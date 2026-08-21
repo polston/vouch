@@ -1,0 +1,2197 @@
+# What commands DO. This is data, not code.
+#
+# vouch's Rust source contains no command names. It implements a small fixed
+# vocabulary of predicates; this file says which programs and argument shapes
+# map to which guard.
+#
+# Two files are read, both from ~/.config/vouch, and neither is inside the
+# binary:
+#   knowledge.toml      this file, as installed. $VOUCH_KNOWLEDGE overrides.
+#   my-knowledge.toml   yours. `vouch trust` appends to it.
+#                       $VOUCH_MY_KNOWLEDGE overrides. Nothing overwrites it.
+#
+# Yours wins piece by piece: a rule you write replaces the shipped rule that
+# fires on the same shape and leaves the others alone. Anything you do not
+# mention keeps what this file said.
+#
+# If neither file is there, vouch knows nothing, and what happens then is
+# `unmodeled_command` in your config. Every prompt says the file is missing.
+#
+# A misspelt key is an error, not a silent ignore. `subcommmands` will refuse to
+# load rather than quietly trusting the whole program.
+#
+# EVERY rule carries `source`, which says where it came from:
+#   "declared"  — your existing cc-allow policy emitted this exact rule. Counts
+#                 are the number of times it fired in the recorded corpus.
+#   "requested" — you asked for it directly.
+#   "inferred"  — a guess. NOT from operator config. Delete freely.
+#
+# `source` is shown in the prompt text, so you always know whether a rule is
+# yours or somebody's guess.
+#
+# Predicate vocabulary (all optional; all present ones must hold):
+#   subcommand_in  = [...]   first non-flag argument
+#   sub_arg_0_in   = [...]   first argument after the subcommand
+#   any_flag       = [...]   short flags are exploded, so "-rf" matches "-r"
+#   any_arg_exact  = [...]   an argument equal to one of these
+#   any_arg_prefix = [...]   an argument starting with one of these
+#   grants_execute = true    named predicate: a chmod-style mode granting +x
+#   always         = true    the program name alone is enough
+#
+# Per-program claims, not rule predicates (all optional; unset keeps whatever
+# the merge already gave that name):
+#   changes_dir    = "..."   dir-change kind: "no" / "stated" / "stack" /
+#                            "unstated" — what the walk can know about where
+#                            the shell goes. Silence reads as "no"
+#   dest_dir_flags = [...]   a flag whose value is where the SHELL moves next,
+#                            not where THIS command runs (that's run_dir_flags)
+#   languages      = [...]   which scanner's lines (bash, powershell, python)
+#                            this entry's claims are true for; absent means
+#                            every language
+#   only_under     = [...]   YOUR file only: trees this entry recognises the
+#                            program in, judged against where the command RUNS.
+#                            Refused on a name this file already describes —
+#                            place-scoping is for your own programs
+#   named_positional = "..." writes = "named"'s POSITIONAL FALLBACK only
+#                            (never consulted when a write_flags member
+#                            matched): "first" or "last" (the default) names
+#                            the destination when none did
+#
+# `version` (below) gates this whole file's schema, not a per-entry predicate.
+
+# The schema this file is written against; a vouch binary that understands a
+# newer schema refuses to load a file below this number rather than run blind
+# on fields it never wrote.
+#
+# 7 (2026-08-19): `[[program.rule]]` gained `unless_flags`, the veto that lets
+# a guard rule name the one spelling it must not fire on (`kill -0`).
+# 8 (2026-08-20): `[[program]]` gained `standalone_flags`; `subcommands`
+# moved from an always-present list to a three-state key — ABSENT covers the
+# whole program, present (even empty) scopes it.
+version = 8
+
+# ============================================================================
+# FROM YOUR EXISTING POLICY — these are rules your current tool already applies
+# ============================================================================
+
+[[program]]
+match = ["git"]
+# git's argument grammar: options that consume the following token, so the
+# subcommand is located correctly even behind `git -C <path>`. -C before the
+# subcommand is a run-dir flag: the command runs in its value's directory.
+# After the subcommand the same spelling belongs to the subcommand
+# (`git commit -C <commit>` reuses a commit message).
+value_options = ["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--depth", "-b"]
+run_dir_flags = ["-C"]
+no_value_options = ["-q", "--quiet", "--bare", "--mirror", "--detach", "--force"]
+# git is the sharp case for exact flag matching: `-C` (run dir) and `-c`
+# (config) differ only by case, and that exactness is load-bearing (M2.119
+# knowledge audit).
+case_sensitive_flags = true
+
+[[program.rule]]
+guard = "history_rewrite"
+source = "declared: 'hard reset may lose work' (40 hits)"
+subcommand_in = ["reset"]
+any_flag = ["--hard"]
+
+[[program.rule]]
+guard = "history_rewrite"
+source = "declared: 'force push not allowed'"
+subcommand_in = ["push"]
+any_flag = ["--force", "--force-with-lease", "-f"]
+
+# Destinations that depend on the subcommand. `git status` writes nothing;
+# these three verbs (four rules below — clone alone has two, one per
+# positional count) create a directory. `init` and `worktree add` are always
+# POINTED at their destination; `clone` is pointed at it with two positionals
+# (this rule) and DERIVES it with one (the url_basename rule right below) —
+# between the two, every positional count `clone` can take has a rule that
+# judges its write.
+[[program.sub_write]]
+subcommand = "clone"
+min_positional = 2
+# Bare `git clone <url>` creates a directory named by the URL's last path
+# segment (.git stripped), in the run place. One positional means the bare
+# form (this rule); two means the explicit-destination rule above it.
+[[program.sub_write]]
+subcommand = "clone"
+takes = "url_basename"
+[[program.sub_write]]
+subcommand = "init"
+takes = "run_dir"
+# `git worktree add <dir> [<commit-ish>]` — the directory is FIRST. Taking the
+# last argument recorded `HEAD` as a written path.
+[[program.sub_write]]
+subcommand = "worktree"
+then = "add"
+min_positional = 1
+takes = "first"
+
+[[program.rule]]
+guard = "history_rewrite"
+source = "inferred: sibling of the two declared git rules above"
+subcommand_in = ["push"]
+any_flag = ["--delete"]
+[[program.rule]]
+guard = "history_rewrite"
+source = "inferred"
+subcommand_in = ["clean"]
+any_flag = ["-f", "--force"]
+[[program.rule]]
+guard = "history_rewrite"
+source = "inferred"
+subcommand_in = ["branch"]
+any_arg_exact = ["-D"]
+[[program.rule]]
+guard = "history_rewrite"
+source = "inferred"
+subcommand_in = ["filter-branch"]
+[[program.rule]]
+guard = "history_rewrite"
+source = "inferred"
+subcommand_in = ["stash"]
+sub_arg_0_in = ["drop", "clear"]
+[[program.rule]]
+guard = "history_rewrite"
+source = "inferred"
+subcommand_in = ["reflog"]
+sub_arg_0_in = ["expire"]
+
+# NOT included, on purpose: plain `git push`, `git rebase`, `git commit --amend`,
+# `git checkout -- <path>`, `git worktree remove`, `git tag -d`. Your policy never
+# prompted on any of them. Add them here if you want them.
+
+[[program]]
+match = ["gh"]
+value_options = ["-R", "--repo"]
+# unix CLI, case-sensitive flags (M2.119 knowledge audit).
+case_sensitive_flags = true
+
+[[program.rule]]
+guard = "publish_outward"
+source = "declared: 'creating pull requests requires review'"
+subcommand_in = ["pr"]
+sub_arg_0_in = ["create"]
+
+[[program.rule]]
+guard = "publish_outward"
+source = "declared: 'merging pull requests requires review'"
+subcommand_in = ["pr"]
+sub_arg_0_in = ["merge"]
+
+[[program]]
+match = ["chmod"]
+# unix, case-sensitive flags (M2.119 knowledge audit).
+case_sensitive_flags = true
+[[program.rule]]
+guard = "grant_execute"
+source = "declared: 'making files executable requires review' (7 hits)"
+grants_execute = true
+
+[[program]]
+match = ["sed"]
+# unix, case-sensitive flags (M2.119 knowledge audit) — `sed -i` is the
+# sharp case: a quoted "-i" must still match this rule.
+case_sensitive_flags = true
+[[program.rule]]
+guard = "in_place_edit"
+source = "declared: 'in-place editing not allowed, use Edit tool' (20+ hits)"
+any_flag = ["-i"]
+[[program.rule]]
+guard = "in_place_edit"
+source = "declared: 'in-place editing not allowed, use Edit tool'"
+any_arg_prefix = ["-i."]
+
+[[program]]
+match = ["ssh"]
+# unix, case-sensitive flags (M2.119 knowledge audit).
+case_sensitive_flags = true
+[[program.rule]]
+guard = "remote_execution"
+source = "declared: policy prompted on ssh"
+always = true
+
+# --- programs that RUN ANOTHER COMMAND --------------------------------------
+# Without these, `env rm -rf x` and `xargs rm -rf` slip past every guard, because
+# the head is `env`/`xargs` and the real command is just an argument.
+#   wraps = "rest"          every remaining non-flag argument forms a command
+#   wraps = "after_c"       the argument following -c is a shell script
+#   wraps = "after_exec"    the arguments following -exec form a command
+#   wraps = "after_flag"    the value of one of `wrap_flags` is the wrapped snippet
+#   wraps = "start_process" `-ArgumentList`'s items rebuild the wrapped command
+#   wraps = "arg_<N>"       positional argument N is the wrapped snippet (python:os.system-shaped calls)
+
+# The rest wrappers, ONE ENTRY PER PROGRAM.
+#
+# These were a single 14-name entry until 2026-08-17. That shape could not
+# carry the two things the walk needs, because both are per-program facts:
+#   - a real flag VOCABULARY. Unioning fourteen programs' flags would make
+#     each entry's claim false for the other thirteen (§3), and the walk
+#     needs the vocabulary to tell `env -u ls rm -rf d` (`-u` takes `ls`, the
+#     command is `rm`) from `nice -5 rm -rf d` (`-5` is not a described flag
+#     at all).
+#   - `leading_args`. `timeout` and `chrt` each take one leading DATA
+#     positional before the command; the other twelve take none, so a count
+#     on a shared entry would make `env 5 rm -rf d` skip the wrong token.
+#
+# Every vocabulary below was VERIFIED BY RUNNING the program on this machine
+# (§3): `--help` for the GNU tools in git-bash, `help <name>` for the bash
+# builtins, `wsl --help` for wsl. Three util-linux tools are absent from the
+# Windows host and were verified by running their `--help` inside the
+# installed WSL distribution; the entries say so. Where a program could not
+# be run at all, the entry claims NO vocabulary rather than an unverified
+# one — an undescribed flag makes the walk fork and judge both readings,
+# which is fail-closed, while a wrong `value_options` entry silently moves
+# the wrapped head one token and is not.
+
+# `env -S 'rm -rf d'` / `env --split-string=…`: the value is a command line
+# env word-splits and runs, with any trailing tokens appended. A second entry
+# rather than a flag on the one below, because the multi-entry expansion loop
+# runs both and this is a DIFFERENT wrap kind from the rest arm. The language
+# is opaque: vouch does not reproduce env's own word splitting, so the text
+# is kept for the protected-path search and nothing else is claimed about it.
+#
+# Declared BEFORE the rest entry below on purpose: the expansion loop runs
+# every matching entry and folds every construct it raises through the same
+# "worst wins, first push breaks a tie" rule every other construct channel
+# uses (`engine::fold_expansion_constructs`) — so for a `-S`/`--split-string`
+# token, this entry's own `unreadable_language` has to be pushed before the
+# rest entry's generic "undescribed flag" complaint (`wrap_unlocated`), or
+# the more specific diagnosis loses the tie to the less specific one.
+[[program]]
+match = ["env"]
+wraps = "after_flag"
+wrap_flags = ["-S", "--split-string"]
+wrap_lang = "opaque"
+case_sensitive_flags = true
+
+# GNU coreutils 8.32, `env --help`. `-S`/`--split-string` is deliberately
+# ABSENT from value_options: its value is a whole command line env splits and
+# runs, so describing it as an ordinary value flag would move the silent
+# allow one token to the right instead of closing it. The entry above
+# describes it for what it is.
+# `--block-signal`, `--default-signal` and `--ignore-signal` take an OPTIONAL
+# value, attachable only with `=`; as separate tokens they consume nothing,
+# which is what no_value_options says. Their `=`-attached spelling is not
+# described by either list and therefore forks — fail-closed, not silent.
+[[program]]
+match = ["env"]
+wraps = "rest"
+case_sensitive_flags = true
+value_options = ["-u", "--unset", "-C", "--chdir"]
+# `env -C <dir>` runs the wrapped command in <dir> — the same claim `git -C`
+# makes, and the expansion places the INNER command's run place and write
+# base there (spec §3.2.5).
+run_dir_flags = ["-C", "--chdir"]
+no_value_options = [
+  "-i", "--ignore-environment", "-0", "--null", "-v", "--debug",
+  "--block-signal", "--default-signal", "--ignore-signal",
+  "--list-signal-handling", "--help", "--version",
+]
+
+# GNU findutils, `xargs --help`. Case-sensitive and load-bearing here (§7):
+# `-E END` takes a value while `-e[=END]` does not, and `-I R` takes one
+# while `-i[=R]` does not.
+[[program]]
+match = ["xargs"]
+wraps = "rest"
+# What it runs is given arguments xargs reads from standard input or from the
+# file `-a`/`--arg-file` names — a channel the command line never states, so
+# the recorded arguments of the command it runs are a partial record. Verified
+# by running: `echo <name> | xargs touch` creates that file, with no token on
+# the line naming it.
+args_from_input = true
+case_sensitive_flags = true
+value_options = [
+  "-a", "--arg-file", "-d", "--delimiter", "-E", "-I", "-L", "--max-lines",
+  "-n", "--max-args", "-P", "--max-procs", "-s", "--max-chars",
+  "--process-slot-var",
+]
+no_value_options = [
+  "-0", "--null", "-e", "--eof", "-i", "--replace", "-l", "-o", "--open-tty",
+  "-p", "--interactive", "-r", "--no-run-if-empty", "--show-limits",
+  "-t", "--verbose", "-x", "--exit", "--help", "--version",
+]
+
+# GNU coreutils 8.32, `nohup --help`: no options at all beyond these two.
+[[program]]
+match = ["nohup"]
+wraps = "rest"
+case_sensitive_flags = true
+no_value_options = ["--help", "--version"]
+
+# GNU coreutils 8.32, `nice --help`. The legacy `nice -5 <command>` spelling
+# is deliberately NOT described: it is `-` followed by an arbitrary number,
+# which no flag list can enumerate. Verified to still run on this machine, so
+# leaving it undescribed is a real shape, not a hypothetical — the walk forks
+# on it and judges both readings.
+[[program]]
+match = ["nice"]
+wraps = "rest"
+case_sensitive_flags = true
+value_options = ["-n", "--adjustment"]
+no_value_options = ["--help", "--version"]
+
+# GNU coreutils 8.32, `stdbuf --help`.
+[[program]]
+match = ["stdbuf"]
+wraps = "rest"
+case_sensitive_flags = true
+value_options = ["-i", "--input", "-o", "--output", "-e", "--error"]
+no_value_options = ["--help", "--version"]
+
+# GNU coreutils 8.32, `timeout --help`: `timeout [OPTION] DURATION COMMAND`.
+# The DURATION is a required leading positional, which is what `leading_args`
+# says.
+[[program]]
+match = ["timeout"]
+wraps = "rest"
+case_sensitive_flags = true
+leading_args = 1
+value_options = ["-k", "--kill-after", "-s", "--signal"]
+no_value_options = [
+  "--preserve-status", "--foreground", "-v", "--verbose", "--help", "--version",
+]
+
+# bash 5.2.37 keyword, `help -m time`: `time [-p] pipeline`. NOTE: the
+# separate GNU `/usr/bin/time` program — which takes `-o FILE` and WRITES it —
+# is not installed on this machine, so no claim is made about it here. If it
+# is ever installed, this entry needs re-checking before it can stay true.
+[[program]]
+match = ["time"]
+wraps = "rest"
+case_sensitive_flags = true
+no_value_options = ["-p"]
+
+# bash builtin, `help builtin`: `builtin [shell-builtin [arg ...]]`. It runs a
+# builtin by name, bypassing any function that shadows it, so what it does is
+# whatever it was handed — the same rest-wrapper shape as `command` below, and
+# described here for the same reason: unwrapped, the head is `builtin` and the
+# real operation is invisible. Takes no options of its own (checked against
+# the builtin's own help), so there is no vocabulary to declare.
+#
+# `eval` is NOT described here, and its absence is the decision rather than an
+# oversight (M2.16). It takes text and executes it as shell code, so
+# recognising it as a program would allow the head while the code it runs went
+# unjudged — the exact silent-empty shape §1 forbids. It should ask as
+# `evaluated_input`, naming what vouch cannot see, instead of asking "no
+# description of: eval", which is a false statement about vouch's knowledge.
+# Making it say the true thing is its own work (ROADMAP M2.149), and until
+# then it keeps asking for the wrong reason, which is the safe direction.
+[[program]]
+match = ["builtin"]
+wraps = "rest"
+case_sensitive_flags = true
+
+# Signalling a process. Reserved in KNOWN_GUARDS from the start and unused by
+# any shipped rule until 2026-08-19; the operator granted the guard for this
+# entry (§4 — guards come only from them).
+#
+# `unless_flags = ["-0"]` is the whole reason that key exists. `kill -0 <pid>`
+# sends NO signal: it asks the kernel whether the process exists and whether
+# the caller could signal it, which is a liveness probe, not a kill. It is
+# also the most common flagged spelling in the corpus — 8 of the 9 flag
+# tokens on `kill` are `-0`, against one `-TERM` and no `-9` at all — so a
+# guard without the veto would ask on a read-only existence check nearly every
+# time it fired.
+#
+# What the veto does NOT cover, stated rather than discovered later. It is
+# FIRST-ARGUMENT and EXACT-SPELLING only, so all of these ask, and asking is
+# the safe direction in every one:
+#   `kill -s 0` / `kill -n 0`  — the same no-op with the signal as a VALUE,
+#                                and the veto matches tokens, not values
+#   `kill -09` / `kill -0abc`  — an attached-value reading; bash delivers -09
+#                                as SIGKILL (measured: wait status 137)
+#   `kill -9 -0`               — only the FIRST token is a signal spec; a later
+#                                `-0` is a target, and a negative target is a
+#                                process GROUP, which is broader than a kill
+#   `kill -- -0`               — after the marker it is an operand, same as above
+#
+# What the GUARD does not reach, also stated: `process_control` is granted on
+# this entry, so it governs the `kill` spelling and no other. `pkill`,
+# `killall`, PowerShell's `Stop-Process` under its own name, and python's
+# `os.kill` are all still undescribed and all still ask as unknown — nothing is
+# open — but setting `guards.process_control` moves only this one. Describing
+# the siblings under the same guard is separate work nobody has asked for.
+#
+# No `languages` scope on purpose: `kill` is also the PowerShell alias of
+# Stop-Process, and an always-firing signal guard is the right answer there
+# too. `case_sensitive_flags` is a unix-shaped claim (CLAUDE.md §7) sitting on
+# an entry that also covers PowerShell; it is inert here because the entry
+# declares no flags and the veto token has no case, and it only ever narrows
+# the veto, so it cannot loosen anything.
+[[program]]
+match = ["kill"]
+case_sensitive_flags = true
+
+[[program.rule]]
+guard = "process_control"
+source = "declared: operator granted a guard for signalling a process, 2026-08-19"
+always = true
+# `-0` probes; `-l` and `-L` LIST signal names (checked in `help kill`, and
+# `-L` is a synonym of `-l`). None of the three sends a signal, so without
+# them here the `always` rule asserts that every `kill` invocation signals a
+# process, which is not true of any of them — §3. Listed separately because
+# `case_sensitive_flags = true` keeps `-l` and `-L` distinct.
+unless_flags = ["-0", "-l", "-L"]
+
+# bash 5.2.37 builtin, `help command`: `command [-pVv] command [arg ...]`.
+# Its own entry (§3.5.1), removed from both the shared rest entry above and
+# the compute-strings entry below, so exactly one wrapping entry names it and
+# the claims below hold whatever order the merge runs in.
+#
+# `-v`/`-V` are declared as VALUE options rather than switches, deliberately:
+# they NAME the argument instead of running it (`command -v x` prints where
+# `x` would be found), so consuming the name is what makes the rest arm wrap
+# nothing. Describing them as switches would leave `x` as the wrapped head
+# and judge a program that never runs.
+[[program]]
+match = ["command"]
+wraps = "rest"
+case_sensitive_flags = true
+value_options = ["-v", "-V"]
+no_value_options = ["-p"]
+
+# Privilege wrappers. `sudo` on this machine is Windows 11's own sudo.exe,
+# which is DISABLED here and prints only that when asked for help; `runas`
+# writes its usage straight to the console, which cannot be captured from a
+# non-interactive process; `doas` is not installed at all. None of the three
+# could be run to establish a vocabulary, so none is claimed (§3) — an
+# undescribed flag forks and both readings are judged, which is the
+# fail-closed direction. `runas`'s switches are slash-shaped with
+# colon-attached values (`/user:name`), a spelling the shared flag rule does
+# not classify today; recorded in ROADMAP.md rather than guessed at here.
+[[program]]
+match = ["sudo", "doas", "runas"]
+wraps = "rest"
+case_sensitive_flags = true
+
+# util-linux `setsid --help`, run inside this machine's WSL distribution —
+# setsid is not installed on the Windows host, so that is where the claim was
+# checked.
+[[program]]
+match = ["setsid"]
+wraps = "rest"
+case_sensitive_flags = true
+no_value_options = ["-c", "--ctty", "-f", "--fork", "-w", "--wait", "-h", "--help", "-V", "--version"]
+
+# util-linux `chrt --help`, run inside this machine's WSL distribution.
+# `chrt [options] <priority> <command>`: the priority is a required leading
+# positional, hence `leading_args = 1`.
+[[program]]
+match = ["chrt"]
+wraps = "rest"
+case_sensitive_flags = true
+leading_args = 1
+value_options = ["-T", "--sched-runtime", "-P", "--sched-period", "-D", "--sched-deadline"]
+no_value_options = [
+  "-b", "--batch", "-d", "--deadline", "-f", "--fifo", "-i", "--idle",
+  "-o", "--other", "-r", "--rr", "-R", "--reset-on-fork", "-a", "--all-tasks",
+  "-m", "--max", "-p", "--pid", "-v", "--verbose", "-h", "--help",
+  "-V", "--version",
+]
+
+# util-linux `ionice --help`, run inside this machine's WSL distribution.
+[[program]]
+match = ["ionice"]
+wraps = "rest"
+case_sensitive_flags = true
+value_options = ["-c", "--class", "-n", "--classdata", "-p", "--pid", "-P", "--pgid", "-u", "--uid"]
+no_value_options = ["-t", "--ignore", "-h", "--help", "-V", "--version"]
+
+# `bash --help` on this machine (GNU bash 5.2.37). The vocabulary below is
+# restricted to what is true for ALL FIVE names on this entry — the POSIX
+# `sh` options every one of them accepts — because a claim on a shared entry
+# is a claim about each name (§3). bash's own extras (`--rcfile`,
+# `--init-file`) are deliberately left out: `dash` has neither, and an
+# undescribed flag forks the walk rather than moving the script silently.
+#
+# `-c` is declared as a SWITCH, which is what these shells actually do with
+# it: the script is the first OPERAND after option parsing, not `-c`'s own
+# attached value. Verified by running: `bash -c -e 'echo x'`, `bash -lc -x
+# 'echo x'` and `bash -cx 'echo x'` all run the string. `-o` and `-O` do
+# consume the next token — verified by running `bash -o pipefail -c 'echo x'`
+# (runs) against `bash -O -c 'echo x'` (fails with "-c: invalid shell option
+# name", i.e. `-O` ate the `-c`).
+[[program]]
+match = ["sh", "bash", "dash"]
+wraps = "after_c"
+wrap_flags = ["-c"]
+wrap_lang = "bash"
+case_sensitive_flags = true
+value_options = ["-o", "+o", "-O", "+O"]
+no_value_options = [
+  "-c", "-i", "-l", "-s", "-r", "-a", "-b", "-e", "-f", "-h", "-k", "-m",
+  "-n", "-p", "-t", "-u", "-v", "-x", "-B", "-C", "-E", "-H", "-P", "-T",
+  "--login", "--norc", "--noprofile", "--posix", "--verbose", "--help",
+  "--version",
+]
+# `--version`/`--help` run alone or together, per name, on this machine:
+# `sh` and `bash` both resolve to GNU bash 5.2.37 here and print their
+# banner and usage text respectively, then exit — verified for each flag
+# alone and combined (`bash --version --help` still just prints usage, no
+# side effect). `dash` on this machine does not implement either GNU long
+# option at all — `dash --version` and `dash --help` both exit 2 with
+# "Illegal option --" — which still satisfies the claim (the design spec's
+# own wording: erroring out on an unsupported flag is the claim, not a
+# violation of it). `zsh` and `ksh` are split into their own entry below,
+# unclaimed: neither is installed on this machine, so neither was RUN, and
+# a run is the only evidence this key accepts (§5 of the design spec) — an
+# external manual is not a substitute, whatever it says.
+standalone_flags = ["--version", "--help"]
+# A shell handed no script and no -c snippet is reading its code from standard
+# input. When a here-document on the same command supplies that input and vouch
+# consumed and scanned it, this claim is SATISFIED — the code is right there in
+# the command. Supplied any other way (`curl … | bash`, a file redirect, a
+# stream), the code does not exist yet and no amount of reading THIS command
+# reveals it.
+evaluates_input = "stdin"
+# And when it IS handed a script, that script is the first operand — verified
+# by running `bash -e s.sh` and `bash -o pipefail s.sh` on this machine, both
+# of which run the file after their options. The file's CONTENTS are code
+# vouch has not read, which is the same blindness as the stdin claim above:
+# the difference is only that the name is on the line. Reading the file to
+# allow it is deliberately not attempted (M2.133).
+runs_file = "arg_0"
+
+# `zsh`/`ksh` — split out of the entry above (2026-08-20): neither is
+# installed on this machine, so `--version`/`--help` were never run under
+# either name, and this task's own verification obligation ("verified ...
+# on this machine, by running it") admits nothing else as evidence — not
+# even zsh's or ksh's own documented option handling. Every other field is
+# identical to the sh/bash/dash entry above; only `standalone_flags` is
+# withheld. These two names keep asking on a flags-only run
+# (`zsh --version`, `ksh --help`) until someone actually runs them here and
+# moves the flags across.
+[[program]]
+match = ["zsh", "ksh"]
+wraps = "after_c"
+wrap_flags = ["-c"]
+wrap_lang = "bash"
+case_sensitive_flags = true
+value_options = ["-o", "+o", "-O", "+O"]
+no_value_options = [
+  "-c", "-i", "-l", "-s", "-r", "-a", "-b", "-e", "-f", "-h", "-k", "-m",
+  "-n", "-p", "-t", "-u", "-v", "-x", "-B", "-C", "-E", "-H", "-P", "-T",
+  "--login", "--norc", "--noprofile", "--posix", "--verbose", "--help",
+  "--version",
+]
+evaluates_input = "stdin"
+runs_file = "arg_0"
+
+# Runs whatever text it is given, at the moment it runs.
+[[program]]
+match = ["iex", "invoke-expression"]
+evaluates_input = "always"
+
+# `find --help` on this machine (GNU findutils): the four action flags that
+# run a command are `-exec COMMAND ;`, `-exec COMMAND {} +`, `-execdir …`,
+# `-ok COMMAND ;` and `-okdir COMMAND ;`. `-ok`/`-okdir` are the confirming
+# twins of the other two — they prompt first and then run exactly the same
+# command — and were unlisted while the other two were hardcoded in the walk.
+[[program]]
+match = ["find"]
+wraps = "after_exec"
+wrap_exec_flags = ["-exec", "-execdir", "-ok", "-okdir"]
+# `;` usually reaches the program as `\;` because the shell would otherwise
+# eat it; both spellings are the same terminator, and `+` is the batching
+# form of the same action.
+wrap_exec_terminators = [";", "\\;", "+"]
+case_sensitive_flags = true
+
+# One shell invoking another. Without these, `powershell -Command "Remove-Item
+# -Recurse C:/work/x"` is completely invisible to every guard, because the bash
+# scanner sees only a program called `powershell` with an opaque argument.
+[[program]]
+# `powershell.exe`/`pwsh.exe` are dropped (M2.121): the lookup trims a
+# trailing `.exe` before any entry is even checked, so those two spellings
+# already land on `powershell`/`pwsh` below and the suffixed names could
+# never be reached — dead data, not a wider claim. Refused at load
+# (`knowledge::validate`) if re-added as written.
+match = ["powershell"]
+wraps = "after_flag"
+wrap_flags = ["-Command", "-c", "-File", "-f"]
+wrap_lang = "powershell"
+# The snippet genuinely spreads over every token after the flag
+# (`-Command Get-ChildItem C:/git`, no quotes needed) rather than being one
+# token — rejoin, unlike python's own `-c` which takes exactly one token.
+wrap_join = true
+# DECISION: ships `-Help`/`-h`, case-insensitive — the platform's true claim
+# (§4 of the design spec), never the GNU `--help`/`--version` spelling.
+# Verified by running on this machine (Windows PowerShell 5.1): `powershell
+# -Help`, `powershell -?` and `powershell -h` all print the same safe usage
+# banner and exit; so do the lowercase/uppercase case-siblings `-help`/
+# `-HELP` and the combined run `powershell -Help -h`. `-?` is dropped — same
+# charset-allowlist reason python's `-?` is dropped (§4): the entry's flag
+# prefix is `-`, and `?` falls outside `[A-Za-z0-9._-]`; `-h`/`-Help` already
+# cover the same request. `--help`/`--version` (the double-dash, Unix-style
+# spelling) are dropped for a real reason, not merely an untested one:
+# running `powershell --help` on this machine does NOT error cleanly — it
+# falls through powershell's own switch parser (which recognises only
+# single-dash tokens as its own flags) into being read as PowerShell CODE,
+# "Unexpected token 'help' in expression or statement" — the unrecognised
+# form is EVALUATED, not rejected, so listing it would be false under the
+# design spec's own claim ("a flag that drops the program into... real work
+# must not be listed"). `-Version`/`-v` are not candidates at all: on this
+# machine `-v` prefix-matched `-Version`, which TAKES A VALUE on Windows
+# PowerShell (selects the engine version) and errored "Missing argument for
+# parameter version" when given none — a value-taking flag, not a
+# print-and-exit one.
+standalone_flags = ["-Help", "-h"]
+case_sensitive_flags = false
+no_value_options = ["-Help", "-h"]
+# Verified by running: `echo 'Write-Host 42' | powershell.exe` (no -Command,
+# no -File) prints 42 — a powershell handed neither a script nor a command
+# flag reads and runs its code from standard input, the same shape bash
+# already declares.
+evaluates_input = "stdin"
+
+# `pwsh` — split out of the entry above (2026-08-20): not installed on this
+# machine, so none of `-Help`/`-h` were ever RUN under this name, and this
+# task's own verification obligation ("verified ... on this machine, by
+# running it") admits nothing else as evidence — not even Microsoft's own
+# `about_Pwsh` reference, whatever it documents. Every other field is
+# identical to the `powershell` entry above; only `standalone_flags` (and
+# the fields that exist solely to pair with it) are withheld. `pwsh -Help`
+# keeps asking until someone actually runs it here and moves the flags
+# across.
+[[program]]
+match = ["pwsh"]
+wraps = "after_flag"
+wrap_flags = ["-Command", "-c", "-File", "-f"]
+wrap_lang = "powershell"
+wrap_join = true
+evaluates_input = "stdin"
+
+# `-EncodedCommand` takes a base-64-encoded string vouch cannot decode
+# without running it, so it is opaque, not `wrap_lang = "powershell"` like
+# `-Command` above — a SEPARATE entry rather than a member of that one's
+# `wrap_flags`, exactly as `unreadable_language`'s design requires one
+# language claim per wrap arm. Verified by running: `powershell.exe
+# -EncodedCommand <base64 of 'Write-Host 99'>` decodes and runs it.
+[[program]]
+match = ["powershell", "pwsh"]
+wraps = "after_flag"
+wrap_flags = ["-EncodedCommand"]
+wrap_lang = "opaque"
+
+[[program]]
+# `cmd.exe` is dropped (M2.121): the same unreachable-suffix shape as
+# `powershell.exe` above — the trim already lands it on `cmd`.
+match = ["cmd"]
+wraps = "after_flag"
+wrap_flags = ["/c", "/C", "/k", "/K"]
+# cmd.exe batch is not bash (§3): declared as its own recognised-but-
+# unscannable language, like `opaque`, rather than borrowing bash's — this
+# used to be unset and silently scanned as bash instead (M2.125). Every
+# cmd /c snippet now asks via unreadable_language, honestly, rather than
+# passing whatever the bash scanner happened to make of cmd syntax.
+wrap_lang = "cmd"
+flag_prefix = ["/"]
+# Same shape as powershell's `-Command` above: `/c del /s /q x` spreads the
+# snippet over the rest of the line, so rejoin.
+wrap_join = true
+
+[[program]]
+# `wsl.exe` is dropped for the same unreachable-suffix reason (M2.121): the
+# trim already lands it on `wsl`. `bash.exe` is dropped too, but for a
+# DIFFERENT reason than the other four names in this changeset: it is not
+# a redundant alias of a name already in THIS entry — trimmed, `bash.exe`
+# lands on the separate POSIX-shell entry above (`sh`/`bash`/…), not here,
+# so removing it is a real behaviour change, not a no-op cleanup. Whether
+# any entry shape can honestly claim `bash.exe` (WSL's own launcher vs.
+# git-bash, which one it is depends on what is actually on PATH) is a
+# knowledge question of its own, deferred to ROADMAP M2.135 rather than
+# silently re-added here.
+match = ["wsl"]
+wraps = "rest"
+# `wsl --help` on this machine. `--exec`/`-e` is a SWITCH here, not a value
+# flag: what follows it is the command line itself, so consuming a token
+# would swallow the wrapped head. `--cd <Directory>` is listed as a value
+# option so its argument is not read as the head, but deliberately NOT as a
+# run-dir flag: its value is a Linux path (or a Windows one, per its own
+# rules) inside the distribution, and composing that with this machine's
+# write scopes would be a claim vouch cannot make.
+value_options = [
+  "--shell-type", "--cd", "--distribution", "-d", "--distribution-id",
+  "--user", "-u", "--set-default", "-s", "--terminate", "-t", "--unregister",
+]
+no_value_options = [
+  "--exec", "-e", "--system", "--help", "--debug-shell", "--status",
+  "--shutdown", "--update", "--version", "-v", "--list", "-l", "--all",
+  "--running", "--quiet", "-q", "--verbose", "--online", "-o",
+]
+
+# Inline python. The snippet is read by the python scanner; what the calls
+# DO is described by the python:-prefixed entries below (§3 claims, each).
+[[program]]
+match = ["python", "python3", "py"]
+wraps = "after_flag"
+wrap_flags = ["-c"]
+wrap_lang = "python"
+case_sensitive_flags = true
+# `python --help` on this machine (3.12). Unlike the POSIX shells above,
+# python's `-c` genuinely CONSUMES its value (`-c cmd`, "terminates option
+# list"), so it is a value option here and a switch there — the same letter,
+# two different bindings, which is why each entry states its own.
+# The short switches matter for the clustered spelling: `python -Sc "…"`
+# hands `-c` the next token, and the walk can only read that cluster when
+# every letter before the wrap letter is described.
+value_options = ["-c", "-m", "-W", "-X", "--check-hash-based-pycs"]
+no_value_options = [
+  "-b", "-B", "-d", "-E", "-h", "-?", "-i", "-I", "-O", "-OO", "-P", "-q",
+  "-s", "-S", "-u", "-v", "-V", "-x", "--help", "--version", "--help-env",
+  "--help-xoptions", "--help-all",
+]
+# `--version`/`-V`/`--help`/`-h` run alone (or together) on this machine
+# (3.12): each prints and exits, dispatching no verb, reading no stdin,
+# running no file — verified individually and as one combined run
+# (`python --version -V --help -h` still just prints usage). `-v` is NOT
+# a case-sibling of `-V`: it is verbose import tracing (confirmed by
+# running `python -v -c ""`, which prints frozen-importer trace lines),
+# so it stays out. `-?` is dropped (§4 of the design spec — the charset
+# allowlist refuses it; `-h`/`--help` already cover the same request). All
+# four already sat in `no_value_options` above, which the scoped
+# `runs_file`/`runs_file_flags` invariant on this entry requires.
+standalone_flags = ["--version", "-V", "--help", "-h"]
+# A python with no script and no -c snippet reads its code from standard
+# input (`curl … | python`); a lone `-` argument is the stdin spelling,
+# never a script path. A here-document on the same command SATISFIES this
+# claim when vouch consumed and scanned it — the code is in the command
+# then. A flag-only invocation (`python --version`) used to trip this claim
+# too — a known, named false ask (M2.19) — but a run consisting only of
+# `standalone_flags` members above now stands this claim down instead: the
+# flag's own action runs and stops, so there is no stdin left to evaluate.
+evaluates_input = "stdin"
+# python's script is its first operand too, and `-m` names code by import
+# path instead of by file path — verified by running `python -m json.tool
+# --help` on this machine (3.12), which runs the named module. Either way the
+# code that runs is not in the command vouch was handed.
+runs_file = "arg_0"
+runs_file_flags = ["-m"]
+
+# arg_names carries the FULL real signature, not just file/mode (task 2b
+# fix round 4): opener is positional-capable (no `*` before it in the real
+# signature, verified live), so a partial list would misplace it once any
+# earlier parameter were also keyword-spelled or the call were fully
+# positional. opener is CALLED by open() itself — `opener(file, flags)`,
+# returning a file descriptor open() then uses — so a call using it is
+# falsifiable the same way json.load's object_hook was.
+[[program]]
+match = ["python:open", "python:io.open"]
+writes = "arg_0"
+writes_only_with_file_mode = true
+arg_names = ["file", "mode", "buffering", "encoding", "errors", "newline", "closefd", "opener"]
+callback_args = ["opener"]
+
+# codecs.open spells its first parameter `filename` — one entry, one
+# signature claim, so it cannot share the entry above.
+[[program]]
+match = ["python:codecs.open"]
+writes = "arg_0"
+writes_only_with_file_mode = true
+arg_names = ["filename", "mode"]
+
+# Path.open: position 0 is the RECEIVER (the path); names start at 1.
+[[program]]
+match = ["python:.open"]
+writes = "arg_0"
+writes_only_with_file_mode = true
+arg_names = ["mode"]
+
+[[program]]
+match = ["python:.write_text", "python:.write_bytes", "python:.touch", "python:.mkdir"]
+writes = "arg_0"
+
+[[program]]
+match = ["python:os.mkdir"]
+writes = "arg_0"
+arg_names = ["path"]
+
+# os.makedirs spells its parameter `name`.
+[[program]]
+match = ["python:os.makedirs"]
+writes = "arg_0"
+arg_names = ["name"]
+
+[[program]]
+match = ["python:shutil.copy", "python:shutil.copy2", "python:shutil.copyfile"]
+writes = "arg_1"
+arg_names = ["src", "dst"]
+
+# copytree's own signature differs from its three siblings above (two more
+# CALLED parameters, verified live), so it cannot share their entry.
+# ignore(dir, names) and copy_function(src, dst) are both invoked BY
+# copytree while it walks the tree (task 2b fix round 4) — neither is
+# keyword-only, so the full real signature is named for the same
+# position-safety reason as open's arg_names above.
+[[program]]
+match = ["python:shutil.copytree"]
+writes = "arg_1"
+arg_names = ["src", "dst", "symlinks", "ignore", "copy_function", "ignore_dangling_symlinks", "dirs_exist_ok"]
+callback_args = ["ignore", "copy_function"]
+
+[[program]]
+match = ["python:os.rename", "python:os.replace", "python:os.renames"]
+writes = "all_args"
+arg_names = ["src", "dst"]
+
+# shutil.move's own signature carries a third, CALLED parameter its
+# siblings above do not (copy_function, invoked once per file it moves,
+# default shutil.copy2) — verified live, not keyword-only, so it cannot
+# share their entry either (task 2b fix round 4).
+[[program]]
+match = ["python:shutil.move"]
+writes = "all_args"
+arg_names = ["src", "dst", "copy_function"]
+callback_args = ["copy_function"]
+
+[[program]]
+match = ["python:os.remove", "python:os.unlink", "python:os.rmdir", "python:.unlink", "python:.rmdir"]
+writes = "arg_0"
+
+# removedirs prunes EMPTY directories upward — recursive in extent, not
+# rmtree's power; both carry the inferred rule because inferred guards err
+# toward asking. The single-directory forms above carry none, on purpose.
+#
+# rmtree's own signature carries two CALLED parameters (task 2b fix round
+# 4, verified live): onerror(function, path, excinfo) — positional-capable,
+# no `*` before it — and its replacement onexc(function, path, exc_info)
+# — keyword-only, after the `*`. Declared even though the always-true
+# delete_recursive rule above already asks on every call regardless: a
+# claim's truth does not depend on another rule happening to catch the
+# call, and a future change to the guard must not silently stop covering
+# this. Split from os.removedirs, which has neither parameter, so the two
+# entries' arg_names claims stay true for what they each actually name.
+[[program]]
+match = ["python:os.removedirs"]
+writes = "arg_0"
+[[program.rule]]
+guard = "delete_recursive"
+source = "inferred: the python spelling of rm -r"
+always = true
+
+[[program]]
+match = ["python:shutil.rmtree"]
+writes = "arg_0"
+arg_names = ["path", "ignore_errors", "onerror"]
+callback_args = ["onerror", "onexc"]
+[[program.rule]]
+guard = "delete_recursive"
+source = "inferred: the python spelling of rm -r"
+always = true
+
+# The text handed to os.system IS a shell command — scanned, not called
+# unknowable. On Windows it actually runs through cmd; reading it as bash
+# is an approximation accepted in the design (unknown heads ask either way).
+[[program]]
+match = ["python:os.system", "python:os.popen"]
+wraps = "arg_0"
+wrap_lang = "bash"
+
+# An argv VECTOR or run-time string — nothing shell-shaped to scan (the
+# design records reading the readable subset as M2.74). The exec/spawn
+# FAMILIES are enumerated in full — match names compare exactly, so a
+# family member left out would be an unmodeled ask (safe) but an
+# unflagged narrowing of the spec's entry set.
+#
+# Audited for CALLED parameters too (task 2b fix round 4):
+# subprocess.Popen carries one, preexec_fn (POSIX only, called in the
+# child after fork, before exec) — not declared as callback_args, and
+# deliberately so: evaluates_input = "always" already asks on EVERY call
+# to this whole family unconditionally, so a callback_args declaration
+# here could never move the decision either direction, only add a claim
+# nothing reads.
+[[program]]
+match = [
+  "python:subprocess.run", "python:subprocess.call", "python:subprocess.check_call",
+  "python:subprocess.check_output", "python:subprocess.Popen",
+  "python:os.execl", "python:os.execle", "python:os.execlp", "python:os.execlpe",
+  "python:os.execv", "python:os.execve", "python:os.execvp", "python:os.execvpe",
+  "python:os.spawnl", "python:os.spawnle", "python:os.spawnlp", "python:os.spawnlpe",
+  "python:os.spawnv", "python:os.spawnve", "python:os.spawnvp", "python:os.spawnvpe",
+  "python:eval", "python:exec",
+]
+evaluates_input = "always"
+
+# writes only — deliberately NOT grant_execute: the mode is an integer
+# whose spelling would make a text predicate lie (0o600 is not "grant").
+# arg_names carries "mode" WITHOUT writes_only_with_file_mode — the
+# validation is one-directional by design (Task 6).
+[[program]]
+match = ["python:os.chmod", "python:.chmod"]
+writes = "arg_0"
+arg_names = ["path", "mode"]
+
+# ── The pure-read python vocabulary (M2.86, spec 2026-08-09) ──────────────
+# Every name below is a §3 claim, checked one by one. The claim is about
+# EFFECTS, and it is exactly three things: no WRITE to the filesystem, no
+# change to the process's working directory, and no process start — in any
+# invocation.
+#
+# READING is not one of them, and never was. vouch does not gate reads, so a
+# name that opens a file for reading (`json.load`, `tomllib.load`,
+# `PIL.Image.open`, `yaml.safe_load`, `.read`) belongs here on the same
+# footing as `len`. An earlier wording of this header said "cannot touch the
+# filesystem", which the set it heads contradicts — corrected 2026-08-10 by
+# the final whole-branch review, and corrected in the SENTENCE, not by
+# dropping names that were always fine. It matters because this line is the
+# test a future sibling sweep will apply to itself.
+#
+# A name is left out when it fails one of the three, when its behaviour
+# cannot be established with confidence, or when it is simply too rare to be
+# worth a claim. Those are different reasons and the exclusion notes below
+# say which applies, so a later pass never reads "absent" as "unsafe".
+# The higher-order builtins
+# (map, filter, sorted, min, max, two-arg iter) are deliberately ABSENT: they
+# invoke a callable the caller supplies, and a callable passed by reference
+# is never judged (M2.89) — do not add them here. help and breakpoint are
+# absent because each can start something (a pager; a hook-selected
+# callable). compile and __import__ are absent and unmodeled on purpose.
+#
+# set, type, hash and exit share spelling with existing bare shell entries
+# on purpose — they are genuine python builtins, not forgotten prefixes;
+# matching and merging compare the full `python:`-prefixed string, so
+# there is no runtime confusion with the shell names of the same spelling.
+[[program]]
+match = [
+  "python:len", "python:isinstance", "python:issubclass", "python:str",
+  "python:int", "python:float", "python:bool", "python:list", "python:dict",
+  "python:tuple", "python:set", "python:frozenset", "python:any",
+  "python:all", "python:sum", "python:abs", "python:round", "python:zip",
+  "python:range", "python:enumerate", "python:reversed", "python:repr",
+  "python:type", "python:chr", "python:ord", "python:hex", "python:oct",
+  "python:bin", "python:format", "python:hash", "python:input",
+  "python:exit", "python:quit",
+]
+
+# Module-qualified reads, chosen singly — json.load READS from a handle,
+# json.dump WRITES through one (group D below); yaml.safe_load parses with
+# the safe loader only, yaml.load can construct arbitrary objects and stays
+# unmodeled; PIL.Image.open opens for reading by contract.
+#
+# Census-observed names deliberately left out of this pass, and why (one
+# line each, so the absence is never mistaken for an oversight):
+#   os.path.exists, os.path.isdir      — held back pending review, NOT a safety
+#   os.path.expanduser, os.sysconf       claim: each clears the three-effect
+#   os.listdir, glob.glob                criterion (they read or query state and
+#   importlib.util.find_spec             write nothing, move nothing, start
+#   shutil.disk_usage                    nothing). They are simply outside what
+#                                        this pass curated — a "string math only"
+#                                        line here previously implied a criterion
+#                                        this group does not apply (2026-08-10)
+#   py_compile.compile                 — writes a compiled bytecode file by default
+#   sqlite3.connect, zipfile.ZipFile   — open (and can create) a file on disk; need open()-style mode gating, not this pass
+#   pprint.pprint, traceback.print_exc — write through an optional stream handle, same family as print (group D)
+#   sys.path.insert                    — mutates the interpreter's module search path, changing what later imports resolve to
+#   numpy.asarray, torch.cuda.is_available, torch.cuda.get_device_capability,
+#   cv2.imread/.resize/.imwrite, torchaudio.load
+#                                      — third-party AND their behaviour against
+#                                        the three effects could not be
+#                                        established with the confidence the
+#                                        standard library gives. Being
+#                                        third-party is not by itself the bar:
+#                                        a third-party name ships when its
+#                                        behaviour IS establishable and it
+#                                        clears both audit axes (an invoked
+#                                        parameter, and a same-name receiver
+#                                        collision). Three do, deliberately, and
+#                                        each is marked at its own entry:
+#                                        PIL.Image.open (opens for reading by
+#                                        contract), yaml.safe_load /
+#                                        safe_load_all (the safe loader
+#                                        constructs no objects), and the method
+#                                        name .astype (numpy/pandas, returns a
+#                                        converted copy). Corrected 2026-08-10:
+#                                        the old wording read as a blanket
+#                                        third-party exclusion that the shipped
+#                                        set already broke three times
+#   next, dir, hasattr, getattr        — plausibly pure but held back from this pass pending explicit review
+#   SystemExit, sys.stdout.reconfigure — unusual/edge-case shapes, left unmodeled
+# object_hook / object_pairs_hook / parse_float / parse_int / parse_constant
+# / cls are called BY json.load itself while decoding (task 2b, M2.86 fix
+# round — a call using one of these is falsifiable otherwise: the function
+# handed there runs and is never scanned as its own event). All six are
+# keyword-only in the real signature, so none of them has a position to
+# declare and this entry needs no `arg_names` at all.
+#
+# It DID carry `arg_names = ["fp"]` until 2026-08-10, to give the engine's
+# nameless-unpacking check a positional boundary to read past — that was
+# real when `**opts` and an unreadable positional value pushed the same
+# token. Fix round 3 gave the unpack its own token, so the check tests for
+# it directly (`callback_argument_used`'s rule 3 says so in its own words),
+# and the field went inert. Removed rather than left standing: it was also
+# FALSE for half the entry — `json.loads`' first parameter is `s`, not `fp`
+# — and a shipped entry does not get to state something untrue on the
+# grounds that nothing currently reads it (§3).
+[[program]]
+match = ["python:json.load", "python:json.loads"]
+callback_args = ["object_hook", "object_pairs_hook", "parse_float", "parse_int", "parse_constant", "cls"]
+
+# json.dumps' callback set differs from load/loads' (cls is shared, default
+# is dumps-only) — a separate entry so neither list makes a false claim
+# about the other's real signature. Both callbacks are keyword-only, so
+# there is no position to declare; the `arg_names = ["obj"]` this entry
+# carried until 2026-08-10 went inert with the same fix round as
+# json.load's, and is removed for the same reason.
+[[program]]
+match = ["python:json.dumps"]
+callback_args = ["cls", "default"]
+
+[[program]]
+match = ["python:sys.exit", "python:sys.stdin.read", "python:sys.stdin.readline", "python:sys.stdin.readlines"]
+
+# THIRD-PARTY, shipped deliberately (see the third-party note in the
+# exclusion list above): the SAFE loader is the whole point — it builds only
+# standard scalars, lists and dicts, so it constructs no object that could
+# write, move the directory, or start anything. `yaml.load` can, and stays
+# unmodeled.
+[[program]]
+match = ["python:yaml.safe_load", "python:yaml.safe_load_all"]
+
+[[program]]
+match = ["python:collections.Counter"]
+
+# default_factory is CALLED whenever a missing key is looked up. Verified
+# live: it is positional-only — `defaultdict(default_factory=x)` does not
+# set the factory at all, it silently inserts a literal dict entry named
+# "default_factory" instead — so the position (0) is what has to be
+# declared, not a keyword spelling that real Python does not honour.
+[[program]]
+match = ["python:collections.defaultdict"]
+arg_names = ["default_factory"]
+callback_args = ["default_factory"]
+
+# THIRD-PARTY, shipped deliberately (see the third-party note in the
+# exclusion list above): opens an image file for READING by contract — the
+# write counterpart is a different name (`.save`), which is not described.
+[[program]]
+match = ["python:PIL.Image.open"]
+
+[[program]]
+match = [
+  "python:re.compile", "python:re.match", "python:re.search",
+  "python:re.fullmatch", "python:re.findall", "python:re.finditer",
+  "python:re.split", "python:re.escape",
+]
+
+# re.sub's own signature differs from its re.* siblings above (positional
+# repl at position 1), so it cannot share their entry. repl accepts EITHER
+# a replacement string OR a callable invoked once per match — verified
+# live. re.subn has the identical shape and is not shipped here; if it is
+# ever added, it needs the same declaration.
+[[program]]
+match = ["python:re.sub"]
+arg_names = ["pattern", "repl", "string", "count", "flags"]
+callback_args = ["repl"]
+
+# ── TEMPORARY: method names on unknown receivers (M2.86 group C) ──────────
+# vouch reads code as text; python text carries no receiver types, so these
+# claims rest on the method NAME alone — accepted by the operator 2026-08-09
+# as a stopgap AT BEST. They RETIRE back to ask when M2.87 (receiver
+# provenance) lands. .write/.writelines are NOT here (group D:
+# writes_via_handle); .close/.flush are absent unless census-observed.
+#
+# Every name below is checked on TWO axes, not one (fix round 1 widened the
+# original invoked-parameter-only audit after review found two shipped names
+# were falsifiable on a different receiver):
+#   (a) invoked parameters — checked against a live interpreter's own
+#       signature; none of the shipped names has one, so none needs
+#       `arg_names`/`callback_args`.
+#   (b) same-NAME collision — because this group claims on the name alone,
+#       the entry covers every receiver that name could belong to, not just
+#       the common one. A name pure on its obvious receiver but
+#       filesystem/directory/process-affecting on some OTHER real receiver
+#       fails this axis and is dropped, its falsifying receiver named below
+#       (live-verified, not from memory).
+#
+#       THE FLOOR (fix round 2, ruled 2026-08-10): axis (b)'s floor is
+#       PYTHON ITSELF AND THE STANDARD LIBRARY, not the wider ecosystem. A
+#       builtin type or standard-library type exposing the exact name with a
+#       disk-write, directory-change, or process-start effect drops the
+#       name. A collision that exists ONLY on a third-party type does NOT
+#       disqualify it — any method name here could be redefined by SOME
+#       third-party library to do anything at all, so a floorless bar is one
+#       no name could ever clear, and this group would collapse to nothing.
+#       A third-party collision is instead a known, accepted, and
+#       unavoidable property of every name in this group, exactly why the
+#       whole group is TEMPORARY (see the top of this comment) and exactly
+#       what it retires when M2.87 (receiver provenance) lands — not
+#       something this text-only stopgap can rule out while standing still.
+#
+# Dropped for a (b) failure, falsifying receiver named:
+#   .replace — pure on str, but pathlib.Path.replace(target) renames/
+#     overwrites a file on disk (live-verified: source path stops existing,
+#     target path exists after the call).
+#   .add — pure on set, but tarfile.TarFile.add(name) writes a new member
+#     into a disk-backed archive (live-verified: archive file size grows
+#     from empty to non-empty after the call).
+#   .setdefault, .update — pure on dict, but shelve.Shelf (a standard-
+#     library persistent, file-backed mapping opened via shelve.open(path))
+#     inherits both from MutableMapping's default implementation, which
+#     writes through __setitem__ — live-verified: values set only via
+#     .setdefault/.update on a shelf survive close and reopen in a fresh
+#     process, proving the write reached disk. shelve.Shelf.get, by
+#     contrast, only reads (live-verified: file mtime unchanged across a
+#     .get call on both a hit and a miss), so it does not collide. (Named
+#     here only as documentation of why these two names are excluded from
+#     this knowledge file — vouch itself never opens or reads a shelf.)
+#
+# .get is BY FAR the highest-volume name in the census (3676 occurrences)
+# and was reviewed specifically for a network-session receiver
+# (`requests.Session.get` / `requests.get`). Adjudicated to KEEP: the
+# criterion is "cannot touch the filesystem, move the process directory, or
+# start anything" — a network fetch is none of the three. Recorded here so
+# the decision reads as a reviewed adjudication, not an oversight.
+#
+# .append was reviewed the same way (fix round 2): a third-party disk-backed
+# store type exposes `.append` and writes at call time. Adjudicated to KEEP,
+# by THE FLOOR above — the collision is outside python and the standard
+# library, so it does not disqualify the name; it is the expected,
+# accepted kind of gap this whole group carries until M2.87 lands.
+#
+# Census-observed dot-method names considered and left out, one line each:
+#   .sort (17 occurrences) — fails axis (a): list.sort(key=...) calls key
+#     once per element, the same invoked-parameter shape callback_args
+#     exists to catch; needs its own entry with that declared, not this
+#     no-callback flat group.
+#   .close (2) — reserved for the writes_via_handle group below (the
+#     "Writers through an already-opened file" header): finalizes buffered
+#     writes through a handle; not shipped there yet — held back for the
+#     same reason as here, absent unless census-observed.
+#   .urlretrieve (4) — urllib.request.urlretrieve(url, filename) both
+#     fetches over the network and writes the result to disk on its own
+#     canonical receiver, no second receiver needed to falsify it.
+#   .max (4) — name too generic/ambiguous to trust by receiver-name alone;
+#     higher chance of colliding with a type whose .max() is not a plain
+#     reduction.
+#   .execute (1) — sqlite3.Cursor.execute(sql) can write to a database file
+#     on disk (and run arbitrary SQL); collision on a common receiver.
+#   .run (1) — name shaped like process-start; low count, left out on a
+#     conservative basis rather than a proven collision.
+#   .urlopen (1) — urllib.request.urlopen itself only opens a network
+#     connection, which clears this group's criterion the same way .get
+#     does (network access is none of filesystem/directory/process-start).
+#     Excluded for LACK OF USAGE (count 1, no volume case the way .get's
+#     3676 makes one), not because it fails the criterion — this is not a
+#     safety claim against the name.
+#   .find_spec (2), .getpixel (2), .convert (1), .namelist (1), .quote (1),
+#   .isupper (1), .pop (1), .search (2), .findall (1) — single- or
+#   low-digit census counts, several module-specific (importlib, PIL,
+#   zipfile); not curated into this round's shipped set. (.pop also fails
+#   axis (b) the same way .setdefault/.update do — shelve.Shelf.pop deletes
+#   a persisted key — reinforcing, not driving, why it stays out.)
+[[program]]
+match = [
+  "python:.get", "python:.items", "python:.keys", "python:.values",
+  "python:.lower", "python:.upper", "python:.strip", "python:.lstrip",
+  "python:.rstrip", "python:.startswith", "python:.endswith",
+  "python:.split", "python:.rsplit", "python:.splitlines", "python:.join",
+  "python:.read", "python:.readline", "python:.readlines",
+  "python:.append", "python:.extend", "python:.group",
+  "python:.groups", "python:.groupdict", "python:.format", "python:.count",
+  "python:.find", "python:.index", "python:.encode", "python:.decode",
+  "python:.isdigit", "python:.most_common", "python:.rfind", "python:.ljust",
+  "python:.discard", "python:.astype",
+]
+# `.astype` is the one THIRD-PARTY name in this block, shipped deliberately
+# (see the third-party note in the exclusion list above): numpy and pandas
+# are its only real receivers and both return a converted COPY — no write,
+# no directory change, no process start.
+
+# Path-STRING math only, zero filesystem access. Note this is a property of
+# these names, not the group's bar: os.path.exists and os.path.isdir DO
+# reach the filesystem and would still clear the three-effect criterion —
+# they are held back for curation reasons, stated in the exclusion list
+# above, not because reading disqualifies a name.
+[[program]]
+match = [
+  "python:os.path.join", "python:os.path.dirname",
+  "python:os.path.basename", "python:os.path.relpath",
+]
+
+# os.environ is a mapping populated once at process start; reading it is an
+# in-memory dict lookup, not a filesystem or subprocess access.
+[[program]]
+match = ["python:os.environ.get"]
+
+# Parses source text into a syntax tree; unlike eval/exec, it never runs it.
+[[program]]
+match = ["python:ast.parse"]
+
+# Pure string transforms, no I/O.
+[[program]]
+match = ["python:textwrap.fill", "python:html.unescape"]
+
+# tomllib.load reads from an ALREADY OPEN file object, same shape as
+# json.load — the handle's own open() call is judged separately.
+# parse_float is CALLED to convert every float literal (default: the
+# builtin `float`) and is keyword-only in the real signature, so there is
+# no position to declare. Its `arg_names = ["fp"]` was removed 2026-08-10
+# for the same reason as json.load's above: the positional-boundary
+# mechanism it existed for no longer exists.
+[[program]]
+match = ["python:tomllib.load"]
+callback_args = ["parse_float"]
+
+# Pure construction/parsing and a system-clock read — none of the four touch
+# the filesystem, move the process directory, or start anything.
+[[program]]
+match = [
+  "python:datetime.datetime",
+  "python:datetime.datetime.fromisoformat",
+  "python:time.time", "python:time.time_ns",
+]
+
+# datetime.now(tz) is NOT a plain clock read like its siblings above: when
+# tz is given, CPython calls tz.fromutc(...) — verified live with a tzinfo
+# subclass whose fromutc prints a marker, which fired. tz is accepted
+# positionally (verified live too), so it needs both fields, in its own
+# entry — the siblings above take no such argument at all.
+[[program]]
+match = ["python:datetime.datetime.now"]
+arg_names = ["tz"]
+callback_args = ["tz"]
+
+# Hash objects are built from in-memory bytes; hashing itself performs no I/O.
+[[program]]
+match = ["python:hashlib.sha1", "python:hashlib.sha256"]
+
+[[program]]
+match = ["python:math.ceil"]
+
+# ── Writers through an already-opened file (writes_via_handle) ────────────
+# The claim is narrower than "the call carries no path anywhere": the
+# position each entry names in its own writes_via_handle is a claimed
+# handle, already judged where it was minted (open's mode gate + the write
+# rules; sys.stdout is the process stream). That field names the position,
+# not arg_names — three of the four entries below declare no arg_names at
+# all, because a receiver (arg_0) and a keyword-only parameter (print's
+# file) each need no positional list to be named. It is NOT a claim that no OTHER position in a call matching this
+# NAME could ever be a real path on some other receiver — these entries
+# match by method NAME alone, and python text carries no receiver types.
+#
+# Live-verified falsifying receiver (fix round 1, 2026-08-10, Python 3.12):
+# xml.etree.ElementTree.ElementTree — an in-memory tree, never opened, never
+# a handle — has its own `.write(file_or_filename, ...)`, whose FIRST
+# argument (arg_1, not the arg_0 this entry claims is the handle) is a real
+# destination path; a plain string there writes a real file on disk
+# (live-verified). zipfile.ZipFile.write(filename, ...) also takes filename
+# as its own real argument, though live verification shows it is READ from,
+# not written to — the receiver itself (arg_0) is the actual write
+# destination there, consistent with this entry — but it still shows a
+# stdlib receiver can carry a path this entry's grammar never inspects.
+#
+# FUTURE TRAP (fix round 2 — corrected which class this names): this stays
+# fail-closed today only because no route to the ElementTree receiver is
+# described — ET.ElementTree/ET.parse are both unmodeled constructors, so a
+# snippet reaching one already asks on the constructor call regardless of
+# what `.write` then does. The trap is specifically a receiver whose
+# SAME-NAMED method takes its write DESTINATION as an argument, the way
+# ElementTree's does — NOT "any receiver exposing this name at all"
+# (zipfile's does too, per the contrast above, and is not a trap). If a
+# constructor for a receiver of THAT shape is ever described, this entry's
+# claim stops being fail-closed for it and MUST be revisited in the SAME
+# change — narrowed with a receiver check or excluded for that name, not
+# left standing. See docs/ROADMAP.md M2.87.
+#
+# Receiver-unknown residue for the method spellings shares group C's basis
+# and retires with M2.87 — this covers not only a handle minted by an
+# unmodeled CALL that asks, but any handle vouch never sees minted at all (a
+# function parameter, a name bound outside the snippet, anything the scanner
+# does not trace back to a call): accepted on the method name alone, exactly
+# like group C's other unknown-receiver claims.
+#
+# Invoked-parameter audit (task 5, same live-interpreter method group C
+# uses): json.dump shares json.dumps' keyword set exactly (`inspect.signature`
+# confirms `cls`/`default` in both) and both are live-verified called —
+# `cls(...)` instantiated, `default(obj)` invoked on an unserializable value
+# — so this entry declares the same `callback_args` json.dumps already does,
+# not the brief sketch's bare form. `.write`/`.writelines`/`print` take no
+# function-shaped parameter in their real signatures (`inspect.signature`
+# checked live): `.write(s, /)`, `.writelines(lines, /)`,
+# `print(*args, sep=' ', end='\n', file=None, flush=False)` — none invokes an
+# argument as a callable, so none needs callback_args.
+[[program]]
+match = ["python:json.dump"]
+writes_via_handle = "arg_1"
+arg_names = ["obj", "fp"]
+callback_args = ["cls", "default"]
+
+[[program]]
+match = ["python:.write", "python:.writelines"]
+writes_via_handle = "arg_0"
+
+[[program]]
+match = ["python:print"]
+writes_via_handle = "file"
+
+# node/perl/ruby/deno/bun stay opaque: vouch has no scanner for these
+# languages, so the snippet is kept as text only so the protected paths can
+# still be looked for in it; nothing else is claimed about it.
+[[program]]
+match = ["node", "perl", "ruby", "deno", "bun"]
+wraps = "after_flag"
+wrap_flags = ["-e", "--eval"]
+wrap_lang = "opaque"
+case_sensitive_flags = true
+
+# node and perl: verified by running on this machine — `echo 'console.log(6*7)'
+# | node` and `echo 'print 6*7,"\n";' | perl`, each handed no script and no -e,
+# print 42, so both run whatever text arrives on standard input.
+# deno and bun are deliberately NOT in this entry, even though the spec names
+# them alongside these three: their BARE invocation (no subcommand) starts an
+# interactive REPL, per each project's own documentation, and is not confirmed
+# to consume non-interactive piped text as code — for bun this is confirmed
+# the OTHER way: its own maintainers state plainly, in
+# https://github.com/oven-sh/bun/discussions/4484, that piping a script into
+# bare `bun` "doesn't accept stdin" at all. Their genuinely-stdin-reading
+# spellings (`deno run -`, `bun run -`/`bun -`) name an explicit subcommand or
+# a literal `-` argument this shared, subcommand-blind claim cannot narrow
+# itself to, so declaring it here would claim something false for the bare
+# case. Left unclaimed rather than claimed wrong.
+[[program]]
+match = ["node", "perl"]
+case_sensitive_flags = true
+# Not required by the scoped `runs_file`/`runs_file_flags` invariant today —
+# this entry declares neither — written anyway: M2.143 (open, ROADMAP) adds
+# `runs_file` to exactly these three entries (this one plus ruby's below),
+# and landing that against an unpaired `standalone_flags` would turn M2.143
+# into a load failure discovered at ITS landing instead of a line already
+# sitting here.
+no_value_options = ["--version", "--help"]
+# `--version`/`--help` run alone or together: verified by running `node
+# --version`, `node --help` and `node --version --help` on this machine
+# (v24.13.1) — each prints and exits, the combination stopping at the first
+# flag's own output. Same for `perl --version`/`perl --help`/both together
+# (5.38.2, msys build). The key lands on THIS bare entry rather than the
+# `-e`/`--eval` wrapper entry above because this is the entry whose
+# `evaluates_input` claim it stands down — §2 of the design spec: the
+# suppression must live on the entry whose claim it suppresses, never a
+# same-name sibling.
+standalone_flags = ["--version", "--help"]
+evaluates_input = "stdin"
+
+# `ruby` — split out of the entry above (2026-08-20): not installed on this
+# machine, so `--version`/`--help` were never run under this name, and this
+# task's own verification obligation ("verified ... on this machine, by
+# running it") admits nothing else as evidence — not even ruby's own manual
+# page, which is why the stdin claim below still cites it (that claim
+# predates and is unaffected by this split) while no `standalone_flags`
+# claim does. Ruby keeps only the pre-existing stdin claim: not installed
+# here; ruby's own manual (`ruby(1)`) documents the same shape — "If no
+# filename is present on the command line, or if the filename is a single
+# hyphen (-), Ruby reads the program source from standard input." A
+# flags-only run of `ruby` keeps asking until someone actually runs it here
+# and moves the flags across.
+[[program]]
+match = ["ruby"]
+evaluates_input = "stdin"
+
+# perl `-E`: verified by running `perl --help` (perl 5.38.2) — "-E commandline
+# like -e, but enables all optional features" — and `perl -E 'print 21*2,
+# "\n"'` on this machine, which printed 42. A separate entry, not a member of
+# the shared -e/--eval list above: node's own `-E` does not exist, and
+# ruby/deno's `-E`/`-e` mean something else entirely (ruby's `-E` sets the
+# external/internal encoding, not code; deno has no global `-e` at all per its
+# own docs), so widening the shared list would misdescribe those three.
+[[program]]
+match = ["perl"]
+wraps = "after_flag"
+wrap_flags = ["-E"]
+wrap_lang = "opaque"
+case_sensitive_flags = true
+
+# node's `-p`/`--print`: verified by running `node --help` (v24.13.1) —
+# "-p, --print [...] evaluate script and print result" — and `node -p
+# "1+41"` / `node --print "6*7"` on this machine, both printing 42. bun
+# mirrors node's CLI here (bun.sh/docs/cli/run: "-e"/"--eval" and
+# "-p"/"--print" both documented, not installed on this machine so taken from
+# vendor docs). Not added to perl/ruby/deno: perl's and ruby's own `-p` is a
+# no-value auto-print LOOP switch (`perl --help`: no mention of a value;
+# ruby's is the classic sed-style `-n`-with-print flag), not an eval-with-
+# value flag, and deno's `-p`/`--print` is a MODIFIER of its `eval`
+# subcommand, not a top-level flag — declaring it here for those three would
+# misread their next token as code when it is not.
+[[program]]
+match = ["node", "bun"]
+wraps = "after_flag"
+wrap_flags = ["-p", "--print"]
+wrap_lang = "opaque"
+case_sensitive_flags = true
+
+# deno has no top-level `-e`/`--eval` (unlike the four names above — see
+# https://docs.deno.com/runtime/reference/cli/eval/, fetched since deno is not
+# installed on this machine): its inline-eval spelling is the `eval`
+# SUBCOMMAND, code as the first positional right after it — `deno eval
+# "console.log(1)"`. `eval` is not flag-shaped, so it cannot join a
+# `wrap_flags` list the way perl's `-E` or node's `-p` do; `arg_1` (the token
+# right after the program name) is the one shape this schema can express,
+# matching how the awk entry above handles awk's own flagless inline form.
+# Precise only for the bare `deno eval CODE` spelling — a flag ahead of CODE
+# (`deno eval --check=all CODE`) shifts the position and is not modelled, and
+# a non-eval subcommand with a second token (`deno run x.ts`) is read as
+# opaque code it is not. Both cases still resolve through `unreadable_language`
+# and still ask, so no verdict this changeset counts on depends on the
+# position being exact — the same tolerance the awk `arg_0` entry above
+# documents.
+[[program]]
+match = ["deno"]
+wraps = "arg_1"
+wrap_lang = "opaque"
+
+# `Start-Process powershell -ArgumentList "-Command","…"` is one more shape of
+# one shell invoking another. The program is the first positional argument.
+[[program]]
+match = ["start-process", "saps", "start"]
+wraps = "start_process"
+# `-Args` is PowerShell's own ALIAS for `-ArgumentList`, not an abbreviation
+# of it (verified: `(Get-Command Start-Process).Parameters` lists it as an
+# alias), so it has to be named — no prefix rule reaches it.
+wrap_flags = ["-ArgumentList", "-Args", "-argumentlist", "-args"]
+# `-FilePath <program>` is the flag spelling of the first positional: the
+# parameter's value IS the program being started, not an ordinary value.
+# Saying so is what lets the walk find the program at all — a plain
+# `value_options` membership makes it consume `pwsh` as a value and then
+# report that nothing was wrapped, with the argument list sitting unjudged
+# one token away (fix round 1, 12 measured spellings).
+wrap_head_flags = ["-FilePath", "-PSPath"]
+# Every parameter `Get-Command Start-Process` reports, split by whether it
+# takes a value. Without these the walk read the first token that did not
+# start with a dash as the program, so `-Verb runas <program>` named `runas`
+# as the thing being started, and any switch before the program had the same
+# effect.
+#
+# The list parameter's own four spellings are here too, and have to be: they
+# take a value (`-ArgumentList <String[]>`), and an entry that named them only
+# in `wrap_flags` left them classified as undescribed, so the walk FORKED on
+# the entry's own declared wrap flag.
+value_options = [
+  "-ArgumentList", "-Args", "-argumentlist", "-args",
+  "-FilePath", "-PSPath", "-Credential", "-RunAs", "-WorkingDirectory",
+  "-RedirectStandardError", "-RSE", "-RedirectStandardInput", "-RSI",
+  "-RedirectStandardOutput", "-RSO", "-Verb", "-WindowStyle",
+  "-ErrorAction", "-ea", "-WarningAction", "-wa", "-InformationAction", "-infa",
+  "-ErrorVariable", "-ev", "-WarningVariable", "-wv", "-InformationVariable", "-iv",
+  "-OutVariable", "-ov", "-OutBuffer", "-ob", "-PipelineVariable", "-pv",
+]
+no_value_options = [
+  "-LoadUserProfile", "-Lup", "-NoNewWindow", "-nnw", "-PassThru", "-Wait",
+  "-UseNewEnvironment", "-Verbose", "-vb", "-Debug", "-db",
+]
+
+# --- which arguments a program writes to -----------------------------------
+# Used to check bash file writes against [write].allow_paths. Without these, a
+# command like `cp x C:/Windows/y` skips the path rules entirely.
+
+# The last argument is the destination. `scp` and `rsync` are NOT in this
+# entry (M2.131.4): their destination may be on another machine, and the key
+# that says so is per-entry, so declaring it here would claim a `cp`
+# destination with a colon in it is remote too. On NTFS that spelling is an
+# alternate data stream of the file before the colon — a real local write, and
+# skipping it would be the silent wrong ALLOW this changeset exists to close.
+[[program]]
+match = ["cp", "mv", "install"]
+# `named` means "the flag's value, or the last positional if the flag is
+# absent", which is exactly `cp -t <dir> a b c` and `cp a b` in one rule.
+# Case-sensitive: `-T` is --no-target-directory and takes no value, so matching
+# loosely would record a SOURCE as the destination.
+writes = "named"
+write_flags = ["-t", "--target-directory"]
+case_sensitive_flags = true
+
+# The same write position, on the two programs whose destination can be on
+# another machine. `[user@]host:path` there is not a local file at all, so the
+# local path rules have nothing to say about it.
+[[program]]
+match = ["rsync", "scp"]
+writes = "named"
+write_flags = ["-t", "--target-directory"]
+case_sensitive_flags = true
+remote_dest = true
+
+[[program]]
+match = ["mkdir", "touch", "tee", "truncate"]
+writes = "all_args"
+# These take a value, so the token after them is not a path: `truncate -s 0 f`
+# was recording `0`, and `mkdir -m 755 d` was recording `755`.
+value_options = ["-s", "--size", "-m", "--mode", "-r", "--reference", "-d", "--date"]
+
+[[program]]
+match = ["dd"]
+writes = "of_prefix"
+
+# `curl -o <file>` writes the response to that file. 240 corpus commands use it.
+# `flags_only` because the positional argument is the URL, not a path, and
+# case-sensitive because `-O` is a different option (remote name, into the
+# current directory) that names no path here.
+[[program]]
+match = ["curl"]
+writes = "flags_only"
+write_flags = ["-o", "--output"]
+case_sensitive_flags = true
+# Enough of its own vocabulary for the destination question below to be
+# answerable: without it a clustered or attached spelling reads as an
+# undescribed token and the here_write claim withholds itself. From `curl
+# --help all` on this machine (8.18.0): `-o, --output <file>`, `--output-dir
+# <dir>`, `-C, --continue-at <offset>` take values; `-O, --remote-name`,
+# `-s`, `-S`, `-L`, `-f` do not.
+value_options = ["-o", "--output", "--output-dir", "-C", "--continue-at"]
+no_value_options = [
+  "-O", "--remote-name", "--remote-name-all", "-s", "--silent", "-S",
+  "--show-error", "-L", "--location", "-f", "--fail",
+]
+# `-O`/`--remote-name` saves under the URL's own basename, in the directory
+# it was run from. Verified by running it against a file:// URL: the named
+# file appeared in the run directory with no token on the line naming it.
+# `-o` names the file instead, and `--output-dir` names the directory, so
+# either one makes this claim untrue.
+[[program.here_write]]
+when_flags = ["-O", "--remote-name"]
+unless_flags = ["-o", "--output", "--output-dir"]
+
+[[program]]
+match = ["wget"]
+writes = "flags_only"
+write_flags = ["-O", "--output-document", "-P", "--directory-prefix"]
+case_sensitive_flags = true
+# Doc-sourced like the claim below, and for the same reason (not installed
+# here): the GNU wget manual's own option list. `-O`/`--output-document` and
+# `-P`/`--directory-prefix` take values; `-q`, `-c`, `-nv`, `-v`, `-N`,
+# `--spider` do not. Without these, the extremely common clustered spelling
+# `-qO-` reads as an undescribed token and the claim below withholds itself
+# — which is the safe direction but leaves the ordinary shapes unjudged.
+value_options = ["-O", "--output-document", "-P", "--directory-prefix"]
+no_value_options = [
+  "-q", "--quiet", "-c", "--continue", "-nv", "--no-verbose", "-v",
+  "--verbose", "-N", "--timestamping", "--spider",
+]
+# A bare download saves under the URL's basename in the directory it runs
+# from. NOT verified by running: wget is not installed on this machine, so
+# this claim comes from the GNU wget manual's own description of the default
+# ("the file is saved in the current directory"), and the flags that make it
+# untrue come from the same place — `-O` names the file, `-P` names the
+# directory, and `--spider` writes nothing at all. Re-verify by running on a
+# machine that has it.
+[[program.here_write]]
+unless_flags = ["-O", "--output-document", "-P", "--directory-prefix", "--spider"]
+
+[[program]]
+match = ["invoke-webrequest", "iwr", "invoke-restmethod", "irm"]
+writes = "flags_only"
+write_flags = ["-outfile"]
+
+# `ln -s target linkname` CREATES linkname. The link is the thing written, and
+# it is the last argument; the target is only read.
+[[program]]
+match = ["ln"]
+writes = "last_arg"
+# With ONE operand there is no link name on the line at all: ln creates it in
+# the directory it runs from, under the target's basename — verified by
+# running `ln -s <absolute target>` in an empty directory, which produced the
+# basename there. `writes = "last_arg"` would derive the TARGET for that
+# shape, which is a different place entirely whenever the target is not a
+# bare name.
+[[program.here_write]]
+operands = 1
+
+# Extraction writes every member of the archive into the destination directory.
+# `flags_only` because the positional arguments are the archive and the members
+# to read — a positional fallback would report an input as a written path.
+# Case-sensitive because `tar -C` is the destination while `tar -c` means create.
+[[program]]
+match = ["tar"]
+writes = "flags_only"
+write_flags = ["-C", "--directory"]
+case_sensitive_flags = true
+# From `tar --help` on this machine (GNU tar 1.35): `-C, --directory=DIR` and
+# `-f, --file=ARCHIVE` take values; `-x`/`--extract`/`--get`, `-c`/`--create`,
+# `-t`/`--list`, `-z`, `-v` do not. Declared so the clustered spellings this
+# program is almost always written in (`-xf`, `-xzf`) are readable rather
+# than a wall of undescribed tokens.
+value_options = ["-C", "--directory", "-f", "--file"]
+no_value_options = [
+  "-x", "--extract", "--get", "-c", "--create", "-t", "--list", "-z",
+  "--gzip", "-v", "--verbose", "-j", "-J",
+]
+# Extraction with no `-C` writes the archive's members into the directory tar
+# runs from — verified by running both spellings on this machine: `tar -xf
+# ../a.tar` put the member in the run directory, and the same command with
+# `-C ../elsewhere` put it there instead. The extract flags are named
+# explicitly because the other modes do not do this: `-c` creates an archive
+# at a path it is given, and `-t` only lists.
+[[program.here_write]]
+when_flags = ["-x", "--extract", "--get"]
+unless_flags = ["-C", "--directory"]
+
+[[program]]
+match = ["unzip"]
+writes = "flags_only"
+write_flags = ["-d"]
+case_sensitive_flags = true
+# From UnZip 6.00's own usage text (`unzip -h`, run on this machine): `-d
+# exdir` takes a value; `-l`, `-t`, `-v`, `-z`, `-p`, `-c`, `-f`, `-u`, `-T`,
+# `-q`, `-o`, `-n`, `-j`, `-a` do not.
+value_options = ["-d"]
+no_value_options = [
+  "-l", "-t", "-v", "-z", "-p", "-c", "-f", "-u", "-T", "-q", "-qq", "-o",
+  "-n", "-j", "-a", "-Z",
+]
+# Extraction lands in the directory unzip runs from unless `-d` names one.
+# NOT verified end to end by running: `zip` is not installed here, so no
+# archive could be built to extract. The claim and the flags that suspend it
+# come from UnZip 6.00's own usage text, printed by `unzip -h` on this
+# machine: "Default action is to extract files in list, except those in
+# xlist, to exdir", with `-d exdir` naming that directory, and `-l`/`-t`/
+# `-v`/`-z`/`-p` listing, testing, or writing to a pipe instead of to disk.
+[[program.here_write]]
+unless_flags = ["-d", "-l", "-t", "-v", "-z", "-p", "-c"]
+
+[[program]]
+match = ["expand-archive"]
+writes = "named"
+write_flags = ["-destinationpath"]
+
+# PowerShell writers whose destination is the FIRST positional, not the last
+# (M2.128): `Set-Content f x` and `Add-Content f x` write x AS CONTENT into
+# f. Verified against `Get-Command -Syntax`: both declare `[-Path]
+# <string[]> [-Value] <Object[]>` in that order, so a bare positional call
+# gives the path first and the content second — a fallback that always
+# picked "last" read the content as the destination.
+#
+# `languages = ["powershell"]` is what turns on the `-Path:value` colon-
+# attach reading for THIS entry (`flags::vocab_for`: colon-attach only
+# activates when an entry's own `languages` explicitly names powershell) —
+# without it `Set-Content -Path:C:/x -Value v` derives no destination at
+# all, the exact M2.128 hole for this spelling. Write-target derivation
+# itself never filters by `languages` (`written_paths` matches by program
+# name alone), so this does not narrow which commands get judged.
+[[program]]
+match = ["set-content", "add-content"]
+writes = "named"
+write_flags = ["-path", "-filepath", "-literalpath"]
+named_positional = "first"
+languages = ["powershell"]
+
+# The rest of the PowerShell writer family. These take the target as a named
+# parameter, so the write target is the token after one of write_flags, with
+# a "last" positional fallback — verified safe by `Get-Command -Syntax`:
+# each of these declares only ONE positional destination parameter, and
+# where a second positional exists it is never the written content
+# (Out-File's is -Encoding, Export-Csv's is -Delimiter), so "first" and
+# "last" agree in every case the fallback is actually reached.
+[[program]]
+match = ["out-file", "new-item", "export-csv", "export-clixml", "tee-object"]
+writes = "named"
+write_flags = ["-path", "-filepath", "-literalpath"]
+
+[[program]]
+match = ["copy-item", "move-item", "rename-item"]
+writes = "named"
+write_flags = ["-destination", "-newname"]
+
+# ============================================================================
+# REQUESTED — you asked for these directly
+# ============================================================================
+
+[[program]]
+match = ["rm"]
+writes = "all_args"
+# unix, case-sensitive flags (M2.119 knowledge audit). Both `-r` and `-R`
+# are declared explicitly below (GNU rm treats them as real synonyms, not
+# a case fold), so exactness does not lose either spelling.
+case_sensitive_flags = true
+# GNU rm's short options take no value, ever — needed so a combined cluster
+# like `-fr`/`-rf` explodes into its letters (spec §4.1.3: cluster reading
+# requires every letter to be an independently declared no-value flag).
+# Found by this task's migration: the shared primitive's cluster check is
+# knowledge-driven, unlike the naive char-by-char split it replaces, and
+# `rm` had never declared this list because the old split needed no
+# declaration to explode a token.
+no_value_options = ["-f", "-i", "-I", "-r", "-R", "-d", "-v"]
+[[program.rule]]
+guard = "delete_recursive"
+source = "requested: recursive force deletes were passing silently"
+# `-recurse` because `rm` is also the PowerShell alias for Remove-Item.
+any_flag = ["-r", "-R", "--recursive", "-recurse"]
+
+# ============================================================================
+# INFERRED — these are guesses. They are NOT from operator config.
+# Nothing here fired in the recorded corpus. Delete any you disagree with.
+# ============================================================================
+
+# `ri` is the PowerShell alias for Remove-Item. The other aliases (rm, rd, del,
+# erase, rmdir) already have entries below, which is why they are not repeated
+# here — but each of those entries must accept `-Recurse` as well as its own
+# native spelling, because in PowerShell they are all the same command.
+[[program]]
+match = ["remove-item", "ri"]
+[[program.rule]]
+guard = "delete_recursive"
+source = "inferred: the Windows spelling of rm -r"
+any_flag = ["-recurse", "--recurse"]
+
+[[program]]
+match = ["rmdir"]
+# One entry for a name that belongs to two operating systems (M2.114): the
+# unix `rmdir` (dash flags) and cmd.exe's own `rmdir` (slash flags, the
+# same command `rd` already covers under its own name below) are the SAME
+# name on this machine, and a rule naming only one half let the other
+# spelling of the identical cmd.exe recursive delete pass unrecognised as
+# a flag at all — matched as neither a guard nor a write, i.e. allowed.
+# Case-insensitive (matches `del`/`erase`/`rd` below, and cmd.exe's own
+# switches, which are not case-sensitive) rather than unix's usual
+# case-sensitive convention (CLAUDE.md §7): safe here specifically because
+# GNU rmdir has no flag whose MEANING changes with case — verified via
+# `rmdir --help`, its only long-form options are `-p`/`--parents` and
+# `-v`/`--verbose`, no uppercase counterpart of either exists, and it has
+# no native recursive-delete flag at all (recursion is not a real rmdir
+# capability on unix; `-r`/`-R`/`--recursive`/`-recurse` below exist to
+# catch the PowerShell alias, where `rmdir` means Remove-Item). §7 exists
+# to stop a case fold from silently merging two flags that mean different
+# things (`tar -C` vs `-c`); that hazard requires a real case-variant pair
+# to exist in the first place, and rmdir has none. The only live cost is a
+# false ASK on a unix `rmdir` whose argument is literally a directory named
+# `/s` (or `-R`/`-Recurse`) — removes only an EMPTY directory, so the
+# false-ask population is one vanishingly rare directory name, against a
+# live wrong ALLOW on the other side.
+flag_prefix = ["/", "-"]
+case_sensitive_flags = false
+[[program.rule]]
+guard = "delete_recursive"
+source = "inferred"
+any_flag = ["-s", "-r", "--recursive", "-recurse", "/s"]
+
+[[program]]
+match = ["find"]
+# unix, case-sensitive flags (M2.119 knowledge audit).
+case_sensitive_flags = true
+# `-fprint`/`-fprint0`/`-fprintf`/`-fls` each write their output to the FILE named
+# right after the flag (`-fprintf` also takes a FORMAT after that, which
+# this claims nothing about) — verified by running `find --help` (GNU
+# findutils 4.10.0): "Actions: ... -fprintf FILE FORMAT -print -fprint0
+# FILE -fprint FILE -ls -fls FILE ...". Listed with the shorter `-fprint`
+# BEFORE the longer `-fprintf` on purpose: this entry is case-sensitive
+# (`Abbrev::Refuse`), and `-fprint` is a literal prefix of `-fprintf` — were
+# the longer name checked first, matching the exact token `-fprint` against
+# declared `-fprintf` would read as a refused abbreviation instead of the
+# exact match it is.
+writes = "flags_only"
+write_flags = ["-fprint", "-fprint0", "-fprintf", "-fls"]
+[[program.rule]]
+guard = "delete_recursive"
+source = "inferred"
+any_arg_exact = ["-delete"]
+
+# These names belong to two languages at once: `del /s` is cmd.exe, `del
+# -Recurse` is the PowerShell alias for Remove-Item. Both spellings are listed
+# so the same guard fires whichever language the snippet turns out to be.
+[[program]]
+match = ["del", "erase", "rd"]
+writes = "all_args"
+flag_prefix = ["/", "-"]
+[[program.rule]]
+guard = "delete_recursive"
+source = "inferred: the cmd.exe spelling of rm -r"
+any_flag = ["/s", "/S", "-recurse"]
+
+[[program]]
+match = ["sudo", "doas", "runas"]
+# unix, case-sensitive flags (M2.119 knowledge audit). No flags in this
+# rule (always = true), so the key is inert here today.
+case_sensitive_flags = true
+[[program.rule]]
+guard = "privilege_escalation"
+source = "inferred: never fired in the recorded corpus"
+always = true
+
+[[program]]
+match = ["mkfs", "diskpart", "fdisk"]
+# unix, case-sensitive flags (M2.119 knowledge audit). No flags in this
+# rule (always = true), so the key is inert here today.
+case_sensitive_flags = true
+[[program.rule]]
+guard = "disk_or_system"
+source = "inferred: never fired in the recorded corpus"
+always = true
+
+[[program]]
+match = ["dd"]
+# unix, case-sensitive flags (M2.119 knowledge audit). This rule matches
+# on any_arg_prefix, not any_flag, so the key is inert here today.
+case_sensitive_flags = true
+[[program.rule]]
+guard = "disk_or_system"
+source = "inferred: never fired in the recorded corpus"
+any_arg_prefix = ["of="]
+
+# ============================================================================
+# DESCRIBED AS READ-ONLY
+#
+# vouch was built as a deny-list: spot a known-bad thing, otherwise allow. That
+# is backwards — you cannot enumerate the bad things, so anything unlisted is a
+# free pass. These entries exist so the opposite can work: a command is allowed
+# because EVERY program in it is described, not because nothing was recognised.
+#
+# An entry here is a claim: this program reads its inputs and writes only to
+# standard output. It is deliberately narrow. Programs that build, install,
+# deploy, or run other code are NOT here, because "described" would then be a
+# lie and an allow-list built on lies is worse than no allow-list at all.
+#
+# Anything absent stays unknown, and under an allow-list unknown means ask.
+# ============================================================================
+
+# Text in, text out. None of these open a file for writing.
+[[program]]
+match = [
+  "echo", "printf", "cat", "head", "tail", "grep", "egrep", "fgrep", "rg",
+  "uniq", "wc", "cut", "tr", "comm", "paste", "join",
+  "jq", "yq", "strings", "base64", "shasum", "sha256sum", "md5sum", "cksum",
+  "rev", "fold", "nl", "expand", "unexpand", "column", "seq", "yes", "bc",
+]
+
+# `sort -o <file>` writes that file. It was in the read-only list above until
+# 2026-07-25, which is exactly the kind of false claim that makes an allow-list
+# worthless — every entry here is load-bearing.
+[[program]]
+match = ["sort"]
+writes = "flags_only"
+write_flags = ["-o", "--output"]
+case_sensitive_flags = true
+
+# `awk '{print > "f"}'` writes from INSIDE its program text, which vouch has no
+# parser for. Same case as `python -c`: the snippet is kept as opaque text so
+# protected paths can be looked for in it, and nothing else is claimed.
+[[program]]
+match = ["awk", "gawk", "mawk", "nawk"]
+wraps = "after_flag"
+wrap_flags = ["-f", "--file"]
+wrap_lang = "opaque"
+case_sensitive_flags = true
+
+# The entry above only covers `-f progfile`. The ordinary inline spelling,
+# `awk 'program' file ...`, has no flag at all — verified by running
+# `awk --help` (GNU Awk 5.3.2) against its own usage line: `awk [POSIX or
+# GNU style options] [--] 'program' file ...`. `arg_0` is the one shape this
+# schema can express for a flagless leading positional, matching the
+# python:os.system entry's own use of the same key. Imprecise for a
+# flag-first spelling (`awk -F, '{...}' f`, where `-F,` lands in position 0
+# instead of the program) — that still pushes junk text through the same
+# opaque arm and still asks via `unreadable_language`, so no verdict this
+# changeset counts on depends on the position being exact.
+[[program]]
+match = ["awk", "gawk", "mawk", "nawk"]
+wraps = "arg_0"
+wrap_lang = "opaque"
+
+# Path arithmetic and lookups. These compute strings; they touch nothing.
+#
+# `command` LEFT this list on 2026-08-17 (§3.5.1). It is not only a lookup:
+# bare `command <prog> <args>` RUNS that program, which is a wrap claim, and
+# it now has one entry of its own carrying both halves. Listing it here as
+# well would have put it in two entries whose claims about the same
+# invocation differ, and left the answer to merge order.
+# `hash` LEFT this list on 2026-08-17 (M2.113) and has its own entry below:
+# `hash -p <path> <name>` does not compute a string, it writes the shell's own
+# lookup table, and a later `<name>` runs that path — verified by running it.
+#
+# The rest of that family was re-asked the same question, in name-resolution
+# terms rather than "does it write a file", and each answer was measured on
+# this machine:
+#   `type`    stays — it PRINTS what a name means and binds nothing.
+#   `unalias` removes a binding; it can restore an original meaning, never
+#             redirect one somewhere new.
+#   `alias`   defines one, but the definition does not reach a later command
+#             on the SAME line: aliases are expanded when a line is read, and
+#             a `-c` one-liner is read in one go. Verified by running, both
+#             without and WITH `shopt -s expand_aliases` — neither spelling
+#             ran the alias. A shape where it does fire needs measuring
+#             before any entry claims one.
+[[program]]
+match = [
+  "basename", "dirname", "realpath", "readlink", "pwd", "which",
+  "type", "whereis", "expr", "test", "true", "false", "printenv",
+  # `[` is `test` spelled as a bracket — 552 uses in the corpus.
+  "[", "[[",
+]
+
+# Looking at the filesystem without changing it.
+[[program]]
+match = ["ls", "dir", "stat", "du", "df", "file", "tree", "diff", "cmp", "less", "more"]
+
+# Looking at the machine without changing it.
+[[program]]
+match = [
+  "ps", "pgrep", "tasklist", "date", "uname", "hostname", "whoami", "id",
+  "uptime", "nvidia-smi", "ipconfig", "ifconfig", "netstat", "arp", "dig",
+  "nslookup", "ping", "systeminfo", "free", "top", "wmic",
+]
+
+# Shell builtins that change only the shell's own state. `cd`, `pushd`, `popd`,
+# `source`, and `.` moved out on 2026-07-31 (spec
+# docs/specs/2026-07-31-changes-dir-knowledge-design.md §6) — each changes the
+# shell's own directory, which is a `changes_dir` claim of its own now, not
+# "no effect" alongside `export`/`set`/etc.
+#
+# `read` joined 2026-08-19 (M2.16). It was the largest hole in this
+# hand-written list: 91 occurrences over 88 corpus rows, every one of them
+# asking "no description of: read", which is the shape any loop over command
+# output takes. The §3 claim checks out — it assigns shell variables and does
+# nothing else: no filesystem write, no directory change, no process start.
+# It does CONSUME standard input, which is a fact about the line rather than
+# an effect of the program, and it assigns that input rather than evaluating
+# it, so it is deliberately not an `evaluates_input` consumer (the M2.82
+# question this row owed an answer to). The corpus shows one flag on it, `-r`,
+# 42 times.
+#
+# The list is still hand-written and so can still drift. What is measured
+# rather than assumed, as of 2026-08-19: of the 61 builtins this machine's
+# bash reports, the ones appearing in the corpus and NOT covered here are now
+# `builtin` and `eval`, each once — `builtin` has its own wrapper entry below,
+# and `eval` is deliberately left out (see it there). `examples/count_recognition_holes`
+# re-derives that set on demand, so the next drift is a command away rather
+# than a discovery.
+#
+# `trap` LEFT this list (spec 2026-08-20 §9.2): its first argument is a
+# command string registered to run later, and vouch never scans it — the
+# same shape `eval` was left out for above. Deliberately not vouched for
+# rather than claimed "no effect"; the honest later fix (scan the handler as
+# a bash snippet) lives on the absorbed roadmap row, not in this change.
+[[program]]
+match = [
+  "export", "set", "unset", "shift", "exit", "return",
+  "break", "continue", "wait", "disown", "sleep", "true", ":",
+  "local", "declare", "typeset", "alias", "unalias", "umask",
+  "read",
+]
+
+# The shell's own movers. `changes_dir` is the dir-change kind (see the spec
+# 2026-07-31): what the walk can KNOW about where the shell goes.
+[[program]]
+match = ["cd"]
+languages = ["bash"]
+changes_dir = "stated"
+
+# In PowerShell, cd/chdir/sl are aliases of Set-Location and take its flags.
+# Probed 2026-07-31: bash `cd -Path /tmp` is "invalid option" — the grammar
+# below is a PowerShell claim only, which is why these entries are scoped.
+[[program]]
+match = ["cd", "chdir", "sl", "set-location"]
+languages = ["powershell"]
+changes_dir = "stated"
+dest_dir_flags = ["-path", "-literalpath"]
+no_value_options = ["-passthru"]
+case_sensitive_flags = false
+
+[[program]]
+match = ["pushd"]
+languages = ["bash"]
+changes_dir = "stack"
+
+[[program]]
+match = ["pushd", "push-location"]
+languages = ["powershell"]
+changes_dir = "stack"
+dest_dir_flags = ["-path"]
+no_value_options = ["-passthru"]
+case_sensitive_flags = false
+
+[[program]]
+match = ["popd"]
+languages = ["bash"]
+changes_dir = "unstated"
+
+[[program]]
+match = ["popd", "pop-location"]
+languages = ["powershell"]
+changes_dir = "unstated"
+
+# A sourced script's `cd` persists in the calling shell — probed ALLOW
+# 2026-07-31 before this entry existed. "Changes only the shell's own state"
+# was literally true, and the working directory is shell state.
+#
+# `runs_file = "arg_0"` (spec 2026-08-20 §9.1): source runs the named file's
+# contents in the caller's shell; the location is on the line, the content
+# is not — same blindness `bash setup.sh` declares. A bare `source` (no
+# operand) stays quiet: there is no operand to name, and the real shell
+# errors out on this shape anyway. Acknowledged looseness: `runs_file_positional`
+# matches entries by NAME only, without the `languages` filter recognition
+# applies, so this claim also fires on another language's `source x` line —
+# ask on ask today (the head is unmodeled there), named here rather than
+# fixed.
+[[program]]
+match = ["source"]
+languages = ["bash"]
+changes_dir = "unstated"
+runs_file = "arg_0"
+
+# Dot-sourcing moves the PowerShell caller too (probed), so `.` is unscoped.
+# `runs_file = "arg_0"`, same comment shape as `source` above: runs the
+# named file's contents in the caller's shell; the location is on the line,
+# the content is not — same blindness `bash setup.sh` declares.
+[[program]]
+match = ["."]
+changes_dir = "unstated"
+runs_file = "arg_0"
+
+# Read-only PowerShell verbs. Get-* is a convention, not a guarantee, so these
+# are listed by name rather than by prefix.
+[[program]]
+match = [
+  "get-content", "get-childitem", "get-item", "get-location", "get-process",
+  "get-date", "get-command", "get-help", "get-member", "get-module",
+  "get-service", "get-ciminstance", "get-wmiobject", "get-random", "get-alias",
+  "select-object", "where-object", "foreach-object", "sort-object",
+  "measure-object", "group-object", "format-table", "format-list",
+  "convertfrom-json", "convertto-json", "convertfrom-csv", "compare-object",
+  "write-output", "write-host", "write-error", "write-warning", "test-path",
+  "join-path", "split-path", "resolve-path", "out-string", "out-host",
+  # out-null discards what it is given and emits nothing. Its neighbours
+  # out-string and out-host were listed and it was not — the list is written by
+  # hand, so it is complete only until the next thing turns up.
+  "out-null",
+]
+
+# ============================================================================
+# HARNESS TOOLS
+#
+# Harness tools, described as data. Listing one is a CLAIM, held to the same
+# standard as a program entry. Most are tools vouch has no scanner for, listed
+# because one of these holds:
+#   - it reads and does not write, OR
+#   - whatever it starts is itself gated when it runs (hooks fire for subagent
+#     tool calls — verified by experiment), so allowing the call does not allow
+#     its effects.
+# The exception is the last group below: the harness's own script and file
+# tools (Bash, PowerShell, Write, Edit, NotebookEdit). These are NOT opaque —
+# a `[[tool.snippet]]` declaration routes the script field into vouch's own
+# scanner, and `write_path_field` routes the written path through the write
+# rules, so the call is judged the same way a typed command or file write is.
+# Their claim is that declaration, not the two bullets above.
+#
+# A tool NOT listed here asks. That is the point: 46.5% of recorded tool calls
+# used to get no decision at all, which let the harness decide alone. The list
+# stays short rather than complete — each name is something to stand behind.
+#
+# `[tools]` in the config overrides all of this. If the config names ANY tool,
+# it governs completely and this list is ignored.
+# ============================================================================
+
+[[tool]]
+match = ["Read", "Grep", "Glob", "NotebookRead"]
+source = "reads the filesystem, writes nothing"
+
+[[tool]]
+match = ["ListMcpResourcesTool", "ReadMcpResourceTool", "ReadMcpResourceDirTool", "ToolSearch"]
+source = "reads catalogues and schemas, writes nothing"
+
+[[tool]]
+match = ["WebFetch", "WebSearch"]
+source = "declared: deliberately out of scope, not gated"
+
+[[tool]]
+match = ["Task", "Agent", "Skill", "Workflow", "SendMessage"]
+source = "starts work whose own tool calls are gated, so this does not allow its effects"
+
+[[tool]]
+match = ["TodoWrite", "AskUserQuestion", "ExitPlanMode", "EnterPlanMode", "StructuredOutput", "ReportFindings", "PushNotification"]
+source = "talks to the operator or the harness; touches no file"
+
+[[tool]]
+match = ["TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "TaskOutput", "TaskStop", "Monitor", "ScheduleWakeup"]
+source = "the harness's own bookkeeping"
+
+[[tool]]
+match = ["EnterWorktree"]
+source = "creates a git worktree under the repository; every tool call made inside it is still gated"
+
+[[tool]]
+match = ["ExitWorktree"]
+source = "leaves a worktree, and can delete it"
+action = "ask"
+
+[[tool]]
+match = ["Bash"]
+source = "runs the `command` field as bash in the calling session's directory"
+cwd_from_call = true
+[[tool.snippet]]
+field = "command"
+language = "bash"
+
+[[tool]]
+match = ["PowerShell"]
+source = "runs the `command` field as powershell in the calling session's directory"
+cwd_from_call = true
+[[tool.snippet]]
+field = "command"
+language = "powershell"
+
+[[tool]]
+match = ["Write", "Edit"]
+source = "writes the file named by `file_path`, relative paths resolved in the calling session's directory"
+cwd_from_call = true
+write_path_field = "file_path"
+
+[[tool]]
+match = ["NotebookEdit"]
+source = "writes the notebook named by `notebook_path`, relative paths resolved in the calling session's directory"
+cwd_from_call = true
+write_path_field = "notebook_path"
+
+# ---------------------------------------------------------------------------
+# Environment names the SHELL ITSELF consults (M2.120)
+#
+# An assignment to one of these is not data handed to the command — it changes
+# which program a name resolves to, or runs code before the command on the
+# line. Every other assignment stays inert, which is what keeps `LC_ALL=C sort`
+# quiet.
+#
+# Each name below was verified by running it on this machine. Names that are
+# documented to do this but did NOT do it here are deliberately absent: POSIX
+# `ENV` is read by an INTERACTIVE sh (and by bash in posix mode), and
+# `ENV=<file> sh -c 'echo x'` here ran the command without running the file, so
+# claiming it would produce asks for something that does not happen. It belongs
+# in this list only on the day someone measures a spelling where it fires.
+
+[[env_name]]
+# `PATH=<dir> zzprobe` ran the zzprobe in <dir>. The described program and the
+# program that runs are then two different things, and vouch is describing the
+# one that does not run.
+name = "PATH"
+effect = "lookup"
+
+[[env_name]]
+# `BASH_ENV=<file> bash -c 'echo command-ran'` printed the FILE's output before
+# the command's. The file is code on the line that vouch has not read.
+name = "BASH_ENV"
+languages = ["bash"]
+effect = "startup"
+
+[[env_name]]
+# PowerShell 5.1, no profile: with PSModulePath pointed at a directory holding
+# a module, a name that entry exports resolves and runs. Where a command name
+# resolves FROM is exactly what this decides.
+name = "PSModulePath"
+languages = ["powershell"]
+effect = "lookup"
+# NOTE (M2.140): true of the shell, and not yet acted on — the engine reads
+# assignments from the OUTER scan only, so a PowerShell env assignment inside
+# a scanned snippet never reaches this check. The claim stays because it is
+# true and because the row that wires the channel needs it; what it decides
+# today is nothing.
+
+# `hash` — the shell's own lookup table.
+#
+# `hash` alone and `hash -r`/`-d`/`-l`/`-t` read or CLEAR the table, which can
+# only make the shell look a name up again the ordinary way. `-p` is the one
+# form that installs a path under a name of its own choosing: verified by
+# running `hash -p <path> zzname` followed by `zzname`, which ran the path.
+# `bash --help`'s own usage line for it is `hash [-lr] [-p pathname] [-dt]
+# [name ...]`.
+[[program]]
+match = ["hash"]
+case_sensitive_flags = true
+value_options = ["-p"]
+no_value_options = ["-r", "-l", "-t", "-d"]
+rebinds_name_flags = ["-p"]

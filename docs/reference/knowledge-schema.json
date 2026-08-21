@@ -1,0 +1,628 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "knowledge.toml / my-knowledge.toml",
+  "description": "`knowledge.toml` (what ships with vouch) and `my-knowledge.toml` (the\noperator's own additions) both parse into this same shape: what programs\nand harness tools ARE and DO. The operator's file is laid over the\nshipped one, entry by entry, by name.",
+  "type": "object",
+  "properties": {
+    "env_name": {
+      "description": "One entry per environment-variable name the shell itself consults,\nwritten as `[[env_name]]`.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/EnvName"
+      }
+    },
+    "program": {
+      "description": "One entry per described program, written as `[[program]]`.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Program"
+      }
+    },
+    "tool": {
+      "description": "One entry per described harness tool (or whole MCP server), written\nas `[[tool]]`.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Tool"
+      }
+    },
+    "version": {
+      "description": "The schema version the file was written against. `None` means the\nfile predates this key. Enforced in `knowledge::read_one`, and ONLY\nfor the shipped file: a `None` here or a value below\n`knowledge::KNOWLEDGE_SCHEMA_VERSION` refuses the whole shipped load\n(spec §7, rev 3/4) rather than running blind on fields it never\nwrote. `my-knowledge.toml` parses into this same struct but is never\nchecked against this field — operator files predate every schema\nchange by design.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "default": null,
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "Action": {
+      "description": "What vouch does about a construct, a guard, or a program: let the command\nthrough, stop and ask the operator, or refuse it outright.",
+      "oneOf": [
+        {
+          "description": "Let it through with no prompt.",
+          "type": "string",
+          "const": "allow"
+        },
+        {
+          "description": "Stop and show the operator what was recognised, before it runs.",
+          "type": "string",
+          "const": "ask"
+        },
+        {
+          "description": "Refuse it outright, with no prompt.",
+          "type": "string",
+          "const": "deny"
+        }
+      ]
+    },
+    "EnvName": {
+      "description": "An environment-variable name the SHELL ITSELF reads — not data the\ncommand happens to be handed, but a name that changes which program a\nlater word resolves to, or what code the shell runs before the command\non the line (M2.120).\n\nThe distinction this kind exists to make: `LC_ALL=C sort f` sets\nsomething `sort` reads, and vouch's description of `sort` still holds.\n`PATH=<dir> ls` sets something the SHELL reads, and the `ls` that runs\nis whatever sits in that directory — vouch's description of `ls` is then\na description of a program that is not running. Only names listed here\nare read that way; every other assignment stays inert, which is what\nkeeps the ordinary case quiet.",
+      "type": "object",
+      "properties": {
+        "effect": {
+          "description": "What the shell does with it, from the closed set validated at load:\n  \"lookup\"  — it decides which program a name resolves to, so the\n              command that runs may not be the one described\n              (`rebound_name`)\n  \"startup\" — it names code the shell runs before the command on the\n              line, which vouch has not read (`evaluated_input`)",
+          "type": "string",
+          "default": ""
+        },
+        "languages": {
+          "description": "Which scanner's lines this claim is true for, same meaning as a\n`[[program]]`'s. Empty means every language.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "name": {
+          "description": "The variable's name. Matched the way the PLATFORM matches it: exactly\nunder bash, where `path=x` sets an ordinary variable and changes\nnothing, and case-insensitively under PowerShell, where `$env:Path`\nand `$env:PATH` are the same variable (both verified by running).",
+          "type": "string",
+          "default": ""
+        }
+      },
+      "additionalProperties": false
+    },
+    "HereWrite": {
+      "description": "\"With this shape and no destination named, this program writes into the\ndirectory it is RUN from\" — the write-side twin of `changes_dir` silence\n(M2.129). `tar -xf a.tar` puts the archive's members in the run place,\n`curl -O <url>` puts the URL's basename there, and vouch derived no\ndestination at all for either, so the commonest download-and-extract\nspellings went unjudged while their explicit twins asked.\n\nThe claim is conditional because these programs only do it in some\nshapes. All three conditions are ANDed, and validation requires at least\none of them to be set — an entry claiming a program ALWAYS writes where\nit stands, unconditionally, is one this key has no way to be right about.",
+      "type": "object",
+      "properties": {
+        "operands": {
+          "description": "The exact number of operands the claim needs, when arity is what\ndecides. `ln -s <target>` with ONE operand creates the link where it\nstands, under the target's basename (verified by running); with two,\nthe second operand names the link and `writes = \"last_arg\"` already\nderives it.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
+        "subcommand": {
+          "description": "The subcommand this claim is about, when the program has verbs.\nUnset means the claim is about the program however it is called.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "unless_flags": {
+          "description": "None of these may be present. Two different populations, both of\nwhich make the claim false: a flag that names the destination\nexplicitly (`tar -C`, `unzip -d`), and a flag that makes the program\nwrite nothing at all (`unzip -l`, which lists).\n\n**Not the same field as `Rule::unless_flags`, despite the name.** This\none matches in ANY position and also suppresses on a flag that merely\nCOULD be hiding in an unreadable token, because suppressing a derived\nwrite is the cautious direction here. The rule's veto is\nfirst-argument, exact-spelling, and suppresses only on a flag it can\nSEE, because there the cautious direction is to keep asking.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "when_flags": {
+          "description": "At least one of these flags must be present. Empty means the shape\nneeds no flag — `unzip a.zip` and a bare `wget <url>` both extract or\ndownload where they stand with nothing switched on.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "Program": {
+      "description": "One `[[program]]` entry: what a program IS and DOES. `knowledge.toml`\nships these for programs vouch describes out of the box;\n`my-knowledge.toml` adds the operator's own, laid over the shipped set by\nname.",
+      "type": "object",
+      "properties": {
+        "all_subcommands": {
+          "description": "Claims every subcommand, in an entry that would otherwise read as adding\nto a scoped one.\n\n`subcommands` widens and never narrows, so a file cannot go from \"these\nthree verbs\" to \"all of them\" by leaving the list out — that would make\nan omission permissive. Saying it out loud is the same rule as\n`vouch trust --all-subcommands` (§2).",
+          "type": "boolean",
+          "default": false
+        },
+        "arg_names": {
+          "description": "This program's own positional parameters, named in call order —\n`[\"file\", \"mode\"]` for python's `open`. What `writes = \"arg_<N>\"` and\n`wraps = \"arg_<N>\"` count positions against, and what\n`writes_only_with_file_mode` looks a `\"mode\"` position up in. For a\nmethod-shaped call the receiver fills position 0 and takes no name of\nits own, so names start at position 1.\n\nNon-empty replaces on merge, like `value_options` — the operator's own\nlist is a full replacement of the shipped one, not a field-by-field\nlay.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "args_from_input": {
+          "description": "This program APPENDS arguments it reads from a channel the command\nline never names — `xargs` takes them from its standard input or from\na file, and what it appends decides what the command it runs acts ON\n(M2.116). Rule 5 of any wrapper walk — \"every remaining token is the\nwrapped command's arguments\" — is simply untrue here, so the wrapped\ncommand's recorded arguments are not a faithful record of what it will\nbe given, and every claim that depends on reading them fails closed.",
+          "type": "boolean",
+          "default": false
+        },
+        "callback_args": {
+          "description": "This program's own parameters that it INVOKES as functions — what\nthey name runs, and vouch cannot see what that is, so this entry's\nother claims (pure read, no writes) hold only for a call that uses\nNONE of them (task 2b, M2.86: `json.load(f, object_hook=whatever)`\nhands `object_hook` a function json.load calls itself; the scanner\nnever emits an event for a callable passed by reference, so the\nread-only claim would otherwise be falsifiable). A positional\ncallback slot must ALSO be named in `arg_names`, at its real\nposition, so the existing keyword fold maps both spellings onto one\ncheck; a keyword-only one is legitimately absent from `arg_names`.\n\nNon-empty replaces on merge, like `arg_names`.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "case_sensitive_flags": {
+          "description": "Whether `write_flags` must match case exactly.\n\nPowerShell parameter names are case-insensitive, so `-Path` is declared\nlowercase and matched loosely. Unix flags are NOT: `tar -C` is the\ndestination directory while `tar -c` means create, and matching them\nloosely would record the token after `-c` as a written path.\n\n`None` means the entry did not say. That differs from `Some(false)` once\ntwo files describe the same program: unset means \"keep what the other\nfile said\", and only an entry that spells it out changes it.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "changes_dir": {
+          "description": "The dir-change kind: what the walk can KNOW about where the shell goes\nafter this program runs. One of `\"no\"`, `\"stated\"`, `\"stack\"`,\n`\"unstated\"` — a closed set, checked in `knowledge::validate`.\n\n`\"no\"` exists so an operator can RETRACT a shipped claim: without it, a\nfalse \"this moves the shell\" has no operator-side fix.\n\n`None` means the entry did not say. That differs from `Some(\"no\")` once\ntwo files describe the same program: unset means \"keep what the other\nfile said\", and only an entry that spells it out changes it — the same\nrule `case_sensitive_flags` follows.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "dest_dir_flags": {
+          "description": "Options that consume the following token AND that token is the\ndestination the SHELL moves to for everything after this command —\nsibling of `run_dir_flags` (where THIS command runs) but for where the\nshell goes next.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "evaluates_input": {
+          "description": "This program runs text it obtains at execution time, so the thing that\nactually runs is not in the command vouch was given — unless vouch can\nprove it IS: a here-document on the same command, consumed and scanned,\nsatisfies the \"stdin\" claim, because then the code is in the command\nafter all.\n  \"always\" — e.g. Invoke-Expression, whatever its argument turns out to be\n  \"stdin\"  — a shell with no script and no -c snippet is reading code\n             from its standard input, as in `curl … | bash`",
+          "type": "string",
+          "default": ""
+        },
+        "flag_prefix": {
+          "description": "How this program spells flags. cmd.exe uses `/s`, not `-s`; without this\nits flags read as paths and its paths read as flags, so both the guard\nrules and the written-path list come out wrong.\n\nA list, because one name can belong to two languages: `del /s` is cmd,\n`del -Recurse` is the PowerShell alias for Remove-Item. Empty means \"-\".",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "here_write": {
+          "description": "Shapes in which this program writes into the directory it runs from\nwithout naming a destination, written as `[[program.here_write]]`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HereWrite"
+          }
+        },
+        "languages": {
+          "description": "Which scanned languages this entry applies to: values from `\"bash\"`,\n`\"powershell\"` — the scanners this field scopes entries against\n(`src/shell.rs`, `src/powershell.rs`). Python is a third scanner but\nis not a value here: a python snippet is scoped through the\n`python:` match prefix on the entry's own name, not through this\nfield. Empty means every language, which is what every entry meant\nbefore this field existed.\n\nA claim can be true in one language and false in the other: `chdir` is\na `Set-Location` alias in PowerShell and is not a bash builtin at all.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "leading_args": {
+          "description": "For `wraps = \"rest\"`: how many leading DATA positionals this wrapper\nconsumes before the wrapped command's head. `timeout` takes exactly\none (the duration), `chrt` one (the priority); every other rest\nwrapper takes none.\n\nReplaces the duration heuristic the rest arm used to run (a token\nthat looked like `5`/`30s`/`1.5h` was skipped wherever it appeared,\nfor every rest wrapper). That guess read `env 5 rm -rf d` and\n`nice 30s rm` the same way it read `timeout 5 rm`, and it could not\nskip a leading positional that did not look like a duration —\n`timeout --signal TERM 5 sleep 1` among them. A count declared per\nprogram says the same thing without guessing at the token's shape.\n\n`None` means the entry did not say (reads as 0). Same `Option` merge\nrule as `case_sensitive_flags`: unset keeps whatever the other file\nalready claimed.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
+        "match": {
+          "description": "The program's own name(s), compared bare (no directory, no `.exe`)\nand case-insensitively. `python:`-prefixed names describe a python\ncallable instead of a shell program.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "named_positional": {
+          "description": "For `writes = \"named\"`'s POSITIONAL FALLBACK only — never consulted\nwhen a `write_flags` member actually matched. Which positional names\nthe destination when none did: `\"first\"` or `\"last\"` (the default).\n\nPowerShell's `Set-Content [-Path] <string[]> [-Value] <Object[]>`\nputs the destination FIRST and the written CONTENT second, while\n`Copy-Item <source> <destination>` puts the destination LAST — one\nprogram-wide fallback that always picked \"last\" read `Set-Content f\nx` as writing to `x`, when `f` is the file that gets `x` written into\nit (M2.128).\n\n`None` means the entry did not say (reads as \"last\"). Same `Option`\nmerge rule as `case_sensitive_flags`: unset keeps whatever the other\nfile already claimed.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "no_value_options": {
+          "description": "Options that take NO following token — needed so a destination walk\ndoes not mistake the option itself for a positional argument, or the\ntoken after it for the option's value.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "only_under": {
+          "description": "Place-scoped recognition: this entry is trusted only when the command\nruns under one of these globs. For the OPERATOR's own programs only —\n`knowledge::validate_place_scopes` refuses it on a name the shipped\nknowledge already describes, and refuses a scoped name split across\nmore than one of the operator's own entries, so the overlay never has\nto decide what \"unset means keep\" means for a field that in practice\nnever collides (spec 2026-08-06 §Refused shapes).\n\n`None` means the entry did not say — same `Option` merge rule as\n`changes_dir` and `case_sensitive_flags`. Read by `recognises_at` for\nthe verdict, and by `place_scopes` for the prompt that has to name an\nentry the run place put out of reach.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "default": null,
+          "items": {
+            "type": "string"
+          }
+        },
+        "rebinds_name_flags": {
+          "description": "Flags in which this program BINDS a name to something else — `hash -p\n<path> <name>` installs `<path>` under `<name>` in the shell's own\nlookup table, so a later `<name>` on the line runs that path\n(verified by running). The name-side twin of `[[env_name]]`'s\n`\"lookup\"` effect: there a variable the shell reads is assigned, here\na program is told to change the table directly. Raises\n`rebound_name`.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "remote_dest": {
+          "description": "This program's destination may be on ANOTHER MACHINE — `scp f\nhost:d`, `rsync a host:/b`. A `[user@]host:path` destination from\nsuch an entry is not a local file, so the local path rules have\nnothing to say about it and it is skipped rather than judged.\n\nPer ENTRY, never globally (M2.131.4): the same `host:path` shape\nwritten for `cp` is a local file with a colon in its name — on NTFS,\nan alternate data stream of the file before the colon — and skipping\nit there means a real write goes unjudged.",
+          "type": "boolean",
+          "default": false
+        },
+        "rule": {
+          "description": "Guard-tripping shapes for this program, written as `[[program.rule]]`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Rule"
+          }
+        },
+        "run_dir_flags": {
+          "description": "Options that consume the following token AND that token is the\ndirectory the command runs in — a flag whose value is the directory\nthe command runs in, declared per program in the knowledge file. A\nsubset of `value_options` — every run-dir flag also has to be in that\nlist, or its value would be mistaken for the subcommand.\n\nMatched by exact token equality, never case-folded (§7): `-c` is a\nvalue option (config), not `-C` (run directory).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "runs_file": {
+          "description": "This program EXECUTES a file named on its own command line, and vouch\nhas not read that file — `bash s.sh`, `python s.py`. Written as\n`\"arg_<N>\"`, counting the program's own OPERANDS (tokens left after\nthis entry's flag vocabulary is walked), so `arg_0` is \"the first\nthing that is not one of my flags or a flag's value\".\n\nDistinct from `evaluates_input`, which covers the case where the code\narrives on standard input and is therefore not on the line at all.\nHere the code's LOCATION is on the line and its CONTENT is not, which\nis the same blindness and the same construct (`evaluated_input`);\nreading the named file in order to allow it is deliberately out of\nscope (spec §9.1, ROADMAP M2.133).\n\nA wrap arm that already consumed this line wins: `bash -c '<code>'`\nputs the code IN the command, so the operand after `-c` is a script\nvouch has read, not one it has not.",
+          "type": "string",
+          "default": ""
+        },
+        "runs_file_flags": {
+          "description": "Flags whose VALUE names code this program will run without vouch\nhaving read it — python's `-m <module>`, which names a module by\nimport path rather than by file path. The flag half of `runs_file`,\nthe way `write_flags` is the flag half of `writes`.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "standalone_flags": {
+          "description": "Flags this entry vouches for ALONE: a run whose every argument is one\nof these (whole-token, unquoted view, the entry's case rule) is a\nstandalone run — covered by the entry, and read as evaluating no\nstandard input. The claim per flag: given only listed flags, the\nprogram performs the flag's own action and stops. Verified by\nrunning each flag, per name and case — each alone and once all\ntogether — before it is written.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "sub_write": {
+          "description": "Write targets that depend on the SUBCOMMAND, not on the program.\n\n`git` writes wherever `clone`, `init` and `worktree add` are told to,\nand nowhere for `status` or `log`. A single `writes` for the whole\nprogram cannot say that.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SubWrite"
+          }
+        },
+        "subcommands": {
+          "description": "Which subcommands this entry recognises.\n\nThree states (spec 2026-08-20 §3): the key ABSENT (`None`) covers the\nwhole program — every run; a non-empty list covers those verbs, plus\nstandalone runs when `standalone_flags` is present; an explicitly\nEMPTY list covers no verb at all — only standalone runs, and the\nloader refuses that spelling without a non-empty `standalone_flags`\n(an entry that can never recognise anything reads as installed\nprotection and is worse than none).",
+          "type": [
+            "array",
+            "null"
+          ],
+          "default": null,
+          "items": {
+            "type": "string"
+          }
+        },
+        "value_options": {
+          "description": "Options that consume the following token. Needed to find the subcommand.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "wrap_exec_flags": {
+          "description": "For `wraps = \"after_exec\"`: the flags after which the wrapped command\nbegins. `find` spells four of them — `-exec`, `-execdir`, `-ok`,\n`-okdir` — and the walk expands EVERY occurrence, not just the first.\n\nWas two hardcoded literals in the wrap arm, which is a program name\nin `src/` (§10: no program or tool names in code) and which left\n`-ok`/`-okdir` — the confirming twins of the two that were listed —\nrunning unjudged.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "wrap_exec_terminators": {
+          "description": "For `wraps = \"after_exec\"`: the tokens that END the wrapped command.\n`find` accepts `;` (usually written `\\;` so the shell does not eat\nit) and `+`. A declared exec flag whose command reaches the end of\nthe argument list without meeting one of these raises\n`wrap_unlocated`: the layers vouch was told exist were never found.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "wrap_flags": {
+          "description": "For `wraps = \"after_flag\"`: the flags whose value is the wrapped snippet.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "wrap_head_flags": {
+          "description": "For `wraps = \"start_process\"`: the flags whose VALUE names the program\nthis entry starts, rather than carrying an ordinary value —\n`Start-Process -FilePath <program>`. A subset of `value_options`\n(checked in `knowledge::validate`), the same relationship\n`run_dir_flags` has: the flag has to be known to consume its value, or\nthe walk would read that value as a positional.\n\nWithout this the program is only ever the first positional, and the\nflag spelling of the same command reached the end of the arguments\nwith no positional found — which the arm then read as \"this wrapped\nnothing\" while the argument list sat in the command unjudged.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "wrap_join": {
+          "description": "Whether this program's wrapped snippet spreads over every token after\nthe flag, rather than being one token: `cmd /c echo hi there` hands\nthe shell three tokens as one command line, while python's own `-c`\ntakes exactly the next token as the whole program and leaves the rest\nas the script's own argv. `true` rejoins the remaining tokens into one\nsnippet; unset or `false` reads only the flag's own value.\n\n`None` means the entry did not say. Same `Option` merge rule as\n`case_sensitive_flags`: unset keeps whatever the other file already\nclaimed.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "wrap_lang": {
+          "description": "Which language the wrapped snippet is written in: one of the scanner\nlanguages (`bash`, `powershell`, `python`, `javascript`), or `opaque`\n(a language vouch has no parser for at all) or `cmd` (cmd.exe batch —\nnot bash, so it is scanned no more than any other unscannable\nlanguage) — a closed set, checked in `knowledge::validate`. A\nsnippet in `opaque`, `cmd`, or any other unscannable language still\nasks (`unreadable_language`, spec 2026-08-14 §5.2) rather than\npassing unread.\n\nRequired for the three arms that scan TEXT (`wraps` = `\"after_c\"`,\n`\"after_flag\"`, or `\"arg_<N>\"`) — leaving it unset there used to fall\nback to silently scanning the snippet as bash, which is exactly the\nlaundering this field exists to prevent. Not required for the arms\nthat build a command rather than scan text (`\"rest\"`, `\"after_exec\"`,\n`\"start_process\"`).",
+          "type": "string",
+          "default": ""
+        },
+        "wraps": {
+          "description": "How this program runs ANOTHER command: \"rest\", \"after_c\", \"after_exec\",\n\"after_flag\", or \"arg_<N>\" naming one numbered positional argument as\nthe wrapped snippet (see `arg_names`).",
+          "type": "string",
+          "default": ""
+        },
+        "write_flags": {
+          "description": "For `writes = \"named\"` and `\"flags_only\"`: the parameters whose value is\nthe written path.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "writes": {
+          "description": "Which arguments this program writes to: \"last_arg\", \"all_args\",\n\"of_prefix\", \"named\", \"flags_only\", or \"arg_<N>\" naming one numbered\npositional argument (see `arg_names`). Empty means it is not known to\nwrite anything.",
+          "type": "string",
+          "default": ""
+        },
+        "writes_only_with_file_mode": {
+          "description": "A `writes = \"arg_<N>\"` claim only writes when this call's OWN \"mode\"\nargument says so — python's `open(file, mode)` shape, where a\nread-mode call touches nothing on disk. `true` needs a `\"mode\"`\nposition to test: `arg_names` must name one, checked in\n`knowledge::validate`. The direction runs one way only — an entry may\nname `\"mode\"` in `arg_names` without setting this (a chmod-shaped\nentry whose mode is an integer, never a write predicate).\n\n`None` means the entry did not say. Same `Option` merge rule as\n`case_sensitive_flags`: unset keeps whatever the other file already\nclaimed.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "writes_via_handle": {
+          "description": "This ENTRY's claim: at the named position (\"arg_<N>\", receiver = 0)\nor keyword-only parameter (a bare identifier), the call writes\nthrough a file object already judged where it was minted — so the\nengine extracts NO write target from this call itself; the value is\ndocumentary, and validation checks only its spelling and its\nexclusivity with the other write claims.\n\nThis is narrower than \"the call carries no path anywhere\". The entry\nmatches by NAME alone (python text carries no receiver types), so it\ncannot rule out some OTHER standard-library receiver whose method of\nthe same name takes a real destination path at a DIFFERENT position\nthis entry never inspects. Live-verified counterexample (fix round 1,\nM2.86 task 5, 2026-08-10): `xml.etree.ElementTree.ElementTree` — an\nin-memory tree, never opened, never a handle — has its own\n`.write(file_or_filename, ...)`, whose first argument is a real path\nthat a plain string there writes to on disk. Contrast, checked the\nsame way and NOT a trap (fix round 2): `zipfile.ZipFile.write\n(filename, ...)` also takes `filename` as a real argument, but live\nverification shows it is READ from, not written to — the archive\nreceiver (arg_0) is the actual write destination there, consistent\nwith this entry's own claim.\n\nThe trap is specifically a receiver whose SAME-NAMED method takes its\nwrite DESTINATION as an argument, the way ElementTree's does — not\n\"any receiver exposing this name at all\" (zipfile's does too, and is\nnot a trap). This stays fail-closed today only because every route to\nthe ElementTree case runs through an unmodelled constructor call that\nasks (`ET.ElementTree`/`ET.parse` are both undescribed) — if a\nconstructor for a receiver of THAT shape is ever described, every\nentry setting this field must be revisited in the SAME change. Scope\nand residue: docs/specs/2026-08-09-python-read-only-builtins-design.md;\nreceiver-provenance retirement: docs/ROADMAP.md M2.87.\n\n`None` means the entry did not say. Same `Option` merge rule as\n`writes_only_with_file_mode`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "match"
+      ]
+    },
+    "Rule": {
+      "description": "One `[[program.rule]]`: the shape that trips a guard. A rule fires when\nthe command matches every non-empty condition it names; an empty list\ncondition matches nothing (never \"anything\"), so a rule with no\nconditions at all fires only via `always`.",
+      "type": "object",
+      "properties": {
+        "always": {
+          "description": "Fires on every invocation of the program, with no other condition\nneeded.",
+          "type": "boolean",
+          "default": false
+        },
+        "any_arg_exact": {
+          "description": "Fires when any argument equals one of these exactly.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "any_arg_prefix": {
+          "description": "Fires when any argument starts with one of these.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "any_flag": {
+          "description": "Fires when any flag on the command is one of these.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "grants_execute": {
+          "description": "This command hands another program permission to run — e.g. `chmod\n+x`. Trips `grant_execute` on its own, independent of the other\nconditions.",
+          "type": "boolean",
+          "default": false
+        },
+        "guard": {
+          "description": "The guard this rule trips — one of vouch's known guard names\n(`delete_recursive`, `grant_execute`, `history_rewrite`,\n`publish_outward`, `process_control`, `privilege_escalation`,\n`disk_or_system`, `in_place_edit`, `remote_execution`).",
+          "type": "string"
+        },
+        "source": {
+          "description": "Where this rule came from: `declared` (the operator's own config),\n`requested` (they asked for it), or `inferred` (a guess). Surfaced in\nthe prompt so the operator always knows whose judgement they are\nseeing.",
+          "type": "string",
+          "default": ""
+        },
+        "sub_arg_0_in": {
+          "description": "Fires when the subcommand's own first argument is one of these.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "subcommand_in": {
+          "description": "Fires when the command's subcommand is one of these.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "unless_flags": {
+          "description": "Does NOT fire when the command's FIRST argument is exactly one of\nthese — the veto, checked before every other condition including\n`always`.\n\nExists because a program can have one spelling that does not do the\nthing its guard is about, and the positive conditions cannot say so:\n`kill -0 <pid>` sends no signal at all, it asks the kernel whether the\nprocess exists. Without a veto the choice is a guard that asks on a\nliveness check or no guard at all, and both are wrong.\n\n**First argument, spelled exactly, and nothing else.** Both halves of\nthat were learned by getting it wrong: an any-position reading allowed\n`kill -9 -0` (a later `-0` is a PID, and a negative PID is a process\nGROUP), and an attached-value reading allowed `kill -09`, which bash\ndelivers as SIGKILL. A veto that fails to fire leaves the guard\nfiring, so narrow is the safe direction here; an entry that needs an\nany-position veto should ask for its own key and say why.\n\nVetoes only on a flag vouch can SEE. A spelling it cannot read leaves\nthe guard firing — the opposite of `here_write`'s `unless_flags`,\nwhich suppresses a derived write and therefore also suppresses on a\nflag that merely COULD be hiding in an unreadable token.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "guard"
+      ]
+    },
+    "SubWrite": {
+      "description": "A write target that depends on the SUBCOMMAND, not on the program as a\nwhole — `git` writes wherever `clone`, `init` and `worktree add` are\ntold to, and nowhere for `status` or `log`.",
+      "type": "object",
+      "properties": {
+        "min_positional": {
+          "description": "How many non-flag arguments must follow the subcommand before one of\nthem is a destination. `git clone <url>` writes to a directory named\nafter the URL — unknowable — so it needs two.",
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "subcommand": {
+          "description": "The subcommand this applies to, e.g. \"clone\".",
+          "type": "string"
+        },
+        "takes": {
+          "description": "Which of those arguments is the destination: \"last\" (the default) or\n\"first\".\n\n`git clone <url> <dir>` puts it last, but `git worktree add <dir>\n[<commit-ish>]` puts it FIRST — taking the last recorded `HEAD` as a\nwritten path, which is a commit, not a directory.",
+          "type": "string",
+          "default": ""
+        },
+        "then": {
+          "description": "A second word that must follow it, e.g. \"add\" for `worktree add`.",
+          "type": "string",
+          "default": ""
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "subcommand"
+      ]
+    },
+    "Tool": {
+      "description": "A harness tool vouch has no scanner for, and what is claimed about it.",
+      "type": "object",
+      "properties": {
+        "action": {
+          "description": "What to do about it. Unset means allow: being listed at all is the\nrecognition claim.\n\n\"ask\" is the interesting case. It says vouch knows exactly what this\ntool is and is stopping anyway — a different sentence from \"vouch has\nnever heard of this\", and the prompt says which.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Action"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cwd_from_call": {
+          "description": "This tool executes its snippet (or writes its path) in the calling\nsession's own working directory. Only when true does a relative\ntarget get resolved against the hook's cwd; absent or false leaves it\nunresolvable, which asks (fail closed).",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "match": {
+          "description": "Optional, unlike `Program::match_names` — a `server` entry (spec\n2026-08-05 §Schema) names no individual tool at all, and without\n`default` here `deny_unknown_fields` would refuse it with \"missing\nfield `match`\" before `knowledge::validate_tool` ever got to say why a\nmatch-less, server-less entry is wrong.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "server": {
+          "description": "A whole-server grant, said out loud (spec 2026-08-05 §Schema): matches\n`<server>__<tool>` for every tool that server exposes, instead of one\ntool by name. Mutually exclusive with a non-empty `match` — checked in\n`knowledge::validate_tool`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "snippet": {
+          "description": "Which named `tool_input` fields carry a script vouch should decide on.\n`None` means \"keep what the shipped entry declares\" — the same\n`Option` merge rule every other per-entry claim in this file follows.\n`Some(vec![])` is a load error (`knowledge::validate_tool`): there is\nno legitimate \"explicitly no snippets\" spelling, because that reading\nwould let one silent my-knowledge line turn off snippet inspection for\na shipped entry it only meant to add a `source` to. The actual\noff-switch is `tools.<name>` in config.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/ToolSnippet"
+          }
+        },
+        "source": {
+          "description": "Why this tool is described. Shown in `vouch doctor` and in the prompt,\nand it is the claim someone has to stand behind.",
+          "type": "string",
+          "default": ""
+        },
+        "write_path_field": {
+          "description": "The `tool_input` field whose value is the path this tool writes. What\n`Write` and `Edit` were hardcoded to do.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "ToolSnippet": {
+      "description": "One declared snippet of a `[[tool]]` entry: a named `tool_input` field\nthat carries a script vouch should decide on, and how to learn which\nlanguage it is written in.",
+      "type": "object",
+      "properties": {
+        "field": {
+          "description": "A stated path into `tool_input`: dotted steps descend objects, `[]`\nmaps over an array (`commands[].command`). No wildcards, no globs.",
+          "type": "string"
+        },
+        "language": {
+          "description": "A fixed snippet language. Exactly one of this and `language_from` —\nchecked in `knowledge::validate_tool`, which also checks this value\nis in the closed `knowledge::SNIPPET_LANGUAGES` set.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "language_from": {
+          "description": "Read a sibling `tool_input` field and translate its value through\n`language_values`. Exactly one of this and `language`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "language_values": {
+          "description": "The translation table for `language_from`: the value read from the\nsibling field, on the left, maps to a `knowledge::SNIPPET_LANGUAGES`\nname on the right — every right-hand value is checked against that\nclosed set at load.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "field"
+      ]
+    }
+  }
+}

@@ -1,0 +1,11 @@
+# An operator file that names a harness tool and says nothing else about it.
+#
+# [review] The reproduction for the tool-overlay defect. The operator's tool
+# entries were APPENDED to the shipped ones and `guards::tool_entry` takes the
+# last matching entry WHOLE, so this file replaced ExitWorktree's shipped
+# `action = "ask"` with an entry whose action is unset — and an unset action on
+# a tool entry means allow. Saying nothing turned an ask into an allow, while
+# the identical silence in a `[[program]]` entry left the shipped rules alone.
+[[tool]]
+match = ["ExitWorktree"]
+source = "mine"

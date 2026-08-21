@@ -1,0 +1,80 @@
+name: release
+on:
+  push:
+    tags: ["v[0-9]*"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: test (fails on any ignored)
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --release 2>&1 | tee out.log
+          IGNORED=$(grep -Eo '[0-9]+ ignored' out.log | awk '{s+=$1} END {print s+0}')
+          RESULTS=$(grep -c '^test result:' out.log || true)
+          [ "$RESULTS" -gt 0 ] || { echo "NOTHING COMPILED"; exit 1; }
+          [ "$IGNORED" -eq 0 ] || { echo "$IGNORED ignored - the gate refuses"; exit 1; }
+
+  build:
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            triple: x86_64-pc-windows-msvc
+            bin: vouch.exe
+          - os: ubuntu-latest
+            triple: x86_64-unknown-linux-gnu
+            bin: vouch
+          - os: macos-latest
+            triple: aarch64-apple-darwin
+            bin: vouch
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.triple }}
+      - name: build
+        run: cargo build --release --target ${{ matrix.triple }}
+      - name: stage (layout mirrors the install destination)
+        shell: bash
+        run: |
+          mkdir -p stage/bin
+          cp "target/${{ matrix.triple }}/release/${{ matrix.bin }}" stage/bin/
+          cp knowledge.toml vouch.example.toml stage/
+      - name: zip (posix)
+        if: runner.os != 'Windows'
+        run: cd stage && zip -r "../vouch-${{ matrix.triple }}.zip" .
+      - name: zip (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path stage/* -DestinationPath "vouch-${{ matrix.triple }}.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vouch-${{ matrix.triple }}
+          path: vouch-${{ matrix.triple }}.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { merge-multiple: true }
+      - name: checksums
+        run: sha256sum vouch-*.zip > SHA256SUMS
+      - name: create release
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: gh release create "${GITHUB_REF_NAME}" vouch-*.zip SHA256SUMS --repo "${GITHUB_REPOSITORY}" --generate-notes

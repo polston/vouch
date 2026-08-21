@@ -1,0 +1,6 @@
+version = 1
+[lang.bash]
+default = "allow"
+[lang.bash.constructs]
+dynamic_command = "ask"
+unmodeled_command = "allow"

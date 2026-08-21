@@ -1,0 +1,12 @@
+target/
+
+# Real recorded command history never exists in this repository, but the
+# ignore stands anyway: a measurement corpus built locally must not be
+# committable even by mistake. See the README's Developing section.
+tests/fixtures/bash_corpus.json
+tests/fixtures/replay_baseline.jsonl
+tests/fixtures/*dump*.jsonl
+tests/fixtures/*dump*.tsv
+tests/fixtures/*samples*.txt
+*parse-samples*.txt
+*parse_samples*.txt

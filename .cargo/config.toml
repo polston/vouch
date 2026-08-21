@@ -1,0 +1,36 @@
+# What the tests AND the `examples/` on-demand measurements decide against, fixed
+# at the repository rather than left to whatever the person running them has
+# installed.
+#
+# For the examples this is load-bearing rather than tidy: `common::require_repo_pinning`
+# exits 1 unless all three variables below resolve inside this tree, so removing or
+# repointing one does not merely make a measurement machine-dependent — it stops
+# every measurement running at all. Most of the ten reach the process-global
+# knowledge, so an unpinned run would otherwise produce a full set of plausible
+# numbers measured against the operator's installed files and attributed to this
+# repository.
+#
+# vouch reads its files from disk. Without this, `cargo test` on a contributor's
+# machine reads THEIR files, so the same commit passes for one person and fails
+# for another for reasons unrelated to the change under test.
+#
+# `relative = true` resolves against the directory holding this `.cargo` folder.
+# `force = true` beats a value exported in the calling shell. Both verified by
+# running them.
+#
+# Three variables, not two. An skeptical review exported a permissive
+# VOUCH_CONFIG and flipped two tool tests while the knowledge vars stayed
+# pinned — half a fence.
+#
+# VOUCH_MY_KNOWLEDGE points under target/ on purpose. `[env]` applies to
+# `cargo run` too, so `cargo run -- trust <prog>` writes to whatever this names;
+# when it named a fixture, the review reproduced a program entry appearing in a
+# committed file. target/ is build output and already ignored.
+#
+# The installed binary never sees any of this: cargo is not involved when the
+# harness runs the hook. Cargo finds this file by walking up from the working
+# directory, so `--manifest-path` from OUTSIDE the repo does not get it.
+[env]
+VOUCH_KNOWLEDGE = { value = "knowledge.toml", relative = true, force = true }
+VOUCH_MY_KNOWLEDGE = { value = "target/test-my-knowledge.toml", relative = true, force = true }
+VOUCH_CONFIG = { value = "vouch.example.toml", relative = true, force = true }

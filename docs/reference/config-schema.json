@@ -1,0 +1,299 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "config.toml",
+  "description": "`config.toml` (`~/.config/vouch/config.toml`): what the operator has told\nvouch to do. Anything not named here resolves to `ask` — absence of a\nsetting must never become permission.",
+  "type": "object",
+  "properties": {
+    "guards": {
+      "description": "What commands DO, written as `[guards]`. Shared across every\nlanguage: a guard fires the same way whichever scanner recognised the\ncommand that tripped it. Every key must be one of vouch's known guard\nnames (`delete_recursive`, `grant_execute`, `history_rewrite`,\n`publish_outward`, `process_control`, `privilege_escalation`,\n`disk_or_system`, `in_place_edit`, `remote_execution`); an unset guard\nalways resolves to `ask`.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/Action"
+      }
+    },
+    "lang": {
+      "description": "Every language section, written as `[lang.<name>]` — `bash`,\n`powershell`, and `python` ship with vouch. One map, so a new scanner\nneeds no new key here.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/LangConfig"
+      }
+    },
+    "protected": {
+      "description": "`[protected]`: paths no `allow_paths` entry can ever open.",
+      "$ref": "#/$defs/ProtectedSection"
+    },
+    "run": {
+      "description": "`[run]`: trust/distrust zones and place-scoped guard overrides.",
+      "$ref": "#/$defs/RunSection"
+    },
+    "shadow": {
+      "description": "`[shadow]`: mode-keyed shadow (design 2026-08-16).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ShadowSection"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "tools": {
+      "description": "Per-tool actions, written as `[tools]`. vouch used to say NOTHING\nabout any tool it had no scanner for — 46.5% of recorded tool calls —\nwhich is the same \"unknown means allowed\" inversion as unmodelled\nprograms, one level up. Naming a FIRST tool here makes this section\ngovern every tool, not only the one named; see `Config::tool_decision`.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/Action"
+      }
+    },
+    "version": {
+      "description": "Accepted as a top-level key but not yet consumed; reserved for future\nversioning of the config format.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64",
+      "default": null
+    },
+    "write": {
+      "description": "`[write]`: what vouch does about a write it can see, and where it is\nallowed to land.",
+      "$ref": "#/$defs/FileConfig"
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "Action": {
+      "description": "What vouch does about a construct, a guard, or a program: let the command\nthrough, stop and ask the operator, or refuse it outright.",
+      "oneOf": [
+        {
+          "description": "Let it through with no prompt.",
+          "type": "string",
+          "const": "allow"
+        },
+        {
+          "description": "Stop and show the operator what was recognised, before it runs.",
+          "type": "string",
+          "const": "ask"
+        },
+        {
+          "description": "Refuse it outright, with no prompt.",
+          "type": "string",
+          "const": "deny"
+        }
+      ]
+    },
+    "FileConfig": {
+      "description": "The `[write]` table: what vouch does about a write it can see, and where\nit is allowed to land.",
+      "type": "object",
+      "properties": {
+        "allow_paths": {
+          "description": "Trees a write may land under with no prompt. Checked only after the\nwrite wall (`ask_paths`/`deny_paths`) has already let it through.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "ask_paths": {
+          "description": "Write wall: a write aimed under one of these trees always asks. No\n`allow_paths` entry, however broadly written, can open a tree named\nhere.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "default": {
+          "description": "Verdict for a write whose destination is not covered by any of the\nlists below.",
+          "$ref": "#/$defs/Action"
+        },
+        "deny_paths": {
+          "description": "Write wall: a write aimed under one of these trees is refused\noutright, with no prompt. Checked before `ask_paths`.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "scope": {
+          "description": "Per-program write scopes, written as `[[write.scope]]`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WriteScope"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "GuardOverride": {
+      "description": "A place-scoped guard override (`[[run.guards]]`): under one of `under`'s\ntrees, each named guard takes the action given here instead of its global\n`[guards]` action. A looser override applies only where vouch can PROVE\nthe command ran in the tree.",
+      "type": "object",
+      "properties": {
+        "under": {
+          "description": "The trees this override applies under. Each entry is a path or a\n`path/**` glob.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/Action"
+      },
+      "required": [
+        "under"
+      ]
+    },
+    "LangConfig": {
+      "description": "Settings for one language: `[lang.bash]`, `[lang.powershell]`,\n`[lang.python]` — one shape for every scanner, looked up by name.",
+      "type": "object",
+      "properties": {
+        "constructs": {
+          "description": "Per-construct verdicts, written as `[lang.<name>.constructs]`. A\nconstruct with no entry here defaults to `ask`, never to `default`\nabove — absence of a setting must never become permission.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/Action"
+          }
+        },
+        "default": {
+          "description": "Verdict when nothing this language's scanner recognised objected.\nNever applies to a construct — an unset construct always resolves to\n`ask`, whatever this says.",
+          "$ref": "#/$defs/Action"
+        },
+        "wrap_depth": {
+          "description": "How many layers of wrapper nesting are scanned before a deeper nest\ntrips `wrap_depth_exceeded` and asks. `None` means the operator has\nnot set it, so the built-in cap (4) applies. Read by the engine's\nwrapper walk, not by this file.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "default": null,
+          "maximum": 255,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProtectedSection": {
+      "description": "The `[protected]` table: paths no `allow_paths` entry can ever open,\nhowever broadly it is written. Checked before every allow rule, by\nidentity rather than by folder.",
+      "type": "object",
+      "properties": {
+        "paths": {
+          "description": "The protected paths themselves — vouch's own config and the hook\nregistration, by default. This list IS the setting: removing a path\nfrom it is the only way to unprotect that path.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "RunSection": {
+      "description": "The `[run]` table: trust and distrust zones, and place-scoped guard\noverrides.",
+      "type": "object",
+      "properties": {
+        "guards": {
+          "description": "Place-scoped guard overrides, written as `[[run.guards]]`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GuardOverride"
+          }
+        },
+        "trust_all_under": {
+          "description": "Trust zone: any command run from under one of these trees is\nrecognised, whatever it is — recognition only, guards and write\nrules still apply. `None` means absent (fine); a written empty list\nis refused at load, since it can never apply.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "default": null,
+          "items": {
+            "type": "string"
+          }
+        },
+        "trust_nothing_under": {
+          "description": "Distrust zone: no command run from under one of these trees is\nrecognised, whatever it is — even a program a knowledge entry\ndescribes. Refused when written empty, same as the grants above: a\nwritten empty list can only be a mistake.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "default": null,
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ShadowSection": {
+      "description": "`[shadow]`: stand down from gating while the harness reports a named\npermission mode. vouch still evaluates and journals every call; what\nwould prompt is not emitted. An ALLOW is never suppressed.",
+      "type": "object",
+      "properties": {
+        "modes": {
+          "description": "Which permission modes stand vouch down. The six documented\nspellings only; a written empty list refuses.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "default": null,
+          "items": {
+            "type": "string"
+          }
+        },
+        "stand_down": {
+          "description": "The three-state toggle. `Option` so the missing-key refusal can name\nthe three values instead of serde's bare missing-field error;\n`validate` refuses `None`, so it is always `Some` in a loaded config.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StandDown"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "StandDown": {
+      "description": "The `[shadow]` three-state toggle (mode-keyed shadow, design 2026-08-16):\nwhat standing down suppresses. Required when the section is present —\nthe feature's own switch is never defaulted.",
+      "oneOf": [
+        {
+          "description": "Stand down, but what BLOCKS still blocks: a deny, and the protection\nasks (the protected list, the ask_paths wall).",
+          "type": "string",
+          "const": "keep-deny"
+        },
+        {
+          "description": "Stand down every prompt and every block; only allows are emitted.",
+          "type": "string",
+          "const": "full"
+        },
+        {
+          "description": "Never stand down — the same as the section being absent.",
+          "type": "string",
+          "const": "off"
+        }
+      ]
+    },
+    "WriteScope": {
+      "description": "One `[[write.scope]]` entry: this program's own writes may land only\nunder `only_under` — judged against the write's resolved target, not the\nwhole command line.",
+      "type": "object",
+      "properties": {
+        "only_under": {
+          "description": "The trees this program's writes may land under. A write outside all\nof them is judged as if this scope did not exist — falling through to\nthe ordinary wall/allow_paths check.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "programs": {
+          "description": "Which programs this scope restricts. Each entry is 1-3 tokens: the\nprogram name, optionally a subcommand, and optionally that\nsubcommand's own second word (`\"git worktree add\"`).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "programs",
+        "only_under"
+      ]
+    }
+  }
+}

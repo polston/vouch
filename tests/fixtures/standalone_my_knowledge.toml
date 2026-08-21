@@ -1,0 +1,19 @@
+# The operator-side shapes the shipped knowledge never uses, pinned as a
+# fixture so a measurement can SEE them against the corpus (M2.144(b)):
+# one subcommand-scoped entry WITH standalone_flags, one WITHOUT. Heads
+# are frequent corpus heads with NO shipped entry (the operator-style
+# verb CLI M2.144 describes), chosen so their flags-only instance count
+# is ZERO (verified with 10a's VOUCH_COUNT_HEADS report: kubectl 0/1829
+# occurrences, go 0/1350 occurrences, over the 20,194-row real corpus) —
+# that is what makes the spec's zero-movement expectation true by
+# construction while the population stays printed and legible. Invented
+# entries only, not part of the shipped knowledge.toml.
+[[program]]
+match = ["kubectl"]
+subcommands = ["get"]
+case_sensitive_flags = true
+standalone_flags = ["--version"]
+
+[[program]]
+match = ["go"]
+subcommands = ["test"]

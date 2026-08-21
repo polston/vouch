@@ -1,0 +1,35 @@
+# Shell scripts keep LF endings in the working tree, on every platform.
+#
+# `core.autocrlf` is true on the machine this repository is developed on, so
+# without this a checkout rewrites every script to CRLF. Measured: a CRLF
+# shebang still EXECUTES under Git for Windows, so that is not the hazard. The
+# hazard is quieter — a carriage return lands inside the quoted value of every
+# assignment, which for scripts/githooks/scan-private-data.sh means a CR at the
+# end of a regular expression, and the last alternative of a pattern then
+# matches nothing. A private-data check that silently stops matching is the
+# exact failure this repository's first invariant is about (CLAUDE.md §1: an
+# allow-list's error mode must be visible).
+#
+# The index already stores LF, so this changes checkout only — no file content
+# changes with it.
+*.sh text eol=lf
+
+# The git hooks have no extension and need naming individually.
+scripts/githooks/pre-commit text eol=lf
+scripts/githooks/commit-msg text eol=lf
+scripts/githooks/pre-push  text eol=lf
+
+# Files the install scripts COPY off this tree keep LF too, for a different
+# reason: the installers compare the installed copy against the repository's to
+# decide whether the operator has local edits worth protecting. With
+# `core.autocrlf` on, a worktree checkout and the main checkout can hold the same
+# file with different endings, so installing from one and then checking from the
+# other reports a difference whose diff shows no visible change — and exits
+# non-zero, which inside a landing sequence reads as a failed step. Pinning them
+# makes every checkout produce the same bytes. Measured on 2026-08-11: exactly
+# that phantom difference appeared the first time a skill was installed from a
+# worktree and re-checked from `master`.
+knowledge.toml       text eol=lf
+plugin/skills/**/*.md text eol=lf
+plugin/**/*.py        text eol=lf
+plugin/commands/*.md  text eol=lf

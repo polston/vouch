@@ -1,0 +1,385 @@
+# vouch configuration
+#
+# Design rule: EVERY construct vouch can recognise appears here and can be set
+# to "allow", "ask", or "deny". If vouch ever prompts you for something that has
+# no setting in this file, that is a bug in vouch, not a decision about safety.
+#
+# Anything not listed under a [lang.<name>.constructs] table defaults to "ask",
+# deliberately — not knowing something is never a reason to allow it. Three
+# language sections ship below: bash, powershell, and python. Python is never a
+# top-level scanned command on its own — a snippet always arrives INSIDE a bash
+# or powershell command (`python -c "…"`, a heredoc fed to python, …) — but its
+# constructs settle under their own section the same as any other language's.
+
+version = 1
+
+[lang.bash]
+# Verdict when no construct objected.
+default = "allow"
+# Nesting layers scanned before a deeper wrapper nest trips wrap_depth_exceeded
+# (below); unset = the built-in 4.
+wrap_depth = 4
+
+[lang.bash.constructs]
+# A variable used as the program name:  PY="/usr/bin/python"; "$PY" script.py
+dynamic_command = "allow"
+# A variable used as a redirect target: OUT=/tmp/x; echo hi > "$OUT"
+dynamic_redirect = "allow"
+subshell = "allow"
+background = "allow"
+heredoc = "allow"
+function_def = "allow"
+
+# vouch could not read the command. This is vouch's own defect, surfaced
+# deliberately rather than silently becoming a permanent prompt.
+parse_failure = "ask"
+
+# vouch cannot tell where a write lands. Originally just "a written path
+# still contains a variable vouch could not resolve". Since the run-dir-flag
+# work (2026-07-31) it also covers: the directory a command runs in is not
+# provable (a run-dir flag like `git -C` given twice, with no value, or with
+# a value that does not resolve; a `cd` inside a subshell, `||` branch or
+# `popd` whose target vouch cannot follow) — and separately, "vouch cannot
+# tell WHICH ARGUMENT is the destination" when an undescribed flag sits
+# after the subcommand. The off-switch got broader along with the class of
+# thing it covers; this is still the one setting for all of it.
+unresolved_path = "ask"
+
+# vouch has no description of what this program does.
+#
+# Ships as "ask" since 2026-07-28: absence of knowledge is not the permissive
+# case. A program vouch cannot describe is one it cannot make any claim about,
+# and saying nothing is the deny-list wearing a different hat.
+#
+# It shipped as "allow" before that, and the comment here argued that "vouch
+# does not gate on program NAMES, it gates on what a program DOES via guards".
+# That reads like a principle. It was written after measuring that "ask" would
+# prompt on 93.8% of recorded commands, to justify not paying the cost. The
+# 93.8% was one machine on one day — not evidence about anything general — and
+# the reversal broke no test.
+#
+# If the prompts are too many, the answer is to describe more programs
+# (`vouch trust <prog> [<sub>…]`, and `vouch doctor` lists what you actually
+# run that is undescribed), not to stop asking. Setting this to "allow" is
+# available and honest about what it does: it allows every program vouch has
+# never heard of.
+unmodeled_command = "ask"
+
+# This runs code that is not in the command vouch was given at all — a shell
+# with no script and no -c snippet reading from standard input, as in
+# `curl … | bash`, or an eval-like construct reading text at execution time.
+evaluated_input = "ask"
+
+# This nests one wrapper inside another more times than wrap_depth (above)
+# will follow, so the layers past the limit were never scanned.
+wrap_depth_exceeded = "ask"
+# A program vouch is told runs another command -- a shell's -c, find's -exec,
+# Start-Process's argument list -- where the walk could not find the command
+# it was told to expect. Allowing this lets a wrapper through with the thing
+# it wraps unread.
+wrap_unlocated = "ask"
+# A wrapper's arguments carry a flag vouch has no description of, so it
+# cannot tell whether the flag takes the next token as its value or whether
+# the next token is the command. Both readings are judged and the stricter
+# answer wins; this setting governs the note that says why. Describing the
+# flag in my-knowledge.toml (value_options or no_value_options) removes the
+# ambiguity outright.
+wrap_ambiguous = "ask"
+# A wrap arm located a snippet in a language vouch has no scanner for --
+# opaque interpreters (node -e, awk's program text), cmd.exe batch, or any
+# other unscannable language. Every one of these asks, including a
+# harmless-looking read-only one: vouch cannot tell a printing awk program
+# from a writing one, so this is the honest cost of not reading it.
+unreadable_language = "ask"
+# A wrapper runs a command with arguments it reads from standard input or from
+# a file (xargs), so what that command acts on is not on the line. Raised only
+# where an appended token could change the answer -- a write claim, a guard
+# rule an appended token could satisfy, or a command handed on to something
+# else. `xargs echo` says the same thing however many arguments it gets, and
+# stays quiet.
+args_from_input = "ask"
+# The shell rewrites a braced word into several words before the program runs
+# -- `rm -{r,f} d` really reaches rm as `rm -r -f d`. vouch reproduces the
+# simple literal lists exactly, so those expand silently and the guard sees
+# what the program sees. This fires for the forms it does NOT reproduce: a
+# range ({1..9}), a nest, several groups in one word, or alternatives carrying
+# quotes, escapes or expansions. Allowing it lets a word through judged as the
+# text on the line rather than as the words the program is handed. Quoted
+# braces are not this: the program really does receive them, and nothing is
+# raised. There is deliberately no inherits_from donor for this key -- an
+# unset config asks.
+brace_expansion = "ask"
+# An assignment to a name the shell itself reads when it looks a program name
+# up -- PATH, and whatever else knowledge.toml's [[env_name]] list declares.
+# The program that runs may then be a different one from the program vouch
+# described, so the description is not evidence about this line. Every other
+# assignment stays inert: LC_ALL=C sort is quiet, and stays quiet.
+rebound_name = "ask"
+
+[lang.powershell]
+# Verdict when no construct objected.
+default = "allow"
+# Nesting layers scanned before a deeper wrapper nest trips wrap_depth_exceeded
+# (below); unset = the built-in 4.
+wrap_depth = 4
+
+[lang.powershell.constructs]
+# A .NET type is referenced, e.g. [System.IO.File]::Delete — vouch cannot
+# follow what the type does.
+type_literal = "ask"
+# & invokes something, and vouch may not be able to resolve what.
+call_operator = "allow"
+# A method is called on an object.
+method_call = "allow"
+# Output is written to a file — fires for every redirect, fixed target or
+# not; the resolved target still goes through [write] like any other write.
+redirect = "allow"
+# A variable is assigned.
+assignment = "allow"
+# An environment variable is assigned.
+env_assignment = "allow"
+function_def = "allow"
+# A foreach loop; vouch reads the body but not how many times or over what.
+keyword_foreach = "allow"
+# A while loop; vouch reads the body but not the exit condition.
+keyword_while = "allow"
+# A do loop; vouch reads the body but not the exit condition.
+keyword_do = "allow"
+# A switch statement; vouch reads the branches but not which is taken.
+keyword_switch = "allow"
+# An error trap.
+keyword_trap = "allow"
+# A class definition.
+keyword_class = "allow"
+# A try/catch block.
+keyword_try = "allow"
+
+# The quotes do not balance, so vouch cannot split the command reliably.
+unbalanced_quotes = "ask"
+
+# vouch could not read the command. This is vouch's own defect, surfaced
+# deliberately rather than silently becoming a permanent prompt.
+parse_failure = "ask"
+
+# vouch cannot tell where a write lands (see the bash section above for the
+# full explanation of what this setting covers).
+unresolved_path = "ask"
+
+# vouch has no description of what this program does (see the bash section
+# above for the full explanation, including why this ships as "ask").
+unmodeled_command = "ask"
+
+# The parameters come from a hashtable, so vouch can see which program runs
+# but not which paths or switches it is given.
+splatting = "ask"
+
+# This runs code that is not in the command vouch was given at all.
+evaluated_input = "ask"
+
+# This nests one wrapper inside another more times than wrap_depth (above)
+# will follow, so the layers past the limit were never scanned.
+wrap_depth_exceeded = "ask"
+# A program vouch is told runs another command -- a shell's -c, find's -exec,
+# Start-Process's argument list -- where the walk could not find the command
+# it was told to expect. Allowing this lets a wrapper through with the thing
+# it wraps unread.
+wrap_unlocated = "ask"
+# A wrapper's arguments carry a flag vouch has no description of, so it
+# cannot tell whether the flag takes the next token as its value or whether
+# the next token is the command. Both readings are judged and the stricter
+# answer wins; this setting governs the note that says why. Describing the
+# flag in my-knowledge.toml (value_options or no_value_options) removes the
+# ambiguity outright.
+wrap_ambiguous = "ask"
+# A wrap arm located a snippet in a language vouch has no scanner for (see
+# the bash section above for the full explanation of what this covers).
+unreadable_language = "ask"
+# The PowerShell half of the channel-fed argument case (see bash above).
+args_from_input = "ask"
+# The PowerShell half of the same thing the bash section explains: an
+# assignment to a name that decides where a command name resolves from.
+rebound_name = "ask"
+
+[lang.python]
+# Verdict when no construct objected.
+default = "allow"
+# Nesting layers scanned before a deeper wrapper nest trips wrap_depth_exceeded
+# (below); unset = the built-in 4.
+wrap_depth = 4
+
+[lang.python.constructs]
+# A call no entry describes, e.g. python:frobnicate(...).
+unmodeled_command = "ask"
+# A callee whose name could not be resolved — a variable, or the result of
+# another expression — so vouch cannot tell what actually runs.
+dynamic_call = "ask"
+# The snippet's parser could not read it at all (or read it only by
+# recovering from syntax the parser does not support).
+parse_failure = "ask"
+# A written path that stayed unresolved.
+unresolved_path = "ask"
+# This runs code that is not in the command vouch was given at all — e.g.
+# standard input piped into python with no script on the command line.
+evaluated_input = "ask"
+# This nests one wrapper inside another more times than wrap_depth (above)
+# will follow, so the layers past the limit were never scanned.
+wrap_depth_exceeded = "ask"
+# A program vouch is told runs another command -- a shell's -c, find's -exec,
+# Start-Process's argument list -- where the walk could not find the command
+# it was told to expect. Allowing this lets a wrapper through with the thing
+# it wraps unread.
+wrap_unlocated = "ask"
+# A wrapper's arguments carry a flag vouch has no description of, so it
+# cannot tell whether the flag takes the next token as its value or whether
+# the next token is the command. Both readings are judged and the stricter
+# answer wins; this setting governs the note that says why. Describing the
+# flag in my-knowledge.toml (value_options or no_value_options) removes the
+# ambiguity outright.
+wrap_ambiguous = "ask"
+# A wrap arm located a snippet in a language vouch has no scanner for (see
+# the bash section above for the full explanation of what this covers).
+unreadable_language = "ask"
+# This call occupies a declared callback slot — the value handed there runs
+# when the described function invokes it, and vouch cannot see what that is.
+callback_argument = "ask"
+# This calls a name the snippet itself rebound (assignment, def, class, …),
+# so vouch will not read it as the name's original meaning.
+rebound_name = "ask"
+
+[run]
+# trust zone: any command run from under one of these trees is recognised,
+# whatever it is — recognition only (§2 of CLAUDE.md). Guards, the write
+# wall, allow_paths, protected paths and per-program write scopes still
+# apply to whatever runs here; a trust zone removes unknown-program asks and
+# nothing else.
+#
+# Trust-zone wording is a choice, not a safety fact. Where a command runs is
+# a weak guarantee — a build verb executes whatever the project's entry
+# point contains, standing anywhere — so this says "trusted because you
+# trust commands run from this location", never "safe because it ran here".
+# trust_all_under = ["C:/git/vouch/.claude/worktrees/**"]
+
+# distrust zone: no command run from under one of these trees is
+# recognised, whatever it is — even a program a knowledge entry describes.
+# Strictest wins: when your own entry and your own zone disagree, both
+# statements are yours, and the ask names which one fired.
+# trust_nothing_under = ["D:/downloads/**"]
+
+# place-scoped guard override. Every key except `under` must name a known
+# guard; anything else refuses the load. An override may be STRICTER or
+# LOOSER than the global [guards] action for that guard — a looser override
+# applies only when vouch can PROVE the command runs in the tree. Doubt
+# always narrows, never widens: an unproven place unlocks nothing, but it
+# also can never be argued out of a stricter override.
+# [[run.guards]]
+# under = ["C:/git/**"]
+# delete_recursive = "ask"      # stricter here than the global action
+
+# [[run.guards]]
+# under = ["C:/scratch/**"]
+# delete_recursive = "allow"    # looser here — applies only on a PROVEN place
+
+[write]
+default = "ask"
+allow_paths = [
+  "$PROJECT_ROOT/**",
+  "$HOME/.claude/**",
+  # Your own working trees go here - these are one operator's, kept as
+  # examples of the shape:
+  #   "C:/work/**",
+  #   "C:/git/**",
+  #   "C:/claude/**",
+]
+
+# write wall: no rule can open this tree to writes: a write aimed under it
+# always asks (ask_paths) or is refused outright (deny_paths). Checked
+# before allow_paths — under either list, no allow rule, however broadly
+# written, can open a walled tree.
+#
+# Three lists, each meaning exactly its name — a key named "deny" that asks
+# would be a lie. ask_paths preserves the one-off approval (§4 of CLAUDE.md:
+# an approval is never a policy); deny_paths is your explicit harder choice
+# and produces the hook's deny verdict, with no prompt.
+#
+# Bound, so this file cannot overclaim what the wall does: no rule can open
+# this tree to writes vouch can see — a write vouch cannot derive is not
+# caught; describing the program's writes is what closes that.
+# ask_paths = ["~/notes/**"]
+# deny_paths = ["~/photos/**"]
+
+# per-program write scope (M2.13): this program's own writes may land only
+# under these trees — judged against the write's resolved target, not the
+# whole command line. A shell redirect beside a scoped program belongs to
+# the shell and is judged by the wall/allow_paths as usual; a file tool has
+# no program for a `programs` list to match, so it stays wall-covered but
+# scope-exempt. `programs` takes 1-3 tokens: the program name, optionally
+# one subcommand, and optionally that subcommand's own second word ("git
+# worktree add") — the same verb the knowledge file models as `subcommand` +
+# `then`.
+#
+# only_under here judges where the WRITE LANDS. The same key spelling judges
+# a different thing on a my-knowledge [[program]] entry (see the bottom of
+# this file) — where the COMMAND RUNS.
+# [[write.scope]]
+# programs = ["git init", "git clone", "git worktree add"]
+# only_under = ["C:/scratch/**"]
+
+[protected]
+# Checked before every allow rule, by identity rather than by folder, so no
+# allow_paths entry can open one of these however broadly it is written.
+#
+# This list IS the setting, and it is the only one: a path here cannot be
+# unlocked from anywhere else, and taking it out of this list is the one way
+# to change that. Do that deliberately or not at all — these are the files
+# that decide what vouch does, and vouch must not be able to disarm itself.
+#
+# knowledge.toml is deliberately not here: writes to it already ask under the
+# write default, the schema gate refuses a mismatched file, and a protection
+# ask on every routine reinstall would train reflexive approval.
+paths = [
+  "$HOME/.claude/settings.json",
+  "$HOME/.config/vouch/config.toml",
+  "$HOME/.config/vouch/my-knowledge.toml",
+]
+
+# ---------------------------------------------------------------------------
+# The rest of this file is config.toml. Place-scoped recognition is not a
+# config key at all — it lives in the OTHER file, my-knowledge.toml, on a
+# [[program]] entry. Shown here, commented out, so the two examples read
+# together:
+#
+# [[program]]
+# match = ["probe-tool"]
+# only_under = ["C:/git/vouch/.claude/worktrees/**"]
+#
+# (my probe binary, trusted only in the worktree.) only_under here judges
+# where the COMMAND RUNS — elsewhere, this entry does not recognise the
+# program, and a program no other entry describes then asks as unknown. The
+# same key spelling judges where the WRITE LANDS on a [[write.scope]] entry
+# above. An entry whose name the SHIPPED knowledge also describes refuses
+# only_under at load, loudly: place-scoping is for your own programs, not
+# for narrowing what vouch ships. [[program]] has no `source` field — that
+# key belongs to [[program.rule]] and [[tool]] only — so it is not shown
+# here; adding one refuses this whole file to load.
+
+# ---------------------------------------------------------------------------
+# Mode-keyed shadow: stand down from gating while the harness reports a named
+# permission mode. vouch still evaluates every call and journals verdict +
+# reason; what would PROMPT is not emitted, so the harness decides alone and
+# the journal says what vouch would have done, for retroactive audit. An
+# ALLOW is always still emitted — it never prompts, and in the dontAsk mode
+# it is one of the three channels that lets a call run at all.
+#
+# stand_down is REQUIRED when the section is present:
+#   "keep-deny" — stand down, but what BLOCKS still blocks: a deny, and the
+#                 protection asks (the protected list, the ask_paths wall)
+#   "full"      — stand down every prompt and every block; only allows are
+#                 emitted
+#   "off"       — never stand down (the same as leaving the section out)
+# modes: which permission modes stand vouch down. Only the six documented
+# spellings load: default, plan, acceptEdits, auto, dontAsk, bypassPermissions.
+# Required, and non-empty, unless stand_down = "off".
+#
+# [shadow]
+# stand_down = "keep-deny"
+# modes = ["auto", "dontAsk", "bypassPermissions"]

@@ -1,0 +1,10 @@
+# A tool whose snippet declaration maps over an array — the batch shape
+# `journal::records_from_snippets` (Task 9) turns into one journal row per
+# element instead of one joined record.
+[[tool]]
+match = ["mcp__p_s__batch"]
+source = "runs every `command` in `commands` as bash"
+cwd_from_call = true
+[[tool.snippet]]
+field = "commands[].command"
+language = "bash"
