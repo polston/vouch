@@ -1,8 +1,15 @@
 # vouch
 
-A permission gate for Claude Code. It runs as a `PreToolUse` hook: every tool
-call the agent is about to make is parsed, judged against declared knowledge of
-what programs do, and answered — allow, ask, or deny — before it runs.
+A permission gate for Claude Code and Codex. It runs as a `PreToolUse` hook:
+every tool call the host exposes is parsed, judged against declared knowledge
+of what programs do, and answered before it runs.
+
+Claude Code supports vouch's native allow / ask / deny response. Codex does
+not currently support `ask` from `PreToolUse`, so vouch blocks the first
+attempt and routes the human decision through Codex's native approval prompt
+for a local MCP broker. An approved broker call grants one exact retry. An
+allow emits nothing to Codex, leaving its native sandbox and approval policy
+fully authoritative.
 
 The judging is not pattern matching on the text of a command. vouch has three
 scanners (bash, PowerShell, python) and walks what the command actually does:
@@ -24,7 +31,8 @@ A prompt with no named setting is a bug in vouch, whatever else is true about
 it.
 
 One exception is deliberate. The protected paths — vouch's own `config.toml`
-and the hook registration in `settings.json` — always prompt, and no
+and the hook registration in Claude's `settings.json` or Codex's `hooks.json`
+— always prompt, and no
 `write.allow_paths` entry can open one however broadly it is written. The
 protected list is checked first and wins. That list is itself the setting, and
 the prompt says so: removing a line from `[protected] paths` removes the
@@ -130,21 +138,16 @@ half-blind, so they move together.
 
 ## Install
 
-**Access.** This repository is private, so every path below needs authenticated
-access to it. `claude plugin marketplace add` authenticates with the machine's
-existing GitHub credential state — a logged-in `gh` with access to the
-repository is enough, for the plugin path and for downloading release assets
-alike.
-
 Three pieces make a working install, and they arrive differently:
 
-- **The gate** — the `vouch` binary and its `knowledge.toml`, from one commit.
-- **The wiring** — four hook entries in `~/.claude/settings.json`. Always saved
-  by a human; see below.
+- **The gate** — `vouch`, `vouch-codex-broker`, and `knowledge.toml`, from one commit.
+- **The wiring** — Claude uses four entries in `~/.claude/settings.json`;
+  Codex uses two in `~/.codex/hooks.json` plus the local approval broker.
+  Hook documents are always saved by a human; see below.
 - **The procedures** — the skills, including `vouch-setup`, which walks a
   machine through the rest.
 
-### The plugin path
+### Claude Code plugin
 
 The repository is its own single-plugin marketplace:
 
@@ -172,9 +175,22 @@ claude plugin update vouch
 
 then restart Claude Code.
 
+### Codex plugin
+
+The same repository is a Codex marketplace:
+
+```
+codex plugin marketplace add <owner>/vouch
+codex plugin add vouch@vouch
+```
+
+Start a new Codex thread and run `$vouch:vouch-setup`. The plugin carries the
+same procedures as Claude Code; it deliberately carries neither live hooks nor
+an executable, so plugin refreshes cannot silently replace the gate.
+
 ### The from-source path
 
-Prerequisites: Claude Code, and a Rust toolchain at or above the floor
+Prerequisites: Claude Code or Codex, and a Rust toolchain at or above the floor
 `Cargo.toml` names in `rust-version`.
 
 ```
@@ -192,7 +208,9 @@ file is a working starting point — the binary's own message points at it.
 `/vouch:setup` builds one from your machine's evidence instead, if you took the
 plugin path.
 
-Then the hook wiring, which no agent writes for you:
+Then generate the hook wiring, which no agent writes for you.
+
+For Claude Code:
 
 ```
 target/release/vouch install > vouch-settings.json
@@ -223,6 +241,30 @@ The four events, and why each is registered:
 The last three decide nothing. They exist so `vouch review` draws its
 candidates from what actually happened rather than from absent signals.
 
+For Codex, choose the shell Codex uses on this machine:
+
+```
+target/release/vouch install --host codex --shell powershell > vouch-hooks.json
+# or: --shell bash
+codex mcp add vouch_approval -- <absolute-path>/target/release/vouch-codex-broker
+```
+
+Review `vouch-hooks.json`, then save it as `~/.codex/hooks.json`. Codex gets
+`PreToolUse` for decisions and `PostToolUse` for outcomes. The broker is what
+turns an approved native MCP prompt into one exact retry; it stores hashes and
+a short reason category, never raw command text or session IDs. Keep
+`approval_policy = "on-request"` and `approvals_reviewer = "user"` at the top
+level, and add `default_tools_approval_mode = "prompt"` inside the existing
+`[mcp_servers.vouch_approval]` section. That native MCP prompt is the human
+decision: denying it leaves the Ask blocked, while approving it lets the broker
+validate the pending request and mint the bound one-use grant. There is no
+second, nested elicitation.
+
+Codex hooks cover shell commands, `apply_patch`, MCP tools, and most local
+function tools. Hosted tools and some specialized paths can bypass the local
+hook path, so vouch is a guardrail over observed calls, not a replacement for
+the native sandbox.
+
 Add `--shadow` (`vouch install --shadow`) to register vouch beside a gate you
 are still running: it evaluates and journals every call in full and emits no
 decision, so you can measure what it would have done before it does anything.
@@ -238,13 +280,12 @@ the same skill under two different names.
 ### Releases
 
 Version numbers and `CHANGELOG.md` are generated from conventional commit
-subjects; each release lands as one reviewed change, and the tag that follows
-triggers the build workflow to attach the binaries.
+subjects; each release lands as one reviewed change, and the public-mirror tag
+that follows triggers the build workflow to attach the binaries.
 
-There is no tagged release yet, so today the binary is built from source.
-When there is one, `gh release download` fetches a per-platform archive holding
-the binary, `knowledge.toml`, and `vouch.example.toml` from a single commit,
-laid out to match where they are installed.
+`gh release download` fetches a per-platform archive holding both binaries,
+`knowledge.toml`, and `vouch.example.toml` from a single commit, laid out to
+match where they are installed.
 
 ## Commands
 
@@ -259,7 +300,7 @@ Everything else is for you:
 | `vouch doctor` | What vouch could not read or describe: place rules that can never fire, `my-knowledge.toml` lines the merge discarded, commands it could not parse, programs it has no description of, and undeclared options on directory-changing programs, by count and by spelling |
 | `vouch review [--accept <name>]` | Rule candidates drawn from recorded outcomes, each with the counts behind it, including the ones it will not propose and why. Prints only; `--accept` is the one thing that writes, and it never proposes a guard |
 | `vouch import [file]` | Translates a cc-allow config to standard output and lists on standard error what did not translate. Writes nothing |
-| `vouch install [--shadow] [--print]` | Bare form prints your `settings.json` with the four hook entries merged in, for redirecting to a file and saving. `--print` narrows that to the hooks-only view — safe to display, since it carries no MCP/server content. Writes nothing |
+| `vouch install [--host claude\|codex] [--shell bash\|powershell] [--shadow] [--print]` | Prints the selected host's merged hook document for redirecting and saving. Codex requires an explicit shell and prints the broker registration command in its notes. `--print` narrows output to the hooks-only view. Writes nothing |
 | `vouch schema <config\|knowledge> [--write]` | Prints the JSON Schema generated from the structs the loaders actually read; `--write` regenerates the committed schemas and the reference page |
 
 ## What will not move, and how mature this is

@@ -36,12 +36,15 @@ jobs:
           - os: windows-latest
             triple: x86_64-pc-windows-msvc
             bin: vouch.exe
+            broker: vouch-codex-broker.exe
           - os: ubuntu-latest
             triple: x86_64-unknown-linux-gnu
             bin: vouch
+            broker: vouch-codex-broker
           - os: macos-latest
             triple: aarch64-apple-darwin
             bin: vouch
+            broker: vouch-codex-broker
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -55,6 +58,7 @@ jobs:
         run: |
           mkdir -p stage/bin
           cp "target/${{ matrix.triple }}/release/${{ matrix.bin }}" stage/bin/
+          cp "target/${{ matrix.triple }}/release/${{ matrix.broker }}" stage/bin/
           cp knowledge.toml vouch.example.toml stage/
       - name: zip (posix)
         if: runner.os != 'Windows'

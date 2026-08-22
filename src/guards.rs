@@ -545,6 +545,28 @@ pub struct ToolSnippet {
     pub language_values: Option<std::collections::BTreeMap<String, String>>,
 }
 
+/// How a declared tool-input field names writes.
+#[derive(Debug, Deserialize, Default, Clone, Copy, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolWritePathFormat {
+    /// The field is one path string, equivalent to the legacy
+    /// `write_path_field` shorthand.
+    #[default]
+    Scalar,
+    /// The field is an OpenAI `apply_patch` envelope. Every add, update,
+    /// delete, and move path in the envelope is decided; worst wins.
+    ApplyPatch,
+}
+
+/// One tool-input field that names one or more paths the tool writes.
+#[derive(Debug, Deserialize, Clone, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ToolWritePath {
+    pub field: String,
+    #[serde(default)]
+    pub format: ToolWritePathFormat,
+}
+
 /// "With this shape and no destination named, this program writes into the
 /// directory it is RUN from" — the write-side twin of `changes_dir` silence
 /// (M2.129). `tar -xf a.tar` puts the archive's members in the run place,
@@ -662,6 +684,11 @@ pub struct Tool {
     /// `Write` and `Edit` were hardcoded to do.
     #[serde(default)]
     pub write_path_field: Option<String>,
+    /// Structured write declarations. This is a list so one tool can carry
+    /// multiple independent path-bearing fields; every declaration is
+    /// evaluated and the worst result governs the call.
+    #[serde(default)]
+    pub write_path: Option<Vec<ToolWritePath>>,
     /// This tool executes its snippet (or writes its path) in the calling
     /// session's own working directory. Only when true does a relative
     /// target get resolved against the hook's cwd; absent or false leaves it

@@ -5,7 +5,8 @@ description: Use when installing vouch on a machine or auditing an existing vouc
 
 # vouch-setup — set vouch up on a machine by evidence, not by defaults
 
-vouch is a PreToolUse permission gate: every tool call is parsed, judged
+vouch is a PreToolUse permission gate: every tool call the host exposes to
+hooks is parsed, judged
 against declared knowledge of what programs do, and answered allow / ask /
 deny before it runs. Setting it up badly is easy and quiet — a config written
 from guesses either asks about everything (and trains reflexive approval) or
@@ -13,6 +14,19 @@ grants trees nobody looked at. This skill sets it up from what the machine has
 actually done: it surveys what is already there, replays that machine's own
 recorded session history against a candidate config to see what would fire,
 proposes scoped changes, and writes nothing without an explicit accept.
+
+## Host model
+
+Run the survey and wiring steps for every requested host. Claude Code exposes
+four events vouch uses. Codex exposes `PreToolUse` and `PostToolUse`; an Ask is
+implemented as a blocked first attempt, Codex's native approval prompt on the
+local MCP broker, and one exact retry. Codex Allow emits nothing, so its native
+sandbox and approval policy remain authoritative.
+
+Codex tool hooks cover shell commands, `apply_patch`, MCP tools, and most local
+function tools. Hosted tools and some specialized paths are outside that hook
+boundary. Report that boundary plainly: vouch is a guardrail over observed
+calls, not a replacement for Codex's sandbox.
 
 **The judgment rules are `vouch-trust`'s hard rules, and that skill is the
 authority for them** — narrowest entry that covers the command, destructive
@@ -36,7 +50,7 @@ proposal in phase 4 is about recognising a program or a tool, follow
    setting or entry it would write.** "This would allow N calls out of the M
    replayed, and writes `write.allow_paths = [...]`" — a proposal with no
    number attached is a guess wearing a procedure's clothes.
-4. **`settings.json` never enters the conversation — not by read and not by
+4. **A host's complete hook/config document never enters the conversation — not by read and not by
    capture.** It can hold credentials in MCP server headers, and
    `vouch install`'s output is the ENTIRE merged settings document. So
    **every** invocation of `vouch install`, in every form, is redirected
@@ -48,8 +62,8 @@ proposal in phase 4 is about recognising a program or a tool, follow
    What this skill relays is the command's stderr notes plus the HOOKS BLOCK
    extracted from that scratch file, values-blind: read only the `hooks` key
    out of the JSON and show that. MCP server configuration lives under a
-   different key and is never touched. The only reads of the live
-   `settings.json` are targeted, values-blind greps — event names, matcher
+   different key and is never touched. The only reads of the live Claude
+   `settings.json` or Codex `hooks.json` are targeted, values-blind greps — event names, matcher
    presence, whether a hook command mentions vouch — never a whole-file read,
    and never a grep that can print a value.
 5. **Everything harvested from session logs stays on this machine and out of
@@ -107,14 +121,13 @@ Run each check and put the answers in one table.
    what the rest of this skill can conclude.
 3. **`~/.config/vouch/` contents.** `ls ~/.config/vouch/` — which of the three
    files are present, and whether a `bin/` directory is there.
-4. **The hook registration**, values-blind. The expected set is the four events
-   `vouch install` registers: `PreToolUse` (the gate, matcher-less) plus
-   `PostToolUse`, `PostToolUseFailure` and `PermissionDenied` (outcome
-   recording, so `vouch review` runs on real outcomes rather than absent
-   signals). Check with greps that cannot print a value — count the occurrences
-   of each event name in `~/.claude/settings.json`, and count the hook command
-   lines that mention vouch. Report present/absent per event. Never read the
-   file whole (hard rule 4).
+4. **The hook registration**, values-blind. For Claude Code, expect
+   `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, and `PermissionDenied` in
+   `~/.claude/settings.json`. For Codex, expect `PreToolUse` and `PostToolUse`
+   in `~/.codex/hooks.json`, each with a command containing `--host codex`, and
+   check that `codex mcp list` names `vouch_approval`. Count event names and
+   vouch command lines without printing values. Never read either file whole
+   (hard rule 4).
 5. **A cc-allow config at the old path**: `~/.config/cc-allow.toml`. Present
    means this is a migration, not a fresh install.
 6. **A vouch clone**, if any — a directory holding `Cargo.toml` with the vouch
@@ -122,7 +135,7 @@ Run each check and put the answers in one table.
    the `install-skill.sh` / `install-knowledge.sh` scripts are available.
 7. **`gh` availability**: `gh --version`, and whether it is authenticated. The
    release-download path in phase 2 needs it.
-8. **Plugin version lag.** Read the installed version from
+8. **Plugin version lag.** On Claude Code, read the installed version from
    `~/.claude/plugins/installed_plugins.json` (the `plugins` map is keyed
    `<plugin>@<marketplace>`, and each key maps to a LIST of installed
    records — `version` and `installPath` live on the elements of that list,
@@ -132,10 +145,12 @@ Run each check and put the answers in one table.
    The cache is version-keyed and a version bump alone moves nothing: an
    installed plugin sits at its install-time version until
    `claude plugin update <name>` runs (restart required). A lag is a FINDING —
-   report it with both numbers.
+   report it with both numbers. On Codex, use `codex plugin list` and compare
+   the installed vouch plugin with the selected local marketplace entry.
 9. **Session logs**: whether `~/.claude/projects/` exists and roughly how many
    `*.jsonl` files are under it. This is what phase 3 replays; no logs means
-   phase 3 reports that and moves on.
+   phase 3 reports that and moves on. The current replay harness reads Claude
+   Code's JSONL format only; do not present those counts as Codex traffic.
 
 **End the phase with a one-table statement of which machine state applies.**
 Exactly one:
@@ -183,12 +198,14 @@ hand, so a machine using both routes can hold two texts of the same skill under
 two names. Plugin route for a machine that consumes vouch, `install-skill.sh`
 for a machine that develops it — not both.
 
-**Hook wiring.** The four `settings.json` entries are the operator's save, not
-this skill's write (hard rule 4, and the harness's own guard refuses to let an
-agent change which program gates its tool calls).
+**Hook wiring.** Generate one merged document per host. These are the
+operator's save, not this skill's write (hard rule 4, and the harness's own
+guard refuses to let an agent change which program gates its tool calls).
 
-1. Run `vouch install` — adding `--shadow` when another gate is still live and
-   vouch should evaluate without emitting — **redirected to a scratch file**.
+1. For Claude Code, run `vouch install`. For Codex, run
+   `vouch install --host codex --shell <bash|powershell>`; the shell must name
+   how Codex executes `Bash` calls on this machine. Add `--shadow` when vouch
+   should record without emitting. **Redirect every form to a scratch file**.
    Do not capture its stdout: that stdout is the entire merged settings
    document. This holds for every form of the command, `--print` included: an
    unparsed flag is swallowed silently, so a form expected to print only the
@@ -198,10 +215,21 @@ agent change which program gates its tool calls).
    key (MCP server configuration lives under a different key and never enters
    the extraction). Show the command's stderr notes alongside it: what it
    would change, the target path, and that nothing was written.
-3. Hand them the one command that saves the scratch file over
-   `~/.claude/settings.json`, and let them run it.
-4. Verify it landed by re-running the phase-1 survey's hook check (item 4) —
-   values-blind, four events present.
+3. Hand them the one command that saves the Claude scratch file over
+   `~/.claude/settings.json`, or the Codex scratch file over
+   `~/.codex/hooks.json`, and let them run it.
+4. For Codex, register the sibling release binary once using the exact command
+   printed in `vouch install`'s notes:
+   `codex mcp add vouch_approval -- <absolute-vouch-codex-broker-path>`.
+5. For Codex, have the operator keep `approval_policy = "on-request"` and
+   `approvals_reviewer = "user"` at the top level of `~/.codex/config.toml`,
+   and add `default_tools_approval_mode = "prompt"` inside the existing
+   `[mcp_servers.vouch_approval]` section. Codex's native MCP prompt is the
+   human decision: a denial prevents the broker call and creates no grant; an
+   approval runs the broker, which validates the pending request and mints one
+   exact one-use grant. There is no nested elicitation.
+6. Verify it landed by re-running the phase-1 survey's hook check (item 4).
+   Claude has four events; Codex has two events plus the broker registration.
 
 **Config.** A fresh machine gets a starter derived from `vouch.example.toml`:
 every uncommented line in it is a genuinely shipped decision, and the commented
@@ -406,7 +434,7 @@ head-token bucketing that keeps a command fragment out of the terminal report.
    `.cargo/config.toml` replaces the candidate files with the repository's own
    and the numbers come back plausible and wrong. Absolute path, always.
 2. **Capturing `vouch install`'s stdout — in any form.** That is the whole
-   settings document, MCP headers included, and a `--print` the running binary
+   host hook document, and Claude's can carry MCP headers; a `--print` the running binary
    does not parse is swallowed rather than refused. Redirect every form to a
    file; display the `hooks` key read back out of it.
 3. **Reporting a harness number when the sentinel did not pass.** It aborts

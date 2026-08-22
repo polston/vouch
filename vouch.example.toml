@@ -338,6 +338,7 @@ allow_paths = [
 # ask on every routine reinstall would train reflexive approval.
 paths = [
   "$HOME/.claude/settings.json",
+  "$HOME/.codex/hooks.json",
   "$HOME/.config/vouch/config.toml",
   "$HOME/.config/vouch/my-knowledge.toml",
 ]

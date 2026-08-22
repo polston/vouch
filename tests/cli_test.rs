@@ -1468,7 +1468,10 @@ fn doctor_prints_the_narrowing_notes() {
     let my_knowledge = std::env::temp_dir().join("vouch_cli_test_doctor_notes_my.toml");
     std::fs::write(
         &knowledge,
-        "version = 8\n[[program]]\nmatch = [\"totallymadeupnotesprog\"]\n",
+        format!(
+            "version = {}\n[[program]]\nmatch = [\"totallymadeupnotesprog\"]\n",
+            vouch::knowledge::KNOWLEDGE_SCHEMA_VERSION
+        ),
     )
     .unwrap();
     std::fs::write(
@@ -1515,13 +1518,13 @@ fn a_merged_shape_set_aside_prints_the_true_banner() {
     let my_knowledge = std::env::temp_dir().join("vouch_cli_test_merged_shape_banner_my.toml");
     std::fs::write(
         &knowledge,
-        "version = 8\n\
+        format!("version = {}\n\
          [[program]]\n\
          match = [\"totallymadeupmergedshapeprog\"]\n\
          runs_file = \"arg_0\"\n\
          no_value_options = [\"--version\"]\n\
          standalone_flags = [\"--version\"]\n\
-         case_sensitive_flags = true\n",
+         case_sensitive_flags = true\n", vouch::knowledge::KNOWLEDGE_SCHEMA_VERSION),
     )
     .unwrap();
     std::fs::write(

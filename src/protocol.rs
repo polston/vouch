@@ -1,4 +1,4 @@
-//! The Claude Code PreToolUse hook protocol.
+//! Host hook protocols, normalized into the one input vouch decides.
 //!
 //! Two rules live here and must not be relaxed:
 //!   1. `Decision::Abstain` renders to *nothing at all* — no output, exit 0.
@@ -8,6 +8,23 @@
 //!      self-explaining prompt depends on it arriving whole.
 
 use serde::Deserialize;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Host {
+    #[default]
+    Claude,
+    Codex,
+}
+
+impl Host {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "claude" => Ok(Self::Claude),
+            "codex" => Ok(Self::Codex),
+            other => Err(format!("vouch: unknown host {other:?}; expected claude or codex")),
+        }
+    }
+}
 
 #[derive(Debug, Deserialize, Default)]
 pub struct ToolInput {
@@ -36,6 +53,11 @@ pub struct HookInput {
     pub is_interrupt: bool,
     #[serde(default)]
     pub session_id: String,
+    /// Codex scopes a tool call to a turn as well as a session. Claude does
+    /// not currently send this field, so the empty default preserves its
+    /// protocol exactly.
+    #[serde(default)]
+    pub turn_id: String,
     #[serde(default)]
     pub cwd: String,
     /// The effective permission mode of THIS call, as the harness reports it
@@ -65,9 +87,24 @@ pub fn parse_input(raw: &str) -> Result<HookInput, serde_json::Error> {
 
 /// Renders the hook response. `None` means emit nothing at all.
 pub fn render(d: &Decision) -> Option<String> {
+    render_for(Host::Claude, d)
+}
+
+/// Render one normalized decision for the selected host.
+///
+/// Codex deliberately receives no output for Allow: its current PreToolUse
+/// implementation supports `allow` only together with `updatedInput`, and
+/// vouch must not weaken the native sandbox or approval layer. Codex also
+/// does not support `ask`, so Ask blocks the first attempt; the caller adds
+/// the approval request id that lets the broker authorize one exact retry.
+pub fn render_for(host: Host, d: &Decision) -> Option<String> {
+    if host == Host::Codex && matches!(d, Decision::Allow(_) | Decision::Abstain) {
+        return None;
+    }
     let (verdict, reason) = match d {
         Decision::Abstain => return None,
         Decision::Allow(r) => ("allow", r),
+        Decision::Ask(r) if host == Host::Codex => ("deny", r),
         Decision::Ask(r) => ("ask", r),
         Decision::Deny(r) => ("deny", r),
     };

@@ -1,7 +1,7 @@
 use std::io::Read;
 use vouch::config::{load, Config};
 use vouch::journal;
-use vouch::protocol::{parse_input, render, Decision};
+use vouch::protocol::{parse_input, render_for, Decision, Host};
 use vouch::route::project_root;
 
 fn home() -> String {
@@ -1253,35 +1253,55 @@ fn main() {
         std::process::exit(0);
     }
 
-    // `vouch install [--shadow] [--print]` — emit the hook registration.
-    // Bare `install` prints the full merged settings.json document, for
+    // `vouch install [--host ...] [--shell ...] [--shadow] [--print]` — emit
+    // the selected host's hook registration. Bare Claude `install` prints
+    // the full merged settings.json document, for
     // redirecting to a file. `--print` narrows that to the hooks-only view —
     // display-safe, since it carries no MCP/server content. Any other
     // argument is refused by `parse_install_args` before anything is read —
     // an unrecognised flag must never fall through to the bare-install form
     // and print more than was asked for.
     if args.first().map(String::as_str) == Some("install") {
-        let (shadow, hooks_only) = match vouch::cli::parse_install_args(&args[1..]) {
+        let options = match vouch::cli::parse_install_options(&args[1..]) {
             Ok(v) => v,
             Err(e) => {
                 eprintln!("{e}");
                 std::process::exit(2);
             }
         };
-        let settings_path = std::path::PathBuf::from(home()).join(".claude/settings.json");
+        let settings_path = match options.host {
+            Host::Claude => std::path::PathBuf::from(home()).join(".claude/settings.json"),
+            Host::Codex => std::path::PathBuf::from(home()).join(".codex/hooks.json"),
+        };
         let existing = std::fs::read_to_string(&settings_path).unwrap_or_default();
         let exe = std::env::current_exe()
             .map(|p| p.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"))
             .unwrap_or_else(|_| "vouch".into());
-        match vouch::install::plan(&existing, &exe, shadow) {
+        let planned = match options.host {
+            Host::Claude => vouch::install::plan(&existing, &exe, options.shadow),
+            Host::Codex => vouch::install::plan_codex(
+                &existing,
+                &exe,
+                options.shell.expect("Codex shell was validated"),
+                options.shadow,
+            ),
+        };
+        match planned {
             Ok(p) => {
-                println!("{}", if hooks_only { &p.hooks_view } else { &p.settings });
+                println!(
+                    "{}",
+                    if options.hooks_only {
+                        &p.hooks_view
+                    } else {
+                        &p.settings
+                    }
+                );
                 eprintln!("
 # --- what this changes ---");
                 for n in &p.notes {
                     eprintln!("# - {n}");
                 }
-                if hooks_only {
+                if options.hooks_only {
                     eprintln!(
                         "# hooks view only - redirect the bare form to a file to save the whole document"
                     );
@@ -1343,28 +1363,45 @@ fn main() {
     if args.is_empty() || !args.iter().any(|a| a == "--hook") {
         println!("vouch {}", env!("CARGO_PKG_VERSION"));
         println!("usage:");
-        println!("  vouch --hook [--shadow]   decide a tool call (reads hook JSON on stdin)");
+        println!("  vouch --hook [--host claude|codex] [--shell bash|powershell] [--shadow]");
+        println!("                            decide a tool call (reads hook JSON on stdin)");
         println!("  vouch explain '<cmd>'     what vouch decides, and why");
         println!("  vouch why '<cmd>'         the same, for a command already run");
         println!("  vouch why                 explain the last recorded decision");
         println!("  vouch doctor              list what vouch could not read or describe");
         println!("  vouch review [--accept X] evidence-backed rule candidates");
         println!("  vouch import [file]       translate a cc-allow config to stdout");
+        println!("  vouch install [--host claude|codex] [--shell bash|powershell] [--shadow] [--print]");
+        println!("                            print merged host hook wiring; writes nothing");
         println!("  vouch schema <config|knowledge> [--write]");
         println!("                            print (or regenerate) the reference docs");
         std::process::exit(0);
     }
 
-    let shadow = args.iter().any(|a| a == "--shadow");
+    let hook_options = match vouch::cli::parse_hook_options(&args) {
+        Ok(options) => options,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    };
+    let shadow = hook_options.shadow;
+    let host = hook_options.host;
 
     let mut raw = String::new();
     if std::io::stdin().read_to_string(&mut raw).is_err() {
         std::process::exit(0);
     }
-    let input = match parse_input(&raw) {
+    let mut input = match parse_input(&raw) {
         Ok(i) => i,
         Err(_) => std::process::exit(0),
     };
+    if host == Host::Codex
+        && hook_options.shell == Some(vouch::cli::InstallShell::PowerShell)
+        && input.tool_name == "Bash"
+    {
+        input.tool_name = "PowerShell".into();
+    }
 
     // Terminal events report what actually happened. They never decide anything.
     if let Some(o) = vouch::outcome::Outcome::from_event(&input.hook_event_name) {
@@ -1383,11 +1420,25 @@ fn main() {
                 detail,
             },
         );
+        if host == Host::Codex {
+            if let Ok(Some(original_id)) =
+                vouch::approval::take_outcome_alias(&journal::state_dir(), &input.tool_use_id)
+            {
+                let _ = journal::append_outcome(
+                    &journal::state_dir(),
+                    &journal::OutcomeRecord {
+                        id: original_id,
+                        outcome: o,
+                        detail: "outcome of the exact approved retry".into(),
+                    },
+                );
+            }
+        }
         std::process::exit(0);
     }
 
     let outcome = vouch::route::decide(&cfg, vouch::guards::in_effect(), &home(), &input);
-    let decision = with_banner(outcome.decision, notice.as_deref());
+    let mut decision = with_banner(outcome.decision, notice.as_deref());
 
     // The emission step of mode-keyed shadow, computed BEFORE the journal
     // writes because the rows' `mode` word depends on it. The --shadow flag
@@ -1405,6 +1456,23 @@ fn main() {
             protection,
         )
     };
+
+    if host == Host::Codex && emit {
+        if let Decision::Ask(reason) = &decision {
+            let now = journal::now_epoch_secs().parse::<u64>().unwrap_or_default();
+            decision = match vouch::approval::gate(&journal::state_dir(), &input, reason, now) {
+                Ok(vouch::approval::GateResult::Granted) => {
+                    Decision::Allow("one-time human approval for this exact retry".into())
+                }
+                Ok(vouch::approval::GateResult::Pending { request_id }) => Decision::Ask(format!(
+                    "{reason}\n  approval request: {request_id}\n  call mcp__vouch_approval__request_approval with that request_id, then retry this exact tool call once"
+                )),
+                Err(error) => Decision::Deny(format!(
+                    "vouch could not create a one-time Codex approval request: {error}"
+                )),
+            };
+        }
+    }
 
     let dir = journal::state_dir();
     // A config-named allow short-circuits `route::decide_tool` before
@@ -1427,7 +1495,7 @@ fn main() {
     if !emit {
         std::process::exit(0);
     }
-    if let Some(out) = render(&decision) {
+    if let Some(out) = render_for(host, &decision) {
         println!("{out}");
     }
     std::process::exit(0);

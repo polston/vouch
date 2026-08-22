@@ -5,7 +5,7 @@
 
 use std::path::Path;
 use vouch::guards::{HereWrite, Program};
-use vouch::knowledge::{load_files, Gap, GapKind, GapSource};
+use vouch::knowledge::{load_files, Gap, GapKind, GapSource, KNOWLEDGE_SCHEMA_VERSION};
 use vouch::syntax::Cmd;
 
 #[path = "common/mod.rs"]
@@ -1066,7 +1066,13 @@ fn a_version_7_file_is_refused_naming_both_versions() {
     let loaded = load_files(&shipped, Path::new(ABSENT));
     assert!(loaded.kb.program.is_empty(), "a version = 7 file still loaded something");
     assert!(loaded.gaps[0].why.contains("version = 7"), "{:?}", loaded.gaps[0]);
-    assert!(loaded.gaps[0].why.contains('8'), "{:?}", loaded.gaps[0]);
+    assert!(
+        loaded.gaps[0]
+            .why
+            .contains(&KNOWLEDGE_SCHEMA_VERSION.to_string()),
+        "{:?}",
+        loaded.gaps[0]
+    );
 }
 
 #[test]

@@ -1,6 +1,6 @@
 {
   "name": "vouch",
-  "description": "The vouch permission gate's own marketplace: one plugin carrying its skills and setup command.",
+  "description": "The vouch permission gate's own marketplace: one plugin carrying its cross-host skills and setup command.",
   "owner": {
     "name": "vouch"
   },
@@ -8,8 +8,8 @@
     {
       "name": "vouch",
       "source": "./plugin",
-      "description": "Skills for running vouch as your Claude Code permission gate: evidence-first setup, safe program recognition, session procedures, and private-data removal.",
-      "version": "0.3.0",
+      "description": "Skills for running vouch with Claude Code or Codex: evidence-first setup, safe program recognition, session procedures, and private-data removal.",
+      "version": "0.3.1",
       "keywords": [
         "permissions",
         "security",

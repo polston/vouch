@@ -208,15 +208,21 @@ runs against the extracted snippet TEXT, not the tool call.
      sibling field the schema names — every value on the right must be one
      of `bash`, `powershell`, `python`, `javascript`; a name outside that
      set is not a legitimate value, whatever the schema calls it.
-   - A field's schema shows it holds a path the tool writes to → propose
-     `write_path_field` naming it. (No `vouch explain` route exists to
-     prove this one today — say that in step 7 rather than skipping it
-     silently.)
+   - A field's schema shows it holds a path the tool writes to → propose a
+     structured declaration for every path-bearing field. Use
+     `[[tool.write_path]]` with `format = "scalar"` when the field is one path
+     string, or `format = "apply_patch"` when it is an OpenAI patch envelope
+     whose add, update, delete, and move headers name paths. Repeat the
+     sub-table when the schema exposes more than one independent write field.
+     The legacy `write_path_field` shorthand remains valid for an existing
+     single scalar declaration, but do not choose it for a new entry. No
+     `vouch explain` route exists to prove a write-target declaration today —
+     say that in step 7 rather than skipping it silently.
    - Ask the `cwd_from_call` question out loud, every time (rule 8), and
      default it false unless independently verified.
 3. Tell the operator, in full, what BOTH writes will contain: the
    recognition entry `vouch trust` will write, and — if a declaration was
-   proposed — the exact `[[tool.snippet]]` or `write_path_field` block the
+   proposed — the exact `[[tool.snippet]]` or `[[tool.write_path]]` block the
    skill will hand-edit in afterward, with the `cwd_from_call` answer
    stated plainly. One accept covers both (rule 9). Stop here without one.
 4. On accept, run `vouch trust <mcp-name>` — or, only if the operator said
@@ -229,7 +235,7 @@ runs against the extracted snippet TEXT, not the tool call.
    now: first keep the file's bytes exactly as they are right after step 4
    — `vouch trust` already verified that content, and it is what step 6
    restores if this edit goes wrong. Then edit `my-knowledge.toml` by hand,
-   anchoring the `[[tool.snippet]]` sub-table (or the `write_path_field`
+   anchoring each `[[tool.snippet]]` or `[[tool.write_path]]`
    line) ON the `[[tool]]` header `vouch trust` just wrote — never inserted
    above it (rule 9). Show the diff as confirmation of what was written;
    this is not a fresh ask, the accept in step 3 already covers it.
@@ -237,7 +243,7 @@ runs against the extracted snippet TEXT, not the tool call.
    anything step 7 reports. `my-knowledge.toml` is refused WHOLE on a parse
    failure (`knowledge::load_files`) — every operator entry in it drops
    silently, including the recognition entry just verified in step 4 — and
-   for a `write_path_field` or a `python`/`javascript` snippet, step 7 below
+   for a write-path declaration or a `python`/`javascript` snippet, step 7 below
    has no way to tell "correctly asking" from "the file failed to load, so
    everything asks"; they look identical from outside. So: run one cheap,
    already-recognised command — `vouch explain 'ls -la'` — and read the
@@ -268,8 +274,10 @@ runs against the extracted snippet TEXT, not the tool call.
      selector — every such snippet asks today, naming the language. That
      is expected, not provable through `vouch explain`; say so rather than
      fabricating a proof.
-   - `write_path_field`: no `vouch explain` route exists for a write-target
-     decision today — say that plainly instead of skipping the step.
+   - Write-path declaration: no `vouch explain` route exists for a
+     write-target decision today — say that plainly instead of skipping the
+     step. For an `apply_patch` declaration, also state that malformed or
+     unknown directives ask rather than dropping an unparsed path.
    - The tool entry itself (recognition) needed no separate proof here —
      that is what `vouch trust`'s `verified:` line in step 4 already means.
 8. Report every result to the operator: the recognition verdict from step 4,

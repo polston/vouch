@@ -1057,3 +1057,128 @@ write_path_field = "path"
         "the prompt must name the setting that turns it off, got: {reason}"
     );
 }
+
+
+#[test]
+fn apply_patch_add_update_delete_and_move_paths_are_all_decided() {
+    let kb = kb_with(
+        r#"
+[[tool]]
+match = ["apply_patch"]
+source = "applies every path named by the patch command"
+cwd_from_call = true
+[[tool.write_path]]
+field = "command"
+format = "apply_patch"
+"#,
+    );
+    let cfg = common::realistic_config();
+    let input = hook(
+        r#"{"session_id":"s","cwd":"C:/Users/dev","tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch\n*** Add File: notes/new.txt\n+x\n*** Update File: notes/old.txt\n@@\n-x\n+y\n*** Move to: notes/moved.txt\n*** Delete File: notes/gone.txt\n*** End Patch"}}"#,
+    );
+    let outcome = decide(&cfg, &kb, HOME, &input);
+    assert!(matches!(outcome.decision, Decision::Allow(_)), "got: {:?}", outcome.decision);
+}
+
+#[test]
+fn apply_patch_uses_the_worst_path_in_a_multi_file_patch() {
+    let kb = kb_with(
+        r#"
+[[tool]]
+match = ["apply_patch"]
+source = "applies every path named by the patch command"
+cwd_from_call = true
+[[tool.write_path]]
+field = "command"
+format = "apply_patch"
+"#,
+    );
+    let cfg = common::realistic_config();
+    let input = hook(
+        r#"{"session_id":"s","cwd":"C:/Users/dev","tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch\n*** Add File: notes/safe.txt\n+x\n*** Add File: D:/elsewhere/unsafe.txt\n+x\n*** End Patch"}}"#,
+    );
+    assert!(matches!(decide(&cfg, &kb, HOME, &input).decision, Decision::Ask(_)));
+}
+
+#[test]
+fn malformed_apply_patch_asks_instead_of_losing_the_write() {
+    let kb = kb_with(
+        r#"
+[[tool]]
+match = ["apply_patch"]
+source = "applies every path named by the patch command"
+cwd_from_call = true
+[[tool.write_path]]
+field = "command"
+format = "apply_patch"
+"#,
+    );
+    let cfg = common::realistic_config();
+    let input = hook(
+        r#"{"session_id":"s","cwd":"C:/Users/dev","tool_name":"apply_patch","tool_input":{"command":"not a patch"}}"#,
+    );
+    let reason = ask_reason(&decide(&cfg, &kb, HOME, &input).decision).to_string();
+    assert!(reason.contains("apply_patch"), "got: {reason}");
+    assert!(reason.contains("could not"), "got: {reason}");
+}
+
+#[test]
+fn an_unknown_apply_patch_directive_cannot_hide_beside_a_valid_path() {
+    let kb = kb_with(
+        r#"
+[[tool]]
+match = ["apply_patch"]
+source = "applies every path named by the patch command"
+cwd_from_call = true
+[[tool.write_path]]
+field = "command"
+format = "apply_patch"
+"#,
+    );
+    let cfg = common::realistic_config();
+    let input = hook(
+        r#"{"session_id":"s","cwd":"C:/Users/dev","tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch\n*** Add File: notes/safe.txt\n+x\n*** Copy File: D:/elsewhere/hidden.txt\n*** End Patch"}}"#,
+    );
+    let reason = ask_reason(&decide(&cfg, &kb, HOME, &input).decision).to_string();
+    assert!(reason.contains("directive"), "got: {reason}");
+}
+
+#[test]
+fn shipped_knowledge_inspects_codex_apply_patch_paths() {
+    let kb = shipped_kb();
+    let cfg = common::realistic_config();
+    let safe = hook(
+        r#"{"session_id":"s","cwd":"C:/Users/dev","tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch\n*** Add File: notes/safe.txt\n+x\n*** End Patch"}}"#,
+    );
+    assert!(matches!(
+        decide(&cfg, &kb, HOME, &safe).decision,
+        Decision::Allow(_)
+    ));
+
+    let outside = hook(
+        r#"{"session_id":"s","cwd":"C:/Users/dev","tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch\n*** Add File: D:/elsewhere/unsafe.txt\n+x\n*** End Patch"}}"#,
+    );
+    assert!(matches!(
+        decide(&cfg, &kb, HOME, &outside).decision,
+        Decision::Ask(_)
+    ));
+}
+
+#[test]
+fn old_and_new_write_path_declarations_cannot_both_be_set() {
+    let err = vouch::knowledge::validate_text(
+        r#"
+version = 9
+[[tool]]
+match = ["bad"]
+source = "bad"
+write_path_field = "path"
+[[tool.write_path]]
+field = "command"
+format = "apply_patch"
+"#,
+    )
+    .unwrap_err();
+    assert!(err.contains("write_path_field"), "got: {err}");
+    assert!(err.contains("write_path"), "got: {err}");
+}

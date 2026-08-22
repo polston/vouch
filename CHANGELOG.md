@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.1 (2026-08-22)
+
+
+### Bug Fixes
+
+* preserve unrelated Codex hook entries
+* the full verifier keeps real command samples out of transcripts
+* use native Codex approval for broker
+
 ## 0.3.0 (2026-08-22)
 
 

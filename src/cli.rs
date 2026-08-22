@@ -97,27 +97,140 @@ pub enum SchemaTarget {
     Knowledge,
 }
 
-/// Parse the arguments after `vouch install`. Returns `(shadow, hooks_only)`.
-/// Any argument other than the two recognised flags is refused here, before
-/// the caller reads `settings.json` or prints anything — an unrecognised
-/// argument (a typo, or a flag from a different command) must never fall
-/// through to the bare-install form and print more than was asked for.
-pub fn parse_install_args(args: &[String]) -> Result<(bool, bool), String> {
-    const USAGE: &str = "usage: vouch install [--shadow] [--print]";
+pub type InstallHost = crate::protocol::Host;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallShell {
+    Bash,
+    PowerShell,
+}
+
+impl InstallShell {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Bash => "bash",
+            Self::PowerShell => "powershell",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "bash" => Ok(Self::Bash),
+            "powershell" | "ps" => Ok(Self::PowerShell),
+            other => Err(format!(
+                "vouch: unknown shell {other:?}; expected bash or powershell"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HookOptions {
+    pub host: InstallHost,
+    pub shell: Option<InstallShell>,
+    pub shadow: bool,
+}
+
+pub fn parse_hook_options(args: &[String]) -> Result<HookOptions, String> {
+    let mut host = InstallHost::Claude;
+    let mut shell = None;
+    let mut shadow = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--hook" => {}
+            "--shadow" => shadow = true,
+            "--host" | "--shell" if i + 1 == args.len() => {
+                return Err(format!("vouch: {} needs a value", args[i]));
+            }
+            "--host" => {
+                host = InstallHost::parse(&args[i + 1])?;
+                i += 1;
+            }
+            "--shell" => {
+                shell = Some(InstallShell::parse(&args[i + 1])?);
+                i += 1;
+            }
+            other => return Err(format!("vouch: unrecognised hook flag {other:?}")),
+        }
+        i += 1;
+    }
+    match (host, shell) {
+        (InstallHost::Codex, None) => {
+            Err("vouch: Codex hook needs --shell bash or --shell powershell".into())
+        }
+        (InstallHost::Claude, Some(_)) => {
+            Err("vouch: --shell is only meaningful with --host codex".into())
+        }
+        _ => Ok(HookOptions {
+            host,
+            shell,
+            shadow,
+        }),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstallOptions {
+    pub host: InstallHost,
+    pub shell: Option<InstallShell>,
+    pub shadow: bool,
+    pub hooks_only: bool,
+}
+
+/// Parse the complete cross-host install interface without reading either
+/// host's settings. A shell is explicit for Codex because its canonical
+/// `Bash` hook name does not identify the shell that executes the command.
+pub fn parse_install_options(args: &[String]) -> Result<InstallOptions, String> {
+    const USAGE: &str =
+        "usage: vouch install [--host claude|codex] [--shell bash|powershell] [--shadow] [--print]";
+    let mut host = InstallHost::Claude;
+    let mut shell = None;
     let mut shadow = false;
     let mut hooks_only = false;
-    for a in args {
-        match a.as_str() {
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
             "--shadow" => shadow = true,
             "--print" => hooks_only = true,
+            "--host" | "--shell" if i + 1 == args.len() => {
+                return Err(format!("vouch: {} needs a value.\n{USAGE}", args[i]));
+            }
+            "--host" => {
+                host = InstallHost::parse(&args[i + 1])?;
+                i += 1;
+            }
+            "--shell" => {
+                shell = Some(InstallShell::parse(&args[i + 1])?);
+                i += 1;
+            }
             other => {
                 return Err(format!(
                     "vouch: '{other}' is not a recognised install flag.\n{USAGE}"
                 ));
             }
         }
+        i += 1;
     }
-    Ok((shadow, hooks_only))
+    match (host, shell) {
+        (InstallHost::Codex, None) => Err(format!(
+            "vouch: Codex installation needs --shell bash or --shell powershell.\n{USAGE}"
+        )),
+        (InstallHost::Claude, Some(_)) => Err(format!(
+            "vouch: --shell is only meaningful with --host codex.\n{USAGE}"
+        )),
+        _ => Ok(InstallOptions { host, shell, shadow, hooks_only }),
+    }
+}
+
+/// Parse the arguments after `vouch install`. Returns `(shadow, hooks_only)`.
+/// Any argument other than the two recognised flags is refused here, before
+/// the caller reads `settings.json` or prints anything — an unrecognised
+/// argument (a typo, or a flag from a different command) must never fall
+/// through to the bare-install form and print more than was asked for.
+pub fn parse_install_args(args: &[String]) -> Result<(bool, bool), String> {
+    let options = parse_install_options(args)?;
+    Ok((options.shadow, options.hooks_only))
 }
 
 /// Parse the arguments after `vouch schema`.

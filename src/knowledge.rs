@@ -12,8 +12,8 @@
 //! was easy to miss — an empty file loads perfectly and leaves vouch knowing
 //! nothing while believing it succeeded.
 
-use crate::guards::{load, Knowledge, Program, Rule, SubWrite, Tool};
 use crate::guards::ToolSnippet;
+use crate::guards::{load, Knowledge, Program, Rule, SubWrite, Tool};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -253,7 +253,14 @@ pub const SNIPPET_LANGUAGES: &[&str] = &["bash", "powershell", "python", "javasc
 /// typo and must fail the load, the same reasoning `SNIPPET_LANGUAGES`
 /// itself is built on: never let an unrecognised name reach the engine's
 /// no-scanner arm in hand, silently read as "no claim at all".
-const VALID_WRAP_LANG: &[&str] = &["bash", "powershell", "python", "javascript", "opaque", "cmd"];
+const VALID_WRAP_LANG: &[&str] = &[
+    "bash",
+    "powershell",
+    "python",
+    "javascript",
+    "opaque",
+    "cmd",
+];
 
 /// `Program::wrap_lang`'s two load-time claims: the three TEXT-SCANNING wrap
 /// arms (`after_c`, `after_flag`, `arg_<N>` — as opposed to `rest`,
@@ -353,8 +360,9 @@ fn scope_of(languages: &[String]) -> HashSet<String> {
 /// list to an ABSENT key for "whole program" — a v7 file's empty
 /// `subcommands = []` now means "no verb at all" rather than "every verb",
 /// so the version gate is what turns that silent reinterpretation into a
-/// loud refusal instead.
-pub const KNOWLEDGE_SCHEMA_VERSION: u32 = 8;
+/// loud refusal instead. Structured tool `write_path` declarations and the
+/// `apply_patch` path-envelope format take it to 9.
+pub const KNOWLEDGE_SCHEMA_VERSION: u32 = 9;
 
 /// Semantic checks `deny_unknown_fields` cannot express: a `takes` value
 /// outside the closed set, a `run_dir_flags` entry that is not also in
@@ -588,7 +596,10 @@ pub(crate) fn validate(kb: &Knowledge) -> Result<(), String> {
         // so what it has to be is described AT ALL — an undescribed one would
         // never classify as this entry's flag and the claim would be inert.
         for f in &prog.rebinds_name_flags {
-            let known = prog.value_options.iter().chain(prog.no_value_options.iter());
+            let known = prog
+                .value_options
+                .iter()
+                .chain(prog.no_value_options.iter());
             if !known.into_iter().any(|v| v == f) {
                 return Err(format!(
                     "[[program]] {:?}: rebinds_name_flags names {f:?}, which this entry does not                      describe in value_options or no_value_options",
@@ -627,7 +638,8 @@ pub(crate) fn validate(kb: &Knowledge) -> Result<(), String> {
                     prog.match_names, prog.wraps
                 ));
             }
-            let exec_keys = !prog.wrap_exec_flags.is_empty() || !prog.wrap_exec_terminators.is_empty();
+            let exec_keys =
+                !prog.wrap_exec_flags.is_empty() || !prog.wrap_exec_terminators.is_empty();
             if exec_keys && prog.wraps != "after_exec" {
                 return Err(format!(
                     "[[program]] {:?}: wrap_exec_flags/wrap_exec_terminators need wraps = \
@@ -668,7 +680,9 @@ pub(crate) fn validate(kb: &Knowledge) -> Result<(), String> {
         // mode is an integer, never a write predicate) — checked ONLY in the
         // direction that would otherwise let the gate point at a position
         // nothing names.
-        if prog.writes_only_with_file_mode == Some(true) && !prog.arg_names.iter().any(|n| n == "mode") {
+        if prog.writes_only_with_file_mode == Some(true)
+            && !prog.arg_names.iter().any(|n| n == "mode")
+        {
             return Err(format!(
                 "[[program]] {:?}: writes_only_with_file_mode = true requires arg_names to contain \"mode\", got {:?}",
                 prog.match_names, prog.arg_names
@@ -683,7 +697,10 @@ pub(crate) fn validate(kb: &Knowledge) -> Result<(), String> {
         // first time this exclusivity was written) and a target it should
         // not.
         if let Some(h) = &prog.writes_via_handle {
-            if !prog.writes.is_empty() || prog.writes_only_with_file_mode.is_some() || !prog.sub_write.is_empty() {
+            if !prog.writes.is_empty()
+                || prog.writes_only_with_file_mode.is_some()
+                || !prog.sub_write.is_empty()
+            {
                 return Err(format!(
                     "[[program]] {:?}: writes_via_handle cannot appear alongside writes, writes_only_with_file_mode, or sub_write — one write story per entry",
                     prog.match_names
@@ -810,7 +827,10 @@ pub fn member_shape_ok(prefixes: &[&str], f: &str) -> Result<(), String> {
              that can never fire reads as installed trust"
         ));
     }
-    if !body.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)) {
+    if !body
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+    {
         return Err(format!(
             "{f:?} has characters outside the allowed set (the flag prefix, \
              then letters, digits, '.', '_', '-') — a shell can rewrite \
@@ -945,7 +965,9 @@ fn validate_tool(t: &Tool) -> Result<(), String> {
 
     match &t.server {
         Some(s) if s.is_empty() => {
-            return Err(format!("[[tool]] {ident}: server = \"\" is not a thing an entry can say"));
+            return Err(format!(
+                "[[tool]] {ident}: server = \"\" is not a thing an entry can say"
+            ));
         }
         Some(_) if !t.match_names.is_empty() => {
             return Err(format!(
@@ -973,8 +995,33 @@ fn validate_tool(t: &Tool) -> Result<(), String> {
             validate_tool_snippet(&ident, p)?;
         }
     }
+    if t.write_path_field.is_some() && t.write_path.is_some() {
+        return Err(format!(
+            "[[tool]] {ident}: write_path_field and write_path cannot both be set; use the \"scalar\" write_path format for a structured declaration"
+        ));
+    }
+    if let Some(paths) = &t.write_path {
+        if paths.is_empty() {
+            return Err(format!(
+                "[[tool]] {ident}: write_path = [] names no field to inspect"
+            ));
+        }
+        if let Some(path) = paths.iter().find(|path| path.field.trim().is_empty()) {
+            return Err(format!(
+                "[[tool]] {ident}: write_path field {:?} is empty",
+                path.field
+            ));
+        }
+    }
 
     Ok(())
+}
+
+/// Parse and run the same semantic validation used by the real knowledge
+/// loader. Kept public for deterministic schema tests and editor tooling.
+pub fn validate_text(text: &str) -> Result<(), String> {
+    let kb = load(text)?;
+    validate(&kb)
 }
 
 /// One `[[tool.snippet]]` entry, checked in isolation — split out of
@@ -1056,7 +1103,12 @@ fn version_remedy() -> String {
 /// the shipped values under the field-level merge (spec §7). Refusing them on
 /// version would break every existing my-knowledge.toml the moment the shipped
 /// schema moves — not vouch's call to make (§4).
-fn read_one(path: &Path, announce_absence: bool, source: GapSource, gaps: &mut Vec<Gap>) -> Option<Knowledge> {
+fn read_one(
+    path: &Path,
+    announce_absence: bool,
+    source: GapSource,
+    gaps: &mut Vec<Gap>,
+) -> Option<Knowledge> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) => {
@@ -1071,7 +1123,12 @@ fn read_one(path: &Path, announce_absence: bool, source: GapSource, gaps: &mut V
                 } else {
                     (format!("not found ({e})"), GapKind::Missing)
                 };
-                gaps.push(Gap { path: display_path(path), why, source, kind });
+                gaps.push(Gap {
+                    path: display_path(path),
+                    why,
+                    source,
+                    kind,
+                });
             }
             return None;
         }
@@ -1126,7 +1183,12 @@ fn read_one(path: &Path, announce_absence: bool, source: GapSource, gaps: &mut V
             } else {
                 GapKind::Unusable
             };
-            gaps.push(Gap { path: display_path(path), why: format!("could not be read: {e}"), source, kind });
+            gaps.push(Gap {
+                path: display_path(path),
+                why: format!("could not be read: {e}"),
+                source,
+                kind,
+            });
             None
         }
     }
@@ -1144,8 +1206,12 @@ fn read_one(path: &Path, announce_absence: bool, source: GapSource, gaps: &mut V
 /// puts `version` somewhere this line-match cannot find it.
 fn newer_than_binary(text: &str) -> bool {
     for line in text.lines() {
-        let Some(rest) = line.trim_start().strip_prefix("version") else { continue };
-        let Some(rest) = rest.trim_start().strip_prefix('=') else { continue };
+        let Some(rest) = line.trim_start().strip_prefix("version") else {
+            continue;
+        };
+        let Some(rest) = rest.trim_start().strip_prefix('=') else {
+            continue;
+        };
         let num = rest.split('#').next().unwrap_or(rest).trim();
         if let Ok(v) = num.parse::<u32>() {
             if v > KNOWLEDGE_SCHEMA_VERSION {
@@ -1356,58 +1422,114 @@ impl Entry for Tool {
 /// onto the other: `match = ["rm", "cat"]` gave `cat` "writes all its
 /// arguments" and a recursive-delete guard, from an entry that claimed nothing.
 fn overlay(base: &mut Program, mine: &Program) {
-    if !mine.value_options.is_empty() { base.value_options = mine.value_options.clone(); }
-    if !mine.run_dir_flags.is_empty() { base.run_dir_flags = mine.run_dir_flags.clone(); }
-    if !mine.no_value_options.is_empty() { base.no_value_options = mine.no_value_options.clone(); }
-    if !mine.writes.is_empty() { base.writes = mine.writes.clone(); }
-    if !mine.wraps.is_empty() { base.wraps = mine.wraps.clone(); }
-    if !mine.write_flags.is_empty() { base.write_flags = mine.write_flags.clone(); }
-    if !mine.wrap_flags.is_empty() { base.wrap_flags = mine.wrap_flags.clone(); }
-    if !mine.wrap_lang.is_empty() { base.wrap_lang = mine.wrap_lang.clone(); }
-    if !mine.flag_prefix.is_empty() { base.flag_prefix = mine.flag_prefix.clone(); }
-    if !mine.evaluates_input.is_empty() { base.evaluates_input = mine.evaluates_input.clone(); }
-    if !mine.runs_file.is_empty() { base.runs_file = mine.runs_file.clone(); }
-    if !mine.runs_file_flags.is_empty() { base.runs_file_flags = mine.runs_file_flags.clone(); }
-    if !mine.rebinds_name_flags.is_empty() { base.rebinds_name_flags = mine.rebinds_name_flags.clone(); }
+    if !mine.value_options.is_empty() {
+        base.value_options = mine.value_options.clone();
+    }
+    if !mine.run_dir_flags.is_empty() {
+        base.run_dir_flags = mine.run_dir_flags.clone();
+    }
+    if !mine.no_value_options.is_empty() {
+        base.no_value_options = mine.no_value_options.clone();
+    }
+    if !mine.writes.is_empty() {
+        base.writes = mine.writes.clone();
+    }
+    if !mine.wraps.is_empty() {
+        base.wraps = mine.wraps.clone();
+    }
+    if !mine.write_flags.is_empty() {
+        base.write_flags = mine.write_flags.clone();
+    }
+    if !mine.wrap_flags.is_empty() {
+        base.wrap_flags = mine.wrap_flags.clone();
+    }
+    if !mine.wrap_lang.is_empty() {
+        base.wrap_lang = mine.wrap_lang.clone();
+    }
+    if !mine.flag_prefix.is_empty() {
+        base.flag_prefix = mine.flag_prefix.clone();
+    }
+    if !mine.evaluates_input.is_empty() {
+        base.evaluates_input = mine.evaluates_input.clone();
+    }
+    if !mine.runs_file.is_empty() {
+        base.runs_file = mine.runs_file.clone();
+    }
+    if !mine.runs_file_flags.is_empty() {
+        base.runs_file_flags = mine.runs_file_flags.clone();
+    }
+    if !mine.rebinds_name_flags.is_empty() {
+        base.rebinds_name_flags = mine.rebinds_name_flags.clone();
+    }
     // A bare bool: `true` in an operator entry sets it, and `false` is
     // indistinguishable from unset — the same shape (and the same limit)
     // every other bare bool in this struct has.
-    if mine.args_from_input { base.args_from_input = true; }
-    if !mine.here_write.is_empty() { base.here_write = mine.here_write.clone(); }
-    if mine.remote_dest { base.remote_dest = true; }
-    if !mine.arg_names.is_empty() { base.arg_names = mine.arg_names.clone(); }
-    if !mine.callback_args.is_empty() { base.callback_args = mine.callback_args.clone(); }
-    if mine.case_sensitive_flags.is_some() { base.case_sensitive_flags = mine.case_sensitive_flags; }
+    if mine.args_from_input {
+        base.args_from_input = true;
+    }
+    if !mine.here_write.is_empty() {
+        base.here_write = mine.here_write.clone();
+    }
+    if mine.remote_dest {
+        base.remote_dest = true;
+    }
+    if !mine.arg_names.is_empty() {
+        base.arg_names = mine.arg_names.clone();
+    }
+    if !mine.callback_args.is_empty() {
+        base.callback_args = mine.callback_args.clone();
+    }
+    if mine.case_sensitive_flags.is_some() {
+        base.case_sensitive_flags = mine.case_sensitive_flags;
+    }
     // `changes_dir` follows the `case_sensitive_flags` Option pattern: unset
     // means "the operator did not say", not "no". Without this an operator
     // could never RETRACT a shipped claim with `changes_dir = "no"` — the
     // whole reason that value exists (spec 2026-07-31 §1).
-    if mine.changes_dir.is_some() { base.changes_dir = mine.changes_dir.clone(); }
-    if !mine.dest_dir_flags.is_empty() { base.dest_dir_flags = mine.dest_dir_flags.clone(); }
+    if mine.changes_dir.is_some() {
+        base.changes_dir = mine.changes_dir.clone();
+    }
+    if !mine.dest_dir_flags.is_empty() {
+        base.dest_dir_flags = mine.dest_dir_flags.clone();
+    }
     // `only_under` follows the same Option pattern. Unreachable live —
     // `validate_place_scopes` refuses every shape where a scoped name could
     // land on both sides of a merge — but the field must not be silently
     // dropped here if that ever changes.
-    if mine.only_under.is_some() { base.only_under = mine.only_under.clone(); }
+    if mine.only_under.is_some() {
+        base.only_under = mine.only_under.clone();
+    }
     // `writes_only_with_file_mode` and `wrap_join` follow the same Option
     // pattern as `case_sensitive_flags`, `changes_dir` and `only_under`
     // above: unset means "the operator did not say", not "false".
     if mine.writes_only_with_file_mode.is_some() {
         base.writes_only_with_file_mode = mine.writes_only_with_file_mode;
     }
-    if mine.writes_via_handle.is_some() { base.writes_via_handle = mine.writes_via_handle.clone(); }
-    if mine.wrap_join.is_some() { base.wrap_join = mine.wrap_join; }
+    if mine.writes_via_handle.is_some() {
+        base.writes_via_handle = mine.writes_via_handle.clone();
+    }
+    if mine.wrap_join.is_some() {
+        base.wrap_join = mine.wrap_join;
+    }
     // `leading_args` follows the same Option pattern: unset means "the
     // operator did not say", so `leading_args = 0` is how a shipped count is
     // RETRACTED. Without the Option there would be no spelling for that —
     // exactly the hole `changes_dir = "no"` exists to fill.
-    if mine.leading_args.is_some() { base.leading_args = mine.leading_args; }
-    if !mine.wrap_head_flags.is_empty() { base.wrap_head_flags = mine.wrap_head_flags.clone(); }
-    if !mine.wrap_exec_flags.is_empty() { base.wrap_exec_flags = mine.wrap_exec_flags.clone(); }
+    if mine.leading_args.is_some() {
+        base.leading_args = mine.leading_args;
+    }
+    if !mine.wrap_head_flags.is_empty() {
+        base.wrap_head_flags = mine.wrap_head_flags.clone();
+    }
+    if !mine.wrap_exec_flags.is_empty() {
+        base.wrap_exec_flags = mine.wrap_exec_flags.clone();
+    }
     if !mine.wrap_exec_terminators.is_empty() {
         base.wrap_exec_terminators = mine.wrap_exec_terminators.clone();
     }
-    if mine.named_positional.is_some() { base.named_positional = mine.named_positional.clone(); }
+    if mine.named_positional.is_some() {
+        base.named_positional = mine.named_positional.clone();
+    }
     // `languages` is deliberately NOT field-copied here. Which language scope
     // a split-off piece of an overlay ends up with is computed by
     // `overlay_all` itself (`Entry::set_scope_tags`, called AFTER `lay()`),
@@ -1458,14 +1580,26 @@ fn overlay(base: &mut Program, mine: &Program) {
     // bare `init` names only `subcommand = "init"`, and whole-entry
     // replacement let that silence delete the shipped judgment.
     let mine_keys: HashSet<String> = mine.sub_write.iter().map(sub_write_key).collect();
-    let mut laid: Vec<SubWrite> =
-        base.sub_write.iter().filter(|s| !mine_keys.contains(&sub_write_key(s))).cloned().collect();
+    let mut laid: Vec<SubWrite> = base
+        .sub_write
+        .iter()
+        .filter(|s| !mine_keys.contains(&sub_write_key(s)))
+        .cloned()
+        .collect();
     for m in &mine.sub_write {
-        match base.sub_write.iter().find(|s| sub_write_key(s) == sub_write_key(m)) {
+        match base
+            .sub_write
+            .iter()
+            .find(|s| sub_write_key(s) == sub_write_key(m))
+        {
             Some(shipped) => {
                 let mut sw = shipped.clone();
-                if !m.takes.is_empty() { sw.takes = m.takes.clone(); }
-                if m.min_positional != 0 { sw.min_positional = m.min_positional; }
+                if !m.takes.is_empty() {
+                    sw.takes = m.takes.clone();
+                }
+                if m.min_positional != 0 {
+                    sw.min_positional = m.min_positional;
+                }
                 laid.push(sw);
             }
             None => laid.push(m.clone()),
@@ -1505,7 +1639,7 @@ fn overlay_tool(base: &mut Tool, mine: &Tool) {
     if mine.action.is_some() {
         base.action = mine.action;
     }
-    // `snippet` / `write_path_field` / `cwd_from_call` follow the same
+    // `snippet` / the write-path declaration / `cwd_from_call` follow the same
     // Option pattern as `action`: `None` means the operator's entry did not
     // say, so the shipped value survives; `Some(_)` replaces it whole. There
     // is no field-level merge WITHIN a snippet list — an operator who sets
@@ -1519,6 +1653,11 @@ fn overlay_tool(base: &mut Tool, mine: &Tool) {
     }
     if mine.write_path_field.is_some() {
         base.write_path_field = mine.write_path_field.clone();
+        base.write_path = None;
+    }
+    if mine.write_path.is_some() {
+        base.write_path = mine.write_path.clone();
+        base.write_path_field = None;
     }
     if mine.cwd_from_call.is_some() {
         base.cwd_from_call = mine.cwd_from_call;
@@ -1600,7 +1739,10 @@ fn overlay_all<E: Entry>(mut base: Vec<E>, mine: &[E]) -> Vec<E> {
             // plain `HashMap` key comparison does not know that `same_name`
             // would call `git` and `Git` the same name.
             for n in &shared {
-                covered.entry(E::canonical_name(n)).or_default().extend(b_scope.iter().cloned());
+                covered
+                    .entry(E::canonical_name(n))
+                    .or_default()
+                    .extend(b_scope.iter().cloned());
             }
             let name_remainder: Vec<String> = b
                 .names()
@@ -1846,7 +1988,9 @@ pub fn validate_place_scopes(shipped: &Knowledge, mine: &Knowledge) -> Result<()
 fn narrowing_noops(base: &Knowledge, own: &Knowledge) -> Vec<String> {
     let mut notes = Vec::new();
     for m in &own.program {
-        let Some(m_sub) = &m.subcommands else { continue };
+        let Some(m_sub) = &m.subcommands else {
+            continue;
+        };
         for n in &m.match_names {
             for b in base
                 .program
@@ -1924,7 +2068,11 @@ pub fn load_files(knowledge: &Path, mine: &Path) -> Loaded {
                 kind: GapKind::SetAside,
             });
         }
-        return Loaded { kb: base, gaps, notes };
+        return Loaded {
+            kb: base,
+            gaps,
+            notes,
+        };
     }
 
     let kb = match own {
@@ -1959,7 +2107,11 @@ pub fn load_files(knowledge: &Path, mine: &Path) -> Loaded {
                     source: GapSource::MyKnowledge,
                     kind: GapKind::Ambiguous,
                 });
-                return Loaded { kb: Knowledge::default(), gaps, notes };
+                return Loaded {
+                    kb: Knowledge::default(),
+                    gaps,
+                    notes,
+                };
             }
             if let Err(e) = validate_place_scopes(&base, &o) {
                 gaps.push(Gap {
@@ -1968,7 +2120,11 @@ pub fn load_files(knowledge: &Path, mine: &Path) -> Loaded {
                     source: GapSource::MyKnowledge,
                     kind: GapKind::PlaceScope,
                 });
-                return Loaded { kb: Knowledge::default(), gaps, notes };
+                return Loaded {
+                    kb: Knowledge::default(),
+                    gaps,
+                    notes,
+                };
             }
             // `narrowing_noops` runs on the PRE-merge shapes — the merge
             // erases exactly the distinction it needs to see (spec §4) — so
