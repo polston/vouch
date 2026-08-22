@@ -16,6 +16,10 @@
 
 use serde_json::{json, Value};
 
+use crate::cli::InstallShell;
+
+const CODEX_STATUS_MESSAGE: &str = "vouch is checking this tool call";
+
 pub struct Plan {
     /// The settings.json content to save.
     pub settings: String,
@@ -35,13 +39,141 @@ fn hook_entry(exe: &str, extra: &str) -> Value {
     json!({ "hooks": [ { "type": "command", "command": cmd } ] })
 }
 
+fn codex_command(exe: &str, shell: InstallShell, shadow: bool) -> String {
+    let quoted = match shell {
+        InstallShell::Bash if exe.contains(' ') => format!("'{exe}'"),
+        InstallShell::PowerShell if exe.contains(' ') => format!("& '{exe}'"),
+        _ => exe.to_string(),
+    };
+    let shadow = if shadow { " --shadow" } else { "" };
+    format!(
+        "{quoted} --hook --host codex --shell {}{shadow}",
+        shell.as_str()
+    )
+}
+
+fn codex_hook_entry(exe: &str, shell: InstallShell, shadow: bool) -> Value {
+    json!({
+        "matcher": ".*",
+        "hooks": [{
+            "type": "command",
+            "command": codex_command(exe, shell, shadow),
+            "timeout": 30,
+            "statusMessage": CODEX_STATUS_MESSAGE
+        }]
+    })
+}
+
+fn is_codex_vouch_hook(hook: &Value) -> bool {
+    hook.get("type").and_then(Value::as_str) == Some("command")
+        && hook.get("statusMessage").and_then(Value::as_str) == Some(CODEX_STATUS_MESSAGE)
+        && hook
+            .get("command")
+            .and_then(Value::as_str)
+            .is_some_and(|command| command.contains("--hook --host codex"))
+}
+
+fn without_codex_vouch(entries: Option<&Value>, event: &str) -> Result<Vec<Value>, String> {
+    let Some(entries) = entries else {
+        return Ok(Vec::new());
+    };
+    let entries = entries
+        .as_array()
+        .ok_or_else(|| format!("hooks.json {event:?} hooks are not an array"))?;
+    let mut kept = Vec::new();
+    for entry in entries {
+        let mut entry = entry.clone();
+        let Some(hooks) = entry.get_mut("hooks").and_then(Value::as_array_mut) else {
+            kept.push(entry);
+            continue;
+        };
+        hooks.retain(|hook| !is_codex_vouch_hook(hook));
+        if !hooks.is_empty() {
+            kept.push(entry);
+        }
+    }
+    Ok(kept)
+}
+
+/// Build a merged `~/.codex/hooks.json`. Codex owns its native sandbox and
+/// approval policy; this file only installs vouch's local PreToolUse decision
+/// hook and PostToolUse outcome recorder. Unrelated hooks are never replaced.
+pub fn plan_codex(
+    existing: &str,
+    exe: &str,
+    shell: InstallShell,
+    shadow: bool,
+) -> Result<Plan, String> {
+    let mut root: Value = if existing.trim().is_empty() {
+        json!({})
+    } else {
+        serde_json::from_str(existing).map_err(|e| format!("hooks.json is not valid JSON: {e}"))?
+    };
+    if !root.is_object() {
+        return Err("hooks.json is not a JSON object".into());
+    }
+    let hooks = root
+        .as_object_mut()
+        .unwrap()
+        .entry("hooks")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or("hooks.json 'hooks' is not an object")?;
+
+    for (event, event_shadow) in [("PreToolUse", shadow), ("PostToolUse", false)] {
+        let mut entries = without_codex_vouch(hooks.get(event), event)?;
+        entries.push(codex_hook_entry(exe, shell, event_shadow));
+        hooks.insert(event.to_string(), Value::Array(entries));
+    }
+
+    let broker_name = if exe.to_ascii_lowercase().ends_with(".exe") {
+        "vouch-codex-broker.exe"
+    } else {
+        "vouch-codex-broker"
+    };
+    let broker = std::path::Path::new(exe)
+        .with_file_name(broker_name)
+        .to_string_lossy()
+        .replace('\\', "/");
+    let broker = if broker.contains(' ') {
+        format!("\"{broker}\"")
+    } else {
+        broker
+    };
+    let notes = vec![
+        if shadow {
+            "SHADOW: Codex still decides every call; vouch records what it would decide."
+        } else {
+            "LIVE: vouch blocks Codex tool calls it would ask about or deny."
+        }
+        .into(),
+        "Codex PostToolUse records completed calls; unsupported Claude-only outcome events are not installed."
+            .into(),
+        format!(
+            "Register the one-time human approval broker once: codex mcp add vouch_approval -- {broker}"
+        ),
+        "Configure Codex for interactive human approval: approval_policy = \"on-request\", approvals_reviewer = \"user\", and under [mcp_servers.vouch_approval] set default_tools_approval_mode = \"prompt\". The native MCP prompt is the broker decision; no nested elicitation is used."
+            .into(),
+    ];
+    let hooks_view = serde_json::to_string_pretty(&json!({ "hooks": root["hooks"].clone() }))
+        .map_err(|e| e.to_string())?;
+    let settings = serde_json::to_string_pretty(&root)
+        .map_err(|e| format!("could not render hooks.json: {e}"))?;
+    Ok(Plan {
+        settings,
+        hooks_view,
+        notes,
+    })
+}
+
 /// Builds the merged settings.json. `shadow` keeps the existing gate in place and
 /// adds vouch alongside it, recording decisions without being able to affect any.
 pub fn plan(existing: &str, exe: &str, shadow: bool) -> Result<Plan, String> {
     let mut root: Value = if existing.trim().is_empty() {
         json!({})
     } else {
-        serde_json::from_str(existing).map_err(|e| format!("settings.json is not valid JSON: {e}"))?
+        serde_json::from_str(existing)
+            .map_err(|e| format!("settings.json is not valid JSON: {e}"))?
     };
     let mut notes = Vec::new();
 
@@ -93,7 +225,11 @@ pub fn plan(existing: &str, exe: &str, shadow: bool) -> Result<Plan, String> {
 
     // Outcome events. Harmless in either mode — they only record.
     for ev in ["PostToolUse", "PostToolUseFailure", "PermissionDenied"] {
-        let mut arr = hooks.get(ev).and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let mut arr = hooks
+            .get(ev)
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
         if !arr.iter().any(|e| e.to_string().contains("vouch")) {
             arr.push(hook_entry(exe, ""));
         }
@@ -110,5 +246,9 @@ pub fn plan(existing: &str, exe: &str, shadow: bool) -> Result<Plan, String> {
 
     let settings = serde_json::to_string_pretty(&root)
         .map_err(|e| format!("could not render settings.json: {e}"))?;
-    Ok(Plan { settings, hooks_view, notes })
+    Ok(Plan {
+        settings,
+        hooks_view,
+        notes,
+    })
 }

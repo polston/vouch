@@ -68,7 +68,7 @@
 # 8 (2026-08-20): `[[program]]` gained `standalone_flags`; `subcommands`
 # moved from an always-present list to a three-state key — ABSENT covers the
 # whole program, present (even empty) scopes it.
-version = 8
+version = 9
 
 # ============================================================================
 # FROM YOUR EXISTING POLICY — these are rules your current tool already applies
@@ -2092,7 +2092,7 @@ match = [
 # The exception is the last group below: the harness's own script and file
 # tools (Bash, PowerShell, Write, Edit, NotebookEdit). These are NOT opaque —
 # a `[[tool.snippet]]` declaration routes the script field into vouch's own
-# scanner, and `write_path_field` routes the written path through the write
+# scanner, and `write_path_field` / `[[tool.write_path]]` route written paths through the write
 # rules, so the call is judged the same way a typed command or file write is.
 # Their claim is that declaration, not the two bullets above.
 #
@@ -2164,6 +2164,30 @@ match = ["NotebookEdit"]
 source = "writes the notebook named by `notebook_path`, relative paths resolved in the calling session's directory"
 cwd_from_call = true
 write_path_field = "notebook_path"
+
+[[tool]]
+match = ["apply_patch"]
+source = "applies every add, update, delete, and move path named by the patch command"
+cwd_from_call = true
+[[tool.write_path]]
+field = "command"
+format = "apply_patch"
+
+[[tool]]
+match = ["update_plan"]
+source = "updates Codex's in-session task plan and touches no project file"
+
+[[tool]]
+match = ["request_user_input"]
+source = "asks the operator a question and touches no project file"
+
+[[tool]]
+match = ["view_image"]
+source = "reads one local image and writes nothing"
+
+[[tool]]
+match = ["mcp__vouch_approval__request_approval"]
+source = "validates a redacted pending request after Codex's native MCP approval and can grant only its exact one-time retry"
 
 # ---------------------------------------------------------------------------
 # Environment names the SHELL ITSELF consults (M2.120)

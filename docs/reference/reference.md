@@ -280,6 +280,7 @@ A harness tool vouch has no scanner for, and what is claimed about it.
 | `server` | string (optional) | (unset) | A whole-server grant, said out loud (spec 2026-08-05 §Schema): matches `<server>__<tool>` for every tool that server exposes, instead of one tool by name. Mutually exclusive with a non-empty `match` — checked in `knowledge::validate_tool`. |
 | `snippet` | array of ToolSnippet (optional) | (none) | Which named `tool_input` fields carry a script vouch should decide on. `None` means "keep what the shipped entry declares" — the same `Option` merge rule every other per-entry claim in this file follows. `Some(vec![])` is a load error (`knowledge::validate_tool`): there is no legitimate "explicitly no snippets" spelling, because that reading would let one silent my-knowledge line turn off snippet inspection for a shipped entry it only meant to add a `source` to. The actual off-switch is `tools.<name>` in config. |
 | `source` | string | "" | Why this tool is described. Shown in `vouch doctor` and in the prompt, and it is the claim someone has to stand behind. |
+| `write_path` | array of ToolWritePath (optional) | (none) | Structured write declarations. This is a list so one tool can carry multiple independent path-bearing fields; every declaration is evaluated and the worst result governs the call. |
 | `write_path_field` | string (optional) | (unset) | The `tool_input` field whose value is the path this tool writes. What `Write` and `Edit` were hardcoded to do. |
 
 ### `ToolSnippet`
@@ -294,4 +295,22 @@ language it is written in.
 | `language` | string (optional) | (unset) | A fixed snippet language. Exactly one of this and `language_from` — checked in `knowledge::validate_tool`, which also checks this value is in the closed `knowledge::SNIPPET_LANGUAGES` set. |
 | `language_from` | string (optional) | (unset) | Read a sibling `tool_input` field and translate its value through `language_values`. Exactly one of this and `language`. |
 | `language_values` | map of string to string (optional) | (unset) | The translation table for `language_from`: the value read from the sibling field, on the left, maps to a `knowledge::SNIPPET_LANGUAGES` name on the right — every right-hand value is checked against that closed set at load. |
+
+### `ToolWritePath`
+
+One tool-input field that names one or more paths the tool writes.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `field` | string | (required) |  |
+| `format` | ToolWritePathFormat | (none) |  |
+
+### `ToolWritePathFormat`
+
+How a declared tool-input field names writes.
+
+- `scalar` — The field is one path string, equivalent to the legacy
+`write_path_field` shorthand.
+- `apply_patch` — The field is an OpenAI `apply_patch` envelope. Every add, update,
+delete, and move path in the envelope is decided; worst wins.
 

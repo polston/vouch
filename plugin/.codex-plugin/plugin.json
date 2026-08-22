@@ -1,0 +1,31 @@
+{
+  "name": "vouch",
+  "version": "0.3.1",
+  "description": "Skills for installing and operating the vouch allow-list permission gate with Codex and Claude Code.",
+  "author": {
+    "name": "vouch"
+  },
+  "license": "WTFPL",
+  "keywords": [
+    "permissions",
+    "security",
+    "hooks",
+    "allow-list"
+  ],
+  "skills": "./skills",
+  "interface": {
+    "displayName": "Vouch",
+    "shortDescription": "An allow-list gate for coding agents",
+    "longDescription": "Install, configure, inspect, and operate vouch as a local tool-call gate for Codex or Claude Code.",
+    "developerName": "vouch",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Skills"
+    ],
+    "defaultPrompt": [
+      "Set up vouch for this coding agent.",
+      "Explain why vouch blocked this tool call.",
+      "Review my vouch configuration from evidence."
+    ]
+  }
+}

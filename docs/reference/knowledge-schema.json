@@ -572,6 +572,16 @@
           "type": "string",
           "default": ""
         },
+        "write_path": {
+          "description": "Structured write declarations. This is a list so one tool can carry\nmultiple independent path-bearing fields; every declaration is\nevaluated and the worst result governs the call.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/ToolWritePath"
+          }
+        },
         "write_path_field": {
           "description": "The `tool_input` field whose value is the path this tool writes. What\n`Write` and `Edit` were hardcoded to do.",
           "type": [
@@ -622,6 +632,37 @@
       "additionalProperties": false,
       "required": [
         "field"
+      ]
+    },
+    "ToolWritePath": {
+      "description": "One tool-input field that names one or more paths the tool writes.",
+      "type": "object",
+      "properties": {
+        "field": {
+          "type": "string"
+        },
+        "format": {
+          "$ref": "#/$defs/ToolWritePathFormat"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "field"
+      ]
+    },
+    "ToolWritePathFormat": {
+      "description": "How a declared tool-input field names writes.",
+      "oneOf": [
+        {
+          "description": "The field is one path string, equivalent to the legacy\n`write_path_field` shorthand.",
+          "type": "string",
+          "const": "scalar"
+        },
+        {
+          "description": "The field is an OpenAI `apply_patch` envelope. Every add, update,\ndelete, and move path in the envelope is decided; worst wins.",
+          "type": "string",
+          "const": "apply_patch"
+        }
       ]
     }
   }

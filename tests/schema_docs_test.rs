@@ -12,10 +12,10 @@
 //!      trip — an omission there is exactly how `evaluated_input` went
 //!      undocumented long enough for an inheritance surprise to hide behind
 //!      it (CLAUDE.md, this task's own reason for existing).
-//!   3. the four version fields release-please drives from one commit —
+//!   3. the five version fields release-please drives from one commit —
 //!      `Cargo.toml`, this package's `Cargo.lock` entry,
-//!      `plugin/.claude-plugin/plugin.json`, and the marketplace entry —
-//!      agree with each other.
+//!      both plugin manifests, and Claude's versioned marketplace entry —
+//!      agree with each other. Codex's marketplace entry has no version field.
 //!   4. the tracked `CHANGELOG.md` carries no forge remnant (a link or a
 //!      commit id) that would name this private repository or point at a
 //!      commit the public mirror does not have.
@@ -121,14 +121,14 @@ fn every_known_construct_is_documented_in_the_example_config() {
     );
 }
 
-/// The version lives in four published files. release-please writes all four in
+/// The version lives in five published fields. release-please writes all five in
 /// one commit, so they cannot drift while that holds — this fails loudly if it
 /// stops holding, or if someone edits one by hand.
 ///
 /// It asserts AGREEMENT, never a particular value, which is what makes it true
 /// in the public mirror as well: `tests/` publishes wholesale.
 #[test]
-fn the_four_version_fields_agree() {
+fn the_five_version_fields_agree() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
 
     let cargo: toml::Value =
@@ -159,6 +159,12 @@ fn the_four_version_fields_agree() {
     .unwrap();
     let from_market = market["plugins"][0]["version"].as_str().unwrap().to_string();
 
+    let codex_plugin: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join("plugin/.codex-plugin/plugin.json")).unwrap(),
+    )
+    .unwrap();
+    let from_codex_plugin = codex_plugin["version"].as_str().unwrap().to_string();
+
     assert_eq!(
         from_cargo, from_lock,
         "Cargo.toml says {from_cargo}, Cargo.lock's vouch entry says {from_lock}"
@@ -170,6 +176,10 @@ fn the_four_version_fields_agree() {
     assert_eq!(
         from_cargo, from_market,
         "Cargo.toml says {from_cargo}, marketplace.json says {from_market}"
+    );
+    assert_eq!(
+        from_cargo, from_codex_plugin,
+        "Cargo.toml says {from_cargo}, the Codex plugin says {from_codex_plugin}"
     );
 }
 

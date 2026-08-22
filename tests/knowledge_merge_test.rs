@@ -3,11 +3,16 @@
 //! The operator's file wins, but only over the pieces they actually wrote.
 
 use vouch::config::Action;
-use vouch::guards::{entry_for, is_modeled, load, recognises, tool_entry, Knowledge, Program, Tool, ToolSnippet};
+use vouch::guards::{
+    entry_for, is_modeled, load, recognises, tool_entry, Knowledge, Program, Tool, ToolSnippet,
+    ToolWritePath, ToolWritePathFormat,
+};
 use vouch::knowledge::merge;
 use vouch::syntax::Cmd;
 
-fn kb(text: &str) -> Knowledge { load(text).expect("fixture parses") }
+fn kb(text: &str) -> Knowledge {
+    load(text).expect("fixture parses")
+}
 fn cmd(head: &str, args: &[&str]) -> Cmd {
     Cmd {
         head: head.into(),
@@ -17,7 +22,10 @@ fn cmd(head: &str, args: &[&str]) -> Cmd {
     }
 }
 fn prog<'a>(k: &'a Knowledge, name: &str) -> &'a vouch::guards::Program {
-    k.program.iter().find(|p| p.match_names.iter().any(|n| n == name)).expect("entry")
+    k.program
+        .iter()
+        .find(|p| p.match_names.iter().any(|n| n == name))
+        .expect("entry")
 }
 
 const BASE: &str = r#"
@@ -51,12 +59,27 @@ any_flag = ["--force"]
 "#;
     let merged = merge(kb(BASE), kb(mine));
     let p = prog(&merged, "vcs");
-    let resets: Vec<_> = p.rule.iter().filter(|r| r.subcommand_in == vec!["reset".to_string()]).collect();
+    let resets: Vec<_> = p
+        .rule
+        .iter()
+        .filter(|r| r.subcommand_in == vec!["reset".to_string()])
+        .collect();
     assert_eq!(resets.len(), 1, "the reset rule was lost");
     assert_eq!(resets[0].source, "shipped", "the reset rule was replaced");
-    let pushes: Vec<_> = p.rule.iter().filter(|r| r.subcommand_in == vec!["push".to_string()]).collect();
-    assert_eq!(pushes.len(), 1, "push should have one rule after replacement");
-    assert_eq!(pushes[0].guard, "publish_outward", "the operator's rule did not win");
+    let pushes: Vec<_> = p
+        .rule
+        .iter()
+        .filter(|r| r.subcommand_in == vec!["push".to_string()])
+        .collect();
+    assert_eq!(
+        pushes.len(),
+        1,
+        "push should have one rule after replacement"
+    );
+    assert_eq!(
+        pushes[0].guard, "publish_outward",
+        "the operator's rule did not win"
+    );
 }
 
 #[test]
@@ -88,7 +111,10 @@ any_flag = ["--no-preserve-root"]
         "the shipped guard was deleted by an unrelated rule: {:?}",
         p.rule.iter().map(|r| &r.guard).collect::<Vec<_>>()
     );
-    assert!(p.rule.iter().any(|r| r.guard == "disk_or_system"), "the operator's rule is missing");
+    assert!(
+        p.rule.iter().any(|r| r.guard == "disk_or_system"),
+        "the operator's rule is missing"
+    );
 }
 
 #[test]
@@ -111,7 +137,12 @@ any_flag = ["-r"]
 "#;
     let merged = merge(kb(base), kb(mine));
     let p = prog(&merged, "wipe");
-    assert_eq!(p.rule.len(), 1, "same shape should replace, not accumulate: {:?}", p.rule);
+    assert_eq!(
+        p.rule.len(),
+        1,
+        "same shape should replace, not accumulate: {:?}",
+        p.rule
+    );
     assert_eq!(p.rule[0].guard, "disk_or_system");
 }
 
@@ -142,14 +173,26 @@ unless_flags = ["-0"]
     let p = prog(&kb, "sig");
     let fires = |args: &[&str]| vouch::guards::rule_matches(&p.rule[0], &cmd("sig", args), p);
 
-    assert!(!fires(&["-0", "1234"]), "the exact vetoed spelling must stand the guard down");
+    assert!(
+        !fires(&["-0", "1234"]),
+        "the exact vetoed spelling must stand the guard down"
+    );
     assert!(
         fires(&["-09", "1234"]),
         "a described cluster is not the vetoed flag and must still trip the guard"
     );
-    assert!(fires(&["-9", "1234"]), "an unvetoed flag must trip the guard");
-    assert!(fires(&["-9", "-0"]), "the veto reads the FIRST argument only");
-    assert!(fires(&["1234"]), "no flag at all still trips an `always` rule");
+    assert!(
+        fires(&["-9", "1234"]),
+        "an unvetoed flag must trip the guard"
+    );
+    assert!(
+        fires(&["-9", "-0"]),
+        "the veto reads the FIRST argument only"
+    );
+    assert!(
+        fires(&["1234"]),
+        "no flag at all still trips an `always` rule"
+    );
 }
 
 #[test]
@@ -243,7 +286,9 @@ always = true
         p.rule
     );
     assert!(
-        p.rule.iter().any(|r| r.unless_flags == vec!["-0".to_string()]),
+        p.rule
+            .iter()
+            .any(|r| r.unless_flags == vec!["-0".to_string()]),
         "the shipped rule's veto must survive the merge: {:?}",
         p.rule
     );
@@ -270,9 +315,18 @@ match = ["show"]
 match = ["wipe", "show"]
 "#;
     let merged = merge(kb(base), kb(mine));
-    assert!(prog(&merged, "show").writes.is_empty(), "show was given wipe's write description");
-    assert!(prog(&merged, "show").rule.is_empty(), "show was given wipe's guard");
-    assert!(!prog(&merged, "wipe").writes.is_empty(), "wipe lost its own description");
+    assert!(
+        prog(&merged, "show").writes.is_empty(),
+        "show was given wipe's write description"
+    );
+    assert!(
+        prog(&merged, "show").rule.is_empty(),
+        "show was given wipe's guard"
+    );
+    assert!(
+        !prog(&merged, "wipe").writes.is_empty(),
+        "wipe lost its own description"
+    );
 }
 
 #[test]
@@ -302,12 +356,21 @@ source = "mine"
 subcommand_in = ["push"]
 "#;
     let merged = merge(kb(base), kb(mine));
-    let survivors: Vec<&str> = merged.program.iter()
+    let survivors: Vec<&str> = merged
+        .program
+        .iter()
         .filter(|p| p.match_names.iter().any(|n| n == "vcs"))
         .flat_map(|p| p.rule.iter().map(|r| r.guard.as_str()))
         .collect();
-    assert!(!survivors.contains(&"history_rewrite"), "a shipped twin survived: {survivors:?}");
-    assert_eq!(survivors, vec!["publish_outward", "publish_outward"], "unexpected: {survivors:?}");
+    assert!(
+        !survivors.contains(&"history_rewrite"),
+        "a shipped twin survived: {survivors:?}"
+    );
+    assert_eq!(
+        survivors,
+        vec!["publish_outward", "publish_outward"],
+        "unexpected: {survivors:?}"
+    );
 }
 
 #[test]
@@ -335,14 +398,28 @@ wrap_flags = ["-o"]
 wrap_lang = "bash"
 "#;
     let merged = merge(kb(base), kb(mine));
-    assert!(!prog(&merged, "show").writes.is_empty(), "show lost its shipped writes description");
     assert!(
-        prog(&merged, "show").rule.iter().any(|r| r.guard == "delete_recursive"),
+        !prog(&merged, "show").writes.is_empty(),
+        "show lost its shipped writes description"
+    );
+    assert!(
+        prog(&merged, "show")
+            .rule
+            .iter()
+            .any(|r| r.guard == "delete_recursive"),
         "show lost its shipped guard: {:?}",
         prog(&merged, "show").rule
     );
-    assert!(prog(&merged, "show").wraps.is_empty(), "show was given the operator's wraps claim: {:?}", prog(&merged, "show").wraps);
-    assert_eq!(prog(&merged, "wipe").wraps, "after_flag", "the operator's own entry did not take effect");
+    assert!(
+        prog(&merged, "show").wraps.is_empty(),
+        "show was given the operator's wraps claim: {:?}",
+        prog(&merged, "show").wraps
+    );
+    assert_eq!(
+        prog(&merged, "wipe").wraps,
+        "after_flag",
+        "the operator's own entry did not take effect"
+    );
 }
 
 #[test]
@@ -356,14 +433,22 @@ source = "requested: mine"
 subcommand_in = ["push"]
 "#;
     let merged = merge(kb(BASE), kb(mine));
-    assert_eq!(prog(&merged, "vcs").value_options, vec!["-C".to_string()], "the grammar hint was lost");
+    assert_eq!(
+        prog(&merged, "vcs").value_options,
+        vec!["-C".to_string()],
+        "the grammar hint was lost"
+    );
 }
 
 #[test]
 fn i_can_replace_a_grammar_hint_by_writing_my_own() {
     let mine = "[[program]]\nmatch = [\"vcs\"]\nvalue_options = [\"-C\", \"--work-tree\"]\n";
     let merged = merge(kb(BASE), kb(mine));
-    assert_eq!(prog(&merged, "vcs").value_options.len(), 2, "an explicit hint must win");
+    assert_eq!(
+        prog(&merged, "vcs").value_options.len(),
+        2,
+        "an explicit hint must win"
+    );
 }
 
 #[test]
@@ -371,9 +456,18 @@ fn recognition_is_widened_never_narrowed() {
     let base = "[[program]]\nmatch = [\"orch\"]\nsubcommands = [\"get\"]\n";
     let mine = "[[program]]\nmatch = [\"orch\"]\nsubcommands = [\"describe\"]\n";
     let merged = merge(kb(base), kb(mine));
-    assert!(recognises(&merged, &cmd("orch", &["get", "x"]), "bash", true), "shipped verb was narrowed away");
-    assert!(recognises(&merged, &cmd("orch", &["describe", "x"]), "bash", true), "my verb was not added");
-    assert!(!recognises(&merged, &cmd("orch", &["delete", "x"]), "bash", true), "an unnamed verb became recognised");
+    assert!(
+        recognises(&merged, &cmd("orch", &["get", "x"]), "bash", true),
+        "shipped verb was narrowed away"
+    );
+    assert!(
+        recognises(&merged, &cmd("orch", &["describe", "x"]), "bash", true),
+        "my verb was not added"
+    );
+    assert!(
+        !recognises(&merged, &cmd("orch", &["delete", "x"]), "bash", true),
+        "an unnamed verb became recognised"
+    );
 }
 
 #[test]
@@ -381,8 +475,14 @@ fn an_entry_that_mentions_no_subcommands_does_not_silently_widen_a_scoped_one() 
     let base = "[[program]]\nmatch = [\"orch\"]\nsubcommands = [\"get\"]\n";
     let mine = "[[program]]\nmatch = [\"orch\"]\nvalue_options = [\"--context\"]\n";
     let merged = merge(kb(base), kb(mine));
-    assert!(!recognises(&merged, &cmd("orch", &["delete", "x"]), "bash", true), "scope was widened by accident");
-    assert!(recognises(&merged, &cmd("orch", &["get", "x"]), "bash", true), "the shipped verb was lost");
+    assert!(
+        !recognises(&merged, &cmd("orch", &["delete", "x"]), "bash", true),
+        "scope was widened by accident"
+    );
+    assert!(
+        recognises(&merged, &cmd("orch", &["get", "x"]), "bash", true),
+        "the shipped verb was lost"
+    );
 }
 
 #[test]
@@ -390,7 +490,10 @@ fn widening_to_the_whole_program_has_to_be_said_out_loud() {
     let base = "[[program]]\nmatch = [\"orch\"]\nsubcommands = [\"get\"]\n";
     let mine = "[[program]]\nmatch = [\"orch\"]\nall_subcommands = true\n";
     let merged = merge(kb(base), kb(mine));
-    assert!(recognises(&merged, &cmd("orch", &["delete", "x"]), "bash", true), "an explicit claim was ignored");
+    assert!(
+        recognises(&merged, &cmd("orch", &["delete", "x"]), "bash", true),
+        "an explicit claim was ignored"
+    );
 }
 
 #[test]
@@ -452,7 +555,11 @@ fn arg_names_operator_override_and_shipped_kept_when_silent() {
 
     let mine_override = "[[program]]\nmatch = [\"vcs\"]\narg_names = [\"file\"]\n";
     let merged = merge(kb(base), kb(mine_override));
-    assert_eq!(prog(&merged, "vcs").arg_names, vec!["file".to_string()], "the operator's arg_names did not win");
+    assert_eq!(
+        prog(&merged, "vcs").arg_names,
+        vec!["file".to_string()],
+        "the operator's arg_names did not win"
+    );
 
     let mine_silent = "[[program]]\nmatch = [\"vcs\"]\nvalue_options = [\"-x\"]\n";
     let merged = merge(kb(base), kb(mine_silent));
@@ -499,7 +606,11 @@ fn wrap_join_kept_unset_by_an_unrelated_operator_field() {
 
     let mine_override = "[[program]]\nmatch = [\"vcs\"]\nwrap_join = false\n";
     let merged = merge(kb(base), kb(mine_override));
-    assert_eq!(prog(&merged, "vcs").wrap_join, Some(false), "the operator's wrap_join did not win");
+    assert_eq!(
+        prog(&merged, "vcs").wrap_join,
+        Some(false),
+        "the operator's wrap_join did not win"
+    );
 }
 
 #[test]
@@ -522,8 +633,16 @@ subcommand = "init"
 "#;
     let merged = merge(kb(base), kb(mine));
     let p = prog(&merged, "vcs");
-    assert_eq!(p.sub_write.len(), 1, "same key should merge, not duplicate: {:?}", p.sub_write);
-    assert_eq!(p.sub_write[0].takes, "run_dir", "the bare init judgment was deleted by silence");
+    assert_eq!(
+        p.sub_write.len(),
+        1,
+        "same key should merge, not duplicate: {:?}",
+        p.sub_write
+    );
+    assert_eq!(
+        p.sub_write[0].takes, "run_dir",
+        "the bare init judgment was deleted by silence"
+    );
 }
 
 #[test]
@@ -548,7 +667,10 @@ min_positional = 2
     let p = prog(&merged, "vcs");
     assert_eq!(p.sub_write.len(), 1);
     assert_eq!(p.sub_write[0].takes, "first", "an explicit takes must win");
-    assert_eq!(p.sub_write[0].min_positional, 2, "an explicit min_positional must win");
+    assert_eq!(
+        p.sub_write[0].min_positional, 2,
+        "an explicit min_positional must win"
+    );
 }
 
 #[test]
@@ -569,9 +691,24 @@ min_positional = 2
 "#;
     let merged = merge(kb(base), kb(mine));
     let p = prog(&merged, "vcs");
-    assert_eq!(p.sub_write.len(), 2, "the operator's new sub_write did not appear: {:?}", p.sub_write);
-    assert!(p.sub_write.iter().any(|s| s.subcommand == "init" && s.takes == "run_dir"), "the shipped one was lost");
-    assert!(p.sub_write.iter().any(|s| s.subcommand == "clone" && s.min_positional == 2), "the new one was lost");
+    assert_eq!(
+        p.sub_write.len(),
+        2,
+        "the operator's new sub_write did not appear: {:?}",
+        p.sub_write
+    );
+    assert!(
+        p.sub_write
+            .iter()
+            .any(|s| s.subcommand == "init" && s.takes == "run_dir"),
+        "the shipped one was lost"
+    );
+    assert!(
+        p.sub_write
+            .iter()
+            .any(|s| s.subcommand == "clone" && s.min_positional == 2),
+        "the new one was lost"
+    );
 }
 
 #[test]
@@ -689,8 +826,18 @@ fn overlay_is_exhaustive_over_every_program_field() {
         ..Default::default()
     };
     let merged = merge(
-        Knowledge { version: None, program: vec![base], tool: vec![], env_name: vec![] },
-        Knowledge { version: None, program: vec![mine], tool: vec![], env_name: vec![] },
+        Knowledge {
+            version: None,
+            program: vec![base],
+            tool: vec![],
+            env_name: vec![],
+        },
+        Knowledge {
+            version: None,
+            program: vec![mine],
+            tool: vec![],
+            env_name: vec![],
+        },
     );
     // `mine` only claims bash, so the entry carrying its overlay is found
     // through `entry_for` scoped to bash — the same primitive any
@@ -701,20 +848,59 @@ fn overlay_is_exhaustive_over_every_program_field() {
 
     // match_names: deliberately NOT extended (documented at knowledge.rs
     // above `overlay`) — mine's second name "q" never arrives.
-    assert_eq!(p.match_names, vec!["p".to_string()], "match_names must not be extended by an overlay");
-    assert_eq!(p.value_options, vec!["--opt".to_string()], "value_options did not arrive");
-    assert_eq!(p.run_dir_flags, vec!["--work-dir".to_string()], "run_dir_flags did not arrive");
-    assert_eq!(p.no_value_options, vec!["--flag".to_string()], "no_value_options did not arrive");
+    assert_eq!(
+        p.match_names,
+        vec!["p".to_string()],
+        "match_names must not be extended by an overlay"
+    );
+    assert_eq!(
+        p.value_options,
+        vec!["--opt".to_string()],
+        "value_options did not arrive"
+    );
+    assert_eq!(
+        p.run_dir_flags,
+        vec!["--work-dir".to_string()],
+        "run_dir_flags did not arrive"
+    );
+    assert_eq!(
+        p.no_value_options,
+        vec!["--flag".to_string()],
+        "no_value_options did not arrive"
+    );
     assert_eq!(p.writes, "all_args", "writes did not arrive");
     assert_eq!(p.wraps, "rest", "wraps did not arrive");
-    assert_eq!(p.write_flags, vec!["--out".to_string()], "write_flags did not arrive");
-    assert_eq!(p.case_sensitive_flags, Some(true), "case_sensitive_flags did not arrive");
-    assert_eq!(p.wrap_flags, vec!["--wrap".to_string()], "wrap_flags did not arrive");
+    assert_eq!(
+        p.write_flags,
+        vec!["--out".to_string()],
+        "write_flags did not arrive"
+    );
+    assert_eq!(
+        p.case_sensitive_flags,
+        Some(true),
+        "case_sensitive_flags did not arrive"
+    );
+    assert_eq!(
+        p.wrap_flags,
+        vec!["--wrap".to_string()],
+        "wrap_flags did not arrive"
+    );
     assert_eq!(p.wrap_lang, "python", "wrap_lang did not arrive");
-    assert_eq!(p.flag_prefix, vec!["/".to_string()], "flag_prefix did not arrive");
-    assert_eq!(p.evaluates_input, "always", "evaluates_input did not arrive");
+    assert_eq!(
+        p.flag_prefix,
+        vec!["/".to_string()],
+        "flag_prefix did not arrive"
+    );
+    assert_eq!(
+        p.evaluates_input, "always",
+        "evaluates_input did not arrive"
+    );
     assert_eq!(p.runs_file, "arg_0", "runs_file did not arrive");
-    assert_eq!(p.runs_file_flags, vec!["-m".to_string()], "runs_file_flags did not arrive");
+    assert_eq!(
+        p.runs_file_flags,
+        vec!["-m".to_string()],
+        "runs_file_flags did not arrive"
+    );
     assert_eq!(
         p.rebinds_name_flags,
         vec!["-p".to_string()],
@@ -726,7 +912,12 @@ fn overlay_is_exhaustive_over_every_program_field() {
     assert_eq!(p.here_write[0].when_flags, vec!["-x".to_string()]);
     assert_eq!(p.rule.len(), 1, "rule did not arrive: {:?}", p.rule);
     assert_eq!(p.rule[0].guard, "delete_recursive");
-    assert_eq!(p.sub_write.len(), 1, "sub_write did not arrive: {:?}", p.sub_write);
+    assert_eq!(
+        p.sub_write.len(),
+        1,
+        "sub_write did not arrive: {:?}",
+        p.sub_write
+    );
     assert_eq!(p.sub_write[0].subcommand, "doit");
     // subcommands / all_subcommands: `all_subcommands` is a merge-time
     // instruction, not a persisted claim — `recognises` reads `None` as the
@@ -734,42 +925,121 @@ fn overlay_is_exhaustive_over_every_program_field() {
     // narrow": an explicit `all_subcommands = true` CLEARS the scoped list
     // to `None` rather than naively replacing it with mine's — "describe"
     // never arrives, and neither does the base's own "get".
-    assert!(p.subcommands.is_none(), "all_subcommands should have cleared the scoped list to None: {:?}", p.subcommands);
+    assert!(
+        p.subcommands.is_none(),
+        "all_subcommands should have cleared the scoped list to None: {:?}",
+        p.subcommands
+    );
     // standalone_flags follows the value_options non-empty-replaces pattern
     // (Task 1, knowledge schema v8).
-    assert_eq!(p.standalone_flags, vec!["--version".to_string()], "standalone_flags did not arrive");
+    assert_eq!(
+        p.standalone_flags,
+        vec!["--version".to_string()],
+        "standalone_flags did not arrive"
+    );
     // changes_dir / languages / dest_dir_flags: Task 4 (spec §2) wires these.
-    assert_eq!(p.changes_dir, Some("stated".to_string()), "changes_dir did not arrive from mine");
-    assert_eq!(p.languages, vec!["bash".to_string()], "languages did not arrive from mine");
-    assert_eq!(p.dest_dir_flags, vec!["-Path".to_string()], "dest_dir_flags did not arrive from mine");
-    assert_eq!(p.only_under.as_deref(), Some(&["C:/scratch/**".to_string()][..]), "only_under did not arrive from mine");
+    assert_eq!(
+        p.changes_dir,
+        Some("stated".to_string()),
+        "changes_dir did not arrive from mine"
+    );
+    assert_eq!(
+        p.languages,
+        vec!["bash".to_string()],
+        "languages did not arrive from mine"
+    );
+    assert_eq!(
+        p.dest_dir_flags,
+        vec!["-Path".to_string()],
+        "dest_dir_flags did not arrive from mine"
+    );
+    assert_eq!(
+        p.only_under.as_deref(),
+        Some(&["C:/scratch/**".to_string()][..]),
+        "only_under did not arrive from mine"
+    );
     // arg_names / writes_only_with_file_mode / wrap_join: Task 6
     // (python-snippets, knowledge schema v4).
-    assert_eq!(p.arg_names, vec!["file".to_string(), "mode".to_string()], "arg_names did not arrive");
-    assert_eq!(p.callback_args, vec!["cb".to_string()], "callback_args did not arrive");
-    assert_eq!(p.writes_only_with_file_mode, Some(true), "writes_only_with_file_mode did not arrive");
-    assert_eq!(p.writes_via_handle.as_deref(), Some("arg_1"), "writes_via_handle did not arrive");
+    assert_eq!(
+        p.arg_names,
+        vec!["file".to_string(), "mode".to_string()],
+        "arg_names did not arrive"
+    );
+    assert_eq!(
+        p.callback_args,
+        vec!["cb".to_string()],
+        "callback_args did not arrive"
+    );
+    assert_eq!(
+        p.writes_only_with_file_mode,
+        Some(true),
+        "writes_only_with_file_mode did not arrive"
+    );
+    assert_eq!(
+        p.writes_via_handle.as_deref(),
+        Some("arg_1"),
+        "writes_via_handle did not arrive"
+    );
     assert_eq!(p.wrap_join, Some(true), "wrap_join did not arrive");
-    assert_eq!(p.named_positional.as_deref(), Some("first"), "named_positional did not arrive");
+    assert_eq!(
+        p.named_positional.as_deref(),
+        Some("first"),
+        "named_positional did not arrive"
+    );
     // leading_args / wrap_exec_flags / wrap_exec_terminators: Task 9, the
     // wrapper walk (knowledge schema v6).
     assert_eq!(p.leading_args, Some(1), "leading_args did not arrive");
-    assert_eq!(p.wrap_head_flags, vec!["-FilePath".to_string()], "wrap_head_flags did not arrive");
-    assert_eq!(p.wrap_exec_flags, vec!["-exec".to_string()], "wrap_exec_flags did not arrive");
-    assert_eq!(p.wrap_exec_terminators, vec![";".to_string()], "wrap_exec_terminators did not arrive");
+    assert_eq!(
+        p.wrap_head_flags,
+        vec!["-FilePath".to_string()],
+        "wrap_head_flags did not arrive"
+    );
+    assert_eq!(
+        p.wrap_exec_flags,
+        vec!["-exec".to_string()],
+        "wrap_exec_flags did not arrive"
+    );
+    assert_eq!(
+        p.wrap_exec_terminators,
+        vec![";".to_string()],
+        "wrap_exec_terminators did not arrive"
+    );
 
     // The powershell portion of base's original (unscoped) claim for "p"
     // must survive untouched: mine never said anything about powershell, so
     // narrowing it away — or leaking mine's bash-only claim onto it — would
     // be the M2.26 defect recurring along the language axis.
-    let leftover = entry_for(&merged, "p", "powershell").expect("powershell remainder of p was lost");
-    assert_eq!(leftover.subcommands, Some(vec!["get".to_string()]), "the untouched shipped side of p was changed");
-    assert!(leftover.standalone_flags.is_empty(), "mine's standalone_flags leaked into the scope mine never addressed");
-    assert!(leftover.changes_dir.is_none(), "mine's changes_dir leaked into the scope mine never addressed");
-    assert!(leftover.value_options.is_empty(), "mine's value_options leaked into the scope mine never addressed");
-    assert!(leftover.only_under.is_none(), "mine's only_under leaked into the scope mine never addressed");
-    assert!(leftover.arg_names.is_empty(), "mine's arg_names leaked into the scope mine never addressed");
-    assert!(leftover.callback_args.is_empty(), "mine's callback_args leaked into the scope mine never addressed");
+    let leftover =
+        entry_for(&merged, "p", "powershell").expect("powershell remainder of p was lost");
+    assert_eq!(
+        leftover.subcommands,
+        Some(vec!["get".to_string()]),
+        "the untouched shipped side of p was changed"
+    );
+    assert!(
+        leftover.standalone_flags.is_empty(),
+        "mine's standalone_flags leaked into the scope mine never addressed"
+    );
+    assert!(
+        leftover.changes_dir.is_none(),
+        "mine's changes_dir leaked into the scope mine never addressed"
+    );
+    assert!(
+        leftover.value_options.is_empty(),
+        "mine's value_options leaked into the scope mine never addressed"
+    );
+    assert!(
+        leftover.only_under.is_none(),
+        "mine's only_under leaked into the scope mine never addressed"
+    );
+    assert!(
+        leftover.arg_names.is_empty(),
+        "mine's arg_names leaked into the scope mine never addressed"
+    );
+    assert!(
+        leftover.callback_args.is_empty(),
+        "mine's callback_args leaked into the scope mine never addressed"
+    );
     assert!(
         leftover.writes_only_with_file_mode.is_none(),
         "mine's writes_only_with_file_mode leaked into the scope mine never addressed"
@@ -778,7 +1048,10 @@ fn overlay_is_exhaustive_over_every_program_field() {
         leftover.writes_via_handle.is_none(),
         "mine's writes_via_handle leaked into the scope mine never addressed"
     );
-    assert!(leftover.wrap_join.is_none(), "mine's wrap_join leaked into the scope mine never addressed");
+    assert!(
+        leftover.wrap_join.is_none(),
+        "mine's wrap_join leaked into the scope mine never addressed"
+    );
     assert!(
         leftover.named_positional.is_none(),
         "mine's named_positional leaked into the scope mine never addressed"
@@ -797,8 +1070,14 @@ fn m2_26_a_name_beside_a_known_one_is_not_silently_dropped() {
     let shipped = kb("[[program]]\nmatch = [\"sudo\"]\n");
     let mine = kb("[[program]]\nmatch = [\"sudo\", \"mytool\"]\n");
     let merged = merge(shipped, mine);
-    assert!(is_modeled(&merged, "mytool", "bash"), "a name beside a known one was dropped");
-    assert!(is_modeled(&merged, "sudo", "bash"), "the known name was lost too");
+    assert!(
+        is_modeled(&merged, "mytool", "bash"),
+        "a name beside a known one was dropped"
+    );
+    assert!(
+        is_modeled(&merged, "sudo", "bash"),
+        "the known name was lost too"
+    );
 }
 
 // --- language scoping (spec 2026-07-31 §2, Task 4) --------------------------
@@ -812,7 +1091,10 @@ fn an_unscoped_operator_entry_overlays_every_scope_and_keeps_the_remainder() {
     let ps = entry_for(&kb, "sl", "powershell").expect("ps entry");
     assert_eq!(ps.changes_dir.as_deref(), Some("stated"));
     // The bash remainder exists — today's unscoped semantics preserved.
-    assert!(entry_for(&kb, "sl", "bash").is_some(), "remainder must persist, not silently drop");
+    assert!(
+        entry_for(&kb, "sl", "bash").is_some(),
+        "remainder must persist, not silently drop"
+    );
     assert!(entry_for(&kb, "sl", "bash").unwrap().changes_dir.is_none());
 }
 
@@ -834,14 +1116,17 @@ fn a_scoped_entry_beats_an_unscoped_one_for_the_same_name_and_language() {
     // an entry that names ONE language specifically. `entry_for` must prefer
     // the one that actually said "this language" — an unscoped claim reads
     // "everywhere", the weaker of the two once the caller asks about one.
-    let both = kb(
-        "[[program]]\nmatch = [\"cd\"]\nsubcommands = [\"get\"]\n\
-         [[program]]\nmatch = [\"cd\"]\nlanguages = [\"bash\"]\nchanges_dir = \"stated\"\n",
-    );
+    let both = kb("[[program]]\nmatch = [\"cd\"]\nsubcommands = [\"get\"]\n\
+         [[program]]\nmatch = [\"cd\"]\nlanguages = [\"bash\"]\nchanges_dir = \"stated\"\n");
     let p = entry_for(&both, "cd", "bash").expect("bash entry");
-    assert_eq!(p.changes_dir.as_deref(), Some("stated"), "the language-scoped entry should win over the unscoped one");
+    assert_eq!(
+        p.changes_dir.as_deref(),
+        Some("stated"),
+        "the language-scoped entry should win over the unscoped one"
+    );
     // On powershell only the unscoped entry applies — it never claimed a kind.
-    let ps = entry_for(&both, "cd", "powershell").expect("powershell falls back to the unscoped entry");
+    let ps =
+        entry_for(&both, "cd", "powershell").expect("powershell falls back to the unscoped entry");
     assert!(ps.changes_dir.is_none());
 }
 
@@ -851,11 +1136,16 @@ fn an_operator_entry_scoped_to_a_language_no_shipped_entry_carries_is_a_pure_rem
     // is the operator's, and it must land exactly as scoped, not widen to
     // "every language" just because nothing shipped disagreed with it.
     let shipped = kb("[[program]]\nmatch = [\"zoxide\"]\n");
-    let mine = kb("[[program]]\nmatch = [\"z\"]\nlanguages = [\"powershell\"]\nchanges_dir = \"unstated\"\n");
+    let mine = kb(
+        "[[program]]\nmatch = [\"z\"]\nlanguages = [\"powershell\"]\nchanges_dir = \"unstated\"\n",
+    );
     let merged = merge(shipped, mine);
     let p = entry_for(&merged, "z", "powershell").expect("the operator's own entry");
     assert_eq!(p.changes_dir.as_deref(), Some("unstated"));
-    assert!(entry_for(&merged, "z", "bash").is_none(), "a powershell-only claim must not recognise z on bash");
+    assert!(
+        entry_for(&merged, "z", "bash").is_none(),
+        "a powershell-only claim must not recognise z on bash"
+    );
 }
 
 #[test]
@@ -863,10 +1153,22 @@ fn is_modeled_and_recognises_respect_language_scope() {
     // `chdir` is a Set-Location alias in PowerShell and not a bash builtin at
     // all (spec §2) — an entry scoped to powershell must not leak into bash.
     let ps_only = kb("[[program]]\nmatch = [\"chdir\"]\nlanguages = [\"powershell\"]\nchanges_dir = \"stated\"\n");
-    assert!(is_modeled(&ps_only, "chdir", "powershell"), "chdir must be modelled on a powershell line");
-    assert!(!is_modeled(&ps_only, "chdir", "bash"), "chdir has no bash meaning and must not be modelled there");
-    assert!(recognises(&ps_only, &cmd("chdir", &[]), "powershell", true), "chdir on powershell is recognised");
-    assert!(!recognises(&ps_only, &cmd("chdir", &[]), "bash", true), "chdir on bash must stay unrecognised");
+    assert!(
+        is_modeled(&ps_only, "chdir", "powershell"),
+        "chdir must be modelled on a powershell line"
+    );
+    assert!(
+        !is_modeled(&ps_only, "chdir", "bash"),
+        "chdir has no bash meaning and must not be modelled there"
+    );
+    assert!(
+        recognises(&ps_only, &cmd("chdir", &[]), "powershell", true),
+        "chdir on powershell is recognised"
+    );
+    assert!(
+        !recognises(&ps_only, &cmd("chdir", &[]), "bash", true),
+        "chdir on bash must stay unrecognised"
+    );
 }
 
 // --- skeptical review fixes, 2026-07-31 -----------------------------------
@@ -890,7 +1192,10 @@ fn an_operator_entrys_different_case_spelling_does_not_mint_a_stray_unscoped_ent
         !recognises(&merged, &cmd("git", &["push"]), "bash", true),
         "a differently-cased operator spelling minted a stray unscoped entry that recognised everything"
     );
-    assert!(recognises(&merged, &cmd("git", &["status"]), "bash", true), "the shipped verb was lost");
+    assert!(
+        recognises(&merged, &cmd("git", &["status"]), "bash", true),
+        "the shipped verb was lost"
+    );
 }
 
 #[test]
@@ -911,10 +1216,21 @@ fn entry_for_is_first_wins_for_a_merge_produced_duplicate() {
     );
     let mine = kb("[[program]]\nmatch = [\"dd\"]\nall_subcommands = true\n");
     let merged = merge(shipped, mine);
-    let matches: Vec<&Program> = merged.program.iter().filter(|p| p.match_names.iter().any(|n| n == "dd")).collect();
-    assert!(matches.len() >= 2, "expected the merge to keep both shipped dd entries, got {}", matches.len());
+    let matches: Vec<&Program> = merged
+        .program
+        .iter()
+        .filter(|p| p.match_names.iter().any(|n| n == "dd"))
+        .collect();
+    assert!(
+        matches.len() >= 2,
+        "expected the merge to keep both shipped dd entries, got {}",
+        matches.len()
+    );
     let p = entry_for(&merged, "dd", "bash").expect("dd entry");
-    assert_eq!(p.writes, "first-entry", "entry_for must deterministically pick the FIRST dd entry in file order");
+    assert_eq!(
+        p.writes, "first-entry",
+        "entry_for must deterministically pick the FIRST dd entry in file order"
+    );
 }
 
 // --- server entries have a merge identity (spec 2026-08-05, Task 3) --------
@@ -945,9 +1261,16 @@ source = "operator grant""#,
     .expect("fixture parses");
     let merged = merge(base, mine);
     assert!(
-        merged.tool.iter().any(|t| t.server.as_deref() == Some("mcp__p_s")),
+        merged
+            .tool
+            .iter()
+            .any(|t| t.server.as_deref() == Some("mcp__p_s")),
         "the server entry vanished from the merge: {:?}",
-        merged.tool.iter().map(|t| (&t.match_names, &t.server)).collect::<Vec<_>>()
+        merged
+            .tool
+            .iter()
+            .map(|t| (&t.match_names, &t.server))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -963,22 +1286,43 @@ server = "mcp__p_s"
 action = "deny"
 "#);
     let merged = merge(base, mine);
-    let matches: Vec<&Tool> = merged.tool.iter().filter(|t| t.server.as_deref() == Some("mcp__p_s")).collect();
-    assert_eq!(matches.len(), 1, "expected one merged server entry, got {:?}", matches);
-    assert_eq!(matches[0].source, "shipped", "source was overwritten by the operator's silence");
-    assert_eq!(matches[0].action, Some(Action::Deny), "the operator's action did not win");
+    let matches: Vec<&Tool> = merged
+        .tool
+        .iter()
+        .filter(|t| t.server.as_deref() == Some("mcp__p_s"))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected one merged server entry, got {:?}",
+        matches
+    );
+    assert_eq!(
+        matches[0].source, "shipped",
+        "source was overwritten by the operator's silence"
+    );
+    assert_eq!(
+        matches[0].action,
+        Some(Action::Deny),
+        "the operator's action did not win"
+    );
 }
 
 #[test]
 fn tool_snippet_absent_keeps_shipped_snippet() {
-    let base = kb(
-        "[[tool]]\nmatch = [\"Bash\"]\nsource = \"shipped\"\n\n\
-         [[tool.snippet]]\nfield = \"command\"\nlanguage = \"bash\"\n",
-    );
+    let base = kb("[[tool]]\nmatch = [\"Bash\"]\nsource = \"shipped\"\n\n\
+         [[tool.snippet]]\nfield = \"command\"\nlanguage = \"bash\"\n");
     let mine = kb("[[tool]]\nmatch = [\"Bash\"]\nsource = \"mine\"\n");
     let merged = merge(base, mine);
-    let t = merged.tool.iter().find(|t| t.match_names.iter().any(|n| n == "Bash")).expect("tool entry");
-    assert!(t.snippet.is_some(), "the shipped snippet was dropped by an operator entry that never mentioned it");
+    let t = merged
+        .tool
+        .iter()
+        .find(|t| t.match_names.iter().any(|n| n == "Bash"))
+        .expect("tool entry");
+    assert!(
+        t.snippet.is_some(),
+        "the shipped snippet was dropped by an operator entry that never mentioned it"
+    );
     let snippet = t.snippet.as_ref().unwrap();
     assert_eq!(snippet.len(), 1);
     assert_eq!(snippet[0].field, "command");
@@ -992,15 +1336,11 @@ fn tool_snippet_present_replaces_the_shipped_list_whole() {
     // fields, not patching one entry into the shipped list. Two shipped
     // fields ("a", "b") plus one operator field ("c") must land as exactly
     // ["c"] - not a union, not an append.
-    let base = kb(
-        "[[tool]]\nmatch = [\"t\"]\nsource = \"shipped\"\n\n\
+    let base = kb("[[tool]]\nmatch = [\"t\"]\nsource = \"shipped\"\n\n\
          [[tool.snippet]]\nfield = \"a\"\nlanguage = \"bash\"\n\n\
-         [[tool.snippet]]\nfield = \"b\"\nlanguage = \"bash\"\n",
-    );
-    let mine = kb(
-        "[[tool]]\nmatch = [\"t\"]\nsource = \"mine\"\n\n\
-         [[tool.snippet]]\nfield = \"c\"\nlanguage = \"python\"\n",
-    );
+         [[tool.snippet]]\nfield = \"b\"\nlanguage = \"bash\"\n");
+    let mine = kb("[[tool]]\nmatch = [\"t\"]\nsource = \"mine\"\n\n\
+         [[tool.snippet]]\nfield = \"c\"\nlanguage = \"python\"\n");
     let merged = merge(base, mine);
     let t = tool_entry(&merged, "t").expect("tool entry");
     let snippet = t.snippet.as_ref().expect("snippet did not arrive");
@@ -1015,18 +1355,49 @@ fn tool_snippet_present_replaces_the_shipped_list_whole() {
 
 #[test]
 fn write_path_field_and_cwd_from_call_present_replace_the_shipped_values() {
-    let base = kb(
-        "[[tool]]\nmatch = [\"t\"]\nsource = \"shipped\"\n\
-         write_path_field = \"old\"\ncwd_from_call = false\n",
-    );
-    let mine = kb(
-        "[[tool]]\nmatch = [\"t\"]\nsource = \"mine\"\n\
-         write_path_field = \"new\"\ncwd_from_call = true\n",
-    );
+    let base = kb("[[tool]]\nmatch = [\"t\"]\nsource = \"shipped\"\n\
+         write_path_field = \"old\"\ncwd_from_call = false\n");
+    let mine = kb("[[tool]]\nmatch = [\"t\"]\nsource = \"mine\"\n\
+         write_path_field = \"new\"\ncwd_from_call = true\n");
     let merged = merge(base, mine);
     let t = tool_entry(&merged, "t").expect("tool entry");
-    assert_eq!(t.write_path_field.as_deref(), Some("new"), "write_path_field was not replaced");
-    assert_eq!(t.cwd_from_call, Some(true), "cwd_from_call was not replaced");
+    assert_eq!(
+        t.write_path_field.as_deref(),
+        Some("new"),
+        "write_path_field was not replaced"
+    );
+    assert_eq!(
+        t.cwd_from_call,
+        Some(true),
+        "cwd_from_call was not replaced"
+    );
+}
+
+#[test]
+fn legacy_and_structured_write_path_overlays_replace_each_other_as_one_field_family() {
+    let structured_base = kb("[[tool]]\nmatch = [\"t\"]\nsource = \"shipped\"\n\
+         [[tool.write_path]]\nfield = \"patch\"\nformat = \"apply_patch\"\n");
+    let legacy_mine =
+        kb("[[tool]]\nmatch = [\"t\"]\nsource = \"mine\"\nwrite_path_field = \"path\"\n");
+    let merged = merge(structured_base, legacy_mine);
+    let t = tool_entry(&merged, "t").expect("tool entry");
+    assert_eq!(t.write_path_field.as_deref(), Some("path"));
+    assert!(
+        t.write_path.is_none(),
+        "the replaced structured declaration survived"
+    );
+
+    let legacy_base =
+        kb("[[tool]]\nmatch = [\"t\"]\nsource = \"shipped\"\nwrite_path_field = \"path\"\n");
+    let structured_mine = kb("[[tool]]\nmatch = [\"t\"]\nsource = \"mine\"\n\
+         [[tool.write_path]]\nfield = \"patch\"\nformat = \"apply_patch\"\n");
+    let merged = merge(legacy_base, structured_mine);
+    let t = tool_entry(&merged, "t").expect("tool entry");
+    assert!(
+        t.write_path_field.is_none(),
+        "the replaced legacy declaration survived"
+    );
+    assert_eq!(t.write_path.as_ref().unwrap()[0].field, "patch");
 }
 
 #[test]
@@ -1050,32 +1421,67 @@ fn overlay_is_exhaustive_over_every_tool_field() {
             language_from: None,
             language_values: None,
         }]),
-        write_path_field: Some("path".to_string()),
+        write_path_field: None,
+        write_path: Some(vec![ToolWritePath {
+            field: "patch".to_string(),
+            format: ToolWritePathFormat::ApplyPatch,
+        }]),
         cwd_from_call: Some(true),
         server: None,
         merge_names: Vec::new(),
     };
-    let base = Tool { match_names: vec!["t".to_string()], ..Default::default() };
+    let base = Tool {
+        match_names: vec!["t".to_string()],
+        ..Default::default()
+    };
     let merged = merge(
-        Knowledge { version: None, program: vec![], tool: vec![base], env_name: vec![] },
-        Knowledge { version: None, program: vec![], tool: vec![mine], env_name: vec![] },
+        Knowledge {
+            version: None,
+            program: vec![],
+            tool: vec![base],
+            env_name: vec![],
+        },
+        Knowledge {
+            version: None,
+            program: vec![],
+            tool: vec![mine],
+            env_name: vec![],
+        },
     );
     let t = tool_entry(&merged, "t").expect("t entry");
 
-    assert_eq!(t.match_names, vec!["t".to_string()], "match_names must not be extended by an overlay");
+    assert_eq!(
+        t.match_names,
+        vec!["t".to_string()],
+        "match_names must not be extended by an overlay"
+    );
     assert_eq!(t.source, "requested: mine", "source did not arrive");
     assert_eq!(t.action, Some(Action::Deny), "action did not arrive");
     let snippet = t.snippet.as_ref().expect("snippet did not arrive");
-    assert_eq!(snippet.len(), 1, "snippet did not arrive: {:?}", snippet.iter().map(|p| &p.field).collect::<Vec<_>>());
+    assert_eq!(
+        snippet.len(),
+        1,
+        "snippet did not arrive: {:?}",
+        snippet.iter().map(|p| &p.field).collect::<Vec<_>>()
+    );
     assert_eq!(snippet[0].field, "code");
     assert_eq!(snippet[0].language.as_deref(), Some("python"));
-    assert_eq!(t.write_path_field.as_deref(), Some("path"), "write_path_field did not arrive");
+    assert!(
+        t.write_path_field.is_none(),
+        "write_path_field should remain absent"
+    );
+    let write_path = t.write_path.as_ref().expect("write_path did not arrive");
+    assert_eq!(write_path[0].field, "patch");
+    assert_eq!(write_path[0].format, ToolWritePathFormat::ApplyPatch);
     assert_eq!(t.cwd_from_call, Some(true), "cwd_from_call did not arrive");
     // `server` is identity, not a claim to lay - `mine.server` here is `None`
     // by construction (a match entry), so this only confirms `overlay_tool`
     // never touches it; the merge identity discipline itself is exercised by
     // the server-entry tests below.
-    assert!(t.server.is_none(), "server must be left alone by the overlay");
+    assert!(
+        t.server.is_none(),
+        "server must be left alone by the overlay"
+    );
 }
 
 // --- the overlay matrix, pinned cell by cell (spec 2026-08-20 §3, Task 2) --
@@ -1094,7 +1500,11 @@ fn a_verb_list_laid_over_a_whole_program_entry_does_not_narrow_it() {
     let base = kb("[[program]]\nmatch = [\"zz\"]\n");
     let mine = kb("[[program]]\nmatch = [\"zz\"]\nsubcommands = [\"go\"]\n");
     let merged = merge(base, mine);
-    assert_eq!(prog(&merged, "zz").subcommands, None, "a verb list narrowed a shipped whole-program entry");
+    assert_eq!(
+        prog(&merged, "zz").subcommands,
+        None,
+        "a verb list narrowed a shipped whole-program entry"
+    );
 }
 
 #[test]
@@ -1106,8 +1516,15 @@ fn an_explicit_empty_list_laid_over_a_whole_program_entry_does_not_narrow_it() {
     );
     let merged = merge(base, mine);
     let p = prog(&merged, "zz");
-    assert_eq!(p.subcommands, None, "an explicit empty list narrowed a shipped whole-program entry");
-    assert_eq!(p.standalone_flags, vec!["--v".to_string()], "the field-replace clause did not still land");
+    assert_eq!(
+        p.subcommands, None,
+        "an explicit empty list narrowed a shipped whole-program entry"
+    );
+    assert_eq!(
+        p.standalone_flags,
+        vec!["--v".to_string()],
+        "the field-replace clause did not still land"
+    );
 }
 
 #[test]
@@ -1176,9 +1593,16 @@ fn the_scope_split_carries_standalone_flags_without_leaking() {
     );
     let merged = merge(base, mine);
     let bash = entry_for(&merged, "zz", "bash").expect("bash-scoped zz entry");
-    assert_eq!(bash.standalone_flags, vec!["--v".to_string()], "standalone_flags did not arrive on the scoped side");
+    assert_eq!(
+        bash.standalone_flags,
+        vec!["--v".to_string()],
+        "standalone_flags did not arrive on the scoped side"
+    );
     let ps = entry_for(&merged, "zz", "powershell").expect("powershell remainder of zz was lost");
-    assert!(ps.standalone_flags.is_empty(), "mine's standalone_flags leaked into the scope mine never addressed");
+    assert!(
+        ps.standalone_flags.is_empty(),
+        "mine's standalone_flags leaked into the scope mine never addressed"
+    );
 }
 
 #[test]

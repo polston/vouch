@@ -1,4 +1,4 @@
-use vouch::protocol::{parse_input, render, Decision};
+use vouch::protocol::{parse_input, render, render_for, Decision, Host};
 
 #[test]
 fn parses_a_real_bash_snippet() {
@@ -62,4 +62,37 @@ fn typed_fields_still_deserialize() {
     let input = parse_input(raw).unwrap();
     assert_eq!(input.tool_input.command.as_deref(), Some("ls"));
     assert!(input.tool_input.extra.is_empty());
+}
+
+#[test]
+fn codex_allow_emits_nothing_and_never_weakens_its_native_gate() {
+    assert_eq!(render_for(Host::Codex, &Decision::Allow("known read".into())), None);
+}
+
+#[test]
+fn codex_ask_is_a_block_not_the_unsupported_ask_shape() {
+    let out = render_for(Host::Codex, &Decision::Ask("request approval id: abc".into()))
+        .expect("Codex Ask must block the first attempt");
+    let body: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(body["hookSpecificOutput"]["permissionDecision"], "deny");
+    assert_eq!(
+        body["hookSpecificOutput"]["permissionDecisionReason"],
+        "request approval id: abc"
+    );
+    assert!(!out.contains(r#""permissionDecision":"ask""#));
+}
+
+#[test]
+fn codex_deny_uses_the_supported_block_shape() {
+    let out = render_for(Host::Codex, &Decision::Deny("blocked".into())).unwrap();
+    assert!(out.contains(r#""permissionDecision":"deny""#));
+}
+
+#[test]
+fn codex_turn_id_is_preserved_for_exact_retry_scoping() {
+    let input = parse_input(
+        r#"{"session_id":"s","turn_id":"t","tool_name":"Bash","tool_input":{"command":"ls"}}"#,
+    )
+    .unwrap();
+    assert_eq!(input.turn_id, "t");
 }

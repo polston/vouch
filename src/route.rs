@@ -24,7 +24,7 @@
 
 use crate::config::{Action, Config, ToolReason};
 use crate::engine::{decide_command_at, decide_command_in_unknown_dir, decide_file};
-use crate::guards::{Knowledge, Tool};
+use crate::guards::{Knowledge, Tool, ToolWritePathFormat};
 use crate::snippet::Extracted;
 use crate::protocol::{Decision, HookInput, ToolInput};
 use serde_json::{Map, Value};
@@ -110,7 +110,9 @@ fn decide_tool(
     //    `ConfigGovernsOthers`. Without that exemption, naming one MCP tool in
     //    config would flip every declared tool — every bash command on the
     //    machine, once Task 8 makes `Bash` an entry — to ask.
-    let declared = entry.filter(|e| e.snippet.is_some() || e.write_path_field.is_some());
+    let declared = entry.filter(|e| {
+        e.snippet.is_some() || e.write_path_field.is_some() || e.write_path.is_some()
+    });
     let Some(declared) = declared else {
         // 3. and 4.: an entry with nothing declared, or no entry at all. The
         //    existing branches decide, UNCHANGED — the entry's own `action`
@@ -227,6 +229,19 @@ fn decide_declared(
 
     if let Some(field) = &entry.write_path_field {
         worst = worse(worst, decide_write_field(cfg, home, root, cwd, tool, field, &fields));
+    }
+    if let Some(paths) = &entry.write_path {
+        for path in paths {
+            let decision = match path.format {
+                ToolWritePathFormat::Scalar => {
+                    decide_write_field(cfg, home, root, cwd, tool, &path.field, &fields)
+                }
+                ToolWritePathFormat::ApplyPatch => {
+                    decide_apply_patch_field(cfg, home, root, cwd, tool, &path.field, &fields)
+                }
+            };
+            worst = worse(worst, decision);
+        }
     }
 
     // Ask is the empty fold's identity (spec §Schema rule 5): a declaration
@@ -356,6 +371,86 @@ fn decide_write_field(
             blanket(tool)
         )),
     }
+}
+
+fn decide_apply_patch_field(
+    cfg: &Config,
+    home: &str,
+    root: Option<&str>,
+    cwd: Option<&str>,
+    tool: &str,
+    field: &str,
+    fields: &Map<String, Value>,
+) -> Decision {
+    let patch = match fields.get(field) {
+        Some(Value::String(value)) if !value.trim().is_empty() => value,
+        _ => {
+            return Decision::Ask(format!(
+                "vouch stopped on: apply_patch\n  tool: {tool}\n  field: {field}\n  vouch could not read a non-empty patch envelope from this field{}",
+                blanket(tool)
+            ));
+        }
+    };
+    let lines: Vec<&str> = patch.lines().collect();
+    if lines.first().map(|line| line.trim_end()) != Some("*** Begin Patch")
+        || lines.last().map(|line| line.trim_end()) != Some("*** End Patch")
+    {
+        return Decision::Ask(format!(
+            "vouch stopped on: apply_patch\n  tool: {tool}\n  field: {field}\n  vouch could not parse a complete Begin Patch / End Patch envelope{}",
+            blanket(tool)
+        ));
+    }
+
+    let mut targets = Vec::new();
+    for line in &lines[1..lines.len() - 1] {
+        let mut recognized = false;
+        for prefix in [
+            "*** Add File: ",
+            "*** Update File: ",
+            "*** Delete File: ",
+            "*** Move to: ",
+        ] {
+            if let Some(path) = line.strip_prefix(prefix) {
+                recognized = true;
+                let path = path.trim();
+                if path.is_empty() {
+                    return Decision::Ask(format!(
+                        "vouch stopped on: apply_patch\n  tool: {tool}\n  field: {field}\n  vouch could not read a path after {prefix:?}{}",
+                        blanket(tool)
+                    ));
+                }
+                targets.push(path.to_string());
+            }
+        }
+        if line.starts_with("*** ") && !recognized && *line != "*** End of File" {
+            return Decision::Ask(format!(
+                "vouch stopped on: apply_patch\n  tool: {tool}\n  field: {field}\n  vouch could not parse patch directive {line:?}{}",
+                blanket(tool)
+            ));
+        }
+    }
+    if targets.is_empty() {
+        return Decision::Ask(format!(
+            "vouch stopped on: apply_patch\n  tool: {tool}\n  field: {field}\n  vouch could not find any add, update, delete, or move path in the patch{}",
+            blanket(tool)
+        ));
+    }
+
+    let mut worst = None;
+    for target in targets {
+        let mut one = Map::new();
+        one.insert(field.to_string(), Value::String(target));
+        worst = worse(
+            worst,
+            decide_write_field(cfg, home, root, cwd, tool, field, &one),
+        );
+    }
+    worst.unwrap_or_else(|| {
+        Decision::Ask(format!(
+            "vouch stopped on: apply_patch\n  tool: {tool}\n  vouch could not decide the patch paths{}",
+            blanket(tool)
+        ))
+    })
 }
 
 /// A snippet in a language vouch has no scanner for. It recognises the tool

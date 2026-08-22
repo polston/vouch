@@ -1,0 +1,20 @@
+{
+  "name": "vouch",
+  "interface": {
+    "displayName": "Vouch"
+  },
+  "plugins": [
+    {
+      "name": "vouch",
+      "source": {
+        "source": "local",
+        "path": "./plugin"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}
