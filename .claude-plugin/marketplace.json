@@ -1,14 +1,21 @@
 {
   "name": "vouch",
   "description": "The vouch permission gate's own marketplace: one plugin carrying its skills and setup command.",
-  "owner": { "name": "vouch" },
+  "owner": {
+    "name": "vouch"
+  },
   "plugins": [
     {
       "name": "vouch",
       "source": "./plugin",
       "description": "Skills for running vouch as your Claude Code permission gate: evidence-first setup, safe program recognition, session procedures, and private-data removal.",
-      "version": "0.1.0",
-      "keywords": ["permissions", "security", "hooks", "allow-list"]
+      "version": "0.2.0",
+      "keywords": [
+        "permissions",
+        "security",
+        "hooks",
+        "allow-list"
+      ]
     }
   ]
 }

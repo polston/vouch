@@ -133,7 +133,17 @@ fn a_symlink_into_the_wall_is_caught_by_its_real_path() {
         return;
     }
 
-    let real_glob = format!("{}/**", real_dir.to_string_lossy().replace('\\', "/"));
+    // The glob is built from the RESOLVED spelling of the real directory,
+    // which is what an operator writes — not from whatever spelling
+    // temp_dir() happens to return. On the Windows CI runner that spelling
+    // is an 8.3 short name (RUNNER~1), so an unresolved glob can never match
+    // the long form the engine resolves the alias to, and the assertion
+    // failed there on this test's first-ever run with symlink privileges —
+    // local non-admin Windows had always taken the skip path above.
+    let real_glob = format!(
+        "{}/**",
+        vouch::paths::resolve_links(&real_dir.to_string_lossy().replace('\\', "/"))
+    );
     let cfg = cfg_with(&format!("[write]\ndefault = \"allow\"\nask_paths = [\"{real_glob}\"]"));
     let target = alias_dir.join("f.txt").to_string_lossy().replace('\\', "/");
     let d = vouch::engine::decide_file(&cfg, "C:/Users/dev", None, &target);

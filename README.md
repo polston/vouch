@@ -237,6 +237,10 @@ the same skill under two different names.
 
 ### Releases
 
+Version numbers and `CHANGELOG.md` are generated from conventional commit
+subjects; each release lands as one reviewed change, and the tag that follows
+triggers the build workflow to attach the binaries.
+
 There is no tagged release yet, so today the binary is built from source.
 When there is one, `gh release download` fetches a per-platform archive holding
 the binary, `knowledge.toml`, and `vouch.example.toml` from a single commit,

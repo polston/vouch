@@ -258,15 +258,15 @@ fn a_project_root_place_scope_cannot_apply_when_there_is_no_project_root() {
         "[[program]]\nmatch = [\"probe-tool\"]\nonly_under = [\"$PROJECT_ROOT/**\"]\n",
     )
     .unwrap();
-    assert!(!vouch::guards::recognises_at(&kb, &probe(), "bash", at(Some("C:/git/vouch/src")), true));
+    assert!(!vouch::guards::recognises_at(&kb, &probe(), "bash", at(Some("C:/git/vouch-dev/src")), true));
     assert!(vouch::guards::recognises_at(
         &kb,
         &probe(),
         "bash",
         vouch::guards::RecognitionPlace {
-            dir: Some("C:/git/vouch/src"),
+            dir: Some("C:/git/vouch-dev/src"),
             home: "C:/Users/dev",
-            project_root: Some("C:/git/vouch"),
+            project_root: Some("C:/git/vouch-dev"),
         },
         true
     ));
@@ -280,8 +280,8 @@ fn expand_pattern_resolves_home_and_project_root() {
     assert_eq!(expand_pattern("~/x", "C:/Users/dev", None).as_deref(), Some("C:/Users/dev/x"));
     assert_eq!(expand_pattern("$PROJECT_ROOT/x", "C:/Users/dev", None), None);
     assert_eq!(
-        expand_pattern("$PROJECT_ROOT/x", "C:/Users/dev", Some("C:/git/vouch")).as_deref(),
-        Some("C:/git/vouch/x")
+        expand_pattern("$PROJECT_ROOT/x", "C:/Users/dev", Some("C:/git/vouch-dev")).as_deref(),
+        Some("C:/git/vouch-dev/x")
     );
 }
 
