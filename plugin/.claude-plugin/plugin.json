@@ -1,7 +1,9 @@
 {
   "name": "vouch",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "An allow-list permission gate for Claude Code: every tool call is judged against declared knowledge of what programs do, and every prompt names the setting that turns it off.",
-  "author": { "name": "vouch" },
+  "author": {
+    "name": "vouch"
+  },
   "license": "WTFPL"
 }

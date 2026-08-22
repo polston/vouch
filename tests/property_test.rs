@@ -432,7 +432,7 @@ const PROBES: &[(&str, &str)] = &[
     ("D:/inbox/sub", "ls -la"),
     ("C:/work", "cd a || cd b; ls -la"),
     // guard override, on a proven place and an unprovable one
-    ("C:/git/vouch", "rm -rf build"),
+    ("C:/git/vouch-dev", "rm -rf build"),
     ("C:/work", "cd a || cd b; rm -rf build"),
     ("C:/scratch/j", "rm -rf build"),
     // the write wall, both lists
@@ -475,10 +475,10 @@ fn every_place_derived_prompt_names_a_setting_that_turns_it_off() {
     // `place_recognition_test.rs` pin instead.
     //
     //   C:/scratch/j  - inside the trust zone and the LOOSER guard override
-    //   C:/git/vouch  - inside the STRICTER guard override, outside both zones
+    //   C:/git/vouch-dev  - inside the STRICTER guard override, outside both zones
     let cfg = place_config(true);
     for (name, rows) in common::all() {
-        for place in ["C:/scratch/j", "C:/git/vouch"] {
+        for place in ["C:/scratch/j", "C:/git/vouch-dev"] {
             let (mut unfixable, mut place_derived) = (Vec::new(), 0usize);
             for row in &rows {
                 let reason = match decide_command_at(

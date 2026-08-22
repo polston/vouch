@@ -3245,7 +3245,7 @@ fn cd_timeline(
         // Stated absolutely? Read from the same candidate walk the
         // destination itself came from, never from the composed result — a
         // composed path and an absolute one that happens to sit under it are
-        // the same text ("C:/git" then "C:/git/vouch"), and only the walk
+        // the same text ("C:/git" then "C:/git/vouch-dev"), and only the walk
         // knows which was written.
         let independent = matches!(
             &cands,

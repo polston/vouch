@@ -39,8 +39,20 @@ pub struct RouteOutcome {
 }
 
 /// Walks up from `cwd` looking for a repository root.
+///
+/// A cwd that is not absolute ON THIS PLATFORM names nothing walkable: the
+/// walk would pop down to an empty path, and an empty path joins to a bare
+/// relative `.git` — which `exists()` answers against the PROCESS's own
+/// working directory, borrowing the runner's filesystem as evidence (the
+/// M2.47 class). That is how a Windows-shaped test cwd, relative on Linux,
+/// made the suite's first-ever ubuntu run find the checkout's own `.git` and
+/// report a project root for a directory that does not exist. A real hook
+/// cwd is always absolute; anything else gets `None`, the fail-closed answer.
 pub fn project_root(cwd: &str) -> Option<String> {
     let mut dir = std::path::PathBuf::from(cwd.replace('\\', "/"));
+    if !dir.is_absolute() {
+        return None;
+    }
     loop {
         if dir.join(".git").exists() {
             return Some(dir.to_string_lossy().replace('\\', "/"));

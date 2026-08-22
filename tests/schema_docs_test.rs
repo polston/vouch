@@ -1,9 +1,10 @@
-//! Generated schema docs: `docs/reference/config-schema.json`,
+//! Documents asserted against code. `docs/reference/config-schema.json`,
 //! `docs/reference/knowledge-schema.json` and `docs/reference/reference.md`
 //! are committed artifacts generated from the same structs the config and
-//! knowledge loaders actually read (`vouch::cli::generate_schema_docs`).
+//! knowledge loaders actually read (`vouch::cli::generate_schema_docs`), and
+//! two more tests hold the release-flow invariants to the same standard.
 //!
-//! Two independent gates:
+//! Four independent gates:
 //!   1. the committed files must match what the structs generate RIGHT NOW —
 //!      otherwise the reference page is describing a shape the loader no
 //!      longer accepts, or has stopped accepting a shape it still does.
@@ -11,6 +12,13 @@
 //!      trip — an omission there is exactly how `evaluated_input` went
 //!      undocumented long enough for an inheritance surprise to hide behind
 //!      it (CLAUDE.md, this task's own reason for existing).
+//!   3. the four version fields release-please drives from one commit —
+//!      `Cargo.toml`, this package's `Cargo.lock` entry,
+//!      `plugin/.claude-plugin/plugin.json`, and the marketplace entry —
+//!      agree with each other.
+//!   4. the tracked `CHANGELOG.md` carries no forge remnant (a link or a
+//!      commit id) that would name this private repository or point at a
+//!      commit the public mirror does not have.
 
 /// `core.autocrlf` on a Windows checkout rewrites a committed LF file to
 /// CRLF on disk; the generator always emits LF. Normalizing before compare
@@ -111,4 +119,97 @@ fn every_known_construct_is_documented_in_the_example_config() {
         missing.is_empty(),
         "vouch.example.toml does not set these constructs as their own key: {missing:?}"
     );
+}
+
+/// The version lives in four published files. release-please writes all four in
+/// one commit, so they cannot drift while that holds — this fails loudly if it
+/// stops holding, or if someone edits one by hand.
+///
+/// It asserts AGREEMENT, never a particular value, which is what makes it true
+/// in the public mirror as well: `tests/` publishes wholesale.
+#[test]
+fn the_four_version_fields_agree() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+    let cargo: toml::Value =
+        toml::from_str(&std::fs::read_to_string(root.join("Cargo.toml")).unwrap()).unwrap();
+    let from_cargo = cargo["package"]["version"].as_str().unwrap().to_string();
+
+    let lock: toml::Value =
+        toml::from_str(&std::fs::read_to_string(root.join("Cargo.lock")).unwrap()).unwrap();
+    let from_lock = lock["package"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"].as_str() == Some("vouch"))
+        .expect("Cargo.lock has no entry named vouch")["version"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let plugin: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join("plugin/.claude-plugin/plugin.json")).unwrap(),
+    )
+    .unwrap();
+    let from_plugin = plugin["version"].as_str().unwrap().to_string();
+
+    let market: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join(".claude-plugin/marketplace.json")).unwrap(),
+    )
+    .unwrap();
+    let from_market = market["plugins"][0]["version"].as_str().unwrap().to_string();
+
+    assert_eq!(
+        from_cargo, from_lock,
+        "Cargo.toml says {from_cargo}, Cargo.lock's vouch entry says {from_lock}"
+    );
+    assert_eq!(
+        from_cargo, from_plugin,
+        "Cargo.toml says {from_cargo}, plugin.json says {from_plugin}"
+    );
+    assert_eq!(
+        from_cargo, from_market,
+        "Cargo.toml says {from_cargo}, marketplace.json says {from_market}"
+    );
+}
+
+/// A tracked changelog must read as plain prose: no URL, no markdown link, no
+/// parenthesised commit-id or PR-number remnant. This file is published, and a
+/// remnant is a repository identifier wearing plain text. It is generated
+/// upstream of every local hook, so this test is the only thing watching.
+#[test]
+fn a_tracked_changelog_carries_no_forge_remnant() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("CHANGELOG.md");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return; // no changelog yet; nothing to check
+    };
+    for (i, line) in text.lines().enumerate() {
+        let n = i + 1;
+        assert!(!line.contains("http"), "CHANGELOG.md line {n} carries a URL");
+        assert!(!line.contains("]("), "CHANGELOG.md line {n} carries a markdown link");
+        // A parenthesised token of 7-40 hex chars, or (#123), is a commit or
+        // PR identifier the strip step failed to remove. The hex candidate must
+        // mix digits and letters — a real commit id does; an all-digit date or
+        // an all-letter word that happens to live in a-f does not, and both are
+        // reachable in ordinary changelog prose.
+        let mut rest = line;
+        while let Some(open) = rest.find('(') {
+            let inner = &rest[open + 1..];
+            let close = inner.find(')').unwrap_or(inner.len());
+            let raw = inner[..close].trim();
+            let tok = raw.trim_start_matches('#');
+            let hexish = (7..=40).contains(&tok.len())
+                && !tok.is_empty()
+                && tok.chars().all(|c| c.is_ascii_hexdigit())
+                && tok.chars().any(|c| c.is_ascii_digit())
+                && tok.chars().any(|c| c.is_ascii_alphabetic());
+            let prnum = raw.starts_with('#') && !tok.is_empty()
+                && tok.chars().all(|c| c.is_ascii_digit());
+            assert!(
+                !hexish && !prnum,
+                "CHANGELOG.md line {n} carries a commit-id or PR-number remnant"
+            );
+            rest = &inner[(close + 1).min(inner.len())..];
+        }
+    }
 }

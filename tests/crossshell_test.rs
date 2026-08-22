@@ -92,7 +92,7 @@ fn reading_through_another_shell_is_still_reading() {
     // it never reads, which is the honest cost of the invariant (§5.2.2),
     // not a regression specific to this shape.
     assert_asks("cmd /c dir");
-    assert_allows(r#"pwsh -NoProfile -Command "Get-Content C:/git/vouch/knowledge.toml""#);
+    assert_allows(r#"pwsh -NoProfile -Command "Get-Content C:/git/vouch-dev/knowledge.toml""#);
     assert_allows("wsl ls /mnt/c/work");
 }
 

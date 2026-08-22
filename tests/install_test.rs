@@ -14,14 +14,14 @@ const EXISTING: &str = r#"{
 
 #[test]
 fn shadow_leaves_the_existing_gate_in_charge() {
-    let p = plan(EXISTING, "C:/git/vouch/vouch.exe", true).unwrap();
+    let p = plan(EXISTING, "C:/git/vouch-dev/vouch.exe", true).unwrap();
     assert!(p.settings.contains("cc-allow.exe --hook"), "existing gate removed: {}", p.settings);
     assert!(p.settings.contains("vouch.exe --hook --shadow"));
 }
 
 #[test]
 fn live_replaces_the_existing_gate() {
-    let p = plan(EXISTING, "C:/git/vouch/vouch.exe", false).unwrap();
+    let p = plan(EXISTING, "C:/git/vouch-dev/vouch.exe", false).unwrap();
     let pre = p.settings.split("\"PreToolUse\"").nth(1).unwrap_or("");
     let pre = pre.split(']').next().unwrap_or("");
     assert!(!pre.contains("cc-allow"), "cc-allow still in PreToolUse: {pre}");

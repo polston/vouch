@@ -103,7 +103,26 @@ Run from the vouch checkout root; every path below is relative to it.
    a quoted here-document, and read back what was actually written.
 
 4. **Merge + push** (fast-forward), then `git push origin master` — only after
-   the operator's explicit approval.
+   the operator's explicit approval. The push goes to the private development
+   remote; the public repository never receives dev history.
+
+4a. **Publishing, when the changeset touches published files.** Landing does
+   not publish; publishing is its own act, and it is the operator's:
+   1. If release-please opened a version pull request here on the step 4
+      push, merge it first — the mirror only picks up the new version once
+      this repository's own version fields carry it.
+   2. Dry run: `bash scripts/publish-mirror.sh <public-clone>` with no flag —
+      read the scan result and the diffstat.
+   3. `--push` — pushes a `publish/*` branch and opens a pull request in the
+      mirror. Nothing has reached its master yet.
+   4. The operator merges that pull request.
+   5. `--verify` — proves the merge landed exactly what was published; refuses
+      naming the differing paths if not.
+   6. `--tag` — re-runs the verify itself, then tags the mirror, which starts
+      the build. A cycle of only docs/test/refactor/chore commits has no new
+      version to tag; that refusal is an ordinary idle cycle, not a failure —
+      or the version pull request release-please opened here has not been
+      merged yet, in which case merge it and publish again before tagging.
 
 5. **Landing turn, same session.** The new binary HARD-REFUSES the old config
    and knowledge spellings (whole file → the gate recognises nothing and fails
