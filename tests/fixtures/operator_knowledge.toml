@@ -1,0 +1,60 @@
+# An operator-shaped `my-knowledge`, exercising the keys the SHIPPED knowledge
+# never uses.
+#
+# Committed because a whole class of question is otherwise unaskable (#8,
+# ROADMAP M2.144). `knowledge.toml` contains ZERO `[[program]]` entries using
+# `subcommands` and ZERO using `all_subcommands`, so any count of either shape
+# over the shipped file returns 0 out of 0 candidates — and a zero out of zero
+# reads exactly like "this shape does not happen", which is the deny-list error
+# mode §1 names, living in the measurement layer instead of the engine.
+#
+# What it is FOR: giving a test or a measurement about operator-side shapes
+# something honest to run against. The shapes that matter here are the ones an
+# operator's file routinely has and the shipped file never does — verb-scoped
+# recognition, whole-program recognition, and rules keyed on a verb or on a
+# verb's second word.
+#
+# What it is NOT: a copy of anyone's real file, ever. Every name below is
+# invented, and the rules exist to be matched against, not because these
+# programs exist. The rule at the top of `CLAUDE.md` applies to this file with
+# no exception — a fixture that starts mirroring a real machine is the same
+# leak as a harvested corpus, arriving through a file nobody thinks to check.
+#
+# No `version` key on purpose. It carried one until 2026-08-20 and went stale
+# the same day, because the schema moved to 8 while this file said 7 — and
+# nothing noticed, since `guards::load` does not check it. A number nobody
+# reads and nothing verifies is a claim that rots silently.
+
+# Whole-program recognition plus a rule naming the verbs that must never run —
+# the shape a third-party tool ships to stop a model forging a decision. This
+# is the shape measured at 27 verbs on a real integration (#3), reduced to
+# three invented ones.
+[[program]]
+match = ["widget"]
+case_sensitive_flags = true
+all_subcommands = true
+
+[[program.rule]]
+guard = "process_control"
+source = "declared: invented fixture rule, for tests only"
+subcommand_in = ["approve", "ratify", "override"]
+
+# Verb-scoped recognition: the entry covers these verbs and nothing else, which
+# is what `subcommands` is for and what the shipped file never exercises.
+[[program]]
+match = ["gadget"]
+case_sensitive_flags = true
+subcommands = ["status", "list"]
+
+# A rule keyed on the verb's SECOND word, so `sub_arg_0_in` has an operator-side
+# case as well as the shipped `gh pr create|merge` one.
+[[program]]
+match = ["sprocket"]
+case_sensitive_flags = true
+all_subcommands = true
+
+[[program.rule]]
+guard = "publish_outward"
+source = "declared: invented fixture rule, for tests only"
+subcommand_in = ["remote"]
+sub_arg_0_in = ["publish"]

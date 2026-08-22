@@ -991,8 +991,13 @@ fn every_python_prefixed_entry_carries_the_prefix_on_every_match_name() {
 /// matching/merging always compares the full `python:`-prefixed string
 /// (`src/guards.rs`, `src/knowledge.rs`), so a python call head can never be
 /// mistaken for the bare shell entry of the same spelling at runtime. Only
-/// these four are exempted; any OTHER bare-name collision still fails below.
-const DELIBERATE_DUAL_NAMES: &[&str] = &["set", "type", "hash", "exit"];
+/// these are exempted; any OTHER bare-name collision still fails below.
+///
+/// `eval` joined them when the shell builtin was described. Both entries are
+/// real and both make the same claim for the same reason — `python:eval` and
+/// bash's `eval` each take text and execute it — so this is the reviewed
+/// dual-name case the list exists for, not a prefix someone dropped.
+const DELIBERATE_DUAL_NAMES: &[&str] = &["set", "type", "hash", "exit", "eval"];
 
 #[test]
 fn no_python_api_bare_name_collides_with_an_existing_shell_program() {

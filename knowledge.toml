@@ -371,18 +371,44 @@ no_value_options = ["-p"]
 # real operation is invisible. Takes no options of its own (checked against
 # the builtin's own help), so there is no vocabulary to declare.
 #
-# `eval` is NOT described here, and its absence is the decision rather than an
-# oversight (M2.16). It takes text and executes it as shell code, so
-# recognising it as a program would allow the head while the code it runs went
-# unjudged — the exact silent-empty shape §1 forbids. It should ask as
-# `evaluated_input`, naming what vouch cannot see, instead of asking "no
-# description of: eval", which is a false statement about vouch's knowledge.
-# Making it say the true thing is its own work (ROADMAP M2.149), and until
-# then it keeps asking for the wrong reason, which is the safe direction.
+# `eval` is NOT in this entry, and it is not a rest-wrapper: it concatenates
+# its arguments and evaluates the result, so a separator hiding inside one
+# token means a token walk would see a harmless head and miss the real
+# command. It has its own entry below, making the claim that is true of it.
 [[program]]
 match = ["builtin"]
 wraps = "rest"
 case_sensitive_flags = true
+
+# `eval` concatenates its arguments and executes the result as shell code. The
+# code is on the line and its VALUE is not — a variable, a substitution, or
+# text assembled from both — which is what `evaluates_input = "always"` claims,
+# and the same claim `iex` carries for the same shape.
+#
+# Recognition here does NOT allow the head while the code goes unjudged: the
+# construct fires unconditionally, so every eval asks through
+# `lang.<name>.constructs.evaluated_input`, naming its own setting. What it
+# replaces is "no description of: eval" — a false statement about vouch's
+# knowledge, which sent the operator toward describing a program they should
+# not describe instead of at the setting that governs it.
+#
+# Scanning the joined text so a literal, safe eval could be ALLOWED is the
+# better answer and is its own work: it needs unquote-per-token-then-join,
+# because joining raw tokens turns the quotes into live syntax and hides the
+# separator inside a quoted word.
+#
+# Known over-ask, accepted: `"always"` fires whatever the arguments are, so a
+# bare `eval` with no arguments — a genuine no-op, exit 0 — asks too. The
+# `source` entry above does NOT have this shape, because `runs_file` names an
+# operand POSITION and simply is not reached when there is no operand. The
+# difference is in the two fields, not in the care taken; gating `"always"` on
+# non-empty arguments would be a code change, and asking is the safe direction
+# for a shape nobody writes.
+[[program]]
+match = ["eval"]
+languages = ["bash"]
+case_sensitive_flags = true
+evaluates_input = "always"
 
 # Signalling a process. Reserved in KNOWN_GUARDS from the start and unused by
 # any shipped rule until 2026-08-19; the operator granted the guard for this
