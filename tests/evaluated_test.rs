@@ -118,3 +118,54 @@ fn the_prompt_names_a_setting_that_turns_it_off() {
         other => panic!("expected Ask, got {other:?}"),
     }
 }
+
+/// `source x.sh` and `bash x.sh` are the same operation: both execute a file
+/// named on the line whose contents vouch has not read. One asked and one
+/// allowed, so write-then-source was two allowed steps where write-then-bash
+/// was one allowed step and one prompt.
+///
+/// `evaluated_input` is set explicitly rather than left to its donor: with
+/// only `dynamic_command` set, the donor's value decides and these would
+/// assert whatever it happens to say (M2.115).
+#[test]
+fn sourcing_a_file_reaches_the_same_construct_as_running_it() {
+    let cfg = with("evaluated_input = \"ask\"");
+    for cmd in ["source ./x.sh", ". ./x.sh", "bash ./x.sh"] {
+        match decide(&cfg, cmd) {
+            Decision::Ask(r) => assert!(
+                r.contains("evaluated_input"),
+                "{cmd} must name the construct that governs it: {r}"
+            ),
+            other => panic!("{cmd} should ask on evaluated_input, got {other:?}"),
+        }
+    }
+}
+
+/// The claim is about a file the command NAMES. `source` with no operand runs
+/// nothing, and must not be swept up by the entry.
+#[test]
+fn sourcing_nothing_is_not_an_evaluated_input() {
+    let cfg = with("evaluated_input = \"ask\"");
+    assert!(
+        matches!(decide(&cfg, "source"), Decision::Allow(_)),
+        "a bare `source` names no file and runs nothing"
+    );
+}
+
+/// "no description of: eval" was false — vouch knows exactly what eval is. The
+/// verdict was already the safe one; the reason was the defect, and it pointed
+/// the operator at describing a program they should not describe.
+#[test]
+fn eval_names_the_construct_that_governs_it_not_a_missing_description() {
+    let cfg = with("evaluated_input = \"ask\"");
+    match decide(&cfg, "eval \"ls -la\"") {
+        Decision::Ask(r) => {
+            assert!(r.contains("evaluated_input"), "must name its construct: {r}");
+            assert!(
+                !r.contains("unmodeled_command"),
+                "vouch knows what eval is; saying it has no description is false: {r}"
+            );
+        }
+        other => panic!("eval should ask on evaluated_input, got {other:?}"),
+    }
+}

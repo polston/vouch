@@ -273,6 +273,20 @@ pub fn kb_with(mine: &str) -> vouch::guards::Knowledge {
     vouch::knowledge::merge(shipped_kb(), mine)
 }
 
+/// One parsed command, built by hand. Shared for the reason `decision_at` is:
+/// every test binary already includes this module, so the four pre-existing
+/// copies (`guards_test.rs`, `knowledge_merge_test.rs`, `rider_test.rs`,
+/// `standalone_test.rs`) were never necessary — this is the point a fifth copy
+/// should have become a shared one instead.
+pub fn cmd(head: &str, args: &[&str]) -> vouch::syntax::Cmd {
+    vouch::syntax::Cmd {
+        head: head.into(),
+        args: args.iter().map(|s| s.to_string()).collect(),
+        chain: None,
+        prefix_assigns: vec![],
+    }
+}
+
 /// The home a child-process run is judged against — a neutral account name,
 /// never a real login (CLAUDE.md, top).
 pub const HOOK_HOME: &str = "C:/Users/dev";

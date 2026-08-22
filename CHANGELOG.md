@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.0 (2026-08-22)
+
+
+### Features
+
+* eval says what vouch knows about it
+* the public commit message carries the change's own account, and a commit skill teaches the shape
+* the push hook refuses a push that is not built on the remote's live tip
+
+
+### Bug Fixes
+
+* a relative cwd yields no project root, instead of borrowing the process's directory
+* stage first, then scan exactly the index
+* the private-data scanner fails closed on a bad invocation, and stands down the account-name check for git's own identity fields
+* the publish scans what git add -A will commit, not the whole working tree
+* verify discovers a squash-merged publish, and an empty discovery refuses aloud
+
 ## 0.2.0 (2026-08-22)
 
 
