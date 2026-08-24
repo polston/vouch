@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.3 (2026-08-24)
+
+
+### Bug Fixes
+
+* compare Windows directories by identity
+
 ## 0.3.2 (2026-08-24)
 
 
