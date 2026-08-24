@@ -1,6 +1,6 @@
 {
   "name": "vouch",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Skills for installing and operating the vouch allow-list permission gate with Codex and Claude Code.",
   "author": {
     "name": "vouch"

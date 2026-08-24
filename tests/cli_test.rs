@@ -750,17 +750,18 @@ fn explain_without_cwd_flag_judges_from_the_process_directory() {
         .output()
         .unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
-    // Canonicalised, because the child reports the directory the OS resolved
-    // for it and this side has to name the same one. On macOS the temp root is
-    // under /var/folders, /var is a symlink to /private/var, and comparing the
-    // unresolved spelling against the resolved one fails while vouch is right.
-    // Windows canonicalisation prefixes \\?\, which `current_dir` does not
-    // return, so that prefix comes back off.
-    let real = std::fs::canonicalize(&dir).unwrap().to_string_lossy().replace('\\', "/");
-    let expected = real.strip_prefix("//?/").unwrap_or(&real);
-    assert!(
-        text.contains(&format!("judged from: {expected}")),
-        "must judge from the process's own directory when no --cwd is given: {text}"
+    // Compare directory identity, not spelling. macOS may resolve /var through
+    // /private/var, while Windows may report the same directory once as an 8.3
+    // path and once in its long extended-length form.
+    let judged = text
+        .lines()
+        .find_map(|line| line.strip_prefix("judged from: "))
+        .expect("explain must announce the directory it judged from");
+    let judged = std::fs::canonicalize(judged).unwrap();
+    let expected = std::fs::canonicalize(&dir).unwrap();
+    assert_eq!(
+        judged, expected,
+        "must judge from the process's own directory when no --cwd is given"
     );
 }
 
