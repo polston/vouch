@@ -124,7 +124,7 @@ All three live in `~/.config/vouch/`.
 
 | File | What it is | Who writes it |
 |---|---|---|
-| `knowledge.toml` | What programs and harness tools are and do: `ls` reads, `rm -r` deletes recursively, `git` takes `-C` with a value. Every entry is a claim that must be true | Ships with vouch. `scripts/install-knowledge.sh --force` replaces it wholesale, so your own entries do not belong here |
+| `knowledge.toml` | What programs and harness tools are and do: `ls` reads, `rm -r` deletes recursively, `git` takes `-C` with a value. Every entry is a claim that must be true | Ships in the release bundle; from source, `scripts/install-knowledge.sh --force` replaces it wholesale. Your own entries do not belong here |
 | `my-knowledge.toml` | Your own descriptions, laid over the shipped ones piece by piece: what you set wins, what you leave unset keeps what ships | You, or `vouch trust` on your explicit accept. Nothing overwrites it |
 | `config.toml` | What you have told vouch to do: guard actions, construct actions per language, trust and distrust zones, write rules, the protected list | You. `vouch review --accept` is the only command that writes this file, and only on that accept |
 
@@ -132,7 +132,7 @@ Every key in the first two and every setting in the third is documented in
 [`docs/reference/reference.md`](docs/reference/reference.md), which is generated
 by `vouch schema config --write` from the same structs the loaders read — so it
 cannot describe a shape vouch would refuse. `vouch.example.toml` is a working
-`config.toml` to start from. The binary and `knowledge.toml` are version-gated
+`config.toml` to start from. Both binaries and `knowledge.toml` are version-gated
 against each other: a mismatched pair refuses loudly rather than deciding
 half-blind, so they move together.
 
@@ -196,8 +196,7 @@ Prerequisites: Claude Code or Codex, and a Rust toolchain at or above the floor
 ```
 git clone https://github.com/<owner>/vouch
 cd vouch
-cargo build --release
-scripts/install-knowledge.sh
+cargo build --release && scripts/install-binaries.sh && scripts/install-knowledge.sh
 cp vouch.example.toml ~/.config/vouch/config.toml
 scripts/install-skill.sh
 ```
@@ -213,7 +212,7 @@ Then generate the hook wiring, which no agent writes for you.
 For Claude Code:
 
 ```
-target/release/vouch install > vouch-settings.json
+~/.config/vouch/bin/vouch install > vouch-settings.json
 ```
 
 `vouch install` reads your existing `~/.claude/settings.json`, merges in four
@@ -244,9 +243,9 @@ candidates from what actually happened rather than from absent signals.
 For Codex, choose the shell Codex uses on this machine:
 
 ```
-target/release/vouch install --host codex --shell powershell > vouch-hooks.json
+~/.config/vouch/bin/vouch install --host codex --shell powershell > vouch-hooks.json
 # or: --shell bash
-codex mcp add vouch_approval -- <absolute-path>/target/release/vouch-codex-broker
+codex mcp add vouch_approval -- ~/.config/vouch/bin/vouch-codex-broker
 ```
 
 Review `vouch-hooks.json`, then save it as `~/.codex/hooks.json`. Codex gets

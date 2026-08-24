@@ -16,7 +16,7 @@ version = 1
 trust_all_under = ["C:/scratch/**"]
 trust_nothing_under = ["D:/inbox/**"]
 [[run.guards]]
-under = ["C:/git/**"]
+under = ["C:/workspace/**"]
 delete_recursive = "ask"
 [write]
 allow_paths = ["C:/work/**"]

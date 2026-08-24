@@ -44,7 +44,7 @@ fn declared_hard_reset_is_caught_however_it_is_written() {
     for cmd in [
         "git reset --hard origin/main",
         "git reset -q --hard",
-        "git -C /c/git/vouch reset --hard",
+        "git -C /c/workspace/vouch reset --hard",
         "git -c user.name=x reset --hard origin/main",
         "cd /tmp && git reset --hard",
     ] {
@@ -134,7 +134,7 @@ fn commands_the_existing_policy_allowed_stay_allowed() {
         "git rebase main",
         "npm run build",
         "cargo test",
-        "ls -la /c/git",
+        "ls -la /c/workspace",
         "python script.py",
     ] {
         assert_no_guard(cmd);

@@ -63,9 +63,9 @@ fn discarding_output_is_not_a_file_write() {
     // `$null` is how PowerShell throws output away. Treating it as a path made
     // it 42 of the 54 unresolved paths in the real corpus.
     for cmd in [
-        "Get-ChildItem C:/git > $null",
-        "Get-ChildItem C:/git 2>$null",
-        "Get-ChildItem C:/git > $NULL",
+        "Get-ChildItem C:/workspace > $null",
+        "Get-ChildItem C:/workspace 2>$null",
+        "Get-ChildItem C:/workspace > $NULL",
     ] {
         assert!(matches!(decide(cmd), Decision::Allow(_)), "{cmd}");
         assert!(targets(cmd).is_empty(), "{cmd} recorded a target");
@@ -74,9 +74,9 @@ fn discarding_output_is_not_a_file_write() {
 
 #[test]
 fn merging_streams_names_no_file() {
-    assert!(targets("Get-ChildItem C:/git 2>&1").is_empty());
+    assert!(targets("Get-ChildItem C:/workspace 2>&1").is_empty());
     assert!(matches!(
-        decide("Get-ChildItem C:/git 2>&1"),
+        decide("Get-ChildItem C:/workspace 2>&1"),
         Decision::Allow(_)
     ));
 }

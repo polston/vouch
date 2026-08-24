@@ -3,10 +3,10 @@ use vouch::protocol::{parse_input, render, render_for, Decision, Host};
 #[test]
 fn parses_a_real_bash_snippet() {
     let raw = r#"{"session_id":"abc","cwd":"C:/claude","hook_event_name":"PreToolUse",
-        "tool_name":"Bash","tool_input":{"command":"ls -la /c/git"}}"#;
+        "tool_name":"Bash","tool_input":{"command":"ls -la /c/workspace"}}"#;
     let input = parse_input(raw).expect("should parse");
     assert_eq!(input.tool_name, "Bash");
-    assert_eq!(input.tool_input.command.as_deref(), Some("ls -la /c/git"));
+    assert_eq!(input.tool_input.command.as_deref(), Some("ls -la /c/workspace"));
 }
 
 #[test]

@@ -299,7 +299,8 @@ fn gap_paragraph(g: &vouch::knowledge::Gap) -> String {
                 "vouch has no config file, so nothing has been allowed and every command \
                  asks.\n  \
                  looked for: {}\n  why: {}\n  \
-                 `vouch.example.toml` in the vouch repository is the file to copy.",
+                 `vouch.example.toml` is the file to copy — it ships in the release \
+                 bundle beside this binary, and sits at the root of a repository checkout.",
                 g.path, g.why
             ),
             // [review] The defect this branch exists for: a config with ONE

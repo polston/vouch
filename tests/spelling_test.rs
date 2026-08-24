@@ -57,7 +57,7 @@ fn the_protected_file_is_recognised_whatever_the_case() {
 
 #[test]
 fn traversal_does_not_hide_the_destination() {
-    let cmd = "echo x > /c/git/vouch/../../Users/dev/.claude/settings.json";
+    let cmd = "echo x > /c/workspace/vouch/../../Users/dev/.claude/settings.json";
     match decide_command_in(&cfg(), "bash", cmd, Some(HOME), None) {
         Decision::Ask(r) => assert!(r.contains("C:/Users/dev/.claude/settings.json"), "{r}"),
         other => panic!("expected Ask, got {other:?}"),

@@ -88,7 +88,7 @@ uncommitted — never left silent.
 
 Also list what the session changed OUTSIDE the repository, because none of it
 shows in git: the operator's live `config.toml` or `my-knowledge.toml`, an
-installed binary, an installed knowledge or skill file, a push.
+installed binaries, an installed knowledge or skill file, a push.
 
 ### 2. Reconcile every live-state claim in the handoff
 
@@ -99,7 +99,7 @@ each:
 | The claim | What settles it |
 |---|---|
 | "not pushed" / "N commits sit unpushed" | `git fetch origin` then `git rev-list --count origin/master..master` — fetch first, because the tracking ref is itself a stale claim |
-| "merged and live" | the installed binary is newer than the merge, and `vouch explain 'ls -la'` shows no gap or refusal banner |
+| "merged and live" | both installed binaries identify the merged version, and `vouch explain 'ls -la'` shows no gap or refusal banner |
 | "the installed knowledge matches the repo" | `cmp knowledge.toml "$HOME/.config/vouch/knowledge.toml"` — a commit after the last install stales it silently |
 | "this construct/setting is on (or off)" | grep the live config for the KEY NAME, then probe the behaviour it governs — an unnamed construct inherits from its donor and decides nothing (M2.115) |
 | "the skills are installed" | `diff` each `plugin/skills/*/SKILL.md` against `$HOME/.claude/skills/<name>/SKILL.md` |

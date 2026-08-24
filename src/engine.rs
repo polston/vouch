@@ -2611,8 +2611,8 @@ impl PlaceTrees {
 ///
 /// An override that sets the guard to the action it ALREADY has still MATCHES.
 /// [review] Dropping it from the matching set was wrong in the permissive
-/// direction: a broad `C:/git/** = ask` under a global `ask`, plus a narrow
-/// `C:/git/scratch/** = allow`, left the narrow one unopposed and yielded
+/// direction: a broad `C:/workspace/** = ask` under a global `ask`, plus a narrow
+/// `C:/workspace/scratch/** = allow`, left the narrow one unopposed and yielded
 /// ALLOW — while the identical shape with a broad entry that merely DIFFERED
 /// from the global yielded ask. "The strictest matching action wins" cannot
 /// depend on whether a matching entry happens to restate the global. What the
@@ -3245,7 +3245,7 @@ fn cd_timeline(
         // Stated absolutely? Read from the same candidate walk the
         // destination itself came from, never from the composed result — a
         // composed path and an absolute one that happens to sit under it are
-        // the same text ("C:/git" then "C:/git/vouch-dev"), and only the walk
+        // the same text ("C:/workspace" then "C:/workspace/vouch-dev"), and only the walk
         // knows which was written.
         let independent = matches!(
             &cands,
