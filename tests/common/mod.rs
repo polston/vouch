@@ -210,7 +210,7 @@ parse_failure = "ask"
 [write]
 default = "ask"
 allow_paths = [
-  "C:/work/**", "C:/git/**", "C:/claude/**", "C:/tmp/**",
+  "C:/work/**", "C:/workspace/**", "C:/claude/**", "C:/tmp/**",
   "$HOME/**", "/tmp/**", "/private/tmp/**", "/Users/**",
 ]
 {extra}
@@ -478,7 +478,7 @@ default = "allow"
     result.push_str("[write]\n");
     result.push_str("default = \"ask\"\n");
     result.push_str("allow_paths = [\n");
-    result.push_str("  \"C:/work/**\", \"C:/git/**\", \"C:/claude/**\", \"C:/tmp/**\",\n");
+    result.push_str("  \"C:/work/**\", \"C:/workspace/**\", \"C:/claude/**\", \"C:/tmp/**\",\n");
     result.push_str("  \"$HOME/**\", \"/tmp/**\", \"/private/tmp/**\", \"/Users/**\",\n");
     result.push_str("]\n");
 

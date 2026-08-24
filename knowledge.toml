@@ -640,7 +640,7 @@ wraps = "after_flag"
 wrap_flags = ["-Command", "-c", "-File", "-f"]
 wrap_lang = "powershell"
 # The snippet genuinely spreads over every token after the flag
-# (`-Command Get-ChildItem C:/git`, no quotes needed) rather than being one
+# (`-Command Get-ChildItem C:/workspace`, no quotes needed) rather than being one
 # token — rejoin, unlike python's own `-c` which takes exactly one token.
 wrap_join = true
 # DECISION: ships `-Help`/`-h`, case-insensitive — the platform's true claim

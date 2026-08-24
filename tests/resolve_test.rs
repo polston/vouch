@@ -35,7 +35,7 @@ method_call = "allow"
 redirect = "allow"
 [write]
 default = "ask"
-allow_paths = ["C:/work/**", "C:/git/**"]
+allow_paths = ["C:/work/**", "C:/workspace/**"]
 [protected]
 paths = ["$HOME/.claude/settings.json"]
 "#,
@@ -401,7 +401,7 @@ fn several_directory_changes_compose_in_the_order_they_run() {
     // in effect. Nothing is guessed — the shapes where the order is NOT
     // provable still ask, which is `unorderable_cds_fail_closed`.
     assert!(matches!(
-        decide("cd /c/work && cd /c/git && echo x > y.txt"),
+        decide("cd /c/work && cd /c/workspace && echo x > y.txt"),
         Decision::Allow(_)
     ));
     // And the write is judged in the LAST one, not the first.

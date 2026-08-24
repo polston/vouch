@@ -257,7 +257,7 @@ rebound_name = "ask"
 # a weak guarantee — a build verb executes whatever the project's entry
 # point contains, standing anywhere — so this says "trusted because you
 # trust commands run from this location", never "safe because it ran here".
-# trust_all_under = ["C:/git/vouch-dev/.claude/worktrees/**"]
+# trust_all_under = ["C:/workspace/vouch-dev/.claude/worktrees/**"]
 
 # distrust zone: no command run from under one of these trees is
 # recognised, whatever it is — even a program a knowledge entry describes.
@@ -272,7 +272,7 @@ rebound_name = "ask"
 # always narrows, never widens: an unproven place unlocks nothing, but it
 # also can never be argued out of a stricter override.
 # [[run.guards]]
-# under = ["C:/git/**"]
+# under = ["C:/workspace/**"]
 # delete_recursive = "ask"      # stricter here than the global action
 
 # [[run.guards]]
@@ -287,7 +287,7 @@ allow_paths = [
   # Your own working trees go here - these are one operator's, kept as
   # examples of the shape:
   #   "C:/work/**",
-  #   "C:/git/**",
+  #   "C:/workspace/**",
   #   "C:/claude/**",
 ]
 
@@ -351,7 +351,7 @@ paths = [
 #
 # [[program]]
 # match = ["probe-tool"]
-# only_under = ["C:/git/vouch-dev/.claude/worktrees/**"]
+# only_under = ["C:/workspace/vouch-dev/.claude/worktrees/**"]
 #
 # (my probe binary, trusted only in the worktree.) only_under here judges
 # where the COMMAND RUNS — elsewhere, this entry does not recognise the

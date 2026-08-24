@@ -65,8 +65,8 @@ fn the_project_root_is_resolved_per_run() {
     let d = decide_file(
         &cfg(),
         HOME,
-        Some("C:/git/somenewproject"),
-        "C:/git/somenewproject/src/a.rs",
+        Some("C:/workspace/somenewproject"),
+        "C:/workspace/somenewproject/src/a.rs",
     );
     assert!(
         matches!(d, Decision::Allow(_)),

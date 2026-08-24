@@ -28,11 +28,11 @@ fn cfg(extra: &str) -> vouch::config::Config {
 
 #[test]
 fn a_stricter_override_applies_on_a_proven_place_and_says_it_overrode() {
-    let c = cfg("[[run.guards]]\nunder = [\"C:/git/**\"]\ndelete_recursive = \"ask\"");
-    let d = decide_command_at(&c, "bash", "rm -rf build", None, None, Some("C:/git/vouch-dev"));
+    let c = cfg("[[run.guards]]\nunder = [\"C:/workspace/**\"]\ndelete_recursive = \"ask\"");
+    let d = decide_command_at(&c, "bash", "rm -rf build", None, None, Some("C:/workspace/vouch-dev"));
     match d {
         Decision::Ask(r) => {
-            assert!(r.contains("run.guards") && r.contains("C:/git/**"), "{r}");
+            assert!(r.contains("run.guards") && r.contains("C:/workspace/**"), "{r}");
             // Spec prompt table: "the global action was overridden".
             assert!(r.contains("overrid"), "{r}");
         }
@@ -42,7 +42,7 @@ fn a_stricter_override_applies_on_a_proven_place_and_says_it_overrode() {
 
 #[test]
 fn a_stricter_override_applies_on_an_unproven_place_and_names_the_cause() {
-    let c = cfg("[[run.guards]]\nunder = [\"C:/git/**\"]\ndelete_recursive = \"ask\"");
+    let c = cfg("[[run.guards]]\nunder = [\"C:/workspace/**\"]\ndelete_recursive = \"ask\"");
     let d = decide_command_at(&c, "bash", "cd a || cd b; rm -rf build", None, None, Some("C:/tmp"));
     match d {
         Decision::Ask(r) => {
@@ -60,7 +60,7 @@ fn a_stricter_override_applies_on_an_unproven_place_and_names_the_cause() {
 
 #[test]
 fn a_stricter_override_does_not_apply_provably_outside() {
-    let c = cfg("[[run.guards]]\nunder = [\"C:/git/**\"]\ndelete_recursive = \"ask\"");
+    let c = cfg("[[run.guards]]\nunder = [\"C:/workspace/**\"]\ndelete_recursive = \"ask\"");
     let d = decide_command_at(&c, "bash", "rm -rf build", None, None, Some("C:/tmp/job"));
     assert!(matches!(d, Decision::Allow(_)), "global allow stands outside: {d:?}");
 }
@@ -99,11 +99,11 @@ fn when_two_overrides_match_the_strictest_wins() {
     // place, the strictest matching action wins."
     let c = vouch::config::load(
         "[lang.bash]\ndefault = \"allow\"\n[guards]\ndelete_recursive = \"allow\"\n\
-         [[run.guards]]\nunder = [\"C:/git/**\"]\ndelete_recursive = \"ask\"\n\
-         [[run.guards]]\nunder = [\"C:/git/vouch-dev/**\"]\ndelete_recursive = \"deny\"",
+         [[run.guards]]\nunder = [\"C:/workspace/**\"]\ndelete_recursive = \"ask\"\n\
+         [[run.guards]]\nunder = [\"C:/workspace/vouch-dev/**\"]\ndelete_recursive = \"deny\"",
     )
     .unwrap();
-    let d = decide_command_at(&c, "bash", "rm -rf build", None, None, Some("C:/git/vouch-dev"));
+    let d = decide_command_at(&c, "bash", "rm -rf build", None, None, Some("C:/workspace/vouch-dev"));
     assert!(matches!(d, Decision::Deny(_)), "{d:?}");
 }
 
@@ -111,8 +111,8 @@ fn when_two_overrides_match_the_strictest_wins() {
 ///
 /// It was being dropped from the matching set as "not an override of
 /// anything", which let a narrow loosening entry win unopposed: the broad
-/// `C:/git/**` entry agreeing with the global `ask` vanished, and
-/// `C:/git/scratch/** = allow` allowed. The identical shape with a broad entry
+/// `C:/workspace/**` entry agreeing with the global `ask` vanished, and
+/// `C:/workspace/scratch/** = allow` allowed. The identical shape with a broad entry
 /// that merely DIFFERED from the global asked. Whether a matching entry
 /// happens to restate the global cannot decide the answer, and it cannot
 /// decide it in the permissive direction.
@@ -120,11 +120,11 @@ fn when_two_overrides_match_the_strictest_wins() {
 fn a_broad_override_restating_the_global_still_blocks_a_narrow_loosening_one() {
     let c = vouch::config::load(
         "[lang.bash]\ndefault = \"allow\"\n[guards]\ndelete_recursive = \"ask\"\n\
-         [[run.guards]]\nunder = [\"C:/git/**\"]\ndelete_recursive = \"ask\"\n\
-         [[run.guards]]\nunder = [\"C:/git/scratch/**\"]\ndelete_recursive = \"allow\"",
+         [[run.guards]]\nunder = [\"C:/workspace/**\"]\ndelete_recursive = \"ask\"\n\
+         [[run.guards]]\nunder = [\"C:/workspace/scratch/**\"]\ndelete_recursive = \"allow\"",
     )
     .unwrap();
-    let d = decide_command_at(&c, "bash", "rm -rf build", None, None, Some("C:/git/scratch/j"));
+    let d = decide_command_at(&c, "bash", "rm -rf build", None, None, Some("C:/workspace/scratch/j"));
     assert!(matches!(d, Decision::Ask(_)), "the strictest matching action wins: {d:?}");
 }
 
@@ -134,11 +134,11 @@ fn a_broad_override_restating_the_global_still_blocks_a_narrow_loosening_one() {
 fn a_broad_override_differing_from_the_global_blocks_it_the_same_way() {
     let c = vouch::config::load(
         "[lang.bash]\ndefault = \"allow\"\n[guards]\ndelete_recursive = \"allow\"\n\
-         [[run.guards]]\nunder = [\"C:/git/**\"]\ndelete_recursive = \"ask\"\n\
-         [[run.guards]]\nunder = [\"C:/git/scratch/**\"]\ndelete_recursive = \"allow\"",
+         [[run.guards]]\nunder = [\"C:/workspace/**\"]\ndelete_recursive = \"ask\"\n\
+         [[run.guards]]\nunder = [\"C:/workspace/scratch/**\"]\ndelete_recursive = \"allow\"",
     )
     .unwrap();
-    let d = decide_command_at(&c, "bash", "rm -rf build", None, None, Some("C:/git/scratch/j"));
+    let d = decide_command_at(&c, "bash", "rm -rf build", None, None, Some("C:/workspace/scratch/j"));
     assert!(matches!(d, Decision::Ask(_)), "{d:?}");
 }
 
@@ -150,10 +150,10 @@ fn a_broad_override_differing_from_the_global_blocks_it_the_same_way() {
 fn a_lone_same_action_override_makes_no_false_override_claim() {
     let c = vouch::config::load(
         "[lang.bash]\ndefault = \"allow\"\n[guards]\ndelete_recursive = \"ask\"\n\
-         [[run.guards]]\nunder = [\"C:/git/**\"]\ndelete_recursive = \"ask\"",
+         [[run.guards]]\nunder = [\"C:/workspace/**\"]\ndelete_recursive = \"ask\"",
     )
     .unwrap();
-    match decide_command_at(&c, "bash", "rm -rf build", None, None, Some("C:/git/vouch-dev")) {
+    match decide_command_at(&c, "bash", "rm -rf build", None, None, Some("C:/workspace/vouch-dev")) {
         Decision::Ask(r) => {
             assert!(!r.contains("overrid"), "nothing was overridden: {r}");
             assert!(r.contains("guards.delete_recursive"), "{r}");
@@ -171,7 +171,7 @@ fn a_line_tripping_two_overridden_guards_names_both() {
     let c = vouch::config::load(
         "[lang.bash]\ndefault = \"allow\"\n[guards]\ndelete_recursive = \"allow\"\n\
          history_rewrite = \"allow\"\n\
-         [[run.guards]]\nunder = [\"C:/git/**\"]\ndelete_recursive = \"ask\"\n\
+         [[run.guards]]\nunder = [\"C:/workspace/**\"]\ndelete_recursive = \"ask\"\n\
          history_rewrite = \"ask\"",
     )
     .unwrap();
@@ -181,7 +181,7 @@ fn a_line_tripping_two_overridden_guards_names_both() {
         "rm -rf build && git reset --hard",
         None,
         None,
-        Some("C:/git/vouch-dev"),
+        Some("C:/workspace/vouch-dev"),
     ) {
         Decision::Ask(r) => {
             assert!(r.contains("delete_recursive"), "{r}");
@@ -247,11 +247,11 @@ fn an_unresolvable_run_dir_value_leaves_the_place_unproven() {
 
 #[test]
 fn two_commands_tripping_the_same_guard_from_different_places_get_the_stricter_answer() {
-    let c = cfg("[[run.guards]]\nunder = [\"C:/git/**\"]\ndelete_recursive = \"ask\"");
+    let c = cfg("[[run.guards]]\nunder = [\"C:/workspace/**\"]\ndelete_recursive = \"ask\"");
     let d = decide_command_at(
         &c,
         "bash",
-        "rm -rf outbuild && cd C:/git/vouch-dev && rm -rf build",
+        "rm -rf outbuild && cd C:/workspace/vouch-dev && rm -rf build",
         None,
         None,
         Some("C:/tmp"),
@@ -264,14 +264,14 @@ fn two_commands_tripping_the_same_guard_from_different_places_get_the_stricter_a
 /// not something the operator should have to think about.
 #[test]
 fn the_stricter_answer_does_not_depend_on_which_place_came_first() {
-    let c = cfg("[[run.guards]]\nunder = [\"C:/git/**\"]\ndelete_recursive = \"ask\"");
+    let c = cfg("[[run.guards]]\nunder = [\"C:/workspace/**\"]\ndelete_recursive = \"ask\"");
     let d = decide_command_at(
         &c,
         "bash",
         "rm -rf build && cd C:/tmp && rm -rf outbuild",
         None,
         None,
-        Some("C:/git/vouch-dev"),
+        Some("C:/workspace/vouch-dev"),
     );
     assert!(matches!(d, Decision::Ask(_)), "{d:?}");
 }
@@ -314,8 +314,8 @@ fn a_loosening_override_whose_trees_cannot_be_located_grants_nothing() {
 /// every guard it does not name.
 #[test]
 fn an_override_for_another_guard_does_not_touch_this_one() {
-    let c = cfg("[[run.guards]]\nunder = [\"C:/git/**\"]\nhistory_rewrite = \"deny\"");
-    let d = decide_command_at(&c, "bash", "rm -rf build", None, None, Some("C:/git/vouch-dev"));
+    let c = cfg("[[run.guards]]\nunder = [\"C:/workspace/**\"]\nhistory_rewrite = \"deny\"");
+    let d = decide_command_at(&c, "bash", "rm -rf build", None, None, Some("C:/workspace/vouch-dev"));
     assert!(matches!(d, Decision::Allow(_)), "{d:?}");
 }
 
@@ -327,7 +327,7 @@ fn an_override_for_another_guard_does_not_touch_this_one() {
 fn with_no_override_the_prompt_still_names_the_global_setting() {
     let c = vouch::config::load("[lang.bash]\ndefault = \"allow\"\n[guards]\ndelete_recursive = \"ask\"")
         .unwrap();
-    match decide_command_at(&c, "bash", "rm -rf build", None, None, Some("C:/git/vouch-dev")) {
+    match decide_command_at(&c, "bash", "rm -rf build", None, None, Some("C:/workspace/vouch-dev")) {
         Decision::Ask(r) => {
             assert!(r.contains("setting: guards.delete_recursive"), "{r}");
             assert!(!r.contains("run.guards"), "no override decided this: {r}");

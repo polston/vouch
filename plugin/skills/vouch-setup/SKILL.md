@@ -104,10 +104,10 @@ proposal in phase 4 is about recognising a program or a tool, follow
 Nothing is written in this phase. Establish what this machine actually has.
 Run each check and put the answers in one table.
 
-1. **Binary and version.** `vouch` with no arguments prints `vouch <version>`
-   on its first line, then usage. If the name does not resolve, look for
-   `~/.config/vouch/bin/vouch` (the release layout) and a source build at
-   `<clone>/target/release/vouch`.
+1. **Binaries and versions.** `vouch --version` and
+   `vouch-codex-broker --version` identify a matched installed pair. If the
+   names do not resolve, look under `~/.config/vouch/bin/` (the release layout)
+   and at the two corresponding source builds under `<clone>/target/release/`.
 2. **Which files it actually resolves.** Not which files exist — which pair
    this binary loads, because later checks must compare the live pair and
    never a plugin-cache reference copy. The rule: `VOUCH_CONFIG`,
@@ -132,7 +132,7 @@ Run each check and put the answers in one table.
    means this is a migration, not a fresh install.
 6. **A vouch clone**, if any — a directory holding `Cargo.toml` with the vouch
    package and a `knowledge.toml` beside it. A clone means the source route and
-   the `install-skill.sh` / `install-knowledge.sh` scripts are available.
+   the binary, knowledge, and skill install scripts are available.
 7. **`gh` availability**: `gh --version`, and whether it is authenticated. The
    release-download path in phase 2 needs it.
 8. **Plugin version lag.** On Claude Code, read the installed version from
@@ -181,16 +181,18 @@ old knowledge file the gate refuses everything, so never update one alone.
    run.** Download `SHA256SUMS` from the same release and check the archive's
    digest against it. Integrity first, semantics second: a file that fails this
    check is not unpacked, not run, and not reported as "probably fine".
-3. Unzip into `~/.config/vouch/`. The archive's layout mirrors the destinations
-   the binary actually reads: the executable lands in `bin/`, `knowledge.toml`
-   lands beside the config where the loader looks, and `vouch.example.toml`
-   seeds `config.toml` only when no config exists.
+3. Unzip into `~/.config/vouch/`. The archive's layout mirrors the destinations:
+   both binaries land in `bin/`, `knowledge.toml` lands beside the config where
+   the loader looks, and `vouch.example.toml` seeds `config.toml` only when no
+   config exists.
 4. Confirm the binary loads the pair — `vouch explain 'ls -la'` with no gap
    banner. This is the semantic check, and it comes after the integrity check,
    not instead of it.
 
-**Dev machine with a clone.** `cargo build --release` then
-`scripts/install-knowledge.sh` — the documented path. Skills arrive via the
+**Dev machine with a clone.** In one shell invocation, run
+`cargo build --release && scripts/install-binaries.sh && scripts/install-knowledge.sh`.
+This gives source builds the same paired binary-and-knowledge layout as a
+release. Skills arrive via the
 plugin (already present if the operator reached this skill through
 `/vouch:setup`) or via `scripts/install-skill.sh` from the clone. **One
 delivery route per machine**: the plugin cache is version-keyed and updated by

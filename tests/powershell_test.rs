@@ -105,13 +105,13 @@ fn an_assignment_from_a_command_still_finds_the_command() {
 
 #[test]
 fn a_plain_pipeline_reports_no_constructs() {
-    let got = constructs("Get-ChildItem C:/git | Select-Object -First 5");
+    let got = constructs("Get-ChildItem C:/workspace | Select-Object -First 5");
     assert!(got.is_empty(), "got {got:?}");
 }
 
 #[test]
 fn heads_are_found_across_separators_and_pipes() {
-    let p = parse("cd C:/git; Get-ChildItem | Where-Object { $_.Length -gt 10 }").expect("scans");
+    let p = parse("cd C:/workspace; Get-ChildItem | Where-Object { $_.Length -gt 10 }").expect("scans");
     for want in ["cd", "Get-ChildItem", "Where-Object"] {
         assert!(p.heads.iter().any(|h| h == want), "missing {want} in {:?}", p.heads);
     }

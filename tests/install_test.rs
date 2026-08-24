@@ -9,14 +9,14 @@ const EXISTING: &str = r#"{
   "model": "opus",
   "hooks": {
     "PreToolUse": [
-      { "hooks": [ { "type": "command", "command": "C:/git/cc-allow/cc-allow.exe --hook" } ] }
+      { "hooks": [ { "type": "command", "command": "C:/workspace/cc-allow/cc-allow.exe --hook" } ] }
     ]
   }
 }"#;
 
 #[test]
 fn shadow_leaves_the_existing_gate_in_charge() {
-    let p = plan(EXISTING, "C:/git/vouch-dev/vouch.exe", true).unwrap();
+    let p = plan(EXISTING, "C:/workspace/vouch-dev/vouch.exe", true).unwrap();
     assert!(
         p.settings.contains("cc-allow.exe --hook"),
         "existing gate removed: {}",
@@ -27,7 +27,7 @@ fn shadow_leaves_the_existing_gate_in_charge() {
 
 #[test]
 fn live_replaces_the_existing_gate() {
-    let p = plan(EXISTING, "C:/git/vouch-dev/vouch.exe", false).unwrap();
+    let p = plan(EXISTING, "C:/workspace/vouch-dev/vouch.exe", false).unwrap();
     let pre = p.settings.split("\"PreToolUse\"").nth(1).unwrap_or("");
     let pre = pre.split(']').next().unwrap_or("");
     assert!(
@@ -95,7 +95,7 @@ const EXISTING_WITH_SERVER: &str = r#"{
   "mcpServers": { "example": { "url": "https://example.invalid", "headers": { "x-sample": "placeholder" } } },
   "hooks": {
     "PreToolUse": [
-      { "hooks": [ { "type": "command", "command": "C:/git/cc-allow/cc-allow.exe --hook" } ] }
+      { "hooks": [ { "type": "command", "command": "C:/workspace/cc-allow/cc-allow.exe --hook" } ] }
     ]
   }
 }"#;
@@ -201,6 +201,79 @@ fn a_recognised_flag_beside_an_unrecognised_one_is_still_refused() {
         err.contains("--bogus"),
         "error does not name the bad flag: {err}"
     );
+}
+
+const MOVED_CLAUDE_HOOKS: &str = r#"{
+  "hooks": {
+    "PreToolUse": [
+      { "hooks": [ { "type": "command", "command": "C:/old/vouch.exe --hook" } ] }
+    ],
+    "PostToolUse": [
+      { "hooks": [ { "type": "command", "command": "C:/other/tool.exe observe" } ] },
+      { "hooks": [ { "type": "command", "command": "C:/old/vouch.exe --hook" } ] }
+    ],
+    "PostToolUseFailure": [
+      { "hooks": [ { "type": "command", "command": "C:/old/vouch.exe --hook" } ] }
+    ],
+    "PermissionDenied": [
+      { "hooks": [ { "type": "command", "command": "C:/old/vouch.exe --hook" } ] }
+    ]
+  }
+}"#;
+
+#[test]
+fn claude_repoints_a_moved_binary_on_every_event() {
+    let p = plan(MOVED_CLAUDE_HOOKS, "C:/new/vouch.exe", false).unwrap();
+    assert!(!p.settings.contains("C:/old/vouch.exe"));
+    assert_eq!(p.settings.matches("C:/new/vouch.exe --hook").count(), 4);
+    assert!(p.settings.contains("C:/other/tool.exe observe"));
+    assert!(p.notes.join(" ").contains("repointed"));
+}
+
+#[test]
+fn claude_shadow_stands_a_repointed_live_gate_down() {
+    let p = plan(MOVED_CLAUDE_HOOKS, "C:/new/vouch.exe", true).unwrap();
+    let pre = p.settings.split("\"PreToolUse\"").nth(1).unwrap_or("");
+    let pre = pre.split(']').next().unwrap_or("");
+    assert!(pre.contains("C:/new/vouch.exe --hook --shadow"));
+    assert!(!pre.contains("C:/new/vouch.exe --hook\""));
+    assert!(p.notes.join(" ").contains("stood down"));
+}
+
+#[test]
+fn claude_quotes_an_executable_path_with_spaces() {
+    let p = plan("{}", "C:/Program Files/vouch/bin/vouch.exe", false).unwrap();
+    assert!(p.settings.contains("\\\"C:/Program Files/vouch/bin/vouch.exe\\\" --hook"));
+}
+
+#[test]
+fn claude_recognises_a_quoted_registration_without_duplication() {
+    let existing = r#"{
+      "hooks": {
+        "PostToolUse": [
+          { "hooks": [ { "type": "command", "command": "\"C:/My Tools/vouch.exe\" --hook" } ] }
+        ]
+      }
+    }"#;
+    let p = plan(existing, "C:/new/vouch.exe", false).unwrap();
+    assert!(!p.settings.contains("My Tools"));
+    let post = p.settings.split("\"PostToolUse\"").nth(1).unwrap_or("");
+    let post = post.split(']').next().unwrap_or("");
+    assert_eq!(post.matches("--hook").count(), 1);
+}
+
+#[test]
+fn claude_does_not_claim_a_lookalike_hook() {
+    let existing = r#"{
+      "hooks": {
+        "PostToolUse": [
+          { "hooks": [ { "type": "command", "command": "C:/bin/notvouch.exe --hook" } ] }
+        ]
+      }
+    }"#;
+    let p = plan(existing, "C:/new/vouch.exe", false).unwrap();
+    assert!(p.settings.contains("C:/bin/notvouch.exe --hook"));
+    assert!(p.settings.contains("C:/new/vouch.exe --hook"));
 }
 
 #[test]

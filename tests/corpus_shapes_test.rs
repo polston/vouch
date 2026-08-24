@@ -160,7 +160,7 @@ unresolved_path = "allow"
 [write]
 default = "ask"
 allow_paths = [
-  "C:/work/**", "C:/git/**", "C:/claude/**", "C:/tmp/**",
+  "C:/work/**", "C:/workspace/**", "C:/claude/**", "C:/tmp/**",
   "$HOME/**", "/tmp/**", "/private/tmp/**", "/Users/**",
 ]
 "#,
@@ -500,7 +500,7 @@ redirect = "allow"
 [write]
 default = "ask"
 allow_paths = [
-  "C:/work/**", "C:/git/**", "C:/claude/**", "C:/tmp/**",
+  "C:/work/**", "C:/workspace/**", "C:/claude/**", "C:/tmp/**",
   "$HOME/**", "/tmp/**", "/private/tmp/**", "/Users/**",
 ]
 "#,

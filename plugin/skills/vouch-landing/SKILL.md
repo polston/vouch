@@ -51,7 +51,31 @@ Run from the vouch checkout root; every path below is relative to it.
 2. **Readiness.** Confirm a clean fast-forward
    (`git merge-base --is-ancestor master <branch>`), gate
    green at HEAD, and show the operator the numbers (test count, transition
-   matrix, parse rate). Get the explicit go to merge + push.
+   matrix, parse rate).
+
+   **Before asking for the explicit go, show the complete route from this
+   branch to the finished release.** Do not summarize landing as merge, push,
+   reinstall and teardown; those are only part of this repository's flow.
+   Derive and report all of these from the current branch and files:
+   - how the implementation enters the private `master` (this procedure's
+     direct fast-forward, not an implementation pull request);
+   - the conventional prefixes in `master..<branch>`, whether release-please
+     will open a private version pull request, and the expected next version
+     from `.release-please-manifest.json`;
+   - whether `git diff --name-only master...<branch>` intersects the publish
+     `MANIFEST` in `scripts/publish-mirror.sh`;
+   - every pull request the operator must merge, in order: the private version
+     pull request when release-please opens one, then the public publish pull
+     request when published files changed;
+   - what follows those merges: mirror verification, public tag and release
+     build, paired live reinstall, changed-skill reinstall, live probes, state
+     docs, and branch teardown;
+   - the final target state: versions aligned here and in the mirror, published
+     archives verified, live binaries and knowledge matching, and no leftover
+     feature branch.
+
+   If any part is unavailable or not yet verified, name it as a readiness gap
+   before asking. Then get the explicit go to merge + push.
 
 2a. **If that check FAILS, master moved while the branch was in flight, and
    the landing is a different job.** Do not force it and do not rebase a long
@@ -131,12 +155,12 @@ Run from the vouch checkout root; every path below is relative to it.
       Derive the shared main checkout root first — this runs against the main
       checkout, not the branch's own worktree — then chain everything through
       it in the same invocation:
-      `root="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")" && cd "$root" && cargo build --release && bash scripts/install-knowledge.sh --force`
+      `root="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")" && cd "$root" && cargo build --release && bash scripts/install-binaries.sh && bash scripts/install-knowledge.sh --force`
       Learned the hard way 2026-08-10: between a rebuilt binary and a
       reinstalled knowledge file the gate is DEAD — the new binary refuses the
       old file, so it recognises nothing and asks about every command,
       including the very command that repairs it, and the operator gets a
-      wall-of-banner prompt for a `bash scripts/install-knowledge.sh` call.
+      wall-of-banner prompt for a later install call.
       Neither order avoids it (the old binary equally refuses the new file's
       unknown keys), so the only fix is to leave no gated tool call in the
       window. Chain them.

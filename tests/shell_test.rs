@@ -49,7 +49,7 @@ fn redirects_carry_their_commands_order() {
 
 #[test]
 fn finds_command_heads() {
-    let p = parse("ls -la /c/git && git status").unwrap();
+    let p = parse("ls -la /c/workspace && git status").unwrap();
     assert!(p.heads.contains(&"ls".to_string()), "heads: {:?}", p.heads);
     assert!(p.heads.contains(&"git".to_string()), "heads: {:?}", p.heads);
 }

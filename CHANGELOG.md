@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.2 (2026-08-24)
+
+
+### Bug Fixes
+
+* distinguish repository exposure from local context
+* install source binaries outside the build tree
+* preserve binary recovery copies
+* show the complete release route before landing
+
 ## 0.3.1 (2026-08-22)
 
 

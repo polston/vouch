@@ -85,14 +85,14 @@ fn wsl_runs_the_rest_of_the_line() {
 
 #[test]
 fn reading_through_another_shell_is_still_reading() {
-    assert_allows(r#"powershell -Command "Get-ChildItem C:/git""#);
+    assert_allows(r#"powershell -Command "Get-ChildItem C:/workspace""#);
     // INVERTED (§2.2 item 5, M2.125/§5.2.4): cmd is its own unscannable
     // language now, so a harmless `dir` inside it asks the same as a
     // destructive one would — vouch cannot tell a read from a write in text
     // it never reads, which is the honest cost of the invariant (§5.2.2),
     // not a regression specific to this shape.
     assert_asks("cmd /c dir");
-    assert_allows(r#"pwsh -NoProfile -Command "Get-Content C:/git/vouch-dev/knowledge.toml""#);
+    assert_allows(r#"pwsh -NoProfile -Command "Get-Content C:/workspace/vouch-dev/knowledge.toml""#);
     assert_allows("wsl ls /mnt/c/work");
 }
 
@@ -128,7 +128,7 @@ fn an_abbreviated_parameter_is_still_the_parameter() {
 #[test]
 fn an_unrelated_parameter_is_not_swallowed_by_prefix_matching() {
     // `-ReadOnly` is not a prefix of `-Recurse`, so it must not match it.
-    assert_allows(r#"powershell -Command "Get-ChildItem -ReadOnly C:/git""#);
+    assert_allows(r#"powershell -Command "Get-ChildItem -ReadOnly C:/workspace""#);
 }
 
 #[test]
@@ -160,7 +160,7 @@ fn start_process_is_one_more_shape_of_one_shell_invoking_another() {
 #[test]
 fn start_process_on_something_harmless_stays_quiet() {
     assert_allows(r#"Start-Process notepad"#);
-    assert_allows(r#"Start-Process powershell -ArgumentList "-Command","Get-ChildItem C:/git""#);
+    assert_allows(r#"Start-Process powershell -ArgumentList "-Command","Get-ChildItem C:/workspace""#);
 }
 
 #[test]
@@ -182,7 +182,7 @@ default = "allow"
 unmodeled_command = "allow"
 [write]
 default = "ask"
-allow_paths = ["C:/work/**", "C:/git/**"]
+allow_paths = ["C:/work/**", "C:/workspace/**"]
 "#,
     )
     .expect("parses");
