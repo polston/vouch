@@ -22,6 +22,9 @@
 //! resolved here.
 //!
 //! Run: `VOUCH_DUMP_PER_ROW=<absolute path> cargo run --release --example dump_per_row_verdicts`
+//! Add `VOUCH_DUMP_COMPARE=<absolute baseline path>` to print a counts-only
+//! transition breakdown. The baseline contains only row indices and verdicts;
+//! neither comparison output nor the dump includes command text.
 //!
 //! Pass an ABSOLUTE destination: a relative one resolves against the invocation
 //! directory rather than the package root.
@@ -74,7 +77,10 @@ fn main() {
             .expect("realistic_config writes a [lang.python] section")
             .constructs
             .insert("evaluated_input".to_string(), vouch::config::Action::Ask);
-        (cfg, "evaluated_input override (bash+python evaluated_input=ask)")
+        (
+            cfg,
+            "evaluated_input override (bash+python evaluated_input=ask)",
+        )
     } else if ask_unmodeled {
         (
             common::realistic_config_with_construct(
@@ -85,19 +91,77 @@ fn main() {
             "live-shaped (unmodeled_command=ask)",
         )
     } else {
-        (common::realistic_config(), "standing replay (unmodeled_command=allow)")
+        (
+            common::realistic_config(),
+            "standing replay (unmodeled_command=allow)",
+        )
     };
     let mut out = String::new();
+    let mut current = Vec::with_capacity(rows.len());
     for (i, r) in rows.iter().enumerate() {
         let d = vouch::engine::decide_command_in(&cfg, "bash", &r.cmd, Some("C:/Users/dev"), None);
-        let v = match d {
-            vouch::protocol::Decision::Allow(_) => "allow",
-            vouch::protocol::Decision::Ask(_) => "ask",
-            vouch::protocol::Decision::Deny(_) => "deny",
-            vouch::protocol::Decision::Abstain => "abstain",
+        let (v, cause) = match d {
+            vouch::protocol::Decision::Allow(_) => ("allow", "allow"),
+            vouch::protocol::Decision::Ask(ref reason) => ("ask", movement_cause(reason)),
+            vouch::protocol::Decision::Deny(ref reason) => ("deny", movement_cause(reason)),
+            vouch::protocol::Decision::Abstain => ("abstain", "abstain"),
         };
         out.push_str(&format!("{{\"i\":{i},\"verdict\":\"{v}\"}}\n"));
+        current.push((v, cause));
     }
     std::fs::write(&path, out).unwrap();
-    println!("MEASURE per-row dump written to {path}: {} rows, under {which}", rows.len());
+    println!(
+        "MEASURE per-row dump written to {path}: {} rows, under {which}",
+        rows.len()
+    );
+
+    if let Ok(baseline) = std::env::var("VOUCH_DUMP_COMPARE") {
+        let text = std::fs::read_to_string(&baseline).expect("comparison baseline is readable");
+        let mut transitions: std::collections::BTreeMap<(&str, &str, &str), usize> =
+            Default::default();
+        let mut baseline_rows = 0;
+        for (i, line) in text.lines().enumerate() {
+            let row: serde_json::Value = serde_json::from_str(line).expect("baseline row is JSON");
+            assert_eq!(row["i"].as_u64(), Some(i as u64), "baseline row index {i}");
+            let old = match row["verdict"].as_str() {
+                Some("allow") => "allow",
+                Some("ask") => "ask",
+                Some("deny") => "deny",
+                Some("abstain") => "abstain",
+                _ => panic!("baseline row has a known verdict"),
+            };
+            let (new, cause) = current.get(i).expect("baseline has no extra rows");
+            if old != *new {
+                *transitions.entry((old, *new, *cause)).or_default() += 1;
+            }
+            baseline_rows += 1;
+        }
+        assert_eq!(
+            baseline_rows,
+            current.len(),
+            "baseline and tip row counts differ"
+        );
+        if transitions.is_empty() {
+            println!("MEASURE movement: 0 rows");
+        }
+        for ((old, new, cause), count) in transitions {
+            println!("MEASURE movement {old}->{new} via {cause}: {count} rows");
+        }
+    }
+}
+
+fn movement_cause(reason: &str) -> &'static str {
+    if reason.contains("unread_verb") {
+        "unread_verb"
+    } else if reason.contains("write.scope") || reason.contains("scope governs") {
+        "write_scope_unprovable"
+    } else if reason.contains("unresolved_path") {
+        "unresolved_path"
+    } else if reason.contains("unmodeled_command") {
+        "unmodeled_command"
+    } else if reason.contains("(guard)") {
+        "guard"
+    } else {
+        "other"
+    }
 }

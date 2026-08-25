@@ -33,6 +33,11 @@ pub struct Hit {
     pub guard: String,
     pub source: String,
     pub detail: String,
+    /// The token that made this rule's verb criterion indeterminate. Such a
+    /// hit is decided by the language's `unread_verb` construct, not by the
+    /// guard action: unread syntax is a promptable limit, not proof of the
+    /// guarded effect.
+    pub unread_verb: Option<String>,
 }
 
 /// One `[[program.rule]]`: the shape that trips a guard. A rule fires when
@@ -960,8 +965,77 @@ fn is_flag(a: &str, declared: &[String]) -> bool {
     })
 }
 
-/// Index into `cmd.args` of the subcommand — the first token that is not a
-/// flag and not itself the value of a value-taking flag declared in `vocab`.
+/// What the argument walk found at the command's verb position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Verb {
+    /// A readable verb at this argument position.
+    At(usize),
+    /// No positional token exists.
+    None,
+    /// A token made the position or value unknowable. `fallback` preserves
+    /// the old scan boundary for consumers such as run-dir discovery that
+    /// must still inspect flags before the possible verb.
+    Unreadable { token: String, fallback: usize },
+}
+
+fn token_is_unreadable(cmd: &Cmd, index: usize, lang: &str) -> bool {
+    if cmd.unread_args.contains(&index) {
+        return true;
+    }
+    let Some(token) = cmd.args.get(index) else {
+        return false;
+    };
+    match lang {
+        "python" => false,
+        "powershell" => carries_expansion(token),
+        _ => token.contains(['\'', '"']) || carries_expansion(token),
+    }
+}
+
+/// Locate and read the verb with one vector walk. An undescribed or refused
+/// flag before the first positional makes the result unreadable rather than
+/// silently treating its possible value as the verb.
+pub fn resolve_verb(cmd: &Cmd, vocab: &crate::flags::Vocab, lang: &str) -> Verb {
+    let mut walk = crate::flags::ArgWalk::new(vocab);
+    let mut skip_next = false;
+    let mut uncertainty: Option<String> = None;
+    for (i, a) in cmd.args.iter().enumerate() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        match walk.next(a) {
+            crate::flags::Class::NotFlag => {
+                if let Some(token) = uncertainty {
+                    return Verb::Unreadable { token, fallback: i };
+                }
+                if token_is_unreadable(cmd, i, lang) {
+                    return Verb::Unreadable { token: a.clone(), fallback: i };
+                }
+                return Verb::At(i);
+            }
+            crate::flags::Class::EndOfOptions => {}
+            crate::flags::Class::Value { attached: None, .. } => skip_next = true,
+            crate::flags::Class::Value { attached: Some(_), .. } => {}
+            crate::flags::Class::Bool { .. } => {}
+            crate::flags::Class::Undescribed { token }
+            | crate::flags::Class::RefusedAbbrev { token, .. } => {
+                if uncertainty.is_none() {
+                    uncertainty = Some(token);
+                }
+            }
+        }
+    }
+    match uncertainty {
+        Some(token) => Verb::Unreadable { token, fallback: cmd.args.len() },
+        None => Verb::None,
+    }
+}
+
+/// Index into `cmd.args` of the subcommand under the compatibility reading.
+/// New decision-bearing consumers use `resolve_verb` directly so they must
+/// state what `Unreadable` means. This wrapper remains for boundary-only and
+/// public callers, preserving the old fallback index.
 ///
 /// `subcommand()` is defined on top of this so the two can never disagree
 /// about which token that is.
@@ -977,28 +1051,18 @@ fn is_flag(a: &str, declared: &[String]) -> bool {
 /// subcommand candidate whatever shape it has, the same as `walk_post_
 /// subcommand` already does past the subcommand itself.
 pub fn subcommand_index(cmd: &Cmd, vocab: &crate::flags::Vocab) -> Option<usize> {
-    let mut walk = crate::flags::ArgWalk::new(vocab);
-    let mut skip_next = false;
-    for (i, a) in cmd.args.iter().enumerate() {
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-        match walk.next(a) {
-            crate::flags::Class::NotFlag => return Some(i),
-            crate::flags::Class::EndOfOptions => {}
-            crate::flags::Class::Value { attached: None, .. } => skip_next = true,
-            crate::flags::Class::Value { attached: Some(_), .. } => {}
-            crate::flags::Class::Bool { .. } => {}
-            crate::flags::Class::Undescribed { .. } => {}
-            crate::flags::Class::RefusedAbbrev { .. } => {}
-        }
+    match resolve_verb(cmd, vocab, "bash") {
+        Verb::At(i) => Some(i),
+        Verb::None => None,
+        Verb::Unreadable { fallback, .. } => Some(fallback),
     }
-    None
 }
 
-fn subcommand<'a>(cmd: &'a Cmd, vocab: &crate::flags::Vocab) -> Option<&'a str> {
-    cmd.args.get(subcommand_index(cmd, vocab)?).map(|s| s.as_str())
+fn subcommand<'a>(cmd: &'a Cmd, vocab: &crate::flags::Vocab, lang: &str) -> Option<&'a str> {
+    match resolve_verb(cmd, vocab, lang) {
+        Verb::At(i) => cmd.args.get(i).map(String::as_str),
+        Verb::None | Verb::Unreadable { .. } => None,
+    }
 }
 
 /// The verb this occurrence names under THIS entry's own vocabulary — what
@@ -1006,8 +1070,12 @@ fn subcommand<'a>(cmd: &'a Cmd, vocab: &crate::flags::Vocab) -> Option<&'a str> 
 /// read. A caller asking two of those questions about the same (entry,
 /// occurrence) pair builds it once and hands the same answer to both, so the
 /// two can never end up reading different grammars for the same tokens.
-fn entry_subcommand<'a>(p: &Program, cmd: &'a Cmd) -> Option<&'a str> {
-    subcommand(cmd, &crate::flags::vocab_for(p, crate::flags::Abbrev::Accept))
+fn entry_subcommand<'a>(p: &Program, cmd: &'a Cmd, lang: &str) -> Option<&'a str> {
+    subcommand(
+        cmd,
+        &crate::flags::vocab_for(p, wrap_abbrev(p)),
+        lang,
+    )
 }
 
 /// Whether this occurrence is a standalone run of `p` (spec 2026-08-20 §2):
@@ -1086,55 +1154,99 @@ fn standalone_hint(prog: &Program, cmd: &Cmd, sub: Option<&str>, eligible: bool)
 /// a second, slightly different rule ("the first argument without a dash")
 /// picks a value option's VALUE the moment one is present.
 ///
-/// `value_options` is unioned across every entry whose match list contains
-/// this head, exactly as `run_dir` and `written_paths` do.
+/// The flag vocabulary is unioned across every same-name entry in the
+/// requested language, exactly as `run_dir` and `written_paths` do. This
+/// compatibility wrapper uses Bash; decision-bearing callers use
+/// `subcommand_of_in` and state their language explicitly.
 pub fn subcommand_of<'a>(kb: &Knowledge, cmd: &'a Cmd) -> Option<&'a str> {
-    let head = base(&cmd.head);
-    let (value_options, flag_prefix) = union_vocab_lists(kb, &head);
-    subcommand(cmd, &head_vocab(&value_options, &flag_prefix))
+    subcommand_of_in(kb, cmd, "bash")
 }
 
-/// Every `value_options` claim about this program name, unioned across the
-/// entries that carry the name — the grammar `subcommand_index` needs to skip
-/// a flag's VALUE while looking for the verb. `flag_prefix` is unioned the
-/// same way, so an operator's own overlay entry for this name is never
-/// silently dropped just because another entry sharing the name declares
-/// none.
-fn union_vocab_lists(kb: &Knowledge, head: &str) -> (Vec<String>, Vec<String>) {
-    let mut value_options: Vec<String> = Vec::new();
-    let mut flag_prefix: Vec<String> = Vec::new();
-    for prog in &kb.program {
-        if prog.match_names.iter().any(|n| n.to_ascii_lowercase() == head) {
-            value_options.extend(prog.value_options.iter().cloned());
-            for p in &prog.flag_prefix {
-                if !flag_prefix.contains(p) {
-                    flag_prefix.push(p.clone());
-                }
-            }
+/// A command's first verb word after the language-scoped walk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerbWord {
+    Absent,
+    Word(String),
+    Unknown(String),
+}
+
+pub fn verb_of_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> VerbWord {
+    let head = base(&cmd.head);
+    let owned = verb_vocab(kb, &head, lang);
+    match resolve_verb(cmd, &owned.as_vocab(), lang) {
+        Verb::At(i) => VerbWord::Word(cmd.args[i].clone()),
+        Verb::None => VerbWord::Absent,
+        Verb::Unreadable { token, .. } => VerbWord::Unknown(token),
+    }
+}
+
+/// Language-aware form used by the decision pipeline.
+pub fn subcommand_of_in<'a>(kb: &Knowledge, cmd: &'a Cmd, lang: &str) -> Option<&'a str> {
+    let head = base(&cmd.head);
+    let owned = verb_vocab(kb, &head, lang);
+    subcommand(cmd, &owned.as_vocab(), lang)
+}
+
+struct OwnedVerbVocab {
+    value_options: Vec<String>,
+    no_value_options: Vec<String>,
+    flag_prefix: Vec<String>,
+    case_sensitive: bool,
+    colon_attach: bool,
+}
+
+impl OwnedVerbVocab {
+    fn as_vocab(&self) -> crate::flags::Vocab<'_> {
+        crate::flags::Vocab {
+            value_options: &self.value_options,
+            no_value_options: &self.no_value_options,
+            flag_prefix: &self.flag_prefix,
+            case_sensitive: self.case_sensitive,
+            abbreviation: if self.case_sensitive {
+                crate::flags::Abbrev::Refuse
+            } else {
+                crate::flags::Abbrev::Accept
+            },
+            colon_attach: self.colon_attach,
         }
     }
-    (value_options, flag_prefix)
 }
 
-/// The vocabulary `subcommand_index` reads when the caller is scanning
-/// across every entry sharing a name at once (`subcommand_of`, `then_of`)
-/// rather than one entry's own. Case-sensitive and abbreviation-accepting,
-/// unconditionally: there is no single `case_sensitive_flags` to defer to
-/// when several entries could disagree, and exact, unabbreviated matching is
-/// also what the pre-primitive code did here regardless of any entry's
-/// declared case — so this keeps today's git/gh answers unchanged
-/// (`subcommand_in`/`sub_arg_0_in` name only those two, both declared
-/// case-sensitive). `colon_attach` is false for the same reason `vocab_for`
-/// would need `languages` to turn it on, and neither consumer of this
-/// vocabulary is PowerShell-scoped today.
-fn head_vocab<'a>(value_options: &'a [String], flag_prefix: &'a [String]) -> crate::flags::Vocab<'a> {
-    crate::flags::Vocab {
+/// One language-scoped grammar for locating a name's verb. Empty entry fields
+/// contribute nothing; non-empty claims combine, and the loader refuses the
+/// cross-entry contradictions that cannot be combined truthfully.
+fn verb_vocab(kb: &Knowledge, head: &str, lang: &str) -> OwnedVerbVocab {
+    let mut value_options: Vec<String> = Vec::new();
+    let mut no_value_options: Vec<String> = Vec::new();
+    let mut flag_prefix: Vec<String> = Vec::new();
+    let mut case_sensitive: Option<bool> = None;
+    for prog in entries_for(kb, head, lang) {
+        for value in &prog.value_options {
+            if !value_options.contains(value) {
+                value_options.push(value.clone());
+            }
+        }
+        for flag in &prog.no_value_options {
+            if !no_value_options.contains(flag) {
+                no_value_options.push(flag.clone());
+            }
+        }
+        for prefix in crate::flags::effective_prefixes(&prog.flag_prefix) {
+            let prefix = prefix.to_string();
+            if !flag_prefix.contains(&prefix) {
+                flag_prefix.push(prefix);
+            }
+        }
+        if let Some(stated) = prog.case_sensitive_flags {
+            case_sensitive.get_or_insert(stated);
+        }
+    }
+    OwnedVerbVocab {
         value_options,
-        no_value_options: &[],
+        no_value_options,
         flag_prefix,
-        case_sensitive: true,
-        abbreviation: crate::flags::Abbrev::Accept,
-        colon_attach: false,
+        case_sensitive: case_sensitive.unwrap_or(false),
+        colon_attach: lang == "powershell",
     }
 }
 
@@ -1155,12 +1267,11 @@ fn then_word<'a>(positionals: &[&'a String]) -> Option<&'a str> {
 /// or why there is not one.
 ///
 /// The last two cases are NOT interchangeable, and collapsing them was a real
-/// hole: a `[[write.scope]]` entry that states a second word must not claim a
-/// command whose verb has a DIFFERENT one, and must not claim one that has
-/// none — but it MUST claim one whose second word vouch could not read. A
-/// scope restricts, and a word vouch cannot read disproves nothing, so the
-/// rule applies until it is disproven. With both spelled `None`, a single
-/// undescribed flag took a scoped command out of its own scope.
+/// hole: a `[[write.scope]]` entry that states a second word must not grant a
+/// scope on a command whose verb has a DIFFERENT one, has none, or could not
+/// be read. `SecondWord::Unknown` lets the decision pipeline take that last
+/// case to `scope_unprovable` instead of selecting a scope by file order or
+/// falling through to a wider write allowance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SecondWord {
     /// Nothing followed the subcommand: the verb is one word.
@@ -1180,23 +1291,25 @@ pub enum SecondWord {
 /// the rule that scopes a write and the walk that finds it read the same
 /// position.
 pub fn then_of(kb: &Knowledge, cmd: &Cmd) -> SecondWord {
+    then_of_in(kb, cmd, "bash")
+}
+
+/// Language-aware form used by the decision pipeline.
+pub fn then_of_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> SecondWord {
     let head = base(&cmd.head);
-    let (value_options, flag_prefix) = union_vocab_lists(kb, &head);
-    let Some(sub_idx) = subcommand_index(cmd, &head_vocab(&value_options, &flag_prefix)) else {
-        // No verb at all, so no second word to it.
-        return SecondWord::Absent;
+    let owned = verb_vocab(kb, &head, lang);
+    let sub_idx = match resolve_verb(cmd, &owned.as_vocab(), lang) {
+        Verb::At(i) => i,
+        Verb::None => return SecondWord::Absent,
+        Verb::Unreadable { token, .. } => return SecondWord::Unknown(token),
     };
-    for prog in &kb.program {
-        if !prog.match_names.iter().any(|n| n.to_ascii_lowercase() == head) {
-            continue;
-        }
-        let (positionals, unknowable) = walk_post_subcommand(&cmd.args[sub_idx + 1..], prog);
-        if let Some(tok) = unknowable.first() {
-            return SecondWord::Unknown(tok.clone());
-        }
-        if let Some(w) = then_word(&positionals) {
-            return SecondWord::Word(w.to_string());
-        }
+    let (positionals, unknowable) =
+        walk_post_subcommand(&cmd.args[sub_idx + 1..], &owned.as_vocab());
+    if let Some(tok) = unknowable.first() {
+        return SecondWord::Unknown(tok.clone());
+    }
+    if let Some(w) = then_word(&positionals) {
+        return SecondWord::Word(w.to_string());
     }
     SecondWord::Absent
 }
@@ -1233,7 +1346,7 @@ pub enum RunDir {
 /// two entries for the same program can never disagree about what its flags
 /// mean.
 pub fn run_dir(kb: &Knowledge, cmd: &Cmd) -> RunDir {
-    run_dir_with_flag(kb, cmd).0
+    run_dir_with_flag_in(kb, cmd, "bash").0
 }
 
 /// The same walk, and the flag token that named the directory.
@@ -1271,35 +1384,35 @@ pub fn run_dir(kb: &Knowledge, cmd: &Cmd) -> RunDir {
 /// decided AFTER classification, by checking which of the two declared
 /// lists the canonical name actually came from.
 pub fn run_dir_with_flag(kb: &Knowledge, cmd: &Cmd) -> (RunDir, Option<String>) {
+    run_dir_with_flag_in(kb, cmd, "bash")
+}
+
+pub fn run_dir_with_flag_in(
+    kb: &Knowledge,
+    cmd: &Cmd,
+    lang: &str,
+) -> (RunDir, Option<String>) {
     let head = base(&cmd.head);
     let mut run_dir_flags: Vec<String> = Vec::new();
-    let mut value_options: Vec<String> = Vec::new();
-    let mut flag_prefix: Vec<String> = Vec::new();
-    let mut colon_attach = false;
-    for prog in &kb.program {
-        if !prog.match_names.iter().any(|n| n.to_ascii_lowercase() == head) {
-            continue;
-        }
+    let owned = verb_vocab(kb, &head, lang);
+    for prog in entries_for(kb, &cmd.head, lang) {
         run_dir_flags.extend(prog.run_dir_flags.iter().cloned());
-        value_options.extend(prog.value_options.iter().cloned());
-        for p in &prog.flag_prefix {
-            if !flag_prefix.contains(p) {
-                flag_prefix.push(p.clone());
-            }
-        }
-        colon_attach |= prog.languages.iter().any(|l| l == "powershell");
     }
     let merged_value_options: Vec<String> =
-        run_dir_flags.iter().cloned().chain(value_options.iter().cloned()).collect();
+        run_dir_flags.iter().cloned().chain(owned.value_options.iter().cloned()).collect();
     let vocab = crate::flags::Vocab {
         value_options: &merged_value_options,
-        no_value_options: &[],
-        flag_prefix: &flag_prefix,
+        no_value_options: &owned.no_value_options,
+        flag_prefix: &owned.flag_prefix,
         case_sensitive: true,
         abbreviation: crate::flags::Abbrev::Refuse,
-        colon_attach,
+        colon_attach: owned.colon_attach,
     };
-    let end = subcommand_index(cmd, &vocab).unwrap_or(cmd.args.len());
+    let end = match resolve_verb(cmd, &vocab, lang) {
+        Verb::At(i) => i,
+        Verb::None => cmd.args.len(),
+        Verb::Unreadable { fallback, .. } => fallback,
+    };
     let mut found: Option<(String, String)> = None;
     let mut walk = crate::flags::ArgWalk::new(&vocab);
     // A token consumed as some OTHER flag's value is never itself a run-dir
@@ -1357,22 +1470,50 @@ pub fn run_dir_with_flag(kb: &Knowledge, cmd: &Cmd) -> (RunDir, Option<String>) 
     }
 }
 
-fn sub_arg_0<'a>(cmd: &'a Cmd, vocab: &crate::flags::Vocab) -> Option<&'a str> {
-    let sub = subcommand(cmd, vocab)?;
-    let mut seen = false;
-    for a in &cmd.args {
-        if !seen {
-            if a == sub {
-                seen = true;
+enum WordRead<'a> {
+    Word(&'a str),
+    Absent,
+    Unreadable(String),
+}
+
+fn sub_arg_0<'a>(
+    cmd: &'a Cmd,
+    vocab: &crate::flags::Vocab,
+    lang: &str,
+    verb: &Verb,
+) -> WordRead<'a> {
+    let start = match verb {
+        Verb::At(i) => i + 1,
+        Verb::None => return WordRead::Absent,
+        Verb::Unreadable { token, .. } => return WordRead::Unreadable(token.clone()),
+    };
+    let mut walk = crate::flags::ArgWalk::new(vocab);
+    let mut skip_next = false;
+    for (offset, a) in cmd.args[start..].iter().enumerate() {
+        let index = start + offset;
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        match walk.next(a) {
+            crate::flags::Class::NotFlag => {
+                return if token_is_unreadable(cmd, index, lang) {
+                    WordRead::Unreadable(a.clone())
+                } else {
+                    WordRead::Word(a)
+                };
             }
-            continue;
+            crate::flags::Class::EndOfOptions => {}
+            crate::flags::Class::Value { attached: None, .. } => skip_next = true,
+            crate::flags::Class::Value { attached: Some(_), .. }
+            | crate::flags::Class::Bool { .. } => {}
+            crate::flags::Class::Undescribed { token }
+            | crate::flags::Class::RefusedAbbrev { token, .. } => {
+                return WordRead::Unreadable(token);
+            }
         }
-        if a.starts_with('-') {
-            continue;
-        }
-        return Some(a);
     }
-    None
+    WordRead::Absent
 }
 
 /// Named predicate: a chmod-style mode that adds an execute bit.
@@ -1472,36 +1613,51 @@ fn veto_flag_spelled(flags: &[String], cmd: &Cmd, prog: &Program) -> bool {
 /// shared flag primitive (`crate::flags`) through the SAME vocabulary, built
 /// once below — `subcommand_index` needs one too, and building it per
 /// criterion would risk two criteria disagreeing about where the verb is.
-/// Abbreviation policy is `Abbrev::Accept`, keeping the pinned behaviour
-/// (`tests/crossshell_test.rs:107`) — which is why the veto does NOT share
-/// `any_flag_spelled`: an accepted abbreviation or attached value widens a
-/// positive condition safely and a veto unsafely (see `veto_flag_spelled`).
-pub fn rule_matches(rule: &Rule, cmd: &Cmd, prog: &Program) -> bool {
-    let vocab = crate::flags::vocab_for(prog, crate::flags::Abbrev::Accept);
+/// Abbreviation follows the entry's derivation policy: accepted for a
+/// case-insensitive grammar and refused for a case-sensitive one. This is
+/// why the veto does NOT share `any_flag_spelled`: an accepted abbreviation
+/// or attached value widens a positive condition safely and a veto unsafely
+/// (see `veto_flag_spelled`).
+struct RuleMatch {
+    matched: bool,
+    unread_verb: Option<String>,
+}
+
+fn rule_match_in(rule: &Rule, cmd: &Cmd, prog: &Program, lang: &str) -> RuleMatch {
+    let vocab = crate::flags::vocab_for(prog, wrap_abbrev(prog));
     // The veto comes first, and before `always` in particular: a rule that
     // fires on every invocation is exactly the one that needs a way to name
     // the invocation it must not fire on.
     if !rule.unless_flags.is_empty() && veto_flag_spelled(&rule.unless_flags, cmd, prog) {
-        return false;
+        return RuleMatch { matched: false, unread_verb: None };
     }
     if rule.always {
-        return true;
+        return RuleMatch { matched: true, unread_verb: None };
     }
 
+    let verb = resolve_verb(cmd, &vocab, lang);
+    let mut unread_verb: Option<String> = None;
+
     if !rule.subcommand_in.is_empty() {
-        match subcommand(cmd, &vocab) {
-            Some(s) if rule.subcommand_in.iter().any(|x| x == s) => {}
-            _ => return false,
+        match &verb {
+            Verb::At(i) if rule.subcommand_in.iter().any(|x| x == &cmd.args[*i]) => {}
+            Verb::Unreadable { token, .. } => unread_verb = Some(token.clone()),
+            _ => return RuleMatch { matched: false, unread_verb: None },
         }
     }
     if !rule.sub_arg_0_in.is_empty() {
-        match sub_arg_0(cmd, &vocab) {
-            Some(s) if rule.sub_arg_0_in.iter().any(|x| x == s) => {}
-            _ => return false,
+        match sub_arg_0(cmd, &vocab, lang, &verb) {
+            WordRead::Word(s) if rule.sub_arg_0_in.iter().any(|x| x == s) => {}
+            WordRead::Unreadable(token) => {
+                if unread_verb.is_none() {
+                    unread_verb = Some(token);
+                }
+            }
+            _ => return RuleMatch { matched: false, unread_verb: None },
         }
     }
     if !rule.any_flag.is_empty() && !any_flag_spelled(&rule.any_flag, cmd, &vocab) {
-        return false;
+        return RuleMatch { matched: false, unread_verb: None };
     }
     if !rule.any_arg_exact.is_empty()
         && !rule
@@ -1509,7 +1665,7 @@ pub fn rule_matches(rule: &Rule, cmd: &Cmd, prog: &Program) -> bool {
             .iter()
             .any(|x| cmd.args.iter().any(|a| crate::paths::unquote(a) == x))
     {
-        return false;
+        return RuleMatch { matched: false, unread_verb: None };
     }
     if !rule.any_arg_prefix.is_empty()
         && !rule
@@ -1517,30 +1673,37 @@ pub fn rule_matches(rule: &Rule, cmd: &Cmd, prog: &Program) -> bool {
             .iter()
             .any(|p| cmd.args.iter().any(|a| crate::paths::unquote(a).starts_with(p)))
     {
-        return false;
+        return RuleMatch { matched: false, unread_verb: None };
     }
     if rule.grants_execute && !grants_execute(&cmd.args) {
-        return false;
+        return RuleMatch { matched: false, unread_verb: None };
     }
     // A rule with no conditions at all would match everything; refuse it.
-    rule.subcommand_in.len()
+    let matched = rule.subcommand_in.len()
         + rule.sub_arg_0_in.len()
         + rule.any_flag.len()
         + rule.any_arg_exact.len()
         + rule.any_arg_prefix.len()
         > 0
-        || rule.grants_execute
+        || rule.grants_execute;
+    RuleMatch { matched, unread_verb: matched.then_some(unread_verb).flatten() }
+}
+
+pub fn rule_matches(rule: &Rule, cmd: &Cmd, prog: &Program) -> bool {
+    rule_match_in(rule, cmd, prog, "bash").matched
 }
 
 pub fn check(kb: &Knowledge, cmd: &Cmd) -> Vec<Hit> {
+    check_in(kb, cmd, "bash")
+}
+
+pub fn check_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> Vec<Hit> {
     let head = base(&cmd.head);
     let mut hits = Vec::new();
-    for prog in &kb.program {
-        if !prog.match_names.iter().any(|n| n.to_ascii_lowercase() == head) {
-            continue;
-        }
+    for prog in entries_for(kb, &cmd.head, lang) {
         for rule in &prog.rule {
-            if rule_matches(rule, cmd, prog) {
+            let outcome = rule_match_in(rule, cmd, prog, lang);
+            if outcome.matched {
                 hits.push(Hit {
                     guard: rule.guard.clone(),
                     source: rule.source.clone(),
@@ -1548,6 +1711,7 @@ pub fn check(kb: &Knowledge, cmd: &Cmd) -> Vec<Hit> {
                         .chars()
                         .take(200)
                         .collect(),
+                    unread_verb: outcome.unread_verb,
                 });
             }
         }
@@ -1614,11 +1778,17 @@ pub fn evaluates_input(
     holds_input: bool,
     standalone_eligible: bool,
 ) -> (bool, Option<String>, Option<StandaloneHint>) {
-    let head = base(&cmd.head);
-    for prog in &kb.program {
-        if !prog.match_names.iter().any(|n| n.to_ascii_lowercase() == head) {
-            continue;
-        }
+    evaluates_input_in(kb, cmd, "bash", holds_input, standalone_eligible)
+}
+
+pub fn evaluates_input_in(
+    kb: &Knowledge,
+    cmd: &Cmd,
+    lang: &str,
+    holds_input: bool,
+    standalone_eligible: bool,
+) -> (bool, Option<String>, Option<StandaloneHint>) {
+    for prog in entries_for(kb, &cmd.head, lang) {
         let wrap_lang = (!prog.wrap_lang.is_empty()).then(|| prog.wrap_lang.clone());
         match prog.evaluates_input.as_str() {
             // Untouched by the flag on purpose: an always-entry runs computed
@@ -1640,7 +1810,7 @@ pub fn evaluates_input(
                 // One lookup, both questions: whether this stands down, and —
                 // when it does not — the off-switch sentence saying what would
                 // have made it.
-                let sub = entry_subcommand(prog, cmd);
+                let sub = entry_subcommand(prog, cmd, lang);
                 if !standalone_run(prog, cmd, sub, standalone_eligible) {
                     let hint = standalone_hint(prog, cmd, sub, standalone_eligible);
                     return (true, wrap_lang, hint);
@@ -2147,14 +2317,24 @@ pub struct ListableStandalone {
 /// could be a `standalone_flags` member: flags-only under the UNION
 /// vocabulary (the same computation `subcommand_of` uses), each token
 /// passing the loader's member allowlist, and none sitting in a refused
-/// vocabulary of ANY same-name entry — the conservative union view, so the
-/// prompt never offers a member the loader would then refuse.
+/// vocabulary of ANY same-name entry in this language — the conservative
+/// language-scoped union view, so the prompt never offers a member the
+/// loader would then refuse.
 ///
 /// `eligible` is the same per-occurrence fold every other standalone
 /// question reads (`standalone_run`, `standalone_hint`): a record something
 /// can still append to, or one the parser could not complete, is never
 /// offered as a flags-only shape, whatever its tokens look like.
 pub fn listable_standalone(kb: &Knowledge, cmd: &Cmd, eligible: bool) -> Option<ListableStandalone> {
+    listable_standalone_in(kb, cmd, "bash", eligible)
+}
+
+fn listable_standalone_in(
+    kb: &Knowledge,
+    cmd: &Cmd,
+    lang: &str,
+    eligible: bool,
+) -> Option<ListableStandalone> {
     if !eligible || cmd.args.is_empty() {
         return None;
     }
@@ -2162,13 +2342,12 @@ pub fn listable_standalone(kb: &Knowledge, cmd: &Cmd, eligible: bool) -> Option<
     // (what `subcommand_of` would rebuild from the same lists) and the flag
     // prefixes the member check needs.
     let head = base(&cmd.head);
-    let (value_options, flag_prefix) = union_vocab_lists(kb, &head);
-    if subcommand(cmd, &head_vocab(&value_options, &flag_prefix)).is_some() {
+    let owned = verb_vocab(kb, &head, lang);
+    if subcommand(cmd, &owned.as_vocab(), lang).is_some() {
         return None;
     }
-    let flag_prefix = prefixes(&flag_prefix);
-    let same_name: Vec<&Program> =
-        kb.program.iter().filter(|p| p.match_names.iter().any(|n| n.to_ascii_lowercase() == head)).collect();
+    let flag_prefix = prefixes(&owned.flag_prefix);
+    let same_name: Vec<&Program> = entries_for(kb, &head, lang).collect();
     let mut flags: Vec<String> = Vec::new();
     for a in &cmd.args {
         let t = crate::paths::unquote(a);
@@ -2260,11 +2439,11 @@ pub fn unmodeled_descriptions(
         // Computed ONCE and returned beside the sentence it shaped: the caller
         // needs the same marker to tell colliding populations apart, and a
         // second call there would be a second answer to one question.
-        let narrow = listable_standalone(kb, c, standalone_eligible);
+        let narrow = listable_standalone_in(kb, c, lang, standalone_eligible);
         let (shown, desc) = if is_modeled(kb, &c.head, lang) {
             // Say WHICH part is unrecognised, or the prompt looks wrong to
             // anyone who just trusted this program.
-            match subcommand_of(kb, c) {
+            match subcommand_of_in(kb, c, lang) {
                 Some(sub) => (
                     format!("{} {sub}", c.head),
                     format!(
@@ -2526,7 +2705,7 @@ pub fn recognition_at(
             Some(subs) => {
                 // Both halves ask about the verb under THIS entry's
                 // vocabulary, so the walk that finds it runs once.
-                let sub = entry_subcommand(p, cmd);
+                let sub = entry_subcommand(p, cmd, lang);
                 (!subs.is_empty()
                     && sub.is_some_and(|sub| subs.iter().any(|s| s.eq_ignore_ascii_case(sub))))
                     || standalone_run(p, cmd, sub, standalone_eligible)
@@ -2993,6 +3172,7 @@ fn after_exec_commands(prog: &Program, args: &[String]) -> (Vec<Cmd>, Vec<String
             Some((h, rest_args)) => found.push(Cmd {
                 head: h.clone(),
                 args: rest_args.to_vec(),
+                unread_args: Default::default(),
                 chain: None,
                 prefix_assigns: vec![],
             }),
@@ -3536,7 +3716,7 @@ pub fn expand_wrappers_forking(
             // Where a WRAPPER's own run-dir flag sends everything it wraps.
             // Read once per command rather than per matching entry, since the
             // flag is a property of the command line, not of one entry.
-            let own_run_dir = match run_dir_with_flag(kb, cmd) {
+            let own_run_dir = match run_dir_with_flag_in(kb, cmd, lang) {
                 (RunDir::Dir(d), _) => Some(d),
                 _ => None,
             };
@@ -3600,6 +3780,7 @@ pub fn expand_wrappers_forking(
                                 cmds: vec![Cmd {
                                     head: cmd.args[at].clone(),
                                     args: cmd.args[at + 1..].to_vec(),
+                                    unread_args: Default::default(),
                                     chain: None,
                                     // The env words this wrapper set for the
                                     // command it runs are that command's own
@@ -3759,6 +3940,7 @@ pub fn expand_wrappers_forking(
                                     cmds: vec![Cmd {
                                         head,
                                         args,
+                                        unread_args: Default::default(),
                                         chain: None,
                                         prefix_assigns: vec![],
                                     }],
@@ -3956,7 +4138,12 @@ pub struct WriteTargets {
 /// the write derivation counts it — a rule that read raw tokens here would
 /// answer "no destination named" for `tar -xf a.tar -C./d` and claim the run
 /// place for a command that states its own.
-fn here_write_applies(prog: &Program, cmd: &Cmd, operands: &[&String]) -> bool {
+fn here_write_applies(
+    prog: &Program,
+    cmd: &Cmd,
+    lang: &str,
+    operands: &[&String],
+) -> bool {
     if prog.here_write.is_empty() {
         return false;
     }
@@ -4013,7 +4200,7 @@ fn here_write_applies(prog: &Program, cmd: &Cmd, operands: &[&String]) -> bool {
         let when_ok = hw.when_flags.is_empty() || present(&hw.when_flags);
         let unless_ok = !present(&hw.unless_flags) && !could_hide(&hw.unless_flags);
         let sub_ok = match &hw.subcommand {
-            Some(want) => subcommand(cmd, &vocab).is_some_and(|s| s == want),
+            Some(want) => subcommand(cmd, &vocab, lang).is_some_and(|s| s == want),
             None => true,
         };
         let arity_ok = hw.operands.is_none_or(|n| operands.len() == n);
@@ -4026,6 +4213,10 @@ fn here_write_applies(prog: &Program, cmd: &Cmd, operands: &[&String]) -> bool {
 /// value, skip each `no_value_options` flag, collect everything else that
 /// starts with a flag prefix as `unknowable`, and everything else again as a
 /// positional.
+///
+/// The caller supplies the same language-scoped, name-wide vocabulary used
+/// to locate the verb. `then_of_in` and `sub_write` therefore cannot disagree
+/// because a flag claim lives on a sibling entry or because file order changed.
 ///
 /// Reads the shared flag primitive (`crate::flags`), not a private
 /// exact-string split (M2.128): `git clone url -C=/tmp /x` used to read
@@ -4042,18 +4233,14 @@ fn here_write_applies(prog: &Program, cmd: &Cmd, operands: &[&String]) -> bool {
 /// value on an UNDESCRIBED flag is unknowable, fail-closed either way (the
 /// alternative, treating it as a plain positional, would be a silent guess
 /// about a shape vouch was never told about). A `Class::RefusedAbbrev`
-/// candidate (case-sensitive entries only, spec §4.1.7 — git is the only
-/// `sub_write` consumer today, and always case-sensitive) is unknowable too,
-/// for the same reason: silently accepting or silently dropping it would
-/// both be a guess this walk exists to refuse.
-fn walk_post_subcommand<'a>(args: &'a [String], prog: &Program) -> (Vec<&'a String>, Vec<String>) {
-    let abbrev = if prog.case_sensitive_flags.unwrap_or(false) {
-        crate::flags::Abbrev::Refuse
-    } else {
-        crate::flags::Abbrev::Accept
-    };
-    let vocab = crate::flags::vocab_for(prog, abbrev);
-    let mut walk = crate::flags::ArgWalk::new(&vocab);
+/// candidate (under a case-sensitive name-wide grammar, spec §4.1.7) is
+/// unknowable too, for the same reason: silently accepting or silently
+/// dropping it would both be a guess this walk exists to refuse.
+fn walk_post_subcommand<'a>(
+    args: &'a [String],
+    vocab: &crate::flags::Vocab,
+) -> (Vec<&'a String>, Vec<String>) {
+    let mut walk = crate::flags::ArgWalk::new(vocab);
     let mut positionals: Vec<&String> = Vec::new();
     let mut unknowable: Vec<String> = Vec::new();
     let mut skip_next = false;
@@ -4433,12 +4620,14 @@ fn mode_says_write(
 /// is not declared to write, which is NOT a claim that it does not write —
 /// only that vouch has no description of it. See `unmodeled_command`.
 pub fn written_paths(kb: &Knowledge, cmd: &Cmd) -> WriteTargets {
+    written_paths_in(kb, cmd, "bash")
+}
+
+pub fn written_paths_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> WriteTargets {
     let head = base(&cmd.head);
     let mut out = WriteTargets::default();
-    for prog in &kb.program {
-        if !prog.match_names.iter().any(|n| n.to_ascii_lowercase() == head) {
-            continue;
-        }
+    let verb_grammar = verb_vocab(kb, &head, lang);
+    for prog in entries_for(kb, &cmd.head, lang) {
         // Keyword arguments folded onto the positions `arg_names` claims for
         // them (a no-op for every entry that never sets `arg_names`, which is
         // every non-python entry) — every arm below reads this instead of
@@ -4495,7 +4684,7 @@ pub fn written_paths(kb: &Knowledge, cmd: &Cmd) -> WriteTargets {
         // basename. Found by the task review: gating this on "the arms
         // derived nothing" made the claim unreachable for exactly the shape
         // it was added for.
-        if here_write_applies(prog, cmd, &non_flags_paths) {
+        if here_write_applies(prog, cmd, lang, &non_flags_paths) {
             out.run_dir_dest = true;
             continue;
         }
@@ -4632,26 +4821,27 @@ pub fn written_paths(kb: &Knowledge, cmd: &Cmd) -> WriteTargets {
         // <dir>, `git status` writes nothing. The program-wide `writes` cannot
         // express that, so these are declared per subcommand.
         //
-        // The anchor is `subcommand_index`, never string equality — a flag's
+        // The anchor is the language-scoped verb grammar, never string equality — a flag's
         // VALUE that happens to equal the subcommand's own spelling
         // (`git -C init init foo`) must not be mistaken for it. The
-        // vocabulary follows the same derivation policy `write_flags`
-        // matching above uses (§4.1.7): abbreviation accepted for a
-        // case-insensitive entry, refused for a case-sensitive one — this is
-        // still destination derivation, not guard/recognition matching.
+        // vocabulary is the same name-wide grammar `then_of_in` reads, so the
+        // scope and destination walks cannot anchor on different tokens.
         if !prog.sub_write.is_empty() {
-            let sub_write_abbrev = if prog.case_sensitive_flags.unwrap_or(false) {
-                crate::flags::Abbrev::Refuse
-            } else {
-                crate::flags::Abbrev::Accept
+            let sub_idx = match resolve_verb(cmd, &verb_grammar.as_vocab(), lang) {
+                Verb::At(i) => Some(i),
+                Verb::None => None,
+                Verb::Unreadable { token, .. } => {
+                    out.unknowable.push(token);
+                    None
+                }
             };
-            let sub_write_vocab = crate::flags::vocab_for(prog, sub_write_abbrev);
-            if let Some(sub_idx) = subcommand_index(cmd, &sub_write_vocab) {
+            if let Some(sub_idx) = sub_idx {
                 for sw in &prog.sub_write {
                     if cmd.args[sub_idx] != sw.subcommand {
                         continue;
                     }
-                    let (positionals, unk) = walk_post_subcommand(&cmd.args[sub_idx + 1..], prog);
+                    let (positionals, unk) =
+                        walk_post_subcommand(&cmd.args[sub_idx + 1..], &verb_grammar.as_vocab());
                     // Something after the subcommand could not be
                     // classified — vouch does not know whether it takes a
                     // value, so the positional count and ORDER from that
@@ -4749,9 +4939,18 @@ pub fn written_paths(kb: &Knowledge, cmd: &Cmd) -> WriteTargets {
 /// has thrown away the only thing that tells them apart. The index is how the
 /// caller gets back to that command's order, and from there to its place.
 pub fn check_each(kb: &Knowledge, cmds: &[Cmd]) -> Vec<(usize, Hit)> {
+    let langs = vec!["bash".to_string(); cmds.len()];
+    check_each_in(kb, cmds, &langs)
+}
+
+/// Language-aware guard walk. The language list is command-parallel; a
+/// missing entry refuses the language-specific reading by using an empty
+/// language name, whose token rules are the conservative shell rules.
+pub fn check_each_in(kb: &Knowledge, cmds: &[Cmd], langs: &[String]) -> Vec<(usize, Hit)> {
     let mut out: Vec<(usize, Hit)> = Vec::new();
     for (i, c) in cmds.iter().enumerate() {
-        for hit in check(kb, c) {
+        let lang = langs.get(i).map(String::as_str).unwrap_or("");
+        for hit in check_in(kb, c, lang) {
             out.push((i, hit));
         }
     }

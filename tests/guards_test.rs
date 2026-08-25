@@ -71,6 +71,269 @@ fn declared_pr_create_and_merge_are_caught() {
 }
 
 #[test]
+fn unread_bash_verbs_fire_the_rule_but_use_the_unread_verb_construct() {
+    let cfg = load(
+        "[lang.bash]\ndefault = \"allow\"\n[guards]\nhistory_rewrite = \"deny\"\n",
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            vouch::engine::decide_bash(&cfg, "git filter-branch --all"),
+            Decision::Deny(_)
+        ),
+        "the readable twin proves the configured guard action"
+    );
+    for command in [
+        r#"git "filter-branch" --all"#,
+        r#"git filter-b"ranch" --all"#,
+        "git --exec-path /usr/lib/git-core reset --hard",
+    ] {
+        match vouch::engine::decide_bash(&cfg, command) {
+            Decision::Ask(reason) => {
+                assert!(reason.contains("unread_verb"), "{command}: {reason}");
+                assert!(!reason.contains("setting: guards.history_rewrite"), "{command}: {reason}");
+            }
+            other => panic!("unread verb must ask instead of evade or hard-deny ({command}): {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn an_unread_hit_does_not_lower_a_sibling_guards_genuine_deny() {
+    let cfg = load(
+        "[lang.bash]\ndefault = \"allow\"\n[guards]\nhistory_rewrite = \"deny\"\nremote_execution = \"deny\"\n",
+    )
+    .unwrap();
+    match vouch::engine::decide_bash(&cfg, r#"git "filter-branch" --all && ssh host"#) {
+        Decision::Deny(reason) => assert!(reason.contains("remote_execution"), "{reason}"),
+        other => panic!("the genuine sibling guard must keep its deny: {other:?}"),
+    }
+}
+
+#[test]
+fn sub_arg_0_anchors_on_the_resolved_verb_index_not_equal_text() {
+    let cfg = load(
+        "[lang.bash]\ndefault = \"allow\"\n[guards]\npublish_outward = \"deny\"\n",
+    )
+    .unwrap();
+    for command in ["gh pr merge 1", "gh -R pr pr merge 1"] {
+        match vouch::engine::decide_bash(&cfg, command) {
+            Decision::Deny(reason) => assert!(reason.contains("publish_outward"), "{reason}"),
+            other => panic!("the merge guard lost its real anchor for {command}: {other:?}"),
+        }
+    }
+    for command in [r#"gh "pr" merge 1"#, "gh --hostname example.test pr merge 1"] {
+        match vouch::engine::decide_bash(&cfg, command) {
+            Decision::Ask(reason) => assert!(reason.contains("unread_verb"), "{reason}"),
+            other => panic!("an unread gh verb must use its construct ({command}): {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn verb_readability_is_language_specific() {
+    let cfg = load(
+        "[lang.powershell]\ndefault = \"allow\"\n[lang.python]\ndefault = \"allow\"\n[guards]\nhistory_rewrite = \"deny\"\n",
+    )
+    .unwrap();
+
+    // PowerShell's scanner has already decoded syntactic quotes. A quote that
+    // was ordinary syntax must not turn a readable guard hit into unread_verb.
+    assert!(matches!(
+        vouch::engine::decide_powershell(&cfg, r#"git "filter-branch" --all"#),
+        Decision::Deny(_)
+    ));
+    match vouch::engine::decide_powershell(&cfg, "git $Verb --all") {
+        Decision::Ask(reason) => assert!(reason.contains("unread_verb"), "{reason}"),
+        other => panic!("PowerShell expansion at the verb must be unreadable: {other:?}"),
+    }
+
+    // Python literal strings are decoded values. Their punctuation is data,
+    // not evidence of an unread token. Python call heads are deliberately
+    // namespaced, so exercise the guard primitive with a matching entry.
+    let py_kb = vouch::guards::load(
+        r#"
+[[program]]
+match = ["python:git"]
+case_sensitive_flags = true
+[[program.rule]]
+guard = "history_rewrite"
+subcommand_in = ["filter-branch"]
+"#,
+    )
+    .unwrap();
+    let literal = vouch::python::parse(r#"git("filter-branch", "--all")"#).unwrap();
+    let literal_hits = vouch::guards::check_in(&py_kb, &literal.commands[0], "python");
+    assert_eq!(literal_hits.len(), 1);
+    assert_eq!(literal_hits[0].unread_verb, None);
+
+    let dynamic = vouch::python::parse(r#"git(verb, "--all")"#).unwrap();
+    let dynamic_hits = vouch::guards::check_in(&py_kb, &dynamic.commands[0], "python");
+    assert_eq!(dynamic_hits.len(), 1);
+    assert!(dynamic_hits[0].unread_verb.is_some());
+}
+
+#[test]
+fn verb_vocabulary_is_language_scoped_and_keeps_the_entry_case_rule() {
+    let kb = vouch::guards::load(
+        r#"
+[[program]]
+match = ["widget"]
+languages = ["bash"]
+value_options = ["-s"]
+case_sensitive_flags = false
+subcommands = ["x"]
+
+[[program]]
+match = ["widget"]
+languages = ["powershell"]
+value_options = ["-P"]
+case_sensitive_flags = false
+subcommands = ["x"]
+"#,
+    )
+    .unwrap();
+
+    let bash = cmd("widget", &["-S", "value", "x"]);
+    assert_eq!(
+        vouch::guards::verb_of_in(&kb, &bash, "bash"),
+        vouch::guards::VerbWord::Word("x".into())
+    );
+    assert!(vouch::guards::recognises(&kb, &bash, "bash", true));
+    assert!(matches!(
+        vouch::guards::verb_of_in(&kb, &bash, "powershell"),
+        vouch::guards::VerbWord::Unknown(_)
+    ));
+
+    let powershell = cmd("widget", &["-P", "value", "x"]);
+    assert_eq!(
+        vouch::guards::verb_of_in(&kb, &powershell, "powershell"),
+        vouch::guards::VerbWord::Word("x".into())
+    );
+    assert!(matches!(
+        vouch::guards::verb_of_in(&kb, &powershell, "bash"),
+        vouch::guards::VerbWord::Unknown(_)
+    ));
+}
+
+#[test]
+fn then_and_sub_write_share_the_same_name_wide_verb_grammar() {
+    let kb = vouch::guards::load(
+        r#"
+[[program]]
+match = ["widget"]
+languages = ["bash"]
+value_options = ["-s"]
+case_sensitive_flags = true
+
+[[program]]
+match = ["widget"]
+languages = ["bash"]
+case_sensitive_flags = true
+[[program.sub_write]]
+subcommand = "x"
+then = "add"
+takes = "first"
+min_positional = 1
+"#,
+    )
+    .unwrap();
+    let command = cmd("widget", &["-s", "value", "x", "add", "C:/work/out"]);
+    assert_eq!(
+        vouch::guards::verb_of_in(&kb, &command, "bash"),
+        vouch::guards::VerbWord::Word("x".into())
+    );
+    assert_eq!(
+        vouch::guards::then_of_in(&kb, &command, "bash"),
+        vouch::guards::SecondWord::Word("add".into())
+    );
+    assert_eq!(
+        vouch::guards::written_paths_in(&kb, &command, "bash").paths,
+        vec!["C:/work/out".to_string()]
+    );
+
+    let post_flag = cmd(
+        "widget",
+        &["x", "-s", "value", "add", "C:/work/post-flag"],
+    );
+    assert_eq!(
+        vouch::guards::then_of_in(&kb, &post_flag, "bash"),
+        vouch::guards::SecondWord::Word("add".into())
+    );
+    assert_eq!(
+        vouch::guards::written_paths_in(&kb, &post_flag, "bash").paths,
+        vec!["C:/work/post-flag".to_string()]
+    );
+}
+
+#[test]
+fn overlapping_verb_grammars_refuse_contradictions_but_cross_language_pairs_do_not() {
+    let case_error = vouch::knowledge::validate_text(
+        r#"
+[[program]]
+match = ["widget"]
+languages = ["bash"]
+case_sensitive_flags = true
+[[program]]
+match = ["widget"]
+languages = ["bash"]
+case_sensitive_flags = false
+"#,
+    )
+    .unwrap_err();
+    assert!(case_error.contains("case_sensitive_flags"), "{case_error}");
+
+    let default_case_error = vouch::knowledge::validate_text(
+        r#"
+[[program]]
+match = ["widget"]
+languages = ["bash"]
+value_options = ["-x"]
+[[program]]
+match = ["widget"]
+languages = ["bash"]
+case_sensitive_flags = true
+"#,
+    )
+    .unwrap_err();
+    assert!(default_case_error.contains("unstated value means false"), "{default_case_error}");
+
+    let kind_error = vouch::knowledge::validate_text(
+        r#"
+[[program]]
+match = ["widget"]
+languages = ["bash"]
+value_options = ["-x"]
+case_sensitive_flags = true
+[[program]]
+match = ["widget"]
+languages = ["bash"]
+no_value_options = ["-x"]
+case_sensitive_flags = true
+"#,
+    )
+    .unwrap_err();
+    assert!(kind_error.contains("value-taking"), "{kind_error}");
+    assert!(kind_error.contains("no-value"), "{kind_error}");
+
+    vouch::knowledge::validate_text(
+        r#"
+[[program]]
+match = ["widget"]
+languages = ["bash"]
+value_options = ["-x"]
+case_sensitive_flags = true
+[[program]]
+match = ["widget"]
+languages = ["powershell"]
+no_value_options = ["-x"]
+case_sensitive_flags = false
+"#,
+    )
+    .unwrap();
+}
+
+#[test]
 fn declared_chmod_execute_is_caught_symbolically_and_numerically() {
     assert_guard("chmod +x script.sh", "grant_execute");
     assert_guard("chmod 755 script.sh", "grant_execute");
@@ -291,6 +554,7 @@ fn cmd(head: &str, args: &[&str]) -> vouch::syntax::Cmd {
     vouch::syntax::Cmd {
         head: head.into(),
         args: args.iter().map(|s| s.to_string()).collect(),
+        unread_args: Default::default(),
         chain: None,
         prefix_assigns: vec![],
     }

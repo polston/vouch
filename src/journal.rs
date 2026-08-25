@@ -12,7 +12,7 @@
 //!      nothing. See `outcome.rs` for why that matters.
 
 use crate::outcome::Outcome;
-use crate::protocol::{Decision, HookInput};
+use crate::protocol::{Decision, HookInput, Host};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{create_dir_all, OpenOptions};
@@ -51,6 +51,11 @@ pub struct Record {
     /// are such callers).
     #[serde(default)]
     pub permission_mode: String,
+    /// Which host selected this hook adapter. Empty only on rows written
+    /// before host attribution existed; the host is a CLI fact, never trusted
+    /// from hook input.
+    #[serde(default)]
+    pub host: String,
 }
 
 /// Seconds since the epoch, as a string. No date library: the journal only
@@ -74,6 +79,8 @@ pub struct OutcomeRecord {
     pub outcome: Outcome,
     #[serde(default)]
     pub detail: String,
+    #[serde(default)]
+    pub host: String,
 }
 
 /// The verdict word and reason text every journal record carries, read off
@@ -88,6 +95,10 @@ fn verdict_and_reason(d: &Decision) -> (&'static str, String) {
 }
 
 pub fn record_from(input: &HookInput, d: &Decision, mode: &str) -> Record {
+    record_from_host(Host::Claude, input, d, mode)
+}
+
+pub fn record_from_host(host: Host, input: &HookInput, d: &Decision, mode: &str) -> Record {
     let (verdict, reason) = verdict_and_reason(d);
     let cmd = input
         .tool_input
@@ -109,6 +120,7 @@ pub fn record_from(input: &HookInput, d: &Decision, mode: &str) -> Record {
         outcome: Outcome::Pending,
         lang: String::new(),
         permission_mode: input.permission_mode.clone(),
+        host: host.as_str().into(),
     }
 }
 
@@ -124,6 +136,16 @@ pub fn record_from(input: &HookInput, d: &Decision, mode: &str) -> Record {
 /// fallback instead, with an empty `lang`, because the snippet was never
 /// looked at and the journal must not pretend otherwise.
 pub fn records_from_snippets(
+    input: &HookInput,
+    d: &Decision,
+    mode: &str,
+    snippets: &[(String, String)],
+) -> Vec<Record> {
+    records_from_snippets_host(Host::Claude, input, d, mode, snippets)
+}
+
+pub fn records_from_snippets_host(
+    host: Host,
     input: &HookInput,
     d: &Decision,
     mode: &str,
@@ -145,6 +167,7 @@ pub fn records_from_snippets(
             outcome: Outcome::Pending,
             lang: lang.clone(),
             permission_mode: input.permission_mode.clone(),
+            host: host.as_str().into(),
         })
         .collect()
 }
@@ -208,12 +231,15 @@ fn read_lines<T: for<'de> Deserialize<'de>>(dir: &Path, file: &str) -> Vec<T> {
 pub fn all(dir: &Path) -> Vec<Record> {
     let mut recs: Vec<Record> = read_lines(dir, "journal.jsonl");
     let outs: Vec<OutcomeRecord> = read_lines(dir, "outcomes.jsonl");
-    let mut by_id: HashMap<String, Outcome> = HashMap::new();
+    let mut by_id: HashMap<(String, String), Outcome> = HashMap::new();
     for o in &outs {
-        by_id.insert(o.id.clone(), o.outcome);
+        by_id.insert((o.host.clone(), o.id.clone()), o.outcome);
     }
     for r in &mut recs {
-        r.outcome = by_id.get(&r.id).copied().unwrap_or(Outcome::Unknown);
+        r.outcome = by_id
+            .get(&(r.host.clone(), r.id.clone()))
+            .copied()
+            .unwrap_or(Outcome::Unknown);
     }
     recs
 }

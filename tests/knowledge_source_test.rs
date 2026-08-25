@@ -702,6 +702,7 @@ fn a_run_dir_flags_only_entry_loads_and_merges_over_the_shipped_value_options() 
     let cmd = Cmd {
         head: "vcs".into(),
         args: vec!["-C".into(), "/x".into(), "status".into()],
+        unread_args: Default::default(),
         chain: None,
         prefix_assigns: vec![],
     };

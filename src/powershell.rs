@@ -46,6 +46,7 @@ pub const KNOWN_CONSTRUCTS: &[&str] = &[
     "wrap_unlocated",
     "wrap_ambiguous",
     "unreadable_language",
+    "unread_verb",
 ];
 
 /// Byte offset of a real redirect operator, or None.

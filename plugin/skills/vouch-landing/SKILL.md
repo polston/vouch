@@ -133,8 +133,15 @@ Run from the vouch checkout root; every path below is relative to it.
 4a. **Publishing, when the changeset touches published files.** Landing does
    not publish; publishing is its own act, and it is the operator's:
    1. If release-please opened a version pull request here on the step 4
-      push, merge it first — the mirror only picks up the new version once
-      this repository's own version fields carry it.
+      push, fetch its generated branch and run the all-ref history audit before
+      offering it for merge. The branch must be exactly one commit ahead of
+      current private master, its final changelog and pull-request body must be
+      forge-remnant-free, and all six history checks must be clean. The
+      workflow's registered release-please plugin sanitizes both views and
+      scans the title, body, paths and every candidate file before the remote write; a
+      second cleanup commit is a defect, not an accepted transient. Merge the
+      clean version pull request first — the mirror only picks up the new
+      version once this repository's own version fields carry it.
    2. Dry run: `bash scripts/publish-mirror.sh <public-clone>` with no flag —
       read the scan result and the diffstat.
    3. `--push` — pushes a `publish/*` branch and opens a pull request in the

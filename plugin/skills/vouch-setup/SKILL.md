@@ -18,10 +18,14 @@ proposes scoped changes, and writes nothing without an explicit accept.
 ## Host model
 
 Run the survey and wiring steps for every requested host. Claude Code exposes
-four events vouch uses. Codex exposes `PreToolUse` and `PostToolUse`; an Ask is
-implemented as a blocked first attempt, Codex's native approval prompt on the
-local MCP broker, and one exact retry. Codex Allow emits nothing, so its native
-sandbox and approval policy remain authoritative.
+four events vouch uses. Codex exposes `PreToolUse` and `PostToolUse`, with two
+deliberate routes. Live gating implements an Ask as a blocked first attempt,
+Codex's native approval prompt on the local MCP broker, and one exact retry.
+Passive `--shadow` evaluates and journals every delivered call but emits
+nothing; it needs no broker and leaves `approvals_reviewer = "auto_review"` (or
+whatever reviewer is configured) and the native policy unchanged. Codex Allow
+also emits nothing, so its native sandbox and approval policy remain
+authoritative in either route.
 
 Codex tool hooks cover shell commands, `apply_patch`, MCP tools, and most local
 function tools. Hosted tools and some specialized paths are outside that hook
@@ -124,10 +128,11 @@ Run each check and put the answers in one table.
 4. **The hook registration**, values-blind. For Claude Code, expect
    `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, and `PermissionDenied` in
    `~/.claude/settings.json`. For Codex, expect `PreToolUse` and `PostToolUse`
-   in `~/.codex/hooks.json`, each with a command containing `--host codex`, and
-   check that `codex mcp list` names `vouch_approval`. Count event names and
-   vouch command lines without printing values. Never read either file whole
-   (hard rule 4).
+   in `~/.codex/hooks.json`, each with a command containing `--host codex`.
+   Count event names, vouch command lines, `--shadow`, and `--state-dir`
+   occurrences without printing values. A live Codex route also requires
+   `codex mcp list` to name `vouch_approval`; a passive shadow route does not.
+   Never read either file whole (hard rule 4).
 5. **A cc-allow config at the old path**: `~/.config/cc-allow.toml`. Present
    means this is a migration, not a fresh install.
 6. **A vouch clone**, if any — a directory holding `Cargo.toml` with the vouch
@@ -206,8 +211,10 @@ guard refuses to let an agent change which program gates its tool calls).
 
 1. For Claude Code, run `vouch install`. For Codex, run
    `vouch install --host codex --shell <bash|powershell>`; the shell must name
-   how Codex executes `Bash` calls on this machine. Add `--shadow` when vouch
-   should record without emitting. **Redirect every form to a scratch file**.
+   how Codex executes `Bash` calls on this machine. For passive observation,
+   add `--shadow --state-dir <absolute durable directory>`; the same explicit
+   directory reaches both decision and outcome commands, so host-attributed
+   rows do not split by session cwd. **Redirect every form to a scratch file**.
    Do not capture its stdout: that stdout is the entire merged settings
    document. This holds for every form of the command, `--print` included: an
    unparsed flag is swallowed silently, so a form expected to print only the
@@ -217,21 +224,30 @@ guard refuses to let an agent change which program gates its tool calls).
    key (MCP server configuration lives under a different key and never enters
    the extraction). Show the command's stderr notes alongside it: what it
    would change, the target path, and that nothing was written.
-3. Hand them the one command that saves the Claude scratch file over
-   `~/.claude/settings.json`, or the Codex scratch file over
-   `~/.codex/hooks.json`, and let them run it.
-4. For Codex, register the sibling release binary once using the exact command
-   printed in `vouch install`'s notes:
+3. Record privately whether the target file was absent or take a byte-for-byte
+   backup, then hand the operator the one command that saves the Claude scratch
+   file over `~/.claude/settings.json`, or the Codex scratch file over
+   `~/.codex/hooks.json`, and let them run it. Restoration returns that backup,
+   or removes only the newly created file when no file existed before.
+4. For a **live Codex gate only**, register the sibling release binary once
+   using the exact command printed in `vouch install`'s notes:
    `codex mcp add vouch_approval -- <absolute-vouch-codex-broker-path>`.
-5. For Codex, have the operator keep `approval_policy = "on-request"` and
-   `approvals_reviewer = "user"` at the top level of `~/.codex/config.toml`,
+5. For a **live Codex gate only**, have the operator keep
+   `approval_policy = "on-request"` and `approvals_reviewer = "user"` at the
+   top level of `~/.codex/config.toml`,
    and add `default_tools_approval_mode = "prompt"` inside the existing
    `[mcp_servers.vouch_approval]` section. Codex's native MCP prompt is the
    human decision: a denial prevents the broker call and creates no grant; an
    approval runs the broker, which validates the pending request and mints one
    exact one-use grant. There is no nested elicitation.
-6. Verify it landed by re-running the phase-1 survey's hook check (item 4).
-   Claude has four events; Codex has two events plus the broker registration.
+   For passive shadow, do not register the broker and do not change the
+   existing reviewer or approval policy.
+6. Have Codex reload the registration, then verify it landed by re-running the
+   phase-1 survey's hook check (item 4). Claude has four events. Codex has two;
+   only the live route also has broker registration. For passive shadow, run
+   harmless supported calls and report counts only: Codex decision rows are
+   `mode="shadow"`, both verdict classes are represented, delivered outcomes
+   correlate on `host="codex"`, and no vouch steering output was emitted.
 
 **Config.** A fresh machine gets a starter derived from `vouch.example.toml`:
 every uncommented line in it is a genuinely shipped decision, and the commented

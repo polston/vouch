@@ -34,6 +34,10 @@ function_def = "allow"
 # deliberately rather than silently becoming a permanent prompt.
 parse_failure = "ask"
 
+# A guard rule depends on the command's verb, but quoting, expansion, or an
+# undescribed flag kept vouch from determining which operation was named.
+unread_verb = "ask"
+
 # vouch cannot tell where a write lands. Originally just "a written path
 # still contains a variable vouch could not resolve". Since the run-dir-flag
 # work (2026-07-31) it also covers: the directory a command runs in is not
@@ -161,6 +165,10 @@ unbalanced_quotes = "ask"
 # deliberately rather than silently becoming a permanent prompt.
 parse_failure = "ask"
 
+# A guard rule depends on the command's verb, but expansion or an undescribed
+# flag kept vouch from determining which operation was named.
+unread_verb = "ask"
+
 # vouch cannot tell where a write lands (see the bash section above for the
 # full explanation of what this setting covers).
 unresolved_path = "ask"
@@ -216,6 +224,9 @@ dynamic_call = "ask"
 # The snippet's parser could not read it at all (or read it only by
 # recovering from syntax the parser does not support).
 parse_failure = "ask"
+# A guard rule depends on the command's verb, but a computed argument kept
+# vouch from determining which operation was named.
+unread_verb = "ask"
 # A written path that stayed unresolved.
 unresolved_path = "ask"
 # This runs code that is not in the command vouch was given at all — e.g.

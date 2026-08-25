@@ -809,8 +809,21 @@ fn m2_128_wget_output_document_attached_form() {
 fn m2_128_powershell_writer_family_spellings() {
     let cfg = common::realistic_config();
     let base = format!("Set-Content -Path {OUTSIDE}/p -Value v");
-    assert_pair(&cfg, INSIDE, &base, &format!("Set-Content -Path:{OUTSIDE}/p -Value v"), "ask", None);
-    assert_pair(&cfg, INSIDE, &base, &format!("Set-Content -pa {OUTSIDE}/p -Value v"), "ask", None);
+    for command in [
+        base,
+        format!("Set-Content -Path:{OUTSIDE}/p -Value v"),
+        format!("Set-Content -pa {OUTSIDE}/p -Value v"),
+    ] {
+        let decision = vouch::engine::decide_command_at(
+            &cfg,
+            "powershell",
+            &command,
+            Some(common::HOOK_HOME),
+            None,
+            Some(INSIDE),
+        );
+        assert!(matches!(decision, vouch::protocol::Decision::Ask(_)), "{command}: {decision:?}");
+    }
 }
 
 /// PS positional spelling: the destination is already correctly derived
@@ -819,7 +832,16 @@ fn m2_128_powershell_writer_family_spellings() {
 #[test]
 fn m2_128_powershell_positional_derives_path_not_content() {
     let cfg = common::realistic_config();
-    assert_verdict(&cfg, INSIDE, &format!("Set-Content {OUTSIDE}/p"), "ask", None);
+    let command = format!("Set-Content {OUTSIDE}/p");
+    let decision = vouch::engine::decide_command_at(
+        &cfg,
+        "powershell",
+        &command,
+        Some(common::HOOK_HOME),
+        None,
+        Some(INSIDE),
+    );
+    assert!(matches!(decision, vouch::protocol::Decision::Ask(_)), "{decision:?}");
 }
 
 // ============================================================================

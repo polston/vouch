@@ -407,6 +407,7 @@ fn undeclared_option_record(id: &str, head: &str, flag: &str) -> vouch::journal:
         outcome: vouch::outcome::Outcome::Pending,
         lang: String::new(),
         permission_mode: String::new(),
+        host: "claude".into(),
     }
 }
 
@@ -484,6 +485,7 @@ fn doctor_omits_the_undeclared_options_section_when_nothing_carries_the_marker()
         outcome: vouch::outcome::Outcome::Pending,
         lang: String::new(),
         permission_mode: String::new(),
+        host: "claude".into(),
     };
     vouch::journal::append(&state, &rec).unwrap();
 
@@ -569,6 +571,7 @@ fn doctor_rescans_a_snippet_row_using_its_own_recorded_language() {
         outcome: vouch::outcome::Outcome::Pending,
         lang: "bash".into(),
         permission_mode: String::new(),
+        host: "claude".into(),
     };
     vouch::journal::append(&state, &rec).unwrap();
 
@@ -796,6 +799,7 @@ fn why_rescans_a_journalled_rows_own_cwd_and_names_the_zone_that_allowed_it() {
         outcome: vouch::outcome::Outcome::Pending,
         lang: String::new(),
         permission_mode: String::new(),
+        host: "claude".into(),
     };
     vouch::journal::append(&state, &rec).unwrap();
 

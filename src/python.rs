@@ -75,6 +75,7 @@ pub const KNOWN_CONSTRUCTS: &[&str] = &[
     "callback_argument",
     "rebound_name",
     "unreadable_language",
+    "unread_verb",
 ];
 
 /// A call whose target vouch cannot name: `f()` where `f` is a parameter, or
@@ -156,24 +157,39 @@ fn dotted(e: &ast::Expr) -> Option<String> {
 /// marker so it arrives at the engine as an UNRESOLVED value instead of a
 /// confident answer. An f-string is the Python spelling of `"$d/x.json"` and
 /// is treated as one.
-fn literal(e: &ast::Expr, assigned: &HashMap<String, String>) -> Option<String> {
+#[derive(Debug, Clone)]
+struct ArgumentValue {
+    text: String,
+    readable: bool,
+}
+
+impl ArgumentValue {
+    fn readable(text: impl Into<String>) -> Self {
+        Self { text: text.into(), readable: true }
+    }
+
+    fn unread(text: impl Into<String>) -> Self {
+        Self { text: text.into(), readable: false }
+    }
+}
+
+fn argument_value(e: &ast::Expr, assigned: &HashMap<String, String>) -> ArgumentValue {
     match e {
-        ast::Expr::StringLiteral(s) => Some(s.value.to_str().to_string()),
+        ast::Expr::StringLiteral(s) => ArgumentValue::readable(s.value.to_str()),
         ast::Expr::NumberLiteral(n) => match &n.value {
-            ast::Number::Int(i) => Some(i.to_string()),
-            _ => None,
+            ast::Number::Int(i) => ArgumentValue::readable(i.to_string()),
+            _ => ArgumentValue::unread(MARKER),
         },
-        ast::Expr::BooleanLiteral(b) => Some(b.value.to_string()),
+        ast::Expr::BooleanLiteral(b) => ArgumentValue::readable(b.value.to_string()),
         // A name resolves to what it was assigned, or stays a marker.
         // Keeping the marker is the point: `open(p, "w")` where `p` came
         // from argv is a write to a path vouch cannot name, and saying so is
         // the honest answer.
-        ast::Expr::Name(n) => Some(
-            assigned
-                .get(n.id.as_str())
-                .cloned()
-                .unwrap_or_else(|| format!("${}", n.id)),
-        ),
+        ast::Expr::Name(n) => assigned
+            .get(n.id.as_str())
+            .cloned()
+            .map(ArgumentValue::readable)
+            .unwrap_or_else(|| ArgumentValue::unread(format!("${}", n.id))),
         // f"{d}/x.json" — literal segments keep their text, the
         // interpolated ones become markers. An adjacent plain literal —
         // "dir/" f"{d}.txt" is ONE value made of two PARTS — has to be
@@ -183,6 +199,7 @@ fn literal(e: &ast::Expr, assigned: &HashMap<String, String>) -> Option<String> 
         // showing the loss.
         ast::Expr::FString(f) => {
             let mut out = String::new();
+            let mut readable = true;
             for part in f.value.iter() {
                 match part {
                     ast::FStringPart::Literal(lit) => out.push_str(&lit.value),
@@ -193,27 +210,34 @@ fn literal(e: &ast::Expr, assigned: &HashMap<String, String>) -> Option<String> 
                                     out.push_str(&lit.value)
                                 }
                                 ast::InterpolatedStringElement::Interpolation(interp) => {
-                                    match literal(&interp.expression, assigned) {
-                                        Some(v) => out.push_str(&v),
-                                        None => out.push_str(MARKER),
-                                    }
+                                    let v = argument_value(&interp.expression, assigned);
+                                    out.push_str(&v.text);
+                                    readable &= v.readable;
                                 }
                             }
                         }
                     }
                 }
             }
-            Some(out)
+            ArgumentValue { text: out, readable }
         }
         // `d + "/x.json"`. Only concatenation; any other operator is
         // arithmetic on something that is not a path.
         ast::Expr::BinOp(b) if matches!(b.op, ast::Operator::Add) => {
-            let l = literal(&b.left, assigned)?;
-            let r = literal(&b.right, assigned)?;
-            Some(format!("{l}{r}"))
+            let l = argument_value(&b.left, assigned);
+            let r = argument_value(&b.right, assigned);
+            ArgumentValue {
+                text: format!("{}{}", l.text, r.text),
+                readable: l.readable && r.readable,
+            }
         }
-        _ => None,
+        _ => ArgumentValue::unread(MARKER),
     }
+}
+
+fn literal(e: &ast::Expr, assigned: &HashMap<String, String>) -> Option<String> {
+    let value = argument_value(e, assigned);
+    value.readable.then_some(value.text)
 }
 
 /// Collects calls, in the order they appear.
@@ -253,7 +277,7 @@ impl Walk {
     /// method call on something vouch could not name as a module
     /// (`Path(p).unlink()`, `d.get(…)`), reported as `.name` with the
     /// receiver carried alongside it — the receiver often IS the path.
-    fn target(&self, func: &ast::Expr) -> (String, Option<String>) {
+    fn target(&self, func: &ast::Expr) -> (String, Option<ArgumentValue>) {
         if let Some(d) = dotted(func) {
             // Computed once and reused below: `split_once` is pure, so the
             // root/rebound check and the module-resolution match are
@@ -292,7 +316,9 @@ impl Walk {
         // receiver comes from the same `Attribute` node the method name did,
         // so testing the shape a second time would only re-derive it.
         if let ast::Expr::Attribute(a) = func {
-            let recv = self.receiver_path(&a.value).unwrap_or_else(|| MARKER.to_string());
+            let recv = self
+                .receiver_path(&a.value)
+                .unwrap_or_else(|| ArgumentValue::unread(MARKER));
             return (format!(".{}", a.attr), Some(recv));
         }
         (UNNAMEABLE.to_string(), None)
@@ -321,16 +347,17 @@ impl Walk {
     /// neither path covers (a multi-argument call, a chained method call, a
     /// subscript, …), and the caller falls back to the generic marker for
     /// those.
-    fn receiver_path(&self, e: &ast::Expr) -> Option<String> {
-        if let Some(v) = literal(e, &self.assigned) {
-            return Some(v);
+    fn receiver_path(&self, e: &ast::Expr) -> Option<ArgumentValue> {
+        let direct = argument_value(e, &self.assigned);
+        if direct.readable || matches!(e, ast::Expr::Name(_)) {
+            return Some(direct);
         }
         match e {
             ast::Expr::Call(c)
                 if c.arguments.args.len() == 1 && c.arguments.keywords.is_empty() =>
             {
                 match self.target(&c.func) {
-                    (_, None) => literal(&c.arguments.args[0], &self.assigned),
+                    (_, None) => Some(argument_value(&c.arguments.args[0], &self.assigned)),
                     (_, Some(_)) => None,
                 }
             }
@@ -349,22 +376,33 @@ impl Walk {
             return;
         }
         let mut args: Vec<String> = Vec::new();
+        let mut unread_args = std::collections::HashSet::new();
         if let Some(r) = receiver {
-            args.push(r);
+            if !r.readable {
+                unread_args.insert(args.len());
+            }
+            args.push(r.text);
         }
         for a in node.arguments.args.iter() {
             // An argument vouch cannot resolve still has to OCCUPY its
             // position, or `os.rename(compute(), "C:/x")` shifts and the
             // destination is read as the source.
-            args.push(literal(a, &self.assigned).unwrap_or_else(|| MARKER.to_string()));
+            let value = argument_value(a, &self.assigned);
+            if !value.readable {
+                unread_args.insert(args.len());
+            }
+            args.push(value.text);
         }
         // Keyword arguments carry their name, since position says nothing
         // about them: `open(file="x", mode="w")`.
         for k in node.arguments.keywords.iter() {
             match &k.arg {
                 Some(name) => {
-                    let v = literal(&k.value, &self.assigned).unwrap_or_else(|| MARKER.to_string());
-                    args.push(format!("{name}={v}"));
+                    let value = argument_value(&k.value, &self.assigned);
+                    if !value.readable {
+                        unread_args.insert(args.len());
+                    }
+                    args.push(format!("{name}={}", value.text));
                 }
                 // `**opts` — a nameless keyword-unpacking argument. There is
                 // no name to attach a value to, but dropping it silently
@@ -374,7 +412,10 @@ impl Walk {
                 // occupies the slot without inventing a name for it, and
                 // without claiming to be an ordinary unresolved value either
                 // (see its own doc comment for why the distinction matters).
-                None => args.push(UNPACK_MARKER.to_string()),
+                None => {
+                    unread_args.insert(args.len());
+                    args.push(UNPACK_MARKER.to_string());
+                }
             }
         }
         let order = Order::Seq(self.counter);
@@ -396,6 +437,9 @@ impl Walk {
             None,
             vec![],
         );
+        if let Some(cmd) = self.out.commands.last_mut() {
+            cmd.unread_args = unread_args;
+        }
     }
 }
 

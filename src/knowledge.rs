@@ -777,6 +777,67 @@ pub(crate) fn validate(kb: &Knowledge) -> Result<(), String> {
             ));
         }
     }
+    validate_verb_vocab(kb)?;
+    Ok(())
+}
+
+/// Contradictions that make one name-and-language verb grammar impossible to
+/// construct. Separate entries may contribute different flags, but they may
+/// not disagree about case identity or classify the same spelling as both a
+/// value-taking and a no-value flag.
+fn validate_verb_vocab(kb: &Knowledge) -> Result<(), String> {
+    for (i, left) in kb.program.iter().enumerate() {
+        let left_scope = scope_of(&left.languages);
+        for right in kb.program.iter().skip(i) {
+            let shared_name = left.match_names.iter().find(|name| {
+                right
+                    .match_names
+                    .iter()
+                    .any(|other| Program::same_name(name, other))
+            });
+            let Some(name) = shared_name else { continue };
+            let shared_languages: Vec<String> = left_scope
+                .intersection(&scope_of(&right.languages))
+                .cloned()
+                .collect();
+            if shared_languages.is_empty() {
+                continue;
+            }
+            let has_verb_flags = !left.value_options.is_empty()
+                || !left.no_value_options.is_empty()
+                || !right.value_options.is_empty()
+                || !right.no_value_options.is_empty();
+            let left_case = left.case_sensitive_flags.unwrap_or(false);
+            let right_case = right.case_sensitive_flags.unwrap_or(false);
+            let explicit_case_conflict = matches!(
+                (left.case_sensitive_flags, right.case_sensitive_flags),
+                (Some(a), Some(b)) if a != b
+            );
+            if explicit_case_conflict || (has_verb_flags && left_case != right_case) {
+                return Err(format!(
+                    "[[program]] {name:?}: same-name entries overlap in languages {:?} but disagree on case_sensitive_flags (an unstated value means false) — one verb grammar cannot use both values",
+                    shared_languages
+                ));
+            }
+            let case_sensitive = left_case || right_case;
+            let same_flag = |a: &str, b: &str| {
+                if case_sensitive { a == b } else { a.eq_ignore_ascii_case(b) }
+            };
+            for value in left.value_options.iter().chain(right.value_options.iter()) {
+                if left
+                    .no_value_options
+                    .iter()
+                    .chain(right.no_value_options.iter())
+                    .any(|flag| same_flag(value, flag))
+                {
+                    return Err(format!(
+                        "[[program]] {name:?}: flag {value:?} is value-taking in one overlapping {:?} grammar and no-value in another — its verb position would be ambiguous",
+                        shared_languages
+                    ));
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -2140,7 +2201,7 @@ pub fn load_files(knowledge: &Path, mine: &Path) -> Loaded {
             // and key, not an ambiguity between the two files at large.
             notes = narrowing_noops(&base, &o);
             let merged = merge(base.clone(), o);
-            match validate_standalone_in_effect(&merged) {
+            match validate_verb_vocab(&merged).and_then(|()| validate_standalone_in_effect(&merged)) {
                 Ok(()) => merged,
                 Err(e) => {
                     gaps.push(Gap {

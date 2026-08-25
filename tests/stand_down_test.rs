@@ -309,6 +309,6 @@ fn the_journal_row_shape_is_preserved_plus_the_one_new_field() {
     keys.sort_unstable();
     assert_eq!(
         keys,
-        vec!["cmd", "cwd", "id", "lang", "mode", "outcome", "permission_mode", "reason", "session", "tool", "ts", "verdict"]
+        vec!["cmd", "cwd", "host", "id", "lang", "mode", "outcome", "permission_mode", "reason", "session", "tool", "ts", "verdict"]
     );
 }

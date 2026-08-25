@@ -1691,8 +1691,8 @@ write_flags = ["-destinationpath"]
 # activates when an entry's own `languages` explicitly names powershell) —
 # without it `Set-Content -Path:C:/x -Value v` derives no destination at
 # all, the exact M2.128 hole for this spelling. Write-target derivation
-# itself never filters by `languages` (`written_paths` matches by program
-# name alone), so this does not narrow which commands get judged.
+# itself filters by the command's language, so this entry judges only the
+# PowerShell spellings whose parameter grammar it describes.
 [[program]]
 match = ["set-content", "add-content"]
 writes = "named"

@@ -64,6 +64,7 @@ fn a_cli_is_not_one_operation() {
     let cmd = |head: &str, args: &[&str]| Cmd {
         head: head.into(),
         args: args.iter().map(|s| s.to_string()).collect(),
+        unread_args: Default::default(),
         chain: None,
         prefix_assigns: vec![],
     };
@@ -85,7 +86,13 @@ fn an_entry_with_no_subcommands_covers_the_whole_program() {
     let kb = load("[[program]]\nmatch = [\"ls\"]\n").expect("parses");
     assert!(recognises(
         &kb,
-        &Cmd { head: "ls".into(), args: vec!["-la".into()], chain: None, prefix_assigns: vec![] },
+        &Cmd {
+            head: "ls".into(),
+            args: vec!["-la".into()],
+            unread_args: Default::default(),
+            chain: None,
+            prefix_assigns: vec![],
+        },
         "bash",
         true
     ));

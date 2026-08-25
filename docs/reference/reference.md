@@ -118,8 +118,8 @@ whole command line.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `only_under` | array of string | (required) | The trees this program's writes may land under. A write outside all of them is judged as if this scope did not exist — falling through to the ordinary wall/allow_paths check. |
-| `programs` | array of string | (required) | Which programs this scope restricts. Each entry is 1-3 tokens: the program name, optionally a subcommand, and optionally that subcommand's own second word (`"git worktree add"`). |
+| `only_under` | array of string | (required) | The trees this program's writes may land under. A write outside all of them asks, and `write.allow_paths` is not consulted for a scoped program. |
+| `programs` | array of string | (required) | Which programs this scope restricts. Each entry is 1-3 tokens: the program name, optionally a subcommand, and optionally that subcommand's own second word (`"git worktree add"`). If a stated verb word is unreadable, the scope is unprovable and asks; it neither grants one entry by file order nor falls through to a later scope or wider global allowance. |
 
 ## knowledge.toml / my-knowledge.toml
 
