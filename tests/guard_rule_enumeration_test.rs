@@ -52,6 +52,7 @@ fn firing_cmd(head: &str, rule: &Rule) -> Cmd {
     Cmd {
         head: head.to_string(),
         args,
+        unread_args: Default::default(),
         chain: None,
         prefix_assigns: vec![],
     }
@@ -61,6 +62,7 @@ fn bare(head: &str) -> Cmd {
     Cmd {
         head: head.to_string(),
         args: Vec::new(),
+        unread_args: Default::default(),
         chain: None,
         prefix_assigns: vec![],
     }

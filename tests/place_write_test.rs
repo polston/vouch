@@ -450,12 +450,12 @@ fn a_two_word_verb_entry_does_not_govern_the_programs_other_operations() {
 }
 
 #[test]
-fn a_two_word_verb_entry_claims_a_command_whose_second_word_vouch_cannot_read() {
-    // The hole this pins: a scope RESTRICTS, so it applies until it is
-    // disproven, and a word vouch could not read disproves nothing. With
-    // "could not read" and "there is none" both spelled the same way, one
-    // undescribed flag walked a scoped command out of its own scope — and
-    // with `unresolved_path` set to allow, out of any prompt at all.
+fn a_two_word_verb_entry_reports_a_command_whose_second_word_is_unprovable() {
+    // The hole this pins: an unread word can neither select a scope grant nor
+    // prove that no scope applies. With "could not read" and "there is none"
+    // collapsed, one undescribed flag walked a scoped command out of its own
+    // scope — and with `unresolved_path` set to allow, out of any prompt at
+    // all.
     //
     // The two-token entry `["git worktree"]` always asked here, because it
     // states no second word to be defeated by. The three-token entry must not
@@ -484,10 +484,79 @@ fn a_two_word_verb_entry_claims_a_command_whose_second_word_vouch_cannot_read() 
 
     // And on the matching rule itself, where the three answers are visible.
     let rule = &cfg.write.scope[0];
-    assert!(rule.names("git", Some("worktree"), &SecondWord::Unknown("--x".into())));
+    assert!(matches!(
+        rule.match_command(
+            "git",
+            &vouch::guards::VerbWord::Word("worktree".into()),
+            &SecondWord::Unknown("--x".into()),
+        ),
+        vouch::config::ScopeMatch::Unprovable(_)
+    ));
     assert!(rule.names("git", Some("worktree"), &word("add")));
     assert!(!rule.names("git", Some("worktree"), &word("list")));
     assert!(!rule.names("git", Some("worktree"), &SecondWord::Absent));
+}
+
+#[test]
+fn an_unread_scope_word_cannot_select_one_of_two_scope_grants_by_file_order() {
+    let cfg = cmd_cfg(
+        "[write]\ndefault = \"allow\"\nallow_paths = [\"C:/work/**\"]\n\
+         [[write.scope]]\nprograms = [\"unzip archive.zip x\"]\nonly_under = [\"C:/work/x/**\"]\n\
+         [[write.scope]]\nprograms = [\"unzip archive.zip y\"]\nonly_under = [\"C:/work/y/**\"]",
+    );
+    vouch::config::validate_scopes(&cfg, vouch::guards::in_effect()).unwrap();
+
+    let d = decide_command_at(
+        &cfg,
+        "bash",
+        "unzip archive.zip --zzz y -d C:/work/x/out",
+        Some("C:/Users/dev"),
+        None,
+        Some("C:/work"),
+    );
+    match d {
+        Decision::Ask(reason) => {
+            assert!(reason.contains("write scope"), "{reason}");
+            assert!(reason.contains("--zzz"), "{reason}");
+        }
+        other => panic!("an unread scope word must not borrow the first grant: {other:?}"),
+    }
+
+    let first = &cfg.write.scope[0];
+    assert!(matches!(
+        first.match_command(
+            "unzip",
+            &vouch::guards::VerbWord::Word("archive.zip".into()),
+            &SecondWord::Unknown("--zzz".into()),
+        ),
+        vouch::config::ScopeMatch::Unprovable(_)
+    ));
+}
+
+#[test]
+fn an_unread_narrow_scope_cannot_borrow_a_later_program_wide_grant() {
+    let cfg = cmd_cfg(
+        "[write]\ndefault = \"allow\"\nallow_paths = [\"C:/work/**\"]\n\
+         [[write.scope]]\nprograms = [\"truncate C:/work/out\"]\nonly_under = [\"C:/scratch/**\"]\n\
+         [[write.scope]]\nprograms = [\"truncate\"]\nonly_under = [\"C:/work/**\"]",
+    );
+    vouch::config::validate_scopes(&cfg, vouch::guards::in_effect()).unwrap();
+
+    let d = decide_command_at(
+        &cfg,
+        "bash",
+        "truncate \"C:/work/out\"",
+        Some("C:/Users/dev"),
+        None,
+        Some("C:/work"),
+    );
+    match d {
+        Decision::Ask(reason) => {
+            assert!(reason.contains("write scope"), "{reason}");
+            assert!(reason.contains("C:/work/out"), "{reason}");
+        }
+        other => panic!("an unread narrow scope must stop before the wider grant: {other:?}"),
+    }
 }
 
 #[test]

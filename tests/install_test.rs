@@ -3,7 +3,7 @@
 use vouch::cli::{
     parse_hook_options, parse_install_args, parse_install_options, InstallHost, InstallShell,
 };
-use vouch::install::{plan, plan_codex};
+use vouch::install::{plan, plan_codex, plan_codex_with_state};
 
 const EXISTING: &str = r#"{
   "model": "opus",
@@ -320,6 +320,40 @@ fn codex_hook_requires_the_same_explicit_shell_adapter() {
 }
 
 #[test]
+fn codex_state_dir_is_absolute_and_reaches_both_parsers() {
+    let install = vec![
+        "--host".to_string(),
+        "codex".to_string(),
+        "--shell".to_string(),
+        "bash".to_string(),
+        "--state-dir".to_string(),
+        "/tmp/vouch-codex".to_string(),
+    ];
+    let got = parse_install_options(&install).unwrap();
+    assert_eq!(got.state_dir.as_deref(), Some("/tmp/vouch-codex"));
+
+    let hook = vec!["--hook".to_string()]
+        .into_iter()
+        .chain(install)
+        .collect::<Vec<_>>();
+    let got = parse_hook_options(&hook).unwrap();
+    assert_eq!(got.state_dir.as_deref(), Some("/tmp/vouch-codex"));
+
+    for bad in ["relative/state", "state"] {
+        let args = vec![
+            "--host".to_string(),
+            "codex".to_string(),
+            "--shell".to_string(),
+            "bash".to_string(),
+            "--state-dir".to_string(),
+            bad.to_string(),
+        ];
+        assert!(parse_install_options(&args).is_err(), "accepted {bad:?}");
+    }
+    assert!(parse_install_options(&["--state-dir".into(), "/tmp/vouch".into()]).is_err());
+}
+
+#[test]
 fn claude_install_rejects_a_shell_override() {
     let args = vec!["--shell".to_string(), "bash".to_string()];
     assert!(parse_install_options(&args).is_err());
@@ -406,4 +440,39 @@ fn codex_shadow_is_idempotent() {
         1,
         "shadow Pre duplicated: {twice}"
     );
+}
+
+#[test]
+fn codex_passive_shadow_has_one_stable_host_attributed_journal_and_no_broker_notes() {
+    let state = "/tmp/vouch codex journal";
+    let once = plan_codex_with_state("", "/opt/Vouch Bin/vouch", InstallShell::Bash, true, state)
+        .unwrap();
+    let twice = plan_codex_with_state(
+        &once.settings,
+        "/opt/Vouch Bin/vouch",
+        InstallShell::Bash,
+        true,
+        state,
+    )
+    .unwrap();
+    let root: serde_json::Value = serde_json::from_str(&twice.settings).unwrap();
+    let command = |event: &str| {
+        root["hooks"][event][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let pre = command("PreToolUse");
+    let post = command("PostToolUse");
+    assert!(pre.contains("--shadow"));
+    assert!(!post.contains("--shadow"));
+    for cmd in [&pre, &post] {
+        assert!(cmd.contains("--state-dir"), "missing state dir: {cmd}");
+        assert!(cmd.contains(state), "wrong state dir: {cmd}");
+    }
+    assert_eq!(twice.settings.matches("--host codex").count(), 2);
+    let notes = twice.notes.join("\n");
+    assert!(!notes.contains("vouch_approval"), "shadow cannot need a broker: {notes}");
+    assert!(!notes.contains("approvals_reviewer = \"user\""), "shadow cannot disable auto-review: {notes}");
+    assert!(notes.contains("emits no decision"), "passive behavior unstated: {notes}");
 }

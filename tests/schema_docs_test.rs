@@ -186,7 +186,9 @@ fn the_five_version_fields_agree() {
 /// A tracked changelog must read as plain prose: no URL, no markdown link, no
 /// parenthesised commit-id or PR-number remnant. This file is published, and a
 /// remnant is a repository identifier wearing plain text. It is generated
-/// upstream of every local hook, so this test is the only thing watching.
+/// upstream of every local hook; the pre-write plugin and release-branch shell
+/// harness watch the candidate, while this test independently watches the final
+/// tree.
 #[test]
 fn a_tracked_changelog_carries_no_forge_remnant() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("CHANGELOG.md");

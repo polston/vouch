@@ -24,6 +24,13 @@ impl Host {
             other => Err(format!("vouch: unknown host {other:?}; expected claude or codex")),
         }
     }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Default)]

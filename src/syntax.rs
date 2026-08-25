@@ -12,6 +12,10 @@
 pub struct Cmd {
     pub head: String,
     pub args: Vec<String>,
+    /// Argument positions whose text is only a placeholder for syntax the
+    /// scanner could not resolve. This is out of band because a literal
+    /// argument may legally equal any marker spelling.
+    pub unread_args: std::collections::HashSet<usize>,
     /// This command's position in an `&&`/`||` and-or chain, `None` when it
     /// is not part of one — a plain `;`/newline-separated statement, or the
     /// sole member of a trivial one-pipeline "chain" with no `&&`/`||` link
@@ -267,7 +271,13 @@ impl Scan {
             return;
         }
         self.heads.push(head.clone());
-        self.commands.push(Cmd { head, args, chain, prefix_assigns });
+        self.commands.push(Cmd {
+            head,
+            args,
+            unread_args: Default::default(),
+            chain,
+            prefix_assigns,
+        });
         self.order.push(order);
         self.input_source.push(input_source);
         self.args_complete.push(args_complete);

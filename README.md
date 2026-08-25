@@ -212,7 +212,8 @@ Then generate the hook wiring, which no agent writes for you.
 For Claude Code:
 
 ```
-~/.config/vouch/bin/vouch install > vouch-settings.json
+mkdir -p ~/.local/state/vouch
+~/.config/vouch/bin/vouch install > ~/.local/state/vouch/claude-settings.json
 ```
 
 `vouch install` reads your existing `~/.claude/settings.json`, merges in four
@@ -223,10 +224,9 @@ gates an agent's tool calls is not a file to let that agent rewrite, so vouch
 prints and you save; `src/install.rs` records the same reasoning. And the
 printed document is your *entire* settings file, which can carry credentials in
 MCP server headers — so it belongs in an editor, never in a chat transcript or
-a captured command output. If you want to look at what changed without
-displaying the whole settings file, `vouch install --print` shows the
-hooks-only view instead — safe to paste anywhere, since it carries no MCP
-content.
+a captured command output. If you want to inspect what changed locally without
+opening the whole settings file, `vouch install --print` narrows the document
+to the hooks-only view; redirect that form to private scratch too.
 
 The four events, and why each is registered:
 
@@ -243,12 +243,14 @@ candidates from what actually happened rather than from absent signals.
 For Codex, choose the shell Codex uses on this machine:
 
 ```
-~/.config/vouch/bin/vouch install --host codex --shell powershell > vouch-hooks.json
+mkdir -p ~/.local/state/vouch
+~/.config/vouch/bin/vouch install --host codex --shell powershell \
+  > ~/.local/state/vouch/codex-hooks.json
 # or: --shell bash
 codex mcp add vouch_approval -- ~/.config/vouch/bin/vouch-codex-broker
 ```
 
-Review `vouch-hooks.json`, then save it as `~/.codex/hooks.json`. Codex gets
+Review the private `codex-hooks.json`, then save it as `~/.codex/hooks.json`. Codex gets
 `PreToolUse` for decisions and `PostToolUse` for outcomes. The broker is what
 turns an approved native MCP prompt into one exact retry; it stores hashes and
 a short reason category, never raw command text or session IDs. Keep
@@ -259,12 +261,29 @@ decision: denying it leaves the Ask blocked, while approving it lets the broker
 validate the pending request and mint the bound one-use grant. There is no
 second, nested elicitation.
 
+To observe Codex while leaving `approvals_reviewer = "auto_review"` and the
+native policy in charge, use passive shadow instead:
+
+```
+~/.config/vouch/bin/vouch install --host codex --shell powershell \
+  --shadow --state-dir ~/.local/state/vouch \
+  > ~/.local/state/vouch/codex-hooks.json
+# or: --shell bash
+```
+
+This route needs no vouch approval broker. `PreToolUse` evaluates and appends a
+`host = "codex"`, `mode = "shadow"` row while emitting nothing; `PostToolUse`
+appends the matching host-attributed outcome. The explicit absolute state
+directory keeps both rows in one durable journal even when Codex starts in a
+different repository. New outcomes correlate by host plus tool-use id, so a
+Codex id cannot attach to a Claude row.
+
 Codex hooks cover shell commands, `apply_patch`, MCP tools, and most local
 function tools. Hosted tools and some specialized paths can bypass the local
 hook path, so vouch is a guardrail over observed calls, not a replacement for
 the native sandbox.
 
-Add `--shadow` (`vouch install --shadow`) to register vouch beside a gate you
+Add `--shadow` to register vouch beside a gate you
 are still running: it evaluates and journals every call in full and emits no
 decision, so you can measure what it would have done before it does anything.
 
@@ -299,7 +318,7 @@ Everything else is for you:
 | `vouch doctor` | What vouch could not read or describe: place rules that can never fire, `my-knowledge.toml` lines the merge discarded, commands it could not parse, programs it has no description of, and undeclared options on directory-changing programs, by count and by spelling |
 | `vouch review [--accept <name>]` | Rule candidates drawn from recorded outcomes, each with the counts behind it, including the ones it will not propose and why. Prints only; `--accept` is the one thing that writes, and it never proposes a guard |
 | `vouch import [file]` | Translates a cc-allow config to standard output and lists on standard error what did not translate. Writes nothing |
-| `vouch install [--host claude\|codex] [--shell bash\|powershell] [--shadow] [--print]` | Prints the selected host's merged hook document for redirecting and saving. Codex requires an explicit shell and prints the broker registration command in its notes. `--print` narrows output to the hooks-only view. Writes nothing |
+| `vouch install [--host claude\|codex] [--shell bash\|powershell] [--state-dir <absolute>] [--shadow] [--print]` | Prints the selected host's merged hook document for redirecting and saving. Codex requires an explicit shell; `--state-dir` is Codex-only and makes decision/outcome journaling durable. Live Codex notes include the broker route; passive `--shadow` notes leave the native reviewer unchanged and require no broker. `--print` narrows output to the hooks-only view. Writes nothing |
 | `vouch schema <config\|knowledge> [--write]` | Prints the JSON Schema generated from the structs the loaders actually read; `--write` regenerates the committed schemas and the reference page |
 
 ## What will not move, and how mature this is

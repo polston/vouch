@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.4 (2026-08-25)
+
+
+### Bug Fixes
+
+* make verb resolution and Codex shadow evidence reliable
+* scan release candidates before remote writes
+
 ## 0.3.3 (2026-08-24)
 
 

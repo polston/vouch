@@ -160,11 +160,14 @@ pub struct RunSection {
 pub struct WriteScope {
     /// Which programs this scope restricts. Each entry is 1-3 tokens: the
     /// program name, optionally a subcommand, and optionally that
-    /// subcommand's own second word (`"git worktree add"`).
+    /// subcommand's own second word (`"git worktree add"`). If a stated verb
+    /// word is unreadable, the scope is unprovable and asks; it neither grants
+    /// one entry by file order nor falls through to a later scope or wider
+    /// global allowance.
     pub programs: Vec<String>,
-    /// The trees this program's writes may land under. A write outside all
-    /// of them is judged as if this scope did not exist — falling through to
-    /// the ordinary wall/allow_paths check.
+    /// The trees this program's writes may land under. A write outside all of
+    /// them asks, and `write.allow_paths` is not consulted for a scoped
+    /// program.
     pub only_under: Vec<String>,
 }
 
@@ -193,6 +196,17 @@ fn split_program(entry: &str) -> (&str, Option<&str>, Option<&str>) {
 /// `validate_scopes` keys duplicates on and doctor compares widths by.
 type ScopeWords = (String, Option<String>, Option<String>);
 
+/// Whether a scope definitely governs a command, definitely does not, or may
+/// govern it but a verb word was unreadable. The third state cannot be folded
+/// into either boolean: `Names` could grant from the wrong scope, while
+/// `DoesNotName` could fall through to a wider global allow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScopeMatch {
+    Names,
+    DoesNotName,
+    Unprovable(String),
+}
+
 impl WriteScope {
     /// True when this scope entry names this command.
     ///
@@ -205,33 +219,62 @@ impl WriteScope {
     /// that missed the first spelling would be a restriction that quietly
     /// stopped applying.
     ///
-    /// The second word carries a third answer that the first cannot, and it
-    /// decides the opposite way: a stated word meeting a word vouch COULD NOT
-    /// READ claims the command. A scope restricts, so it applies until it is
-    /// disproven, and an unreadable word disproves nothing — `git worktree
-    /// --undescribedflag add C:/work/wt` must not walk out of a `git worktree
-    /// add` scope on the strength of one flag nobody described. A stated word
-    /// meeting a DIFFERENT word, or meeting none at all, does not claim: those
-    /// are answers, and they say this is another operation.
+    /// Compatibility wrapper for callers that only need the old boolean
+    /// answer. An unread word returns true here so it is not mistaken for a
+    /// proven non-match; the decision pipeline uses `match_command` below and
+    /// routes that third state to `scope_unprovable` without granting a scope.
     pub fn names(&self, head: &str, sub: Option<&str>, then: &crate::guards::SecondWord) -> bool {
-        use crate::guards::SecondWord;
+        let sub = sub
+            .map(|s| crate::guards::VerbWord::Word(s.to_string()))
+            .unwrap_or(crate::guards::VerbWord::Absent);
+        !matches!(
+            self.match_command(head, &sub, then),
+            ScopeMatch::DoesNotName
+        )
+    }
+
+    /// Three-state scope match used by the decision pipeline.
+    pub fn match_command(
+        &self,
+        head: &str,
+        sub: &crate::guards::VerbWord,
+        then: &crate::guards::SecondWord,
+    ) -> ScopeMatch {
+        use crate::guards::{SecondWord, VerbWord};
         let head = crate::guards::base_name(head);
-        let stated_sub = |want: Option<&str>| match want {
-            None => true,
-            Some(w) => sub.is_some_and(|g| g.eq_ignore_ascii_case(w)),
-        };
-        let stated_then = |want: Option<&str>| match (want, then) {
-            (None, _) => true,
-            (Some(_), SecondWord::Unknown(_)) => true,
-            (Some(w), SecondWord::Word(g)) => g.eq_ignore_ascii_case(w),
-            (Some(_), SecondWord::Absent) => false,
-        };
-        self.programs.iter().any(|entry| {
+        let mut unprovable: Option<String> = None;
+        for entry in &self.programs {
             let (want_head, want_sub, want_then) = split_program(entry);
-            crate::guards::base_name(want_head) == head
-                && stated_sub(want_sub)
-                && stated_then(want_then)
-        })
+            if crate::guards::base_name(want_head) != head {
+                continue;
+            }
+            match (want_sub, sub) {
+                (None, _) => return ScopeMatch::Names,
+                (Some(w), VerbWord::Word(g)) if g.eq_ignore_ascii_case(w) => {}
+                (Some(_), VerbWord::Unknown(token)) => {
+                    if unprovable.is_none() {
+                        unprovable = Some(format!("the first verb word is unreadable at {token:?}"));
+                    }
+                    continue;
+                }
+                _ => continue,
+            }
+            match (want_then, then) {
+                (None, _) => return ScopeMatch::Names,
+                (Some(w), SecondWord::Word(g)) if g.eq_ignore_ascii_case(w) => {
+                    return ScopeMatch::Names;
+                }
+                (Some(_), SecondWord::Unknown(token)) => {
+                    if unprovable.is_none() {
+                        unprovable = Some(format!("the second verb word is unreadable at {token:?}"));
+                    }
+                }
+                _ => {}
+            }
+        }
+        unprovable
+            .map(ScopeMatch::Unprovable)
+            .unwrap_or(ScopeMatch::DoesNotName)
     }
 }
 

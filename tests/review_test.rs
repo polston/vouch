@@ -18,6 +18,7 @@ fn rec(id: &str, verdict: &str, reason: &str, outcome: Outcome, mode: &str, sess
         outcome,
         lang: String::new(),
         permission_mode: String::new(),
+        host: "claude".into(),
     }
 }
 

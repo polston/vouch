@@ -124,23 +124,49 @@ impl InstallShell {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookOptions {
     pub host: InstallHost,
     pub shell: Option<InstallShell>,
     pub shadow: bool,
+    pub state_dir: Option<String>,
+}
+
+/// A hook command runs from the session cwd, so a relative state directory
+/// would split one logical journal across whatever repositories Codex visits.
+/// Accept both native absolute spellings independent of the platform running
+/// the test suite; generated Windows registrations are tested on Unix too.
+pub fn validate_state_dir(value: &str) -> Result<(), String> {
+    let b = value.as_bytes();
+    let unix = value.starts_with('/');
+    let drive = b.len() >= 3
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && matches!(b[2], b'/' | b'\\');
+    let unc = value.starts_with("\\\\");
+    if value.is_empty()
+        || value.contains('\r')
+        || value.contains('\n')
+        || !(unix || drive || unc)
+    {
+        return Err(format!(
+            "vouch: --state-dir must be an absolute path, got {value:?}"
+        ));
+    }
+    Ok(())
 }
 
 pub fn parse_hook_options(args: &[String]) -> Result<HookOptions, String> {
     let mut host = InstallHost::Claude;
     let mut shell = None;
     let mut shadow = false;
+    let mut state_dir = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--hook" => {}
             "--shadow" => shadow = true,
-            "--host" | "--shell" if i + 1 == args.len() => {
+            "--host" | "--shell" | "--state-dir" if i + 1 == args.len() => {
                 return Err(format!("vouch: {} needs a value", args[i]));
             }
             "--host" => {
@@ -151,31 +177,41 @@ pub fn parse_hook_options(args: &[String]) -> Result<HookOptions, String> {
                 shell = Some(InstallShell::parse(&args[i + 1])?);
                 i += 1;
             }
+            "--state-dir" => {
+                validate_state_dir(&args[i + 1])?;
+                state_dir = Some(args[i + 1].clone());
+                i += 1;
+            }
             other => return Err(format!("vouch: unrecognised hook flag {other:?}")),
         }
         i += 1;
     }
-    match (host, shell) {
-        (InstallHost::Codex, None) => {
+    match (host, shell, state_dir.is_some()) {
+        (InstallHost::Codex, None, _) => {
             Err("vouch: Codex hook needs --shell bash or --shell powershell".into())
         }
-        (InstallHost::Claude, Some(_)) => {
+        (InstallHost::Claude, Some(_), _) => {
             Err("vouch: --shell is only meaningful with --host codex".into())
+        }
+        (InstallHost::Claude, None, true) => {
+            Err("vouch: --state-dir is only meaningful with --host codex".into())
         }
         _ => Ok(HookOptions {
             host,
             shell,
             shadow,
+            state_dir,
         }),
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallOptions {
     pub host: InstallHost,
     pub shell: Option<InstallShell>,
     pub shadow: bool,
     pub hooks_only: bool,
+    pub state_dir: Option<String>,
 }
 
 /// Parse the complete cross-host install interface without reading either
@@ -183,17 +219,18 @@ pub struct InstallOptions {
 /// `Bash` hook name does not identify the shell that executes the command.
 pub fn parse_install_options(args: &[String]) -> Result<InstallOptions, String> {
     const USAGE: &str =
-        "usage: vouch install [--host claude|codex] [--shell bash|powershell] [--shadow] [--print]";
+        "usage: vouch install [--host claude|codex] [--shell bash|powershell] [--state-dir <absolute>] [--shadow] [--print]";
     let mut host = InstallHost::Claude;
     let mut shell = None;
     let mut shadow = false;
     let mut hooks_only = false;
+    let mut state_dir = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--shadow" => shadow = true,
             "--print" => hooks_only = true,
-            "--host" | "--shell" if i + 1 == args.len() => {
+            "--host" | "--shell" | "--state-dir" if i + 1 == args.len() => {
                 return Err(format!("vouch: {} needs a value.\n{USAGE}", args[i]));
             }
             "--host" => {
@@ -204,6 +241,11 @@ pub fn parse_install_options(args: &[String]) -> Result<InstallOptions, String> 
                 shell = Some(InstallShell::parse(&args[i + 1])?);
                 i += 1;
             }
+            "--state-dir" => {
+                validate_state_dir(&args[i + 1])?;
+                state_dir = Some(args[i + 1].clone());
+                i += 1;
+            }
             other => {
                 return Err(format!(
                     "vouch: '{other}' is not a recognised install flag.\n{USAGE}"
@@ -212,14 +254,17 @@ pub fn parse_install_options(args: &[String]) -> Result<InstallOptions, String> 
         }
         i += 1;
     }
-    match (host, shell) {
-        (InstallHost::Codex, None) => Err(format!(
+    match (host, shell, state_dir.is_some()) {
+        (InstallHost::Codex, None, _) => Err(format!(
             "vouch: Codex installation needs --shell bash or --shell powershell.\n{USAGE}"
         )),
-        (InstallHost::Claude, Some(_)) => Err(format!(
+        (InstallHost::Claude, Some(_), _) => Err(format!(
             "vouch: --shell is only meaningful with --host codex.\n{USAGE}"
         )),
-        _ => Ok(InstallOptions { host, shell, shadow, hooks_only }),
+        (InstallHost::Claude, None, true) => Err(format!(
+            "vouch: --state-dir is only meaningful with --host codex.\n{USAGE}"
+        )),
+        _ => Ok(InstallOptions { host, shell, shadow, hooks_only, state_dir }),
     }
 }
 

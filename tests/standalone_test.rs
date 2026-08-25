@@ -24,6 +24,7 @@ fn cmd(head: &str, args: &[&str]) -> Cmd {
     Cmd {
         head: head.into(),
         args: args.iter().map(|s| s.to_string()).collect(),
+        unread_args: Default::default(),
         chain: None,
         prefix_assigns: vec![],
     }
@@ -477,6 +478,24 @@ fn a_case_silent_modeled_entry_gets_the_case_key_named() {
     let items = unmodeled_descriptions(&k, &[cmd("caseless", &["--version"])], "bash", true);
     assert_eq!(items.len(), 1, "{items:?}");
     assert!(items[0].1.contains("case_sensitive_flags"), "{:?}", items[0]);
+}
+
+#[test]
+fn a_prompt_ignores_refused_vocabulary_from_another_language() {
+    let k = kb(
+        "[[program]]\nmatch = [\"mytool\"]\nlanguages = [\"bash\"]\n\
+         subcommands = [\"build\"]\ncase_sensitive_flags = true\n\
+         [[program]]\nmatch = [\"mytool\"]\nlanguages = [\"powershell\"]\n\
+         subcommands = [\"build\"]\ncase_sensitive_flags = true\n\
+         value_options = [\"--version\"]\n",
+    );
+    let items = unmodeled_descriptions(&k, &[cmd("mytool", &["--version"])], "bash", true);
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert!(
+        items[0].1.contains("standalone_flags = [\"--version\"]"),
+        "a PowerShell-only value option must not suppress a truthful Bash offer: {:?}",
+        items[0]
+    );
 }
 
 // --- The engine-level dedup and remedy: end to end -------------------------

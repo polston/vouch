@@ -212,6 +212,7 @@ pub fn respond(
                 id: request.original_id,
                 outcome: Outcome::Denied,
                 detail: "declined through the Codex approval broker".into(),
+                host: "codex".into(),
             },
         )
         .map_err(|e| format!("could not record declined approval: {e}"))?,

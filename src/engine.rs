@@ -91,6 +91,7 @@ fn describe(name: &str) -> &'static str {
         "wrap_unlocated" => "this program is described as running another command, and vouch could not find the command it was told to expect — so whatever runs inside the wrapper was never read",
         "wrap_ambiguous" => "a flag on this wrapper is described by nothing vouch knows, so it cannot tell whether the flag takes the next token as its value or whether the next token is the command that runs",
         "unreadable_language" => "this hands off a snippet in a language vouch has no scanner for, so it cannot tell what the snippet does — not even whether it writes anything",
+        "unread_verb" => "vouch cannot determine which operation this command names because quoting, expansion, or an undescribed flag makes the verb unreadable",
         "brace_expansion" => "the shell rewrites a braced word into several words before the program runs, and this one is a form vouch does not reproduce — so the arguments the program really receives are not the ones on the line",
         _ => "vouch recognises this but cannot follow what it does",
     }
@@ -808,8 +809,8 @@ fn judge_once(
     // zone or scoped entry — and an allow that names only one of them reads as
     // one rule deciding what two rules decided.
     let mut grants: Vec<String> = Vec::new();
-    let mut resolved: Vec<(crate::guards::Hit, Action, Option<String>)> = Vec::new();
-    for (i, hit) in crate::guards::check_each(kb, &all_cmds) {
+    let mut resolved: Vec<(usize, crate::guards::Hit, Action, Option<String>)> = Vec::new();
+    for (i, hit) in crate::guards::check_each_in(kb, &all_cmds, &all_langs) {
         // Where this one command runs: its position in the line, then its own
         // run-dir flag. Same call the write pass and the recognition pass make
         // — one command, one run place.
@@ -818,16 +819,29 @@ fn judge_once(
             all_cmds.get(i).and_then(|c| c.chain.as_ref()),
             &start,
         );
-        let (state, _) =
-            run_dir_place(kb, &all_cmds[i], &base, inherited_at(&all_inherited, i), &resolve);
-        let (a, overrode) = resolve_guard_action(
-            cfg,
-            &hit.guard,
-            &place_of(&state, here_home),
-            unproven_cause(&state),
-            here_home,
-            project_root,
+        let clang = all_langs.get(i).map(String::as_str).unwrap_or(lang);
+        let (state, _) = run_dir_place(
+            kb,
+            &all_cmds[i],
+            clang,
+            &base,
+            inherited_at(&all_inherited, i),
+            &resolve,
         );
+        let (a, overrode) = if hit.unread_verb.is_some() {
+            let lang = all_langs.get(i).map(String::as_str).unwrap_or(lang);
+            let (a, _) = construct_action_for(cfg, lang, "unread_verb");
+            (a, None)
+        } else {
+            resolve_guard_action(
+                cfg,
+                &hit.guard,
+                &place_of(&state, here_home),
+                unproven_cause(&state),
+                here_home,
+                project_root,
+            )
+        };
         // An override that LOOSENS is what let this hit through, and `worst`
         // drops an Allow on the floor — so the sentence would be lost with it.
         // It goes in the grant list instead, where the allow reason reads it.
@@ -835,15 +849,29 @@ fn judge_once(
         if let (Action::Allow, Some(s)) = (a, &overrode) {
             remember(&mut grants, format!("allowed by {s}"));
         }
-        resolved.push((hit, a, overrode));
+        resolved.push((i, hit, a, overrode));
     }
     // The guard pass's own verdict: the strictest action any hit resolved to,
     // reasoned about by the FIRST hit that reached it — which is what the old
     // dedupe-then-`rank(a) > rank(*w)` walk produced, and stays byte-identical
     // when no override is configured.
-    if let Some(top) = resolved.iter().map(|(_, a, _)| *a).max_by_key(|a| rank(*a)) {
-        let (hit, _, overrode) = resolved.iter().find(|(_, a, _)| *a == top).unwrap();
-        let mut reason = guard_reason(hit, top, overrode.as_deref());
+    if let Some(top) = resolved.iter().map(|(_, _, a, _)| *a).max_by_key(|a| rank(*a)) {
+        let (command_index, hit, _, overrode) =
+            resolved.iter().find(|(_, _, a, _)| *a == top).unwrap();
+        let mut reason = if let Some(token) = &hit.unread_verb {
+            let lang = all_langs
+                .get(*command_index)
+                .map(String::as_str)
+                .unwrap_or(lang);
+            let (_, key) = construct_action_for(cfg, lang, "unread_verb");
+            format!(
+                "{}\n  vouch could not determine the command's verb at token {:?}",
+                construct_reason(lang, &key),
+                token
+            )
+        } else {
+            guard_reason(hit, top, overrode.as_deref())
+        };
         // [review] Every OTHER guard a place rule decided at this same action
         // names itself too. One line can trip two overridden guards, and a
         // prompt that named only the first left the operator turning off a rule
@@ -851,7 +879,7 @@ fn judge_once(
         // zone pass settled for allows. Only OVERRIDDEN guards are added, so a
         // prompt with no place rule in it is untouched.
         let mut named: Vec<&str> = vec![hit.guard.as_str()];
-        for (h, a, o) in &resolved {
+        for (_, h, a, o) in &resolved {
             let (Some(s), true) = (o, *a == top) else {
                 continue;
             };
@@ -890,11 +918,6 @@ fn judge_once(
         // definition, so the two arms that answer for an UNPROVABLE
         // destination and `decide_file_for`, which answers for a provable one,
         // cannot end up disagreeing about which rule governs a command.
-        let scope_for = |by: &By| {
-            by.as_ref()
-                .and_then(|(h, s, t)| cfg.write.scope.iter().find(|sc| sc.names(h, s.as_deref(), t)))
-        };
-
         // Redirects belong to the shell, not to the program: they are never
         // resolved against a run-dir flag's directory (spec §3.5), and for the
         // same reason no write scope judges them — `git init > log.txt` writes
@@ -930,7 +953,8 @@ fn judge_once(
         }
 
         for (i, c) in all_cmds.iter().enumerate() {
-            let wt = crate::guards::written_paths(kb, c);
+            let clang = all_langs.get(i).map(String::as_str).unwrap_or(lang);
+            let wt = crate::guards::written_paths_in(kb, c, clang);
             if wt.paths.is_empty() && !wt.run_dir_dest && wt.unknowable.is_empty() {
                 continue;
             }
@@ -944,11 +968,15 @@ fn judge_once(
             // second, slightly different reading of any of the three would
             // govern a different set of commands than the one whose writes
             // vouch derived.
-            let sub = crate::guards::subcommand_of(kb, c);
+            let verb = crate::guards::verb_of_in(kb, c, clang);
+            let sub = match &verb {
+                crate::guards::VerbWord::Word(word) => Some(word.clone()),
+                crate::guards::VerbWord::Absent | crate::guards::VerbWord::Unknown(_) => None,
+            };
             let by: By = Some((
                 crate::guards::base_name(&c.head),
-                sub.map(str::to_string),
-                crate::guards::then_of(kb, c),
+                verb,
+                crate::guards::then_of_in(kb, c, clang),
             ));
 
             // A token after the subcommand that no entry describes: vouch
@@ -963,11 +991,11 @@ fn judge_once(
                 }
                 named.push(tok);
                 unplaced.push(Unplaced {
-                    generic: which_token(lang, tok, sub.unwrap_or("")),
+                    generic: which_token(lang, tok, sub.as_deref().unwrap_or("")),
                     cause: format!(
                         "'{tok}' after '{}' is not described, so vouch cannot tell which \
                          argument is the destination",
-                        sub.unwrap_or("")
+                        sub.as_deref().unwrap_or("")
                     ),
                     what: None,
                     by: by.clone(),
@@ -994,7 +1022,7 @@ fn judge_once(
             let (base, provenance) = if !needs_base {
                 (here.clone(), None)
             } else {
-                run_dir_place(kb, c, &here, inherited_at(&all_inherited, i), &resolve)
+                run_dir_place(kb, c, clang, &here, inherited_at(&all_inherited, i), &resolve)
             };
 
             if wt.run_dir_dest {
@@ -1021,7 +1049,6 @@ fn judge_once(
             // remote for `scp` and is a local file with a colon in its name
             // for `cp` — on NTFS, an alternate data stream of the file before
             // the colon, which is a real write.
-            let clang = all_langs.get(i).map(String::as_str).unwrap_or(lang);
             let remote_ok = crate::guards::entry_for(kb, &c.head, clang)
                 .is_some_and(|e| e.remote_dest);
             for p in paths {
@@ -1059,14 +1086,27 @@ fn judge_once(
             // inside its trees, so `lang.<lang>.constructs.unresolved_path`
             // = "allow" must not open a scoped program's unprovable write.
             // A stricter setting still wins.
-            let (a, reason) = match scope_for(&u.by) {
-                Some(rule) => {
+            let (a, reason) = match scope_for(&cfg.write.scope, &u.by) {
+                Some(ScopeFor::Rule(rule)) => {
                     let stricter = declared.as_ref().filter(|(a, _)| rank(*a) > rank(Action::Ask));
                     (
                         stricter.map_or(Action::Ask, |(a, _)| *a),
                         scope_unprovable(
                             rule,
                             &u.cause,
+                            u.what.as_deref(),
+                            stricter.map(|(a, s)| (s.as_str(), *a)),
+                        ),
+                    )
+                }
+                Some(ScopeFor::Unprovable(rule, verb_cause)) => {
+                    let stricter = declared.as_ref().filter(|(a, _)| rank(*a) > rank(Action::Ask));
+                    let cause = format!("{verb_cause}; {}", u.cause);
+                    (
+                        stricter.map_or(Action::Ask, |(a, _)| *a),
+                        scope_unprovable(
+                            rule,
+                            &cause,
                             u.what.as_deref(),
                             stricter.map(|(a, s)| (s.as_str(), *a)),
                         ),
@@ -1113,14 +1153,26 @@ fn judge_once(
                 // scope instead of a setting that would not turn it off —
                 // unless that setting is STRICTER than the scope's ask, in
                 // which case it is the decider and gets named.
-                let (a, reason) = match scope_for(&by) {
-                    Some(rule) => {
+                let (a, reason) = match scope_for(&cfg.write.scope, &by) {
+                    Some(ScopeFor::Rule(rule)) => {
                         let stricter = rank(declared) > rank(Action::Ask);
                         (
                             if stricter { declared } else { Action::Ask },
                             scope_unprovable(
                                 rule,
                                 describe("unresolved_path"),
+                                Some(&t),
+                                stricter.then_some((setting.as_str(), declared)),
+                            ),
+                        )
+                    }
+                    Some(ScopeFor::Unprovable(rule, verb_cause)) => {
+                        let stricter = rank(declared) > rank(Action::Ask);
+                        (
+                            if stricter { declared } else { Action::Ask },
+                            scope_unprovable(
+                                rule,
+                                &format!("{verb_cause}; {}", describe("unresolved_path")),
                                 Some(&t),
                                 stricter.then_some((setting.as_str(), declared)),
                             ),
@@ -1145,12 +1197,12 @@ fn judge_once(
             // answers when nothing else did: `decide_file_for` returns it
             // through `act` in its own last arm, and that Ask or Deny arrives
             // here as exactly the action it already was.
-            let (a, reason) = match decide_file_for(
+            let (a, reason) = match decide_file_for_by(
                 cfg,
                 home,
                 project_root,
                 &t,
-                by.as_ref().map(|(h, s, t)| (h.as_str(), s.as_deref(), t)),
+                by.as_ref(),
             ) {
                 Decision::Ask(r) => (Action::Ask, r),
                 Decision::Deny(r) => (Action::Deny, r),
@@ -1189,8 +1241,14 @@ fn judge_once(
         // separate loops over the same parallel vectors.
         let standalone_eligible =
             standalone_eligible_at(&all_args_complete, &all_args_from_input, i);
-        let (triggered, wrap_lang, hint) =
-            crate::guards::evaluates_input(kb, c, holds, standalone_eligible);
+        let clang = all_langs.get(i).map(String::as_str).unwrap_or(lang);
+        let (triggered, wrap_lang, hint) = crate::guards::evaluates_input_in(
+            kb,
+            c,
+            clang,
+            holds,
+            standalone_eligible,
+        );
         if !triggered {
             continue;
         }
@@ -1511,7 +1569,8 @@ fn judge_once(
             c.chain.as_ref(),
             &start,
         );
-        let (state, _) = run_dir_place(kb, c, &base, inherited_at(&all_inherited, i), &resolve);
+        let (state, _) =
+            run_dir_place(kb, c, clang, &base, inherited_at(&all_inherited, i), &resolve);
         let place = place_of(&state, here_home);
 
         // 3a. The distrust zone, FIRST (spec §Precedence for recognition,
@@ -1682,7 +1741,7 @@ fn judge_once(
                     // `subcommands` list is what excluded it, never the place.
                     Some(_) => ScopedMiss::Verb {
                         runs_at: d.clone(),
-                        verb: crate::guards::subcommand_of(kb, c).map(str::to_string),
+                        verb: crate::guards::subcommand_of_in(kb, c, clang).map(str::to_string),
                     },
                     // Outside every tree it could LOCATE — and if it could
                     // locate none, "outside them" would be a claim about
@@ -2443,6 +2502,7 @@ fn place_of(state: &CdState, home: &str) -> Place {
 fn run_dir_place<F: Fn(&str) -> String>(
     kb: &crate::guards::Knowledge,
     c: &crate::shell::Cmd,
+    lang: &str,
     here: &CdState,
     inherited: Option<&str>,
     resolve: &F,
@@ -2469,7 +2529,7 @@ fn run_dir_place<F: Fn(&str) -> String>(
         }
         None => here.clone(),
     };
-    match crate::guards::run_dir_with_flag(kb, c) {
+    match crate::guards::run_dir_with_flag_in(kb, c, lang) {
         (crate::guards::RunDir::Absent, _) => (here.clone(), None),
         // The causes `run_dir` reports are short internal labels; a prompt has
         // to read as a sentence, so each is given the words the operator sees.
@@ -3351,7 +3411,30 @@ fn join(dir: &str, rel: &str) -> String {
 /// One alias, because the placed destinations and the unplaceable ones carry
 /// exactly the same triple and are matched against the same `[[write.scope]]`
 /// rule: two spellings of it could only drift apart.
-type By = Option<(String, Option<String>, crate::guards::SecondWord)>;
+type By = Option<(String, crate::guards::VerbWord, crate::guards::SecondWord)>;
+
+enum ScopeFor<'a> {
+    Rule(&'a crate::config::WriteScope),
+    Unprovable(&'a crate::config::WriteScope, String),
+}
+
+fn scope_for<'a>(scopes: &'a [crate::config::WriteScope], by: &By) -> Option<ScopeFor<'a>> {
+    let (head, sub, then) = by.as_ref()?;
+    for scope in scopes {
+        match scope.match_command(head, sub, then) {
+            crate::config::ScopeMatch::Names => return Some(ScopeFor::Rule(scope)),
+            // Scope order is decision-bearing: the first entry that could
+            // govern this command must stop the walk even when its verb is
+            // unreadable. Continuing could hand the command to a later,
+            // wider scope and manufacture a grant from uncertainty.
+            crate::config::ScopeMatch::Unprovable(cause) => {
+                return Some(ScopeFor::Unprovable(scope, cause));
+            }
+            crate::config::ScopeMatch::DoesNotName => {}
+        }
+    }
+    None
+}
 
 /// A destination the walk could not place, with everything a prompt about it
 /// needs — not just the prompt.
@@ -3602,6 +3685,24 @@ pub fn decide_file_for(
     target: &str,
     program: Option<(&str, Option<&str>, &crate::guards::SecondWord)>,
 ) -> Decision {
+    let owned = program.map(|(head, sub, then)| {
+        (
+            head.to_string(),
+            sub.map(|s| crate::guards::VerbWord::Word(s.to_string()))
+                .unwrap_or(crate::guards::VerbWord::Absent),
+            then.clone(),
+        )
+    });
+    decide_file_for_by(cfg, home, project_root, target, owned.as_ref())
+}
+
+fn decide_file_for_by(
+    cfg: &Config,
+    home: &str,
+    project_root: Option<&str>,
+    target: &str,
+    program: Option<&(String, crate::guards::VerbWord, crate::guards::SecondWord)>,
+) -> Decision {
     let textual = normalize(target, home);
     let real = normalize(&resolve_links(&textual), home);
 
@@ -3660,26 +3761,33 @@ pub fn decide_file_for(
     // here for the same reason `allow_paths` itself is: the comparison is
     // against `real`, which is the resolved path, so an alias into the trees
     // is judged by where it lands.
-    if let Some((head, sub, then)) = program {
-        if let Some(rule) = cfg.write.scope.iter().find(|s| s.names(head, sub, then)) {
-            for pat in &rule.only_under {
-                if let Some(p) = expand(pat, home, project_root) {
-                    if glob_match(&p, &real) {
-                        return Decision::Allow(format!(
-                            "inside the write.scope trees for {head} ({p})"
-                        ));
+    if let Some(by) = program {
+        match scope_for(&cfg.write.scope, &Some(by.clone())) {
+            Some(ScopeFor::Rule(rule)) => {
+                let head = &by.0;
+                for pat in &rule.only_under {
+                    if let Some(p) = expand(pat, home, project_root) {
+                        if glob_match(&p, &real) {
+                            return Decision::Allow(format!(
+                                "inside the write.scope trees for {head} ({p})"
+                            ));
+                        }
                     }
                 }
+                return Decision::Ask(format!(
+                    "vouch stopped on: write scope\n  {real}\n  \
+                     [[write.scope]] limits {} to {} — this destination is outside them, and \
+                     write.allow_paths is not consulted for a scoped program\n  \
+                     to change that, add the tree to that entry's `only_under`, or take the \
+                     program out of [[write.scope]]",
+                    rule.programs.join(", "),
+                    rule.only_under.join(", ")
+                ));
             }
-            return Decision::Ask(format!(
-                "vouch stopped on: write scope\n  {real}\n  \
-                 [[write.scope]] limits {} to {} — this destination is outside them, and \
-                 write.allow_paths is not consulted for a scoped program\n  \
-                 to change that, add the tree to that entry's `only_under`, or take the \
-                 program out of [[write.scope]]",
-                rule.programs.join(", "),
-                rule.only_under.join(", ")
-            ));
+            Some(ScopeFor::Unprovable(rule, cause)) => {
+                return Decision::Ask(scope_unprovable(rule, &cause, Some(&real), None));
+            }
+            None => {}
         }
     }
 

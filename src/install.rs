@@ -16,7 +16,7 @@
 
 use serde_json::{json, Value};
 
-use crate::cli::InstallShell;
+use crate::cli::{validate_state_dir, InstallShell};
 
 const CODEX_STATUS_MESSAGE: &str = "vouch is checking this tool call";
 
@@ -77,25 +77,48 @@ fn repoint(entries: &mut [Value], exe: &str, force_shadow: bool) -> Repointed {
     result
 }
 
-fn codex_command(exe: &str, shell: InstallShell, shadow: bool) -> String {
+fn bash_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn powershell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn codex_command(
+    exe: &str,
+    shell: InstallShell,
+    shadow: bool,
+    state_dir: Option<&str>,
+) -> String {
     let quoted = match shell {
-        InstallShell::Bash if exe.contains(' ') => format!("'{exe}'"),
-        InstallShell::PowerShell if exe.contains(' ') => format!("& '{exe}'"),
-        _ => exe.to_string(),
+        InstallShell::Bash => bash_quote(exe),
+        InstallShell::PowerShell => format!("& {}", powershell_quote(exe)),
     };
     let shadow = if shadow { " --shadow" } else { "" };
+    let state_dir = state_dir
+        .map(|path| match shell {
+            InstallShell::Bash => format!(" --state-dir {}", bash_quote(path)),
+            InstallShell::PowerShell => format!(" --state-dir {}", powershell_quote(path)),
+        })
+        .unwrap_or_default();
     format!(
-        "{quoted} --hook --host codex --shell {}{shadow}",
+        "{quoted} --hook --host codex --shell {}{shadow}{state_dir}",
         shell.as_str()
     )
 }
 
-fn codex_hook_entry(exe: &str, shell: InstallShell, shadow: bool) -> Value {
+fn codex_hook_entry(
+    exe: &str,
+    shell: InstallShell,
+    shadow: bool,
+    state_dir: Option<&str>,
+) -> Value {
     json!({
         "matcher": ".*",
         "hooks": [{
             "type": "command",
-            "command": codex_command(exe, shell, shadow),
+            "command": codex_command(exe, shell, shadow, state_dir),
             "timeout": 30,
             "statusMessage": CODEX_STATUS_MESSAGE
         }]
@@ -142,6 +165,29 @@ pub fn plan_codex(
     shell: InstallShell,
     shadow: bool,
 ) -> Result<Plan, String> {
+    plan_codex_inner(existing, exe, shell, shadow, None)
+}
+
+/// The durable-journal form of [`plan_codex`]. The state directory is an
+/// explicit hook argument rather than an assumed inherited environment value.
+pub fn plan_codex_with_state(
+    existing: &str,
+    exe: &str,
+    shell: InstallShell,
+    shadow: bool,
+    state_dir: &str,
+) -> Result<Plan, String> {
+    validate_state_dir(state_dir)?;
+    plan_codex_inner(existing, exe, shell, shadow, Some(state_dir))
+}
+
+fn plan_codex_inner(
+    existing: &str,
+    exe: &str,
+    shell: InstallShell,
+    shadow: bool,
+    state_dir: Option<&str>,
+) -> Result<Plan, String> {
     let mut root: Value = if existing.trim().is_empty() {
         json!({})
     } else {
@@ -160,7 +206,7 @@ pub fn plan_codex(
 
     for (event, event_shadow) in [("PreToolUse", shadow), ("PostToolUse", false)] {
         let mut entries = without_codex_vouch(hooks.get(event), event)?;
-        entries.push(codex_hook_entry(exe, shell, event_shadow));
+        entries.push(codex_hook_entry(exe, shell, event_shadow, state_dir));
         hooks.insert(event.to_string(), Value::Array(entries));
     }
 
@@ -178,21 +224,36 @@ pub fn plan_codex(
     } else {
         broker
     };
-    let notes = vec![
+    let mut notes = vec![
         if shadow {
-            "SHADOW: Codex still decides every call; vouch records what it would decide."
+            "SHADOW: vouch records what it would decide and emits no decision; Codex remains in charge."
         } else {
             "LIVE: vouch blocks Codex tool calls it would ask about or deny."
         }
         .into(),
         "Codex PostToolUse records completed calls; unsupported Claude-only outcome events are not installed."
             .into(),
-        format!(
-            "Register the one-time human approval broker once: codex mcp add vouch_approval -- {broker}"
-        ),
-        "Configure Codex for interactive human approval: approval_policy = \"on-request\", approvals_reviewer = \"user\", and under [mcp_servers.vouch_approval] set default_tools_approval_mode = \"prompt\". The native MCP prompt is the broker decision; no nested elicitation is used."
-            .into(),
+        if state_dir.is_some() {
+            "Both Codex hooks use the explicit stable --state-dir."
+        } else {
+            "No --state-dir was supplied; hooks use inherited VOUCH_STATE_DIR or the OS temp fallback."
+        }
+        .into(),
     ];
+    if shadow {
+        notes.push(
+            "Passive shadow needs no vouch approval broker and leaves Codex's approval policy and reviewer unchanged."
+                .into(),
+        );
+    } else {
+        notes.push(format!(
+            "Register the one-time human approval broker once: codex mcp add vouch_approval -- {broker}"
+        ));
+        notes.push(
+            "Configure Codex for interactive human approval: approval_policy = \"on-request\", approvals_reviewer = \"user\", and under [mcp_servers.vouch_approval] set default_tools_approval_mode = \"prompt\". The native MCP prompt is the broker decision; no nested elicitation is used."
+                .into(),
+        );
+    }
     let hooks_view = serde_json::to_string_pretty(&json!({ "hooks": root["hooks"].clone() }))
         .map_err(|e| e.to_string())?;
     let settings = serde_json::to_string_pretty(&root)

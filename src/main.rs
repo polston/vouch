@@ -906,6 +906,7 @@ fn main() {
                 let probe = vouch::shell::Cmd {
                     head: program.clone(),
                     args: subs.clone(),
+                    unread_args: Default::default(),
                     chain: None,
                     prefix_assigns: vec![],
                 };
@@ -929,6 +930,7 @@ fn main() {
                     let flag_probe = vouch::shell::Cmd {
                         head: program.clone(),
                         args: flags_typed.clone(),
+                        unread_args: Default::default(),
                         chain: None,
                         prefix_assigns: vec![],
                     };
@@ -1254,7 +1256,8 @@ fn main() {
         std::process::exit(0);
     }
 
-    // `vouch install [--host ...] [--shell ...] [--shadow] [--print]` — emit
+    // `vouch install [--host ...] [--shell ...] [--state-dir ...] [--shadow]
+    // [--print]` — emit
     // the selected host's hook registration. Bare Claude `install` prints
     // the full merged settings.json document, for
     // redirecting to a file. `--print` narrows that to the hooks-only view —
@@ -1280,12 +1283,21 @@ fn main() {
             .unwrap_or_else(|_| "vouch".into());
         let planned = match options.host {
             Host::Claude => vouch::install::plan(&existing, &exe, options.shadow),
-            Host::Codex => vouch::install::plan_codex(
-                &existing,
-                &exe,
-                options.shell.expect("Codex shell was validated"),
-                options.shadow,
-            ),
+            Host::Codex => match options.state_dir.as_deref() {
+                Some(state_dir) => vouch::install::plan_codex_with_state(
+                    &existing,
+                    &exe,
+                    options.shell.expect("Codex shell was validated"),
+                    options.shadow,
+                    state_dir,
+                ),
+                None => vouch::install::plan_codex(
+                    &existing,
+                    &exe,
+                    options.shell.expect("Codex shell was validated"),
+                    options.shadow,
+                ),
+            },
         };
         match planned {
             Ok(p) => {
@@ -1364,7 +1376,7 @@ fn main() {
     if args.is_empty() || !args.iter().any(|a| a == "--hook") {
         println!("vouch {}", env!("CARGO_PKG_VERSION"));
         println!("usage:");
-        println!("  vouch --hook [--host claude|codex] [--shell bash|powershell] [--shadow]");
+        println!("  vouch --hook [--host claude|codex] [--shell bash|powershell] [--state-dir <absolute>] [--shadow]");
         println!("                            decide a tool call (reads hook JSON on stdin)");
         println!("  vouch explain '<cmd>'     what vouch decides, and why");
         println!("  vouch why '<cmd>'         the same, for a command already run");
@@ -1372,7 +1384,7 @@ fn main() {
         println!("  vouch doctor              list what vouch could not read or describe");
         println!("  vouch review [--accept X] evidence-backed rule candidates");
         println!("  vouch import [file]       translate a cc-allow config to stdout");
-        println!("  vouch install [--host claude|codex] [--shell bash|powershell] [--shadow] [--print]");
+        println!("  vouch install [--host claude|codex] [--shell bash|powershell] [--state-dir <absolute>] [--shadow] [--print]");
         println!("                            print merged host hook wiring; writes nothing");
         println!("  vouch schema <config|knowledge> [--write]");
         println!("                            print (or regenerate) the reference docs");
@@ -1388,6 +1400,11 @@ fn main() {
     };
     let shadow = hook_options.shadow;
     let host = hook_options.host;
+    let state_dir = hook_options
+        .state_dir
+        .as_deref()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(journal::state_dir);
 
     let mut raw = String::new();
     if std::io::stdin().read_to_string(&mut raw).is_err() {
@@ -1414,23 +1431,25 @@ fn main() {
             input.error.clone()
         };
         let _ = journal::append_outcome(
-            &journal::state_dir(),
+            &state_dir,
             &journal::OutcomeRecord {
                 id: input.tool_use_id.clone(),
                 outcome: o,
                 detail,
+                host: host.as_str().into(),
             },
         );
         if host == Host::Codex {
             if let Ok(Some(original_id)) =
-                vouch::approval::take_outcome_alias(&journal::state_dir(), &input.tool_use_id)
+                vouch::approval::take_outcome_alias(&state_dir, &input.tool_use_id)
             {
                 let _ = journal::append_outcome(
-                    &journal::state_dir(),
+                    &state_dir,
                     &journal::OutcomeRecord {
                         id: original_id,
                         outcome: o,
                         detail: "outcome of the exact approved retry".into(),
+                        host: host.as_str().into(),
                     },
                 );
             }
@@ -1461,7 +1480,7 @@ fn main() {
     if host == Host::Codex && emit {
         if let Decision::Ask(reason) = &decision {
             let now = journal::now_epoch_secs().parse::<u64>().unwrap_or_default();
-            decision = match vouch::approval::gate(&journal::state_dir(), &input, reason, now) {
+            decision = match vouch::approval::gate(&state_dir, &input, reason, now) {
                 Ok(vouch::approval::GateResult::Granted) => {
                     Decision::Allow("one-time human approval for this exact retry".into())
                 }
@@ -1475,7 +1494,7 @@ fn main() {
         }
     }
 
-    let dir = journal::state_dir();
+    let dir = state_dir;
     // A config-named allow short-circuits `route::decide_tool` before
     // extraction ever runs (spec §Decision flow step 1), so `outcome.snippets`
     // is empty for it — that tool journals through the single-record
@@ -1483,10 +1502,16 @@ fn main() {
     // looked at. Everything else journals one record per extracted snippet,
     // still carrying the banner-bearing `decision` composed above.
     if outcome.snippets.is_empty() {
-        let rec = journal::record_from(&input, &decision, mode);
+        let rec = journal::record_from_host(host, &input, &decision, mode);
         let _ = journal::append(&dir, &rec);
     } else {
-        for rec in journal::records_from_snippets(&input, &decision, mode, &outcome.snippets) {
+        for rec in vouch::journal::records_from_snippets_host(
+            host,
+            &input,
+            &decision,
+            mode,
+            &outcome.snippets,
+        ) {
             let _ = journal::append(&dir, &rec);
         }
     }

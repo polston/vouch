@@ -185,7 +185,13 @@ fn scoped_kb() -> vouch::guards::Knowledge {
 }
 
 fn probe() -> Cmd {
-    Cmd { head: "probe-tool".into(), args: vec!["x".into()], chain: None, prefix_assigns: vec![] }
+    Cmd {
+        head: "probe-tool".into(),
+        args: vec!["x".into()],
+        unread_args: Default::default(),
+        chain: None,
+        prefix_assigns: vec![],
+    }
 }
 
 /// The place a recognition question is asked at, under this file's fixed home

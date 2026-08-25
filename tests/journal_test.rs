@@ -20,6 +20,7 @@ fn appends_one_json_line_per_record() {
         cwd: String::new(),
         lang: String::new(),
         permission_mode: String::new(),
+        host: "claude".into(),
     };
     append(&dir, &rec).unwrap();
     append(&dir, &rec).unwrap();
@@ -113,6 +114,7 @@ fn a_missing_directory_is_created_rather_than_failing() {
         cwd: String::new(),
         lang: String::new(),
         permission_mode: String::new(),
+        host: "claude".into(),
     };
     append(&dir, &rec).unwrap();
     assert!(dir.join("journal.jsonl").exists());
@@ -133,4 +135,52 @@ fn an_old_journal_row_without_the_field_still_parses() {
     let line = r#"{"id":"x","ts":"1","session":"s","tool":"Bash","cmd":"ls","verdict":"allow","reason":"","mode":"live"}"#;
     let rec: Record = serde_json::from_str(line).unwrap();
     assert_eq!(rec.permission_mode, "");
+    assert_eq!(rec.host, "");
+}
+
+#[test]
+fn outcomes_correlate_by_host_as_well_as_tool_use_id() {
+    let dir = std::env::temp_dir().join("vouch_journal_host_correlation");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("journal.jsonl"),
+        concat!(
+            "{\"id\":\"same\",\"ts\":\"1\",\"session\":\"s\",\"tool\":\"Bash\",\"cmd\":\"a\",\"verdict\":\"allow\",\"reason\":\"\",\"mode\":\"live\",\"host\":\"claude\"}\n",
+            "{\"id\":\"same\",\"ts\":\"2\",\"session\":\"s\",\"tool\":\"Bash\",\"cmd\":\"b\",\"verdict\":\"ask\",\"reason\":\"\",\"mode\":\"shadow\",\"host\":\"codex\"}\n",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        dir.join("outcomes.jsonl"),
+        "{\"id\":\"same\",\"host\":\"codex\",\"outcome\":\"executed\",\"detail\":\"\"}\n",
+    )
+    .unwrap();
+
+    let recs = vouch::journal::all(&dir);
+    assert_eq!(recs[0].host, "claude");
+    assert_eq!(recs[0].outcome, Outcome::Unknown);
+    assert_eq!(recs[1].host, "codex");
+    assert_eq!(recs[1].outcome, Outcome::Executed);
+}
+
+#[test]
+fn legacy_hostless_rows_still_correlate_only_with_legacy_outcomes() {
+    let dir = std::env::temp_dir().join("vouch_journal_legacy_host_correlation");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("journal.jsonl"),
+        "{\"id\":\"old\",\"ts\":\"1\",\"session\":\"s\",\"tool\":\"Bash\",\"cmd\":\"a\",\"verdict\":\"allow\",\"reason\":\"\",\"mode\":\"live\"}\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("outcomes.jsonl"),
+        "{\"id\":\"old\",\"outcome\":\"executed\",\"detail\":\"\"}\n",
+    )
+    .unwrap();
+
+    let recs = vouch::journal::all(&dir);
+    assert_eq!(recs[0].host, "");
+    assert_eq!(recs[0].outcome, Outcome::Executed);
 }

@@ -275,14 +275,14 @@
       "type": "object",
       "properties": {
         "only_under": {
-          "description": "The trees this program's writes may land under. A write outside all\nof them is judged as if this scope did not exist — falling through to\nthe ordinary wall/allow_paths check.",
+          "description": "The trees this program's writes may land under. A write outside all of\nthem asks, and `write.allow_paths` is not consulted for a scoped\nprogram.",
           "type": "array",
           "items": {
             "type": "string"
           }
         },
         "programs": {
-          "description": "Which programs this scope restricts. Each entry is 1-3 tokens: the\nprogram name, optionally a subcommand, and optionally that\nsubcommand's own second word (`\"git worktree add\"`).",
+          "description": "Which programs this scope restricts. Each entry is 1-3 tokens: the\nprogram name, optionally a subcommand, and optionally that\nsubcommand's own second word (`\"git worktree add\"`). If a stated verb\nword is unreadable, the scope is unprovable and asks; it neither grants\none entry by file order nor falls through to a later scope or wider\nglobal allowance.",
           "type": "array",
           "items": {
             "type": "string"

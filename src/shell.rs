@@ -1255,6 +1255,7 @@ impl crate::syntax::Scanner for Bash {
             "wrap_unlocated",
             "wrap_ambiguous",
             "unreadable_language",
+            "unread_verb",
             // Raised for the command a channel-fed wrapper runs, whose
             // arguments the line never states.
             "args_from_input",
