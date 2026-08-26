@@ -64,10 +64,10 @@ Run from the vouch checkout root; every path below is relative to it.
      from `.release-please-manifest.json`;
    - whether `git diff --name-only master...<branch>` intersects the publish
      `MANIFEST` in `scripts/publish-mirror.sh`;
-   - every pull request the operator must merge, in order: the private version
-     pull request when release-please opens one, then the public publish pull
-     request when published files changed;
-   - what follows those merges: mirror verification, public tag and release
+   - every review boundary, in order: merge the private version pull request
+     when release-please opens one, then review the public publish pull request
+     and exact-land its scanned head when published files changed;
+   - what follows those landings: mirror verification, public tag and release
      build, paired live reinstall, changed-skill reinstall, live probes, state
      docs, and branch teardown;
    - the final target state: versions aligned here and in the mirror, published
@@ -132,6 +132,10 @@ Run from the vouch checkout root; every path below is relative to it.
 
 4a. **Publishing, when the changeset touches published files.** Landing does
    not publish; publishing is its own act, and it is the operator's:
+   **Preparation is automatic.** Run the local dry run, scans, history checks,
+   and any value-free coordination draft when this point is reached; never ask
+   whether to begin them. Explicit approval still gates remote writes, history
+   rewrites, and sending an external request.
    1. If release-please opened a version pull request here on the step 4
       push, fetch its generated branch and run the all-ref history audit before
       offering it for merge. The branch must be exactly one commit ahead of
@@ -146,10 +150,17 @@ Run from the vouch checkout root; every path below is relative to it.
       read the scan result and the diffstat.
    3. `--push` — pushes a `publish/*` branch and opens a pull request in the
       mirror. Nothing has reached its master yet.
-   4. The operator merges that pull request.
-   5. `--verify` — proves the merge landed exactly what was published; refuses
-      naming the differing paths if not.
-   6. `--tag` — re-runs the verify itself, then tags the mirror, which starts
+   4. The operator reviews that pull request but does not use a forge merge
+      method: merge, squash, and rebase each create an object the publisher did
+      not scan.
+   5. `--land <publish-branch>` — fetches and rescans the exact remote head,
+      requires an open, ready, clean pull request whose head and base match,
+      then fast-forwards mirror master to that same commit without force. The
+      forge marks the pull request merged because its head became reachable.
+   6. `--verify <publish-branch>` — proves master is the exact published tree
+      and audits published author, committer, and annotated-tagger identities.
+   7. `--tag <publish-branch>` — re-runs the verify itself, scans the new tag's
+      message and identity, then tags the mirror, which starts
       the build. A cycle of only docs/test/refactor/chore commits has no new
       version to tag; that refusal is an ordinary idle cycle, not a failure —
       or the version pull request release-please opened here has not been
@@ -258,6 +269,8 @@ the knowledge install.
 - Looping on the worktree delete — the owning session cannot win that; defer it.
 - Diffing the on-disk replay baseline and reporting a false zero.
 - Merging or pushing before the operator's explicit go.
+- Using the forge merge button on a public publish pull request; `--land` is
+  the only path that preserves the exact scanned commit.
 - Treating the docs sweep as a landing chore. It is a plan task that runs
   before the final review; this skill refuses to start without its report.
 - Reinstalling the knowledge but not the skills when the branch changed both.

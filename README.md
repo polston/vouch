@@ -301,6 +301,13 @@ Version numbers and `CHANGELOG.md` are generated from conventional commit
 subjects; each release lands as one reviewed change, and the public-mirror tag
 that follows triggers the build workflow to attach the binaries.
 
+The mirror publisher scans the configured Git identity and the exact candidate
+message, metadata, paths, patch, and files before it pushes a review branch.
+After review, `--land` rescans that branch and fast-forwards mirror master to
+the same commit; the forge merge button is not used because it creates a new,
+unscanned object. `--verify` also audits published author, committer, and tagger
+identities before `--tag` can start a release build.
+
 `gh release download` fetches a per-platform archive holding both binaries,
 `knowledge.toml`, and `vouch.example.toml` from a single commit, laid out to
 match where they are installed.

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.6 (2026-08-26)
+
+
+### Bug Fixes
+
+* treat Git identity email as public attribution
+
+## 0.3.5 (2026-08-25)
+
+
+### Bug Fixes
+
+* preserve the exact scanned public release
+
 ## 0.3.4 (2026-08-25)
 
 

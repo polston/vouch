@@ -29,6 +29,51 @@ fn normalize(s: &str) -> String {
     s.replace("\r\n", "\n")
 }
 
+/// Resolve the checkout at run time. Compiling `CARGO_MANIFEST_DIR` into this
+/// binary makes a cached test artifact point at the checkout that built it;
+/// after that checkout is removed, otherwise-current tests fail on files that
+/// are present in the checkout running them. `cargo test` supplies the same
+/// variable to the test process, without making the artifact location-bound.
+fn manifest_dir() -> std::path::PathBuf {
+    std::env::var_os("CARGO_MANIFEST_DIR")
+        .map(std::path::PathBuf::from)
+        .expect("CARGO_MANIFEST_DIR is unset: run this test through cargo")
+}
+
+#[test]
+fn rust_test_artifacts_do_not_embed_a_checkout_path() {
+    let root = manifest_dir();
+    let forbidden = ["env", "!(\"CARGO_MANIFEST_DIR\")"].concat();
+    let mut pending = vec![
+        std::path::PathBuf::from("tests"),
+        std::path::PathBuf::from("examples"),
+    ];
+    let mut offenders = Vec::new();
+
+    while let Some(relative_dir) = pending.pop() {
+        for entry in
+            std::fs::read_dir(root.join(&relative_dir)).expect("Rust source directory reads")
+        {
+            let entry = entry.expect("Rust source directory entry reads");
+            let relative = relative_dir.join(entry.file_name());
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(relative);
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                let source = std::fs::read_to_string(&path).expect("Rust source file reads");
+                if source.contains(&forbidden) {
+                    offenders.push(relative);
+                }
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "these Rust sources compile a checkout path into their artifacts: {offenders:?}"
+    );
+}
+
 #[test]
 fn the_shipped_knowledge_declares_the_schema_this_binary_understands() {
     // A new `[[program]]` or `[[program.rule]]` field is only half a change:
@@ -43,10 +88,8 @@ fn the_shipped_knowledge_declares_the_schema_this_binary_understands() {
     // `strip_prefix("version")` accepts any key merely starting with that
     // word, and nothing would strip a trailing comment. The loader already
     // holds the answer, and §6.1 is about exactly this.
-    let shipped = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("knowledge.toml"),
-    )
-    .expect("the shipped knowledge file is readable");
+    let shipped = std::fs::read_to_string(manifest_dir().join("knowledge.toml"))
+        .expect("the shipped knowledge file is readable");
     let declared: u32 = vouch::guards::load(&shipped)
         .expect("the shipped knowledge file parses")
         .version
@@ -129,7 +172,7 @@ fn every_known_construct_is_documented_in_the_example_config() {
 /// in the public mirror as well: `tests/` publishes wholesale.
 #[test]
 fn the_five_version_fields_agree() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = manifest_dir();
 
     let cargo: toml::Value =
         toml::from_str(&std::fs::read_to_string(root.join("Cargo.toml")).unwrap()).unwrap();
@@ -191,7 +234,7 @@ fn the_five_version_fields_agree() {
 /// tree.
 #[test]
 fn a_tracked_changelog_carries_no_forge_remnant() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("CHANGELOG.md");
+    let path = manifest_dir().join("CHANGELOG.md");
     let Ok(text) = std::fs::read_to_string(&path) else {
         return; // no changelog yet; nothing to check
     };

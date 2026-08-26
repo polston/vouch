@@ -11,10 +11,11 @@ use vouch::guards::{evaluates_input, load, recognises, Knowledge};
 use vouch::syntax::Cmd;
 
 fn shipped() -> Knowledge {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("knowledge.toml"),
-    )
-    .expect("the shipped knowledge file is readable");
+    let root = std::env::var_os("CARGO_MANIFEST_DIR")
+        .map(std::path::PathBuf::from)
+        .expect("CARGO_MANIFEST_DIR is unset: run this test through cargo");
+    let text = std::fs::read_to_string(root.join("knowledge.toml"))
+        .expect("the shipped knowledge file is readable");
     load(&text).expect("the shipped knowledge file parses")
 }
 

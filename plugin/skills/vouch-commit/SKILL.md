@@ -9,9 +9,9 @@ description: Use when writing any commit message in the vouch repositories — t
 
 A `feat:` or `fix:` subject in this repository IS a public release-notes
 line: release-please collects them verbatim into `CHANGELOG.md`, the
-changelog publishes to the mirror, and the publish pull request's squash
-turns its body into the mirror's own commit message. A subject written
-lazily is published lazily. The other prefixes (`docs`, `test`,
+changelog publishes to the mirror, and the publisher puts that account in the
+exact candidate commit that `--land` fast-forwards to mirror master. A subject
+written lazily is published lazily. The other prefixes (`docs`, `test`,
 `refactor`, `chore`) never appear in release notes — they are for the
 private history's readers.
 
