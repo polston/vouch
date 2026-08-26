@@ -1,6 +1,6 @@
 ---
 name: vouch-session-end
-description: Use when a working session in the vouch repository is ending — the operator says they are stopping, asks whether it is safe to start fresh, or the work reaches a natural stopping point. Makes the state docs true again before the session's memory disappears. Not for landing a branch (that is vouch-landing), and not a substitute for it.
+description: Use when a working session in the vouch repository is ending — the operator says they are stopping, asks whether it is safe to start fresh, the released outcome is verified, or work is genuinely parked. Makes the state docs true again before the session's memory disappears. Not for landing a ready branch (that automatically chains to vouch-landing), and not a substitute for it.
 ---
 
 # vouch session end
@@ -33,10 +33,11 @@ git worktree list
 git branch --no-merged master
 ```
 
-**If a branch has commits not on master, STOP. `vouch-landing` runs FIRST,
-in full, and this skill runs after it.** Landing has preconditions this one
+**If a branch has commits not on master, STOP THIS SKILL. `vouch-landing` runs
+FIRST, in full, without another approval question, and this skill runs after
+it.** Landing has preconditions this one
 knows nothing about — a docs sweep, a clean whole-branch review, a cleanup
-pass, the operator's explicit go on the merge — and none of them happen by
+pass, and the fixed release route — and none of them happen by
 finishing a session tidily around the branch.
 
 Added 2026-08-19, on the operator's correction, after this skill was run on a
@@ -69,6 +70,9 @@ the handoff that the branch is unlanded and which landing steps remain.
   goes stale, so run this too.
 - Never invent the next task here. Deciding what runs next belongs to the
   roadmap and to `vouch-session-start`.
+- Passing implementation gates is not a natural stopping point. The operator's
+  standing authorization sends ready work through `vouch-landing`; this skill
+  runs after the release is verified or when work is genuinely parked.
 
 ## Do this, in order
 
@@ -144,7 +148,8 @@ do not tell the operator to rest.
 - **Trusting the handoff because the session wrote it.** It was true when
   written. The question is whether it is true now.
 - Treating "the tests pass" as the end of a session. The gate says the code
-  is consistent; it says nothing about whether the docs describe the machine.
+  is consistent; it says nothing about whether the work is released or the
+  docs describe the machine.
 - Ending a session whose only output was investigation without writing the
   findings down, on the grounds that no code changed.
 - Leaving a temporary measurement checkout registered. `git worktree list`

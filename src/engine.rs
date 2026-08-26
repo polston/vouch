@@ -2,8 +2,8 @@
 //!
 //! Languages differ only in syntax, so the only per-language thing is a
 //! `Scanner`. Guards, settings lookup, precedence, and message text are shared.
-//! Adding a language is: write a scanner, add it to `syntax::scanner_for`, add a
-//! `[lang.<name>]` config key. Nothing here changes.
+//! Adding a language is: write a scanner, add one row to the registry in
+//! `syntax`, add a `[lang.<name>]` config section. Nothing here changes.
 //!
 //! Design rule, enforced by tests: every construct a scanner can name MUST be a
 //! settable key and MUST take its verdict from configuration. No code path here

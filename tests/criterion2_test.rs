@@ -13,12 +13,11 @@
 use vouch::config::{load, Action, Config};
 use vouch::engine::decide_command_in;
 use vouch::protocol::Decision;
-use vouch::syntax::scanner_for;
+use vouch::syntax::{scanner_for, scanner_languages};
 
 /// Every settable construct name, per language, taken from the scanners.
 fn all_constructs() -> Vec<(&'static str, Vec<String>)> {
-    ["bash", "powershell", "python"]
-        .into_iter()
+    scanner_languages()
         .map(|lang| {
             let names = scanner_for(lang)
                 .expect("scanner exists")
@@ -209,8 +208,7 @@ fn names_in_source() -> Vec<String> {
 #[test]
 fn no_construct_is_emitted_that_the_scanners_do_not_declare() {
     // If this fails, a prompt exists that the settable-name tests never see.
-    let declared: Vec<String> = ["bash", "powershell", "python"]
-        .into_iter()
+    let declared: Vec<String> = scanner_languages()
         .flat_map(|l| {
             scanner_for(l)
                 .expect("scanner")
@@ -235,6 +233,29 @@ fn no_construct_is_emitted_that_the_scanners_do_not_declare() {
         "these construct names are emitted but not declared by any scanner, so \
          nothing verifies they have a working setting: {missing:?}"
     );
+}
+
+#[test]
+fn the_scanner_registry_is_unique_and_matches_each_scanner() {
+    let languages: Vec<_> = scanner_languages().collect();
+    assert!(!languages.is_empty(), "the scanner registry is empty");
+    assert!(
+        languages.iter().all(|lang| !lang.is_empty()),
+        "the scanner registry contains an empty language name: {languages:?}"
+    );
+
+    let unique: std::collections::HashSet<_> = languages.iter().copied().collect();
+    assert_eq!(
+        unique.len(),
+        languages.len(),
+        "the scanner registry contains duplicate language names: {languages:?}"
+    );
+
+    for lang in languages {
+        let scanner = scanner_for(lang).expect("every registration resolves");
+        assert_eq!(scanner.lang(), lang, "registration and scanner disagree");
+    }
+    assert!(scanner_for("not-a-vouch-language").is_none());
 }
 
 #[test]

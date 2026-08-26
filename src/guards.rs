@@ -366,6 +366,8 @@ pub struct Program {
     /// callback slot must ALSO be named in `arg_names`, at its real
     /// position, so the existing keyword fold maps both spellings onto one
     /// check; a keyword-only one is legitimately absent from `arg_names`.
+    /// Every name uses the shared ASCII parameter grammar: a letter or `_`
+    /// first, then letters, digits, or `_`.
     ///
     /// Non-empty replaces on merge, like `arg_names`.
     #[serde(default)]
@@ -384,7 +386,8 @@ pub struct Program {
     #[serde(default)]
     pub writes_only_with_file_mode: Option<bool>,
     /// This ENTRY's claim: at the named position ("arg_<N>", receiver = 0)
-    /// or keyword-only parameter (a bare identifier), the call writes
+    /// or keyword-only parameter (the same ASCII identifier grammar
+    /// `callback_args` uses), the call writes
     /// through a file object already judged where it was minted — so the
     /// engine extracts NO write target from this call itself; the value is
     /// documentary, and validation checks only its spelling and its
@@ -535,7 +538,7 @@ pub struct ToolSnippet {
     pub field: String,
     /// A fixed snippet language. Exactly one of this and `language_from` —
     /// checked in `knowledge::validate_tool`, which also checks this value
-    /// is in the closed `knowledge::SNIPPET_LANGUAGES` set.
+    /// is in the closed `knowledge::snippet_languages()` set.
     #[serde(default)]
     pub language: Option<String>,
     /// Read a sibling `tool_input` field and translate its value through
@@ -543,7 +546,7 @@ pub struct ToolSnippet {
     #[serde(default)]
     pub language_from: Option<String>,
     /// The translation table for `language_from`: the value read from the
-    /// sibling field, on the left, maps to a `knowledge::SNIPPET_LANGUAGES`
+    /// sibling field, on the left, maps to a `knowledge::snippet_languages()`
     /// name on the right — every right-hand value is checked against that
     /// closed set at load.
     #[serde(default)]

@@ -4,7 +4,7 @@
 //! knowledge loaders actually read (`vouch::cli::generate_schema_docs`), and
 //! two more tests hold the release-flow invariants to the same standard.
 //!
-//! Four independent gates:
+//! Seven independent gates:
 //!   1. the committed files must match what the structs generate RIGHT NOW —
 //!      otherwise the reference page is describing a shape the loader no
 //!      longer accepts, or has stopped accepting a shape it still does.
@@ -19,6 +19,12 @@
 //!   4. the tracked `CHANGELOG.md` carries no forge remnant (a link or a
 //!      commit id) that would name this private repository or point at a
 //!      commit the public mirror does not have.
+//!   5. every accepted schema key and every settable construct has one exact
+//!      vocabulary row in `CLAUDE.md` §0.0.
+//!   6. the example config advertises exactly the registered constructs, with
+//!      neither omissions nor dead settings.
+//!   7. current operational documentation does not claim a registered scanner
+//!      is absent.
 
 /// `core.autocrlf` on a Windows checkout rewrites a committed LF file to
 /// CRLF on disk; the generator always emits LF. Normalizing before compare
@@ -130,38 +136,317 @@ fn the_committed_schemas_match_the_structs() {
     );
 }
 
-/// True when some line of `text`, trimmed, is a TOML key assignment for
-/// exactly `name` — `name = ...`, not merely `name` appearing somewhere in
-/// the file. A bare substring check would pass `redirect` for free off of
-/// `dynamic_redirect = "allow"`, a DIFFERENT settable key that happens to
-/// contain the shorter name as characters — exactly the loose-match trap
-/// CLAUDE.md §6.1 warns against ("counting curl -o three ways gave 349,
-/// 289, and a true 240").
-fn sets_key(text: &str, name: &str) -> bool {
-    text.lines().any(|line| {
-        let line = line.trim_start();
-        line.strip_prefix(name)
-            .and_then(|rest| rest.trim_start().strip_prefix('='))
-            .is_some()
-    })
+fn construct_documentation_gaps(example: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let parsed: toml::Value = toml::from_str(example).expect("vouch.example.toml parses as TOML");
+    let language_tables = parsed
+        .get("lang")
+        .and_then(toml::Value::as_table)
+        .expect("vouch.example.toml has a [lang] table");
+    let mut missing_languages = Vec::new();
+    let mut missing = Vec::new();
+    let mut extra = Vec::new();
+
+    for lang in vouch::syntax::scanner_languages() {
+        let Some(language) = language_tables.get(lang).and_then(toml::Value::as_table) else {
+            missing_languages.push(lang.to_string());
+            continue;
+        };
+        let documented: std::collections::BTreeSet<_> = language
+            .get("constructs")
+            .and_then(toml::Value::as_table)
+            .into_iter()
+            .flat_map(|table| table.keys().map(String::as_str))
+            .collect();
+        let scanner = vouch::syntax::scanner_for(lang).expect("registered scanner exists");
+        let known: std::collections::BTreeSet<_> =
+            scanner.known_constructs().iter().copied().collect();
+
+        missing.extend(
+            known
+                .difference(&documented)
+                .map(|name| format!("{lang}/{name}")),
+        );
+        extra.extend(
+            documented
+                .difference(&known)
+                .map(|name| format!("{lang}/{name}")),
+        );
+    }
+    (missing_languages, missing, extra)
 }
 
 #[test]
-fn every_known_construct_is_documented_in_the_example_config() {
+fn the_example_config_documents_exactly_every_known_construct() {
     let example = std::fs::read_to_string("vouch.example.toml").expect("vouch.example.toml reads");
-    let mut missing = Vec::new();
-    for lang in ["bash", "powershell", "python"] {
-        let scanner = vouch::syntax::scanner_for(lang).expect("scanner exists");
-        for name in scanner.known_constructs() {
-            if !sets_key(&example, name) {
-                missing.push(format!("{lang}/{name}"));
+    let (missing_languages, missing, extra) = construct_documentation_gaps(&example);
+    assert!(
+        missing_languages.is_empty() && missing.is_empty() && extra.is_empty(),
+        "vouch.example.toml construct mismatch: missing languages {missing_languages:?}; \
+         missing constructs {missing:?}; extra constructs {extra:?}"
+    );
+}
+
+#[test]
+fn the_example_config_check_detects_an_omission_and_a_dead_setting() {
+    let example = std::fs::read_to_string("vouch.example.toml").expect("vouch.example.toml reads");
+    let changed = example.replacen("dynamic_command = \"allow\"", "dead_construct = \"ask\"", 1);
+    let (_, missing, extra) = construct_documentation_gaps(&changed);
+    assert!(missing.iter().any(|name| name == "bash/dynamic_command"));
+    assert!(extra.iter().any(|name| name == "bash/dead_construct"));
+}
+
+fn collect_schema_property_names(
+    schema: &serde_json::Value,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    match schema {
+        serde_json::Value::Object(object) => {
+            if let Some(properties) = object
+                .get("properties")
+                .and_then(serde_json::Value::as_object)
+            {
+                out.extend(properties.keys().cloned());
+            }
+            for value in object.values() {
+                collect_schema_property_names(value, out);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_schema_property_names(value, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn exact_glossary_names(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix("| **`")?;
+            let (name, _) = rest.split_once("`** |")?;
+            (!name.is_empty() && !name.contains('`')).then(|| name.to_string())
+        })
+        .collect()
+}
+
+#[test]
+fn every_schema_key_and_construct_has_one_exact_glossary_row() {
+    let generated = vouch::cli::generate_schema_docs();
+    let mut schema_keys = std::collections::BTreeSet::new();
+    for json in [&generated.config_json, &generated.knowledge_json] {
+        let schema: serde_json::Value =
+            serde_json::from_str(json).expect("generated schema parses");
+        collect_schema_property_names(&schema, &mut schema_keys);
+    }
+
+    let mut constructs = std::collections::BTreeSet::new();
+    for lang in vouch::syntax::scanner_languages() {
+        constructs.extend(
+            vouch::syntax::scanner_for(lang)
+                .expect("registered scanner exists")
+                .known_constructs()
+                .iter()
+                .map(|name| name.to_string()),
+        );
+    }
+
+    let claude = std::fs::read_to_string("CLAUDE.md").expect("CLAUDE.md reads");
+    let rows = exact_glossary_names(&claude);
+    let glossary: std::collections::BTreeSet<_> = rows.iter().cloned().collect();
+    let duplicates: Vec<_> = glossary
+        .iter()
+        .filter(|name| rows.iter().filter(|row| *row == *name).count() > 1)
+        .cloned()
+        .collect();
+    let missing_schema: Vec<_> = schema_keys.difference(&glossary).cloned().collect();
+    let missing_constructs: Vec<_> = constructs.difference(&glossary).cloned().collect();
+
+    assert!(
+        duplicates.is_empty() && missing_schema.is_empty() && missing_constructs.is_empty(),
+        "CLAUDE.md §0.0 exact glossary mismatch: duplicate rows {duplicates:?}; \
+         missing schema keys {missing_schema:?}; missing constructs {missing_constructs:?}"
+    );
+}
+
+fn word_present(paragraph: &str, word: &str) -> bool {
+    paragraph.match_indices(word).any(|(start, _)| {
+        let before = paragraph[..start].chars().next_back();
+        let after = paragraph[start + word.len()..].chars().next();
+        before.is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_')
+            && after.is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_')
+    })
+}
+
+fn false_scanner_claims<'a>(paragraphs: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut claims = Vec::new();
+    for paragraph in paragraphs {
+        let normalized = paragraph.to_ascii_lowercase();
+        if normalized.contains("no scanner") {
+            for lang in vouch::syntax::scanner_languages() {
+                if word_present(&normalized, lang) {
+                    claims.push(lang.to_string());
+                }
             }
         }
     }
+    claims.sort();
+    claims.dedup();
+    claims
+}
+
+fn markdown_paragraphs(text: &str) -> Vec<String> {
+    let mut paragraphs = Vec::new();
+    let mut current = Vec::new();
+    let flush = |current: &mut Vec<&str>, paragraphs: &mut Vec<String>| {
+        if !current.is_empty() {
+            paragraphs.push(current.join(" "));
+            current.clear();
+        }
+    };
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        let numbered = trimmed
+            .split_once(". ")
+            .is_some_and(|(number, _)| number.chars().all(|c| c.is_ascii_digit()));
+        let starts_block = trimmed.starts_with("| ")
+            || trimmed.starts_with("- ")
+            || trimmed.starts_with("* ")
+            || trimmed.starts_with('#')
+            || numbered;
+        if trimmed.is_empty() || starts_block {
+            flush(&mut current, &mut paragraphs);
+        }
+        if !trimmed.is_empty() {
+            current.push(trimmed);
+        }
+        if trimmed.starts_with("| ") {
+            flush(&mut current, &mut paragraphs);
+        }
+    }
+    flush(&mut current, &mut paragraphs);
+    paragraphs
+}
+
+fn toml_comment_paragraphs(text: &str) -> Vec<String> {
+    let mut paragraphs = Vec::new();
+    let mut current = Vec::new();
+    for line in text.lines() {
+        let comment = line.trim_start().strip_prefix('#').map(str::trim);
+        match comment {
+            Some("") | None => {
+                if !current.is_empty() {
+                    paragraphs.push(current.join(" "));
+                    current.clear();
+                }
+            }
+            Some(line) => current.push(line),
+        }
+    }
+    if !current.is_empty() {
+        paragraphs.push(current.join(" "));
+    }
+    paragraphs
+}
+
+fn rust_doc_paragraphs(text: &str) -> Vec<String> {
+    let mut paragraphs = Vec::new();
+    let mut current = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        let doc = trimmed
+            .strip_prefix("///")
+            .or_else(|| trimmed.strip_prefix("//!"));
+        match doc.map(str::trim) {
+            Some("") | None => {
+                if !current.is_empty() {
+                    paragraphs.push(current.join(" "));
+                    current.clear();
+                }
+            }
+            Some(line) => current.push(line),
+        }
+    }
+    if !current.is_empty() {
+        paragraphs.push(current.join(" "));
+    }
+    paragraphs
+}
+
+fn files_with_extension(root: &std::path::Path, extension: &str) -> Vec<std::path::PathBuf> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut files = Vec::new();
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(dir).expect("documentation directory reads") {
+            let entry = entry.expect("documentation entry reads");
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().and_then(|value| value.to_str()) == Some(extension) {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+#[test]
+fn current_documentation_does_not_deny_a_registered_scanner() {
+    let root = manifest_dir();
+    let mut markdown = ["README.md", "CLAUDE.md"]
+        .into_iter()
+        .map(|path| root.join(path))
+        .collect::<Vec<_>>();
+    markdown.extend(files_with_extension(&root.join("plugin"), "md"));
+    markdown.extend(files_with_extension(&root.join("docs/reference"), "md"));
+
+    let mut offenders = Vec::new();
+    for path in markdown {
+        let text = std::fs::read_to_string(&path).expect("current documentation reads");
+        let paragraphs = markdown_paragraphs(&text);
+        for lang in false_scanner_claims(paragraphs.iter().map(String::as_str)) {
+            offenders.push(format!(
+                "{}: {lang}",
+                path.strip_prefix(&root).unwrap().display()
+            ));
+        }
+    }
+    for path in [root.join("knowledge.toml"), root.join("vouch.example.toml")] {
+        let text = std::fs::read_to_string(&path).expect("current TOML documentation reads");
+        let paragraphs = toml_comment_paragraphs(&text);
+        for lang in false_scanner_claims(paragraphs.iter().map(String::as_str)) {
+            offenders.push(format!(
+                "{}: {lang}",
+                path.strip_prefix(&root).unwrap().display()
+            ));
+        }
+    }
+    for path in files_with_extension(&root.join("src"), "rs") {
+        let text = std::fs::read_to_string(&path).expect("Rust source reads");
+        let paragraphs = rust_doc_paragraphs(&text);
+        for lang in false_scanner_claims(paragraphs.iter().map(String::as_str)) {
+            offenders.push(format!(
+                "{}: {lang}",
+                path.strip_prefix(&root).unwrap().display()
+            ));
+        }
+    }
+
     assert!(
-        missing.is_empty(),
-        "vouch.example.toml does not set these constructs as their own key: {missing:?}"
+        offenders.is_empty(),
+        "current operational documentation says a registered language has no scanner: {offenders:?}"
     );
+}
+
+#[test]
+fn the_current_document_claim_check_distinguishes_registered_languages() {
+    assert_eq!(
+        false_scanner_claims(["Python has no scanner."]),
+        vec!["python"]
+    );
+    assert!(false_scanner_claims(["JavaScript has no scanner."]).is_empty());
 }
 
 /// The version lives in five published fields. release-please writes all five in

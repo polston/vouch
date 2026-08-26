@@ -215,7 +215,7 @@ fn every_in_effect_snippet_language_is_in_the_closed_set() {
         let Some(snippets) = &t.snippet else { continue };
         for p in snippets {
             if let Some(lang) = &p.language {
-                if !vouch::knowledge::SNIPPET_LANGUAGES.contains(&lang.as_str()) {
+                if !vouch::knowledge::is_snippet_language(lang) {
                     offenders.push(format!(
                         "{:?} field {:?}: language = {lang:?}",
                         t.match_names, p.field
@@ -224,7 +224,7 @@ fn every_in_effect_snippet_language_is_in_the_closed_set() {
             }
             if let Some(values) = &p.language_values {
                 for (k, v) in values {
-                    if !vouch::knowledge::SNIPPET_LANGUAGES.contains(&v.as_str()) {
+                    if !vouch::knowledge::is_snippet_language(v) {
                         offenders.push(format!(
                             "{:?} field {:?}: language_values[{k:?}] = {v:?}",
                             t.match_names, p.field
@@ -234,7 +234,7 @@ fn every_in_effect_snippet_language_is_in_the_closed_set() {
             }
         }
     }
-    assert!(offenders.is_empty(), "snippet language outside SNIPPET_LANGUAGES: {offenders:?}");
+    assert!(offenders.is_empty(), "snippet language outside the closed set: {offenders:?}");
 }
 
 #[test]

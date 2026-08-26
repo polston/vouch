@@ -1,9 +1,9 @@
 //! Snippet extraction: turning declared `[[tool.snippet]]` field paths, plus
 //! one tool call's input map, into (text, language) pairs for the scanners
-//! to decide on — whichever `syntax::scanner_for` has, bash and powershell
-//! when this was written, python since M1.4. `route::decide_tool` builds the merged
-//! input map and consumes `extract` (it did not when this module was written,
-//! and the header said so until 2026-08-07).
+//! to decide on — every language registered in `syntax`, currently bash,
+//! powershell, and python. `route::decide_tool` builds the merged input map and
+//! consumes `extract` (it did not when this module was written, and the header
+//! said so until 2026-08-07).
 //!
 //! Fail-closed by construction, matching CLAUDE.md §1 (vouch is an
 //! allow-list): any declared snippet that cannot be FULLY resolved — a
@@ -20,7 +20,7 @@ use serde_json::{Map, Value};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Extracted {
     /// One (text, language) pair per resolved snippet element, in input
-    /// order. `language` is one of `knowledge::SNIPPET_LANGUAGES`.
+    /// order. `language` is one of `knowledge::snippet_languages()`.
     Ok(Vec<(String, String)>),
     /// Fail-closed: names what was missing, empty, wrong-shaped, or
     /// unmapped. Callers turn this into an ask prompt.

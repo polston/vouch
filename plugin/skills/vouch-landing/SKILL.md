@@ -1,6 +1,6 @@
 ---
 name: vouch-landing
-description: Use when a completed, reviewed vouch feature branch needs to be merged to master and landed live — the merge, push, binary rebuild, knowledge reinstall, live-config migration, and worktree teardown. Not for mid-branch work.
+description: Use automatically when a completed, reviewed vouch branch is ready to continue through the normal CI/CD and release route — private integration, CI, version pull request, exact mirror publication, tag/build verification, reinstall, probes, state docs, and teardown. Not for mid-branch work.
 ---
 
 # vouch landing (finish + land a branch)
@@ -9,8 +9,24 @@ description: Use when a completed, reviewed vouch feature branch needs to be mer
 
 The fixed landing sequence for a done vouch branch, in order, never
 re-derived (operator rule: "landing an implementation branch — the fixed
-pattern"). Merge and push happen ONLY on the operator's explicit go, after
-they have seen the numbers.
+pattern"). The operator's 2026-08-25 standing authorization covers the normal
+remote writes in this sequence once readiness is established; do not stop to
+ask for the same go again.
+
+## Authorization boundary
+
+Proceed automatically through private integration and push, CI inspection, a
+clean release-please pull-request merge, public publish-branch push, exact-head
+landing, tag, release verification, reinstall, probes, state docs, and cleanup.
+Record the readiness numbers before the first remote write so the evidence is
+auditable even though it is no longer an approval checkpoint.
+
+Stop if the operator explicitly limited the task to local work or told the
+session to stop. Also stop for a repository or credential exposure, a required
+force/history rewrite, an unresolved conflict, missing credentials, a live
+trust/config choice, or any departure from the scanned exact-object route.
+Tooling may still display a platform approval prompt for an authorized command;
+request that capability and continue when it is granted.
 
 ## Preconditions
 
@@ -38,8 +54,8 @@ Run from the vouch checkout root; every path below is relative to it.
      invalidated), `knowledge.toml` header and section comments,
      `vouch.example.toml`, `docs/reference/`, **`plugin/skills/`**, and source module
      doc comments. Skills are documentation and were swept for the first time
-     on 2026-08-10 — one had been telling agents python has no scanner since
-     the previous landing, which would have made an agent fabricate a
+     on 2026-08-10 — one carried a scanner-capability claim that had lagged
+     Python's M1.4 scanner, which would have made an agent fabricate a
      verification result.
    - **This landing REFUSES to start without that sweep's report for this
      branch.** If there is no report, stop and run the sweep; do not proceed
@@ -53,7 +69,7 @@ Run from the vouch checkout root; every path below is relative to it.
    green at HEAD, and show the operator the numbers (test count, transition
    matrix, parse rate).
 
-   **Before asking for the explicit go, show the complete route from this
+   **Before the first remote write, record the complete route from this
    branch to the finished release.** Do not summarize landing as merge, push,
    reinstall and teardown; those are only part of this repository's flow.
    Derive and report all of these from the current branch and files:
@@ -75,7 +91,8 @@ Run from the vouch checkout root; every path below is relative to it.
      feature branch.
 
    If any part is unavailable or not yet verified, name it as a readiness gap
-   before asking. Then get the explicit go to merge + push.
+   and close it before proceeding. A genuine blocker uses the authorization
+   boundary above; readiness itself does not require another operator answer.
 
 2a. **If that check FAILS, master moved while the branch was in flight, and
    the landing is a different job.** Do not force it and do not rebase a long
@@ -126,16 +143,18 @@ Run from the vouch checkout root; every path below is relative to it.
    commit message that reaches a shell: pass the message with `git commit -F` or
    a quoted here-document, and read back what was actually written.
 
-4. **Merge + push** (fast-forward), then `git push origin master` — only after
-   the operator's explicit approval. The push goes to the private development
-   remote; the public repository never receives dev history.
+4. **Merge + push** (fast-forward), then `git push origin master` after the
+   readiness record and safety scan are complete. The standing authorization
+   covers this normal push. It goes to the private development remote; the
+   public repository never receives dev history.
 
-4a. **Publishing, when the changeset touches published files.** Landing does
-   not publish; publishing is its own act, and it is the operator's:
-   **Preparation is automatic.** Run the local dry run, scans, history checks,
-   and any value-free coordination draft when this point is reached; never ask
-   whether to begin them. Explicit approval still gates remote writes, history
-   rewrites, and sending an external request.
+4a. **Publishing, when the changeset touches published files.** Publishing is
+   a distinct exact-object phase inside the automatic finish line:
+   **The fixed route is automatic.** Run the local dry run, scans, history
+   checks, private version pull-request merge, public publish pull request,
+   exact landing, verification, and tag when this point is reached. The
+   standing authorization covers those normal remote writes. It never covers
+   a history rewrite or a departure from this route.
    1. If release-please opened a version pull request here on the step 4
       push, fetch its generated branch and run the all-ref history audit before
       offering it for merge. The branch must be exactly one commit ahead of
@@ -150,9 +169,9 @@ Run from the vouch checkout root; every path below is relative to it.
       read the scan result and the diffstat.
    3. `--push` — pushes a `publish/*` branch and opens a pull request in the
       mirror. Nothing has reached its master yet.
-   4. The operator reviews that pull request but does not use a forge merge
-      method: merge, squash, and rebase each create an object the publisher did
-      not scan.
+   4. Review that pull request against the scanned candidate, but do not use a
+      forge merge method: merge, squash, and rebase each create an object the
+      publisher did not scan.
    5. `--land <publish-branch>` — fetches and rescans the exact remote head,
       requires an open, ready, clean pull request whose head and base match,
       then fast-forwards mirror master to that same commit without force. The
@@ -268,7 +287,8 @@ the knowledge install.
   breaking the live gate after the reinstall. Do them together (step 5).
 - Looping on the worktree delete — the owning session cannot win that; defer it.
 - Diffing the on-disk replay baseline and reporting a false zero.
-- Merging or pushing before the operator's explicit go.
+- Merging or pushing before readiness, review, and privacy evidence are clean;
+  asking again after they are clean recreates the friction this skill removes.
 - Using the forge merge button on a public publish pull request; `--land` is
   the only path that preserves the exact scanned commit.
 - Treating the docs sweep as a landing chore. It is a plan task that runs

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.0 (2026-08-26)
+
+
+### Features
+
+* make declared repository state mechanically enforceable
+
 ## 0.3.6 (2026-08-26)
 
 

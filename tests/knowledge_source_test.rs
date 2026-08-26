@@ -458,6 +458,75 @@ fn a_writes_via_handle_spelling_outside_the_grammar_fails_the_whole_file() {
 }
 
 #[test]
+fn writes_via_handle_accepts_positions_and_keyword_parameter_names() {
+    for value in ["arg_0", "_handle", "handle1"] {
+        let good = scratch(
+            "wvh-good-grammar.toml",
+            &format!(
+                "version = {}\n[[program]]\nmatch = [\"python:x\"]\nwrites_via_handle = {value:?}\n",
+                v()
+            ),
+        );
+        let loaded = load_files(&good, Path::new(ABSENT));
+        assert!(
+            loaded.gaps.is_empty(),
+            "valid writes_via_handle {value:?} was rejected: {:?}",
+            loaded.gaps
+        );
+    }
+}
+
+#[test]
+fn writes_via_handle_and_callback_args_share_the_parameter_name_grammar() {
+    for value in ["1handle", "", "two words", "handle!"] {
+        for field in [
+            format!("writes_via_handle = {value:?}"),
+            format!("callback_args = [{value:?}]"),
+        ] {
+            let bad = scratch(
+                "shared-bad-parameter-name.toml",
+                &format!(
+                    "version = {}\n[[program]]\nmatch = [\"python:x\"]\n{field}\n",
+                    v()
+                ),
+            );
+            let loaded = load_files(&bad, Path::new(ABSENT));
+            assert!(loaded.kb.program.is_empty(), "invalid {field} loaded");
+            assert_eq!(loaded.gaps.len(), 1, "invalid {field} did not produce one gap");
+            let field_name = field.split_once(" =").expect("fixture has an assignment").0;
+            assert!(
+                loaded.gaps[0].why.contains(field_name)
+                    && (value.is_empty() || loaded.gaps[0].why.contains(value)),
+                "rejection for {field} did not name its field and non-empty value: {:?}",
+                loaded.gaps
+            );
+        }
+    }
+}
+
+#[test]
+fn every_registered_scanner_language_is_valid_for_snippets_and_wraps() {
+    for lang in vouch::syntax::scanner_languages() {
+        assert!(vouch::knowledge::is_snippet_language(lang));
+        let good = scratch(
+            "registered-language-claims.toml",
+            &format!(
+                "version = {}\n\
+                 [[program]]\nmatch = [\"x\"]\nevaluates_input = \"stdin\"\nwrap_lang = {lang:?}\n\n\
+                 [[tool]]\nmatch = [\"tool\"]\n[[tool.snippet]]\nfield = \"code\"\nlanguage = {lang:?}\n",
+                v()
+            ),
+        );
+        let loaded = load_files(&good, Path::new(ABSENT));
+        assert!(
+            loaded.gaps.is_empty(),
+            "registered scanner language {lang:?} was rejected: {:?}",
+            loaded.gaps
+        );
+    }
+}
+
+#[test]
 fn a_callback_args_entry_that_is_not_an_identifier_fails_the_whole_file() {
     // Grammar only (task 2b, M2.86 fix round): membership in `arg_names` is
     // NOT required, so this cannot check anything beyond "is this a name at

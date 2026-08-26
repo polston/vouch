@@ -2083,7 +2083,7 @@ match = [
 # HARNESS TOOLS
 #
 # Harness tools, described as data. Listing one is a CLAIM, held to the same
-# standard as a program entry. Most are tools vouch has no scanner for, listed
+# standard as a program entry. Most are opaque to vouch, listed
 # because one of these holds:
 #   - it reads and does not write, OR
 #   - whatever it starts is itself gated when it runs (hooks fire for subagent

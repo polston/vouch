@@ -232,35 +232,52 @@ const VALID_CHANGES_DIR: &[&str] = &["no", "stated", "stack", "unstated"];
 /// `guards::Program` for what each value means (M2.128).
 const VALID_NAMED_POSITIONAL: &[&str] = &["first", "last"];
 
-/// The closed set `Program::languages` entries may hold. Mirrors the two
-/// scanners vouch has (`src/shell.rs`, `src/powershell.rs`) — a value outside
-/// this set names a language vouch cannot scan for.
-const VALID_LANGUAGES: &[&str] = &["bash", "powershell"];
+/// The ASCII parameter-name grammar shared by Python keyword claims.
+fn is_parameter_name(name: &str) -> bool {
+    name.chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// The closed set `Program::languages` entries may hold. This field scopes
+/// shell-program entries only; Python callables are scoped by their `python:`
+/// match prefix instead of this field.
+const PROGRAM_LANGUAGE_SCOPES: &[&str] = &["bash", "powershell"];
 
 /// The closed set a `[[tool.snippet]]`'s `language` (or the right-hand side
-/// of `language_values`) may hold. Deliberately WIDER than `VALID_LANGUAGES`:
-/// `python` and `javascript` are real, useful claims — "this field is a
-/// python script" — even though vouch has no scanner for either yet (M1.4).
-/// A name outside this set is a typo, not a future scanner, and must fail the
-/// load the same way a misspelt `changes_dir` does — never reach the engine's
-/// no-scanner abstain arm with an unrecognised name in hand.
-pub const SNIPPET_LANGUAGES: &[&str] = &["bash", "powershell", "python", "javascript"];
+/// of `language_values`) may hold. Every registered scanner language belongs
+/// automatically; this separate list names recognised but unscannable
+/// languages. A name outside both sets is a typo, not a future scanner, and
+/// must fail before it reaches the engine's no-scanner abstain arm.
+const UNSCANNED_SNIPPET_LANGUAGES: &[&str] = &["javascript"];
 
-/// The closed set `Program::wrap_lang` may hold: every `SNIPPET_LANGUAGES`
+/// Every recognised snippet language, in stable diagnostic order.
+pub fn snippet_languages() -> impl Iterator<Item = &'static str> + Clone {
+    crate::syntax::scanner_languages().chain(UNSCANNED_SNIPPET_LANGUAGES.iter().copied())
+}
+
+/// Whether a name is in the closed snippet-language vocabulary.
+pub fn is_snippet_language(lang: &str) -> bool {
+    crate::syntax::scanner_languages().any(|registered| registered == lang)
+        || UNSCANNED_SNIPPET_LANGUAGES.contains(&lang)
+}
+
+/// The closed set `Program::wrap_lang` may hold: every snippet language,
 /// name, plus `"opaque"` (a language vouch has no parser for, period) and
 /// `"cmd"` (cmd.exe batch — not bash, so it gets its own name rather than
 /// borrowing bash's, spec 2026-08-14 §5.2.4). A name outside this set is a
-/// typo and must fail the load, the same reasoning `SNIPPET_LANGUAGES`
-/// itself is built on: never let an unrecognised name reach the engine's
+/// typo and must fail the load: never let an unrecognised name reach the engine's
 /// no-scanner arm in hand, silently read as "no claim at all".
-const VALID_WRAP_LANG: &[&str] = &[
-    "bash",
-    "powershell",
-    "python",
-    "javascript",
-    "opaque",
-    "cmd",
-];
+const WRAP_ONLY_LANGUAGES: &[&str] = &["opaque", "cmd"];
+
+fn wrap_languages() -> impl Iterator<Item = &'static str> + Clone {
+    snippet_languages().chain(WRAP_ONLY_LANGUAGES.iter().copied())
+}
+
+fn is_wrap_language(lang: &str) -> bool {
+    is_snippet_language(lang) || WRAP_ONLY_LANGUAGES.contains(&lang)
+}
 
 /// `Program::wrap_lang`'s two load-time claims: the three TEXT-SCANNING wrap
 /// arms (`after_c`, `after_flag`, `arg_<N>` — as opposed to `rest`,
@@ -285,22 +302,22 @@ fn validate_wrap_lang_for(prog: &Program) -> Result<(), String> {
     let text_scanning =
         matches!(prog.wraps.as_str(), "after_c" | "after_flag") || prog.wraps.starts_with("arg_");
     if text_scanning && prog.wrap_lang.is_empty() {
+        let valid_wrap_languages: Vec<_> = wrap_languages().collect();
         return Err(format!(
             "[[program]] {:?}: wraps = {:?} scans text and must declare wrap_lang \
-             (one of {VALID_WRAP_LANG:?}) — an unset wrap_lang used to fall back to \
+             (one of {valid_wrap_languages:?}) — an unset wrap_lang used to fall back to \
              scanning the snippet as bash, which is exactly the silent laundering \
              this check exists to refuse",
             prog.match_names, prog.wraps
         ));
     }
-    // `VALID_WRAP_LANG` is deliberately wider than `SNIPPET_LANGUAGES`
-    // (`"opaque"`, `"cmd"`) for the same reason `SNIPPET_LANGUAGES` is wider
-    // than the scanner registry: an unscannable language is still a real,
-    // checkable claim, and a name outside even that closed set is a typo,
-    // not a future scanner.
-    if !prog.wrap_lang.is_empty() && !VALID_WRAP_LANG.contains(&prog.wrap_lang.as_str()) {
+    // The wrap vocabulary is deliberately wider than the snippet vocabulary
+    // (`"opaque"`, `"cmd"`): an unscannable language is still a real,
+    // checkable claim, and a name outside even that closed set is a typo.
+    if !prog.wrap_lang.is_empty() && !is_wrap_language(&prog.wrap_lang) {
+        let valid_wrap_languages: Vec<_> = wrap_languages().collect();
         return Err(format!(
-            "[[program]] {:?}: wrap_lang = {:?}, which must be one of {VALID_WRAP_LANG:?}",
+            "[[program]] {:?}: wrap_lang = {:?}, which must be one of {valid_wrap_languages:?}",
             prog.match_names, prog.wrap_lang
         ));
     }
@@ -326,7 +343,10 @@ pub(crate) fn validate_wrap_lang(kb: &Knowledge) -> Result<(), String> {
 /// all work on plain set operations instead.
 fn scope_of(languages: &[String]) -> HashSet<String> {
     if languages.is_empty() {
-        VALID_LANGUAGES.iter().map(|s| s.to_string()).collect()
+        PROGRAM_LANGUAGE_SCOPES
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
     } else {
         languages.iter().cloned().collect()
     }
@@ -474,7 +494,7 @@ pub(crate) fn validate(kb: &Knowledge) -> Result<(), String> {
             }
         }
         for lang in &prog.languages {
-            if !VALID_LANGUAGES.contains(&lang.as_str()) {
+            if !PROGRAM_LANGUAGE_SCOPES.contains(&lang.as_str()) {
                 return Err(format!(
                     "[[program]] {:?}: languages contains {:?}, which must be one of \"bash\", \"powershell\"",
                     prog.match_names, lang
@@ -708,7 +728,7 @@ pub(crate) fn validate(kb: &Knowledge) -> Result<(), String> {
             }
             let ok = match h.strip_prefix("arg_") {
                 Some(n) => n.parse::<usize>().is_ok(),
-                None => !h.is_empty() && h.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+                None => is_parameter_name(h),
             };
             if !ok {
                 return Err(format!(
@@ -724,13 +744,7 @@ pub(crate) fn validate(kb: &Knowledge) -> Result<(), String> {
         // dead declaration; the enumeration test that proves every declared
         // slot actually trips is what catches that instead.
         for name in &prog.callback_args {
-            let is_ident = !name.is_empty()
-                && name
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-            if !is_ident {
+            if !is_parameter_name(name) {
                 return Err(format!(
                     "[[program]] {:?}: callback_args entry {name:?} is not a valid identifier",
                     prog.match_names
@@ -1014,7 +1028,7 @@ fn validate_standalone_in_effect(kb: &Knowledge) -> Result<(), String> {
 ///   doc comment for why silence has to mean "unset", not this.
 /// - Each declared snippet names exactly one of `language` / `language_from`,
 ///   and every language name — fixed or on the right of `language_values` —
-///   is in the closed `SNIPPET_LANGUAGES` set.
+///   is in the closed snippet-language set.
 fn validate_tool(t: &Tool) -> Result<(), String> {
     let ident = if !t.match_names.is_empty() {
         format!("{:?}", t.match_names)
@@ -1108,21 +1122,23 @@ fn validate_tool_snippet(ident: &str, p: &ToolSnippet) -> Result<(), String> {
         _ => {}
     }
     if let Some(lang) = &p.language {
-        if !SNIPPET_LANGUAGES.contains(&lang.as_str()) {
+        if !is_snippet_language(lang) {
+            let valid: Vec<_> = snippet_languages().collect();
             return Err(format!(
                 "[[tool]] {ident}: snippet field {:?} has language = {:?}, which must be one \
-                 of {SNIPPET_LANGUAGES:?}",
-                p.field, lang
+                 of {valid:?}",
+                p.field, lang,
             ));
         }
     }
     if let Some(values) = &p.language_values {
         for (k, v) in values {
-            if !SNIPPET_LANGUAGES.contains(&v.as_str()) {
+            if !is_snippet_language(v) {
+                let valid: Vec<_> = snippet_languages().collect();
                 return Err(format!(
                     "[[tool]] {ident}: snippet field {:?} has language_values[{k:?}] = {v:?}, \
-                     which must be one of {SNIPPET_LANGUAGES:?}",
-                    p.field
+                     which must be one of {valid:?}",
+                    p.field,
                 ));
             }
         }

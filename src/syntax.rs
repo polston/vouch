@@ -378,12 +378,54 @@ pub trait Scanner {
     fn known_constructs(&self) -> &'static [&'static str];
 }
 
+type ScannerConstructor = fn() -> Box<dyn Scanner>;
+
+struct ScannerRegistration {
+    lang: &'static str,
+    construct: ScannerConstructor,
+}
+
+fn bash_scanner() -> Box<dyn Scanner> {
+    Box::new(crate::shell::Bash)
+}
+
+fn powershell_scanner() -> Box<dyn Scanner> {
+    Box::new(crate::powershell::PowerShell)
+}
+
+fn python_scanner() -> Box<dyn Scanner> {
+    Box::new(crate::python::Python)
+}
+
+/// The one registration seam for scanner-backed languages.
+///
+/// Runtime dispatch and every exhaustive consumer enumerate this table, so
+/// adding a scanner is one additive change rather than a match arm plus copied
+/// language lists that can drift while tests remain green.
+const SCANNERS: &[ScannerRegistration] = &[
+    ScannerRegistration {
+        lang: "bash",
+        construct: bash_scanner,
+    },
+    ScannerRegistration {
+        lang: "powershell",
+        construct: powershell_scanner,
+    },
+    ScannerRegistration {
+        lang: "python",
+        construct: python_scanner,
+    },
+];
+
+/// Every registered scanner language, in stable registration order.
+pub fn scanner_languages() -> impl Iterator<Item = &'static str> + Clone {
+    SCANNERS.iter().map(|registration| registration.lang)
+}
+
 /// Resolves a language name to its scanner.
 pub fn scanner_for(lang: &str) -> Option<Box<dyn Scanner>> {
-    match lang {
-        "bash" => Some(Box::new(crate::shell::Bash)),
-        "powershell" => Some(Box::new(crate::powershell::PowerShell)),
-        "python" => Some(Box::new(crate::python::Python)),
-        _ => None,
-    }
+    SCANNERS
+        .iter()
+        .find(|registration| registration.lang == lang)
+        .map(|registration| (registration.construct)())
 }

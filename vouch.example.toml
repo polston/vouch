@@ -200,7 +200,7 @@ wrap_unlocated = "ask"
 # ambiguity outright.
 wrap_ambiguous = "ask"
 # A wrap arm located a snippet in a language vouch has no scanner for (see
-# the bash section above for the full explanation of what this covers).
+# the earlier unreadable-language explanation for the full scope).
 unreadable_language = "ask"
 # The PowerShell half of the channel-fed argument case (see bash above).
 args_from_input = "ask"
@@ -248,7 +248,7 @@ wrap_unlocated = "ask"
 # ambiguity outright.
 wrap_ambiguous = "ask"
 # A wrap arm located a snippet in a language vouch has no scanner for (see
-# the bash section above for the full explanation of what this covers).
+# the earlier unreadable-language explanation for the full scope).
 unreadable_language = "ask"
 # This call occupies a declared callback slot — the value handed there runs
 # when the described function invokes it, and vouch cannot see what that is.

@@ -36,7 +36,7 @@ pub struct Record {
     pub outcome: Outcome,
     /// The language `cmd` was decided in, when it came from a declared
     /// snippet (Task 9's `records_from_snippets`) — `"bash"`, `"powershell"`,
-    /// or whatever `knowledge::SNIPPET_LANGUAGES` names. Empty for a row
+    /// or whatever `knowledge::snippet_languages()` names. Empty for a row
     /// journaled through `record_from`'s single-record fallback: a
     /// config-named short-circuit never extracted a snippet at all, so
     /// claiming a language for it would assert something vouch never looked
