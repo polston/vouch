@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1 (2026-08-26)
+
+
+### Bug Fixes
+
+* test the assembled public tree before publishing
+
 ## 0.4.0 (2026-08-26)
 
 

@@ -19,12 +19,13 @@
 //!   4. the tracked `CHANGELOG.md` carries no forge remnant (a link or a
 //!      commit id) that would name this private repository or point at a
 //!      commit the public mirror does not have.
-//!   5. every accepted schema key and every settable construct has one exact
-//!      vocabulary row in `CLAUDE.md` §0.0.
+//!   5. in the development repository, every accepted schema key and every
+//!      settable construct has one exact vocabulary row in private
+//!      `CLAUDE.md` §0.0; the public mirror deliberately omits that file.
 //!   6. the example config advertises exactly the registered constructs, with
 //!      neither omissions nor dead settings.
-//!   7. current operational documentation does not claim a registered scanner
-//!      is absent.
+//!   7. current operational documentation present in either repository does
+//!      not claim a registered scanner is absent.
 
 /// `core.autocrlf` on a Windows checkout rewrites a committed LF file to
 /// CRLF on disk; the generator always emits LF. Normalizing before compare
@@ -44,6 +45,49 @@ fn manifest_dir() -> std::path::PathBuf {
     std::env::var_os("CARGO_MANIFEST_DIR")
         .map(std::path::PathBuf::from)
         .expect("CARGO_MANIFEST_DIR is unset: run this test through cargo")
+}
+
+/// Resolve a development-only document without making the public mirror's
+/// deliberately smaller manifest fail its own test suite.
+///
+/// Absence is allowed only when the private release configuration is absent
+/// too. That distinguishes the public product mirror from an accidentally
+/// damaged development checkout: deleting `CLAUDE.md` here must still fail
+/// loudly instead of turning its glossary ratchet off.
+fn development_only_document(
+    root: &std::path::Path,
+    relative: &str,
+) -> Option<std::path::PathBuf> {
+    let path = root.join(relative);
+    match development_document_presence(
+        path.is_file(),
+        root.join("release-please-config.json").is_file(),
+    ) {
+        Ok(true) => Some(path),
+        Ok(false) => None,
+        Err(()) => panic!(
+            "development-only document {relative} is missing from the development repository"
+        ),
+    }
+}
+
+fn development_document_presence(
+    document_exists: bool,
+    development_repository: bool,
+) -> Result<bool, ()> {
+    match (document_exists, development_repository) {
+        (true, _) => Ok(true),
+        (false, false) => Ok(false),
+        (false, true) => Err(()),
+    }
+}
+
+#[test]
+fn development_only_documents_may_be_absent_only_from_the_public_tree() {
+    assert_eq!(development_document_presence(false, false), Ok(false));
+    assert_eq!(development_document_presence(false, true), Err(()));
+    assert_eq!(development_document_presence(true, false), Ok(true));
+    assert_eq!(development_document_presence(true, true), Ok(true));
 }
 
 #[test]
@@ -232,6 +276,10 @@ fn exact_glossary_names(text: &str) -> Vec<String> {
 
 #[test]
 fn every_schema_key_and_construct_has_one_exact_glossary_row() {
+    let root = manifest_dir();
+    let Some(claude_path) = development_only_document(&root, "CLAUDE.md") else {
+        return;
+    };
     let generated = vouch::cli::generate_schema_docs();
     let mut schema_keys = std::collections::BTreeSet::new();
     for json in [&generated.config_json, &generated.knowledge_json] {
@@ -251,7 +299,7 @@ fn every_schema_key_and_construct_has_one_exact_glossary_row() {
         );
     }
 
-    let claude = std::fs::read_to_string("CLAUDE.md").expect("CLAUDE.md reads");
+    let claude = std::fs::read_to_string(claude_path).expect("CLAUDE.md reads");
     let rows = exact_glossary_names(&claude);
     let glossary: std::collections::BTreeSet<_> = rows.iter().cloned().collect();
     let duplicates: Vec<_> = glossary
@@ -395,10 +443,11 @@ fn files_with_extension(root: &std::path::Path, extension: &str) -> Vec<std::pat
 #[test]
 fn current_documentation_does_not_deny_a_registered_scanner() {
     let root = manifest_dir();
-    let mut markdown = ["README.md", "CLAUDE.md"]
+    let mut markdown = ["README.md"]
         .into_iter()
         .map(|path| root.join(path))
         .collect::<Vec<_>>();
+    markdown.extend(development_only_document(&root, "CLAUDE.md"));
     markdown.extend(files_with_extension(&root.join("plugin"), "md"));
     markdown.extend(files_with_extension(&root.join("docs/reference"), "md"));
 

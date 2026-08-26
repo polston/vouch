@@ -166,7 +166,10 @@ Run from the vouch checkout root; every path below is relative to it.
       clean version pull request first — the mirror only picks up the new
       version once this repository's own version fields carry it.
    2. Dry run: `bash scripts/publish-mirror.sh <public-clone>` with no flag —
-      read the scan result and the diffstat.
+      read the scan result, diffstat, and assembled public candidate's locked
+      release-test result. The publisher also repeats that candidate gate
+      before `--push`; this catches tests or runtime code that still reach a
+      private-only file after the manifest removes it.
    3. `--push` — pushes a `publish/*` branch and opens a pull request in the
       mirror. Nothing has reached its master yet.
    4. Review that pull request against the scanned candidate, but do not use a
