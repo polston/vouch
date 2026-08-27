@@ -1,6 +1,6 @@
 ---
 name: vouch-trust
-description: Use when a vouch prompt says "no description of" a program, or "no scanner for" an MCP tool — recognises it safely by proposing the narrowest entry, showing what it would trust, writing only on explicit accept, and proving the entry fires
+description: Use when vouch reports an undescribed program, a generated path-spelled program family, or an MCP tool with no scanner — proposes the narrowest recognition rule, writes only on explicit accept, and proves its boundaries
 ---
 
 # vouch-trust — recognise a program or MCP tool without trusting more than was asked
@@ -9,7 +9,8 @@ A vouch `unmodeled_command` prompt means: this exact command contains
 something vouch has no entry that covers. An `unmodeled_tool` prompt is the
 same gap one layer up: the harness ran a tool (an `mcp__server__tool` name,
 almost always) vouch has no `[[tool]]` entry for. This skill turns either
-into a verified knowledge entry. It exists because a printed one-line
+into a verified recognition rule — config or knowledge, according to the
+boundary being trusted. It exists because a printed one-line
 instruction cannot check what it is about to write, and four measured
 defects came from that (vouch ROADMAP, M2.12) — the MCP-tool half exists
 because the same failure mode, guessing instead of checking, is worse one
@@ -26,7 +27,7 @@ fields are only what the harness actually declares (rule 6 below).
    the bare program name, and never `--all-subcommands` unless the operator
    says those words. If they DO say them: state out loud that this trusts
    every verb the program has, including ones they have never run, and the
-   still-asks proof in step 6 becomes a different unknown program instead of
+   still-asks proof in step 7 becomes a different unknown program instead of
    a sibling verb (there is no sibling left to ask).
    **Rule 2a — narrower still, when the program only ever runs in one
    tree:** an `only_under` list on the `[[program]]` entry — place-scoped
@@ -39,6 +40,12 @@ fields are only what the harness actually declares (rule 6 below).
    (place-scoping is for the operator's own programs), and one name may not
    appear on two of the operator's entries. If a scoped entry for this name
    already exists, widen ITS `only_under` list — never add a second entry.
+   **Rule 2b — generated program families use executable place, not a dead
+   bare-name entry:** when repeated builds produce path-spelled executables
+   whose suffix changes but whose source target establishes a stable filename
+   prefix, propose `[[run.trust_program]]`. This is whole-program recognition,
+   not verb-scoped knowledge. A single observed filename is not evidence of a
+   family, and a bare or PATH-resolved name cannot use this grant.
 3. **Destructive operations get no entry.** If the command's point is
    deleting, force-pushing, or rewriting state, tell the operator vouch asks
    about it on purpose and stop. Applies to a tool the same way: if its
@@ -109,12 +116,56 @@ invocations — that is the gate working; answer its prompt.
    `vouch explain --cwd '<dir>' ps '<command>'`; bare explain scans as bash.
    Confirm it stops on `unmodeled_command` and note WHICH part is
    unrecognised (the prompt's per-item lines say). `--cwd` matters because a
-   place rule — a trust or distrust zone, a guard override, a write scope, a
-   scoped entry's `only_under` — is judged against where the command RUNS;
-   without it explain judges from its own directory and can disagree with
-   what the hook decided. Every run prints `judged from:`; read that line and
-   check it is the place you meant.
-3. Decide the narrowest entry: bare program (no verbs) or program + the one
+   run-place rule — a trust or distrust zone, a guard override, or a scoped
+   entry's `only_under` — is judged against where the command RUNS. Relative
+   executable heads and write destinations, including destinations governed
+   by a write scope, also resolve from there; an absolute executable-place
+   rule uses the program file's own canonical location. Without cwd, explain
+   can disagree with what the hook decided. Every run prints `judged from:`;
+   read that line and check it is the place you meant.
+3. Before reducing a path-spelled head to a bare knowledge name, decide whether
+   it is a generated program family. Take this branch when the prompt already
+   names `[[run.trust_program]]`, or when rebuilds replace a suffix while a
+   source/build target supplies one stable filename prefix. Otherwise continue
+   to step 4.
+
+   - Establish the convention from evidence, not resemblance: inspect the
+     declared source/build target and observe an actual rebuild's output. The
+     proposed literal prefix must be explained by that target and present in
+     the rebuilt files; one historical hash-suffixed filename proves nothing.
+   - Choose the narrowest stable executable tree and show the complete rule:
+
+     ```toml
+     [[run.trust_program]]
+     under = ["<stable executable tree>/**"]
+     name_patterns = ["<observed-target-prefix>*"]
+     ```
+
+     State before acceptance that this recognises every operation of an
+     existing path-spelled shell program satisfying BOTH clauses. It does not
+     search PATH; exact names or one terminal-prefix `*` are the only name
+     grammar; canonicalization and symlink escape checks apply; guards,
+     constructs, protected paths, and write rules remain active.
+   - Wait for explicit accept of that exact block. Without it, stop. The CLI
+     does not write this config rule and the skill must not substitute a
+     `vouch trust` knowledge entry.
+   - On accept, locate the active `config.toml`, preserve its exact original
+     bytes in private temporary backup, and hand-edit the accepted block. Run
+     `vouch doctor` and read a full `vouch explain --cwd ...` result; any config
+     load-gap banner or parse refusal means restore the backup and stop.
+   - Prove four directions without executing the fixture commands: (1) the
+     rebuilt matching path ALLOWs and credits `[[run.trust_program]]`; (2) an
+     existing regular-file fixture with the same logical name outside the tree
+     ASKs; (3) an existing regular-file sibling inside the tree but outside the
+     accepted prefix ASKs; (4) one `vouch explain` line combining the matching
+     path with a known guard-shaped fixture still ASKs on the guard. Use
+     clearly temporary inert files for missing fixtures, never execute them,
+     and remove them afterward.
+   - Any failed boundary restores the exact backup and is reported. When all
+     four pass, remove the backup, report the verdicts, and stop this workflow;
+     do not fall through to the bare-name `vouch trust` steps below.
+
+4. Decide the narrowest entry: bare program (no verbs) or program + the one
    verb. A path-spelled head is recognised by its bare name — `vouch trust`
    normalises this itself and says so.
 
@@ -148,10 +199,10 @@ invocations — that is the gate working; answer its prompt.
    or the operator wants coverage beyond what was run), say that plainly
    before proposing anything wider — the whole-CLI entry is available but
    covers verbs a scoped entry deliberately excludes.
-4. Tell the operator, in one line per entry, exactly what it would trust
+5. Tell the operator, in one line per entry, exactly what it would trust
    ("recognise the `pull` operation of `frob` and nothing else — guards and
    write rules still apply"). Ask for an accept. Stop here without one.
-5. On accept, run `vouch trust <program> [<verb>]`. It must print
+6. On accept, run `vouch trust <program> [<verb>]`. It must print
    `verified: an entry now recognises …` — if it instead reports the entry
    did not fire and was removed again, that is a vouch defect: report it to
    the operator and record it per rule 5. One case where the undo is CORRECT
@@ -159,7 +210,7 @@ invocations — that is the gate working; answer its prompt.
    same name, so the appended second entry made the whole file refuse to
    load (rule 2a). Check `my-knowledge.toml` for the name before calling it
    a defect, and widen the existing entry's `only_under` instead.
-6. Prove both directions (`--cwd` and the `ps` selector again, exactly as in
+7. Prove both directions (`--cwd` and the `ps` selector again, exactly as in
    step 2):
    - `vouch explain --cwd '<dir>' '<the original command>'` — must no longer
      stop on `unmodeled_command`.
@@ -174,7 +225,7 @@ invocations — that is the gate working; answer its prompt.
      (`run.trust_all_under` and the glob that matched, versus the entry). Re-run
      the neighbour from a directory outside the zone before calling the entry
      too broad.
-7. Report both results to the operator, quoting the two verdicts.
+8. Report both results to the operator, quoting the two verdicts.
 
 ## MCP tools
 

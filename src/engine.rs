@@ -524,6 +524,34 @@ fn with_extra_reason(d: Decision, extra: &str) -> Decision {
     }
 }
 
+fn assignments_in_effect(
+    assignments: &[(String, Option<String>)],
+) -> std::collections::HashMap<String, Option<String>> {
+    assignments.iter().cloned().collect()
+}
+
+/// Resolve one scanner token exactly as the decision path does: the last
+/// same-line assignment wins (including an unreadable poisoned value), absent
+/// names may use the process environment, and recursive expansion is bounded.
+fn resolve_with_assignments(
+    raw: &str,
+    assigned: &std::collections::HashMap<String, Option<String>>,
+) -> String {
+    let lookup = |name: &str| match assigned.get(name) {
+        Some(value) => value.clone(),
+        None => std::env::var(name).ok(),
+    };
+    let mut text = crate::paths::unquote(raw).to_string();
+    for _ in 0..4 {
+        let next = crate::paths::expand_env_with(&text, &lookup);
+        if next == text {
+            break;
+        }
+        text = next;
+    }
+    crate::paths::unquote(&text).to_string()
+}
+
 /// The whole decision, under ONE reading of every ambiguous wrapper.
 ///
 /// `picks` selects a reading at each fork the walk meets, in visit order; an
@@ -565,11 +593,7 @@ fn judge_once(
     // name wins, which is the order the shell would apply — poisoned (`None`)
     // entries included, so a name whose LAST write is poisoned stays poisoned
     // even if an earlier write in the same text was readable.
-    let mut assigned: std::collections::HashMap<String, Option<String>> =
-        std::collections::HashMap::new();
-    for (k, v) in &scan.assignments {
-        assigned.insert(k.clone(), v.clone());
-    }
+    let assigned = assignments_in_effect(&scan.assignments);
     // A name whose last same-line write vouch could not read must resolve to
     // NOTHING — never fall through to the judging process's own environment
     // (M2.122). The two cases a lookup can land in are different questions:
@@ -577,11 +601,6 @@ fn judge_once(
     // the environment, unchanged from before), or it is PRESENT with a
     // poisoned last write (answer `None` outright, and stop — env is not
     // consulted for a name this text itself just tried and failed to set).
-    let lookup_assigned = |n: &str| match assigned.get(n) {
-        Some(v) => v.clone(),
-        None => std::env::var(n).ok(),
-    };
-
     // 0. Resolve the PROGRAM NAME the same way a written path is resolved.
     //
     // `PY="C:/…/python.exe" "$PY" -c "…"` states the program one token earlier,
@@ -590,15 +609,7 @@ fn judge_once(
     // resolved this way since 2026-07-25; heads were not, so the same command
     // got two different answers depending on which half you looked at.
     for c in scan.commands.iter_mut() {
-        let mut h = crate::paths::unquote(&c.head).to_string();
-        for _ in 0..4 {
-            let next = crate::paths::expand_env_with(&h, &lookup_assigned);
-            if next == h {
-                break;
-            }
-            h = next;
-        }
-        c.head = crate::paths::unquote(&h).to_string();
+        c.head = resolve_with_assignments(&c.head, &assigned);
     }
 
     // 1. Guards — what the command DOES. Same set for every language.
@@ -663,17 +674,7 @@ fn judge_once(
     //
     // (`assigned` is built once above, before heads are resolved, and is the
     // same map used here — one resolution rule for names and paths.)
-    let resolve = |raw: &str| -> String {
-        let mut t = crate::paths::unquote(raw).to_string();
-        for _ in 0..4 {
-            let next = crate::paths::expand_env_with(&t, &lookup_assigned);
-            if next == t {
-                break;
-            }
-            t = next;
-        }
-        crate::paths::unquote(&t).to_string()
-    };
+    let resolve = |raw: &str| resolve_with_assignments(raw, &assigned);
 
     // Where a RELATIVE write actually lands.
     //
@@ -1512,8 +1513,8 @@ fn judge_once(
     // It shipped as "allow" until then, justified by a measurement that
     // flipping it would prompt on 93.8% of recorded commands. That figure
     // described one machine on one day and was never evidence about anything
-    // general; flipping it broke no test. `vouch trust` and doctor are how the
-    // list grows from here.
+    // general; flipping it broke no test. `vouch trust`, program-location
+    // conventions, and doctor are how recognition grows from here.
     //
     // Read one OCCURRENCE at a time over the expanded list, never over the
     // commands as WRITTEN. Guards have read the expanded list since wrappers
@@ -1537,6 +1538,7 @@ fn judge_once(
     // guard pass, which now asks the same "where does this run" question.)
     let trust = PlaceTrees::of(cfg.run.trust_all_under.as_ref(), here_home, project_root);
     let distrust = PlaceTrees::of(cfg.run.trust_nothing_under.as_ref(), here_home, project_root);
+    let program_trust = ProgramTrustRules::of(cfg, here_home, project_root);
 
     let mut items: Vec<UnmodeledItem> = Vec::new();
     // The worst action any single occurrence asks for, and every language
@@ -1673,9 +1675,37 @@ fn judge_once(
             crate::guards::Recognised::No => {}
         }
 
-        // 3c. A trust zone (spec step 3), which grants, so it needs a proven
+        // 3c. A proven program file whose canonical location AND logical name
+        // satisfy one operator-written convention (spec step 3). The location
+        // is computed once for this expanded occurrence, after its run-place
+        // timeline exists. Python callables are not shell program heads.
+        let program_answer = if matches!(clang, "bash" | "powershell") {
+            let location = program_location_from_state(&c.head, &state, here_home);
+            program_trust.answer(&location)
+        } else {
+            ProgramTrustAnswer::NoRelevantRule
+        };
+        if let ProgramTrustAnswer::Matched {
+            entry,
+            under,
+            name_pattern,
+            canonical_file,
+        } = &program_answer
+        {
+            remember(
+                &mut grants,
+                format!(
+                    "allowed by [[run.trust_program]] #{entry} — existing program file \
+                     {canonical_file} is under {under} and its logical name matches \
+                     {name_pattern}; guards and write rules still apply"
+                ),
+            );
+            continue;
+        }
+
+        // 3d. A compatibility trust zone (spec step 4), which grants, so it needs a proven
         // place. "Whatever it is" includes an unknown VERB of a described
-        // program: 3b left that unrecognised like anything else.
+        // program: 3b and 3c left that unrecognised like anything else.
         if let Place::Proven(d) = &place {
             if let Some(glob) = trust.holding(d) {
                 remember(
@@ -1713,7 +1743,7 @@ fn judge_once(
             continue;
         }
 
-        // 3d. Nothing recognised it. What the place has to say about that
+        // 3e. Nothing recognised it. What the place has to say about that
         // changes the prompt, so it is part of what makes this item distinct.
         let scopes = crate::guards::place_scopes(kb, &c.head, clang);
         let answer = if scopes.is_empty() {
@@ -1772,14 +1802,20 @@ fn judge_once(
             if !settings_langs.iter().any(|l| l == clang) {
                 settings_langs.push(clang.to_string());
             }
-            // Deduplicated by name, LANGUAGE and place answer together: two
+            // Deduplicated by name, LANGUAGE, place, and prepared program-rule
+            // answer together: two
             // occurrences that answer the same are one item, two that differ
             // are two. A name-only key printed one line carrying whichever
             // language and whichever place happened to be seen first, so half
             // a mixed-language prompt named the wrong syntax.
             let pos = items
                 .iter()
-                .position(|it| it.shown == shown && it.lang == clang && it.place == answer);
+                .position(|it| {
+                    it.shown == shown
+                        && it.lang == clang
+                        && it.place == answer
+                        && it.program == program_answer
+                });
             match pos {
                 None => items.push(UnmodeledItem {
                     occurrence: i,
@@ -1787,6 +1823,7 @@ fn judge_once(
                     desc,
                     lang: clang.to_string(),
                     place: answer.clone(),
+                    program: program_answer.clone(),
                     narrow,
                 }),
                 // Today's code was push-if-absent, silently keeping whichever
@@ -1843,6 +1880,7 @@ fn judge_once(
             let mut fresh: Vec<&str> = Vec::new();
             for it in &items {
                 if !matches!(it.place, PlaceAnswer::Scoped { .. })
+                    && matches!(it.program, ProgramTrustAnswer::NoRelevantRule)
                     && !fresh.contains(&it.shown.as_str())
                 {
                     fresh.push(&it.shown);
@@ -1850,7 +1888,10 @@ fn judge_once(
             }
             let lines = items
                 .iter()
-                .filter(|it| !matches!(it.place, PlaceAnswer::Scoped { .. }))
+                .filter(|it| {
+                    !matches!(it.place, PlaceAnswer::Scoped { .. })
+                        && matches!(it.program, ProgramTrustAnswer::NoRelevantRule)
+                })
                 .map(|it| {
                     // Only when it differs from the language of the line the
                     // operator typed: otherwise every prompt would carry a
@@ -1897,6 +1938,11 @@ fn judge_once(
                      accept (it drives `vouch trust`, whose usage `vouch trust` alone prints), \
                      and proves it fires. The narrowest entries here:\n{lines}"
                 ));
+            }
+            for it in &items {
+                if let Some(reason) = program_trust_miss_reason(&it.program) {
+                    remember(&mut parts, reason);
+                }
             }
             // The entry the operator already has, named — never a suggestion
             // to write a new one (spec prompt table, the proven-outside row,
@@ -2281,6 +2327,177 @@ pub fn count_unknown_run_place_commands(lang: &str, src: &str) -> usize {
         .count()
 }
 
+/// Path-free aggregates for the on-demand program-location census.
+///
+/// This is deliberately the narrow public surface instead of returning the
+/// underlying `ProgramLocation`: a measurement caller can print these counts,
+/// but cannot accidentally print a command head, cwd, canonical executable,
+/// environment value, or wrapper payload from the engine's retained answer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProgramLocationMeasurement {
+    pub rows_total: usize,
+    pub rows_scanned: usize,
+    pub eligible_path_spelled_occurrences: usize,
+    pub proven_existing_files: usize,
+    pub matching_both_clauses: usize,
+    pub unproven_unresolved_head: usize,
+    pub unproven_unknown_run_place: usize,
+    pub unproven_no_run_directory: usize,
+    pub unproven_missing_file: usize,
+    pub unproven_not_regular_file: usize,
+    pub unproven_canonicalization_failed: usize,
+    pub unresolved_residual: usize,
+}
+
+impl ProgramLocationMeasurement {
+    /// Fold one row into a corpus total without exposing its source material.
+    pub fn add(&mut self, other: Self) {
+        self.rows_total += other.rows_total;
+        self.rows_scanned += other.rows_scanned;
+        self.eligible_path_spelled_occurrences += other.eligible_path_spelled_occurrences;
+        self.proven_existing_files += other.proven_existing_files;
+        self.matching_both_clauses += other.matching_both_clauses;
+        self.unproven_unresolved_head += other.unproven_unresolved_head;
+        self.unproven_unknown_run_place += other.unproven_unknown_run_place;
+        self.unproven_no_run_directory += other.unproven_no_run_directory;
+        self.unproven_missing_file += other.unproven_missing_file;
+        self.unproven_not_regular_file += other.unproven_not_regular_file;
+        self.unproven_canonicalization_failed += other.unproven_canonicalization_failed;
+        self.unresolved_residual += other.unresolved_residual;
+    }
+}
+
+/// Classify every expanded shell-program occurrence through the real
+/// program-location resolver and retained trust-rule answer, returning only
+/// counts safe for a transcript.
+///
+/// `unresolved_residual` counts a source row the scanner could not read plus
+/// wrapper parse/depth/ambiguity events whose missing occurrence population
+/// cannot honestly be inferred. It is not guessed from source text.
+pub fn measure_program_locations(
+    cfg: &Config,
+    lang: &str,
+    src: &str,
+    home: &str,
+    project_root: Option<&str>,
+    cwd: Option<&str>,
+) -> ProgramLocationMeasurement {
+    let mut measured = ProgramLocationMeasurement {
+        rows_total: 1,
+        ..Default::default()
+    };
+    let Some(scanner) = crate::syntax::scanner_for(lang) else {
+        measured.unresolved_residual = 1;
+        return measured;
+    };
+    let mut scan = match scanner.scan(src) {
+        Ok(scan) => scan,
+        Err(_) => {
+            measured.unresolved_residual = 1;
+            return measured;
+        }
+    };
+    measured.rows_scanned = 1;
+
+    // This is the decision resolver from `judge_once`: last same-line write
+    // wins, poisoned writes do not fall through, absent names may use the
+    // judging process's environment, and expansion is bounded to four passes.
+    let assigned = assignments_in_effect(&scan.assignments);
+    let resolve = |raw: &str| resolve_with_assignments(raw, &assigned);
+    for command in &mut scan.commands {
+        command.head = resolve(&command.head);
+    }
+
+    let kb = crate::guards::in_effect();
+    let caps = |language: &str| cfg.lang(language).and_then(|c| c.wrap_depth).unwrap_or(4);
+    let mut fork = crate::guards::ForkCursor::new(&[]);
+    let Expanded {
+        cmds,
+        orders,
+        from_snippet,
+        langs,
+        inherited_run_dir,
+        parse_failures,
+        wrap_depth_exceeded,
+        ..
+    } = collect_expanded(kb, &scan, lang, &caps, &mut fork);
+    measured.unresolved_residual += parse_failures.len();
+    measured.unresolved_residual += usize::from(wrap_depth_exceeded.is_some());
+    measured.unresolved_residual += fork
+        .points()
+        .iter()
+        .filter(|point| point.factor > 1)
+        .count();
+
+    let start = start_state(cwd);
+    let timeline = cd_timeline(
+        &cmds,
+        &orders,
+        &from_snippet,
+        &langs,
+        &resolve,
+        Some(home),
+        &start,
+    );
+    let trust = ProgramTrustRules::of(cfg, home, project_root);
+
+    for (index, command) in cmds.iter().enumerate() {
+        if command.head.is_empty() {
+            continue;
+        }
+        let occurrence_lang = langs.get(index).map(String::as_str).unwrap_or(lang);
+        if !matches!(occurrence_lang, "bash" | "powershell") {
+            continue;
+        }
+        let base = timeline.base_at(
+            orders.get(index).unwrap_or(&crate::syntax::Order::Unordered),
+            command.chain.as_ref(),
+            &start,
+        );
+        let (state, _) = run_dir_place(
+            kb,
+            command,
+            occurrence_lang,
+            &base,
+            inherited_at(&inherited_run_dir, index),
+            &resolve,
+        );
+        let location = program_location_from_state(&command.head, &state, home);
+        match &location {
+            ProgramLocation::NotPathSpelled { .. } => continue,
+            ProgramLocation::Unproven { cause, .. } => {
+                measured.eligible_path_spelled_occurrences += 1;
+                match cause {
+                    ProgramLocationCause::UnresolvedHead => {
+                        measured.unproven_unresolved_head += 1
+                    }
+                    ProgramLocationCause::UnknownRunPlace(_) => {
+                        measured.unproven_unknown_run_place += 1
+                    }
+                    ProgramLocationCause::NoRunDirectory => {
+                        measured.unproven_no_run_directory += 1
+                    }
+                    ProgramLocationCause::MissingFile => measured.unproven_missing_file += 1,
+                    ProgramLocationCause::NotRegularFile => {
+                        measured.unproven_not_regular_file += 1
+                    }
+                    ProgramLocationCause::CanonicalizationFailed => {
+                        measured.unproven_canonicalization_failed += 1
+                    }
+                }
+            }
+            ProgramLocation::Proven { .. } => {
+                measured.eligible_path_spelled_occurrences += 1;
+                measured.proven_existing_files += 1;
+                if matches!(trust.answer(&location), ProgramTrustAnswer::Matched { .. }) {
+                    measured.matching_both_clauses += 1;
+                }
+            }
+        }
+    }
+    measured
+}
+
 // --- where a command runs ---------------------------------------------------
 //
 // A command line is a sequence, and a write lands in whatever directory is in
@@ -2326,6 +2543,408 @@ enum CdState {
     /// written, which is what vouch did before working directories were
     /// plumbed through.
     NoDirectory,
+}
+
+/// Why a path-spelled command head could not become filesystem evidence for
+/// a program-location recognition grant. The head itself stays on
+/// `ProgramLocation::Unproven`; these variants classify the cause without
+/// copying local paths into measurements.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProgramLocationCause {
+    /// A variable, command substitution, or glob survived head resolution.
+    UnresolvedHead,
+    /// The head is relative and the command's run place is genuinely unknown.
+    UnknownRunPlace(String),
+    /// The head is relative and the caller supplied no run directory.
+    NoRunDirectory,
+    /// The complete resolved file does not exist.
+    MissingFile,
+    /// The complete resolved path exists but is not a regular file.
+    NotRegularFile,
+    /// The operating system refused complete-path canonicalization.
+    CanonicalizationFailed,
+}
+
+/// Existing-only filesystem evidence for one command occurrence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProgramLocation {
+    /// A bare program name. Location rules never guess PATH, aliases,
+    /// functions, builtins, or a shell command cache.
+    NotPathSpelled { written_head: String },
+    /// A path was written, but one fact needed to prove its file is missing.
+    Unproven { written_head: String, cause: ProgramLocationCause },
+    /// The complete path exists as a regular file and was canonicalized.
+    Proven { written_head: String, canonical_file: String, logical_name: String },
+}
+
+/// Why a program-location rule was relevant but could not recognise this
+/// occurrence. A name-only miss retains the exact location evidence; a
+/// location-only miss retains the conventions it failed to satisfy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProgramTrustMiss {
+    NameMatched {
+        entry: usize,
+        name_pattern: String,
+        under: Vec<ProgramTrustUnder>,
+        location: ProgramLocation,
+    },
+    LocationMatched {
+        entry: usize,
+        under: String,
+        logical_name: String,
+        name_patterns: Vec<String>,
+    },
+}
+
+/// One written location clause and whether it could be canonicalized for this
+/// decision. The error is path-free; diagnostics report the config spelling,
+/// never a discovered directory listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgramTrustUnder {
+    pub written: String,
+    pub error: Option<crate::paths::ExistingPathError>,
+}
+
+/// The single answer used by recognition and, later, its explanation. A
+/// caller never re-walks configuration to reconstruct why a grant happened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProgramTrustAnswer {
+    NoRelevantRule,
+    Matched {
+        entry: usize,
+        under: String,
+        name_pattern: String,
+        canonical_file: String,
+    },
+    Missed(ProgramTrustMiss),
+}
+
+#[derive(Debug, Clone)]
+struct PreparedProgramTrustRule {
+    entry: usize,
+    under: Vec<(String, Result<crate::paths::CanonicalPattern, crate::paths::ExistingPathError>)>,
+    name_patterns: Vec<String>,
+}
+
+/// Program-location configuration expanded and canonicalized once for one
+/// decision. Missing build trees stay as typed inert entries for doctor and
+/// prompt wording; they never broaden into a match.
+#[derive(Debug, Clone)]
+struct ProgramTrustRules {
+    rules: Vec<PreparedProgramTrustRule>,
+}
+
+impl ProgramTrustRules {
+    fn of(cfg: &Config, home: &str, project_root: Option<&str>) -> Self {
+        let rules = cfg
+            .run
+            .trust_program
+            .iter()
+            .enumerate()
+            .map(|(index, rule)| PreparedProgramTrustRule {
+                entry: index + 1,
+                under: rule
+                    .under
+                    .iter()
+                    .map(|written| {
+                        (
+                            written.clone(),
+                            crate::paths::canonical_existing_pattern_root(
+                                written,
+                                home,
+                                project_root,
+                            ),
+                        )
+                    })
+                    .collect(),
+                name_patterns: rule.name_patterns.clone(),
+            })
+            .collect();
+        Self { rules }
+    }
+
+    fn answer(&self, location: &ProgramLocation) -> ProgramTrustAnswer {
+        let apparent_name = match location {
+            ProgramLocation::NotPathSpelled { written_head } => {
+                Some(logical_program_name(written_head))
+            }
+            ProgramLocation::Unproven { written_head, .. } => {
+                Some(logical_program_name(written_head))
+            }
+            ProgramLocation::Proven { logical_name, .. } => Some(logical_name.clone()),
+        };
+        let mut first_name_miss = None;
+        let mut first_location_miss = None;
+
+        for rule in &self.rules {
+            let name_match = apparent_name.as_ref().and_then(|name| {
+                rule.name_patterns
+                    .iter()
+                    .find(|pattern| crate::config::program_name_pattern_matches(pattern, name))
+            });
+            let location_match = match location {
+                ProgramLocation::Proven { canonical_file, .. } => rule.under.iter().find(
+                    |(_, resolved)| {
+                        matches!(resolved, Ok(pattern) if pattern.matches(canonical_file))
+                    },
+                ),
+                ProgramLocation::NotPathSpelled { .. } | ProgramLocation::Unproven { .. } => None,
+            };
+
+            if let (Some(name_pattern), Some((under, _))) = (name_match, location_match) {
+                let canonical_file = match location {
+                    ProgramLocation::Proven { canonical_file, .. } => canonical_file.clone(),
+                    _ => unreachable!("a location match requires proven file evidence"),
+                };
+                return ProgramTrustAnswer::Matched {
+                    entry: rule.entry,
+                    under: under.clone(),
+                    name_pattern: name_pattern.clone(),
+                    canonical_file,
+                };
+            }
+
+            if first_name_miss.is_none() {
+                if let Some(name_pattern) = name_match {
+                    first_name_miss = Some(ProgramTrustMiss::NameMatched {
+                        entry: rule.entry,
+                        name_pattern: name_pattern.clone(),
+                        under: rule
+                            .under
+                            .iter()
+                            .map(|(written, resolved)| ProgramTrustUnder {
+                                written: written.clone(),
+                                error: resolved.as_ref().err().copied(),
+                            })
+                            .collect(),
+                        location: location.clone(),
+                    });
+                }
+            }
+            if first_location_miss.is_none() {
+                if let Some((under, _)) = location_match {
+                    let logical_name = match location {
+                        ProgramLocation::Proven { logical_name, .. } => logical_name.clone(),
+                        _ => unreachable!("a location match requires proven file evidence"),
+                    };
+                    first_location_miss = Some(ProgramTrustMiss::LocationMatched {
+                        entry: rule.entry,
+                        under: under.clone(),
+                        logical_name,
+                        name_patterns: rule.name_patterns.clone(),
+                    });
+                }
+            }
+        }
+
+        first_name_miss
+            .or(first_location_miss)
+            .map(ProgramTrustAnswer::Missed)
+            .unwrap_or(ProgramTrustAnswer::NoRelevantRule)
+    }
+}
+
+fn program_location_cause_words(cause: &ProgramLocationCause) -> String {
+    match cause {
+        ProgramLocationCause::UnresolvedHead => {
+            "the written program path still contains a variable, substitution, or glob"
+                .to_string()
+        }
+        ProgramLocationCause::UnknownRunPlace(cause) => format!(
+            "the path is relative and vouch cannot prove its run directory ({cause})"
+        ),
+        ProgramLocationCause::NoRunDirectory => {
+            "the path is relative and the caller supplied no run directory".to_string()
+        }
+        ProgramLocationCause::MissingFile => {
+            "the complete program path does not exist as a file now".to_string()
+        }
+        ProgramLocationCause::NotRegularFile => {
+            "the complete program path is not a regular file".to_string()
+        }
+        ProgramLocationCause::CanonicalizationFailed => {
+            "the operating system could not canonicalize the complete program path".to_string()
+        }
+    }
+}
+
+/// Format only the answer recognition already computed. No path resolution,
+/// config walk, or name match is permitted here: explanation must not invent
+/// a second answer after the verdict has been chosen.
+fn program_trust_miss_reason(answer: &ProgramTrustAnswer) -> Option<String> {
+    let ProgramTrustAnswer::Missed(miss) = answer else {
+        return None;
+    };
+    Some(match miss {
+        ProgramTrustMiss::NameMatched { entry, name_pattern, under, location } => {
+            let unavailable = under
+                .iter()
+                .filter_map(|clause| clause.error.map(|error| (&clause.written, error)))
+                .map(|(written, error)| {
+                    let why = error.current_state_words();
+                    format!("`under` = {written:?} {why} and is inert now")
+                })
+                .collect::<Vec<_>>();
+            let location_words = if !unavailable.is_empty() {
+                unavailable.join("; ")
+            } else {
+                match location {
+                    ProgramLocation::NotPathSpelled { .. } => {
+                        "the command head is bare; vouch never searches PATH, aliases, functions, \
+                         builtins, or a shell command cache for an `under` grant"
+                            .to_string()
+                    }
+                    ProgramLocation::Unproven { cause, .. } => format!(
+                        "its `under` clause cannot prove the program file because {}",
+                        program_location_cause_words(cause)
+                    ),
+                    ProgramLocation::Proven { canonical_file, .. } => format!(
+                        "the canonical program file {canonical_file} is outside every written \
+                         `under` location"
+                    ),
+                }
+            };
+            format!(
+                "[[run.trust_program]] #{entry} is relevant because `name_patterns` matched \
+                 {name_pattern:?}, but {location_words}\n  \
+                 to change this recognition convention, correct that entry's `under` paths or \
+                 remove {name_pattern:?} from its `name_patterns`"
+            )
+        }
+        ProgramTrustMiss::LocationMatched {
+            entry,
+            under,
+            logical_name,
+            name_patterns,
+        } => format!(
+            "[[run.trust_program]] #{entry} is relevant because `under` matched {under:?}, but \
+             the logical program name {logical_name:?} matches none of its `name_patterns` = \
+             {name_patterns:?}\n  \
+             to recognise this generated family, add its deliberate convention to that entry's \
+             `name_patterns`; do not create a one-off knowledge entry"
+        ),
+    })
+}
+
+/// Whether the shell head itself states a path. A separator is the boundary:
+/// bare names remain shell-resolution questions and are never looked up.
+pub fn program_head_is_path_spelled(head: &str) -> bool {
+    head.contains('/') || head.contains('\\')
+}
+
+/// A Windows root-relative spelling (`\tool` or `/tool`) omits the drive.
+/// UNC paths and MSYS drive mirrors are complete locations and are excluded.
+pub fn program_head_has_unspecified_windows_drive(head: &str) -> bool {
+    let head = head.replace('\\', "/");
+    if !head.starts_with('/') || head.starts_with("//") {
+        return false;
+    }
+    let bytes = head.as_bytes();
+    !(bytes.len() >= 3 && bytes[1].is_ascii_alphabetic() && bytes[2] == b'/')
+}
+
+/// The logical filename a program-location convention matches, re-exported
+/// with the rest of the public resolver surface.
+pub use crate::paths::logical_program_name;
+
+fn program_location_from_state(head: &str, state: &CdState, home: &str) -> ProgramLocation {
+    if !program_head_is_path_spelled(head) {
+        return ProgramLocation::NotPathSpelled { written_head: head.to_string() };
+    }
+    if head.contains(['$', '%', '`', '*', '?', '[']) {
+        return ProgramLocation::Unproven {
+            written_head: head.to_string(),
+            cause: ProgramLocationCause::UnresolvedHead,
+        };
+    }
+
+    if head.starts_with('~')
+        && !matches!(head, "~")
+        && !head.starts_with("~/")
+        && !head.starts_with("~\\")
+    {
+        return ProgramLocation::Unproven {
+            written_head: head.to_string(),
+            cause: ProgramLocationCause::UnresolvedHead,
+        };
+    }
+
+    // On Windows a single-root spelling inherits a drive from shell state.
+    // Rust canonicalization would instead inherit the vouch process's drive,
+    // which can prove a different file. Refuse rather than guess. `/C/...`
+    // MSYS mirrors and `//server/share` UNC paths carry their own root.
+    if cfg!(windows) && program_head_has_unspecified_windows_drive(head) {
+        return ProgramLocation::Unproven {
+            written_head: head.to_string(),
+            cause: ProgramLocationCause::CanonicalizationFailed,
+        };
+    }
+
+    // Preserve relative `.` and `..` segments until AFTER the occurrence's
+    // run directory is prepended. Normalizing first can silently bind a head
+    // to a different in-tree file than the shell will execute.
+    let relative = is_relative(head) || drive_relative(head).is_some();
+    let complete = if relative {
+        match state {
+            CdState::Known(_) => match place(head, state) {
+                Placed::At(path) => crate::paths::normalize(&path, home),
+                Placed::Nowhere(cause) => {
+                    return ProgramLocation::Unproven {
+                        written_head: head.to_string(),
+                        cause: ProgramLocationCause::UnknownRunPlace(cause),
+                    };
+                }
+            },
+            CdState::Unknown(cause) => {
+                return ProgramLocation::Unproven {
+                    written_head: head.to_string(),
+                    cause: ProgramLocationCause::UnknownRunPlace(cause.clone()),
+                };
+            }
+            CdState::NoDirectory => {
+                return ProgramLocation::Unproven {
+                    written_head: head.to_string(),
+                    cause: ProgramLocationCause::NoRunDirectory,
+                };
+            }
+        }
+    } else {
+        crate::paths::normalize(head, home)
+    };
+
+    match crate::paths::canonical_existing_file(&complete) {
+        Ok(canonical_file) => ProgramLocation::Proven {
+            written_head: head.to_string(),
+            logical_name: logical_program_name(&canonical_file),
+            canonical_file,
+        },
+        Err(crate::paths::ExistingPathError::Missing) => ProgramLocation::Unproven {
+            written_head: head.to_string(),
+            cause: ProgramLocationCause::MissingFile,
+        },
+        Err(crate::paths::ExistingPathError::NotRegularFile)
+        | Err(crate::paths::ExistingPathError::NotDirectory) => ProgramLocation::Unproven {
+            written_head: head.to_string(),
+            cause: ProgramLocationCause::NotRegularFile,
+        },
+        Err(crate::paths::ExistingPathError::CannotExpandPattern)
+        | Err(crate::paths::ExistingPathError::CannotCanonicalize) => {
+            ProgramLocation::Unproven {
+                written_head: head.to_string(),
+                cause: ProgramLocationCause::CanonicalizationFailed,
+            }
+        }
+    }
+}
+
+/// Public existing-only probe for tests and counts-only measurements. A
+/// relative head needs `run_dir`; an absolute path does not.
+pub fn resolve_program_location(head: &str, run_dir: Option<&str>, home: &str) -> ProgramLocation {
+    let state = run_dir
+        .filter(|d| !d.is_empty())
+        .map(|d| CdState::Known(d.to_string()))
+        .unwrap_or(CdState::NoDirectory);
+    program_location_from_state(head, &state, home)
 }
 
 /// What a PLACE RULE is allowed to know about where one command runs.
@@ -2419,6 +3038,9 @@ struct UnmodeledItem {
     desc: String,
     lang: String,
     place: PlaceAnswer,
+    /// The exact prepared-rule answer recognition already used. Prompt
+    /// formatting reads this value; it never canonicalizes paths again.
+    program: ProgramTrustAnswer,
     narrow: Option<crate::guards::ListableStandalone>,
 }
 
@@ -2487,10 +3109,10 @@ fn place_of(state: &CdState, home: &str) -> Place {
 /// A run-dir flag says where THIS command runs (`git -C <dir> <verb>`), so it
 /// is part of the run PLACE, not a detail of the write pass. It lived only in
 /// the write loop, which meant `git -C <tree> <verb>` had its writes judged at
-/// the flag's directory while every PLACE rule — zones, place-scoped entries,
-/// guard overrides — judged it at the shell's: one command, two answers to the
-/// same question, and a zone that the operator could step around by spelling
-/// the directory as a flag instead of a `cd`.
+/// the flag's directory while every run-place rule — zones, place-scoped
+/// entries, guard overrides — judged it at the shell's: one command, two
+/// answers to the same question, and a zone that the operator could step
+/// around by spelling the directory as a flag instead of a `cd`.
 ///
 /// Fail-closed on every uncertainty. A flag vouch cannot resolve makes the
 /// place `Unknown` WITH its cause — never the shell's directory, which is a

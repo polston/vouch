@@ -81,5 +81,11 @@
   {"cmd": "git -C C:/elsewhere log", "verdict": "allow"},
 
   {"cmd": "cd -1 && echo x > f.txt", "verdict": "ask"},
-  {"cmd": "pushd -n C:/work && echo x > f.txt", "verdict": "ask"}
+  {"cmd": "pushd -n C:/work && echo x > f.txt", "verdict": "ask"},
+
+  {"cmd": "./build/probe-alpha inspect", "verdict": "allow"},
+  {"cmd": "probe-alpha inspect", "verdict": "allow"},
+  {"cmd": "./build/missing-probe inspect", "verdict": "allow"},
+  {"cmd": "C:/workspace/fixture/outside/probe-beta inspect", "verdict": "allow"},
+  {"cmd": "./build/helper-alpha inspect", "verdict": "allow"}
 ]

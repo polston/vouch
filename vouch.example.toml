@@ -276,6 +276,19 @@ rebound_name = "ask"
 # statements are yours, and the ask names which one fired.
 # trust_nothing_under = ["D:/downloads/**"]
 
+# program-location trust: recognise a path-spelled shell program only when
+# its complete existing canonical file is under one of these executable trees
+# AND its logical filename follows one of these exact/prefix conventions.
+# This covers the whole matching program, not one verb. A bare/PATH name, a
+# missing file, an unknown run directory, or a symlink escape grants nothing.
+# Recognition only: guards, write rules, protected paths and constructs still
+# apply. `*` is allowed only once at the end of a non-empty literal prefix.
+# Observe the declared source target and a real rebuild before choosing a
+# stable prefix; never copy a one-build suffix into this rule.
+# [[run.trust_program]]
+# under = ["$PROJECT_ROOT/target/release/**"]
+# name_patterns = ["probe-tool", "probe-tool-*"]
+
 # place-scoped guard override. Every key except `under` must name a known
 # guard; anything else refuses the load. An override may be STRICTER or
 # LOOSER than the global [guards] action for that guard — a looser override
@@ -355,10 +368,11 @@ paths = [
 ]
 
 # ---------------------------------------------------------------------------
-# The rest of this file is config.toml. Place-scoped recognition is not a
-# config key at all — it lives in the OTHER file, my-knowledge.toml, on a
-# [[program]] entry. Shown here, commented out, so the two examples read
-# together:
+# The rest of this file is config.toml. The run-place-scoped program entry
+# below is not a config key — it lives in the OTHER file, my-knowledge.toml,
+# on a [[program]] entry. Executable-place recognition is the
+# [[run.trust_program]] config rule shown above. This entry is commented out
+# here so the two files' examples read together:
 #
 # [[program]]
 # match = ["probe-tool"]

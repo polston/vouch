@@ -130,8 +130,43 @@ pub struct GuardOverride {
     pub actions: std::collections::HashMap<String, Action>,
 }
 
-/// The `[run]` table: trust and distrust zones, and place-scoped guard
-/// overrides.
+/// One `[[run.trust_program]]` entry: recognise a path-spelled shell program
+/// only when its existing canonical file is under one of `under`'s trees AND
+/// its logical filename follows one of `name_patterns`' exact/prefix
+/// conventions. This recognises the whole matching program, not one verb, and
+/// never searches PATH. Recognition only; guards and write rules still apply.
+#[derive(Debug, Deserialize, Clone, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProgramLocationTrust {
+    /// Exact executable paths or executable trees ending in `/**`. `~` and
+    /// `$PROJECT_ROOT` expand at decision time. Unlike every other `under`
+    /// key, this names where the PROGRAM FILE lives, not where it runs.
+    pub under: Vec<String>,
+    /// Logical executable names, either exact or a non-empty literal prefix
+    /// followed by one terminal `*`. The platform `.exe` suffix is removed
+    /// before matching; path separators and `*` alone are refused.
+    pub name_patterns: Vec<String>,
+}
+
+/// Match one already-validated program-location name convention.
+///
+/// The comparison follows filesystem path equality, because this is the
+/// filename component of a proven path: exact on a case-sensitive host and
+/// folded where `paths::fold_case` folds. `*` is valid only as the final byte
+/// after a non-empty literal prefix; load-time validation guarantees that
+/// shape, while this helper still treats any other spelling as exact rather
+/// than widening it.
+pub fn program_name_pattern_matches(pattern: &str, logical_name: &str) -> bool {
+    let pattern = crate::paths::fold_case(pattern);
+    let logical_name = crate::paths::fold_case(logical_name);
+    match pattern.strip_suffix('*') {
+        Some(prefix) if !prefix.is_empty() => logical_name.starts_with(prefix),
+        _ => logical_name == pattern,
+    }
+}
+
+/// The `[run]` table: run-place trust and distrust zones, executable-place
+/// program trust, and place-scoped guard overrides.
 #[derive(Debug, Deserialize, Default, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RunSection {
@@ -147,6 +182,11 @@ pub struct RunSection {
     /// written empty list can only be a mistake.
     #[serde(default)]
     pub trust_nothing_under: Option<Vec<String>>,
+    /// Program-location trust rules, written as `[[run.trust_program]]`.
+    /// Both an existing canonical executable location and a logical filename
+    /// convention must match; bare names and uncertainty grant nothing.
+    #[serde(default, rename = "trust_program")]
+    pub trust_program: Vec<ProgramLocationTrust>,
     /// Place-scoped guard overrides, written as `[[run.guards]]`.
     #[serde(default, rename = "guards")]
     pub guard_overrides: Vec<GuardOverride>,
@@ -381,7 +421,8 @@ struct Raw {
     /// always resolves to `ask`.
     #[serde(default)]
     guards: HashMap<String, Action>,
-    /// `[run]`: trust/distrust zones and place-scoped guard overrides.
+    /// `[run]`: run-place zones, executable-place program trust, and
+    /// place-scoped guard overrides.
     #[serde(default)]
     run: RunSection,
     /// `[write]`: what vouch does about a write it can see, and where it is
@@ -628,6 +669,77 @@ fn validate(cfg: &Config) -> Result<(), String> {
     ] {
         if matches!(list, Some(v) if v.is_empty()) {
             return Err(format!("{name} is an empty list — a rule that can never apply; remove the line or fill it"));
+        }
+    }
+    // Program-location recognition is a two-clause grant. Every written entry
+    // must say both clauses, and neither grammar is allowed to widen silently:
+    // `under` is the existing exact/trailing-/** path grammar; a name is exact
+    // or one literal prefix followed by a terminal `*` (spec 2026-08-26).
+    let mut seen_pairs = std::collections::BTreeSet::new();
+    for (i, rule) in cfg.run.trust_program.iter().enumerate() {
+        let label = format!("[[run.trust_program]] #{}", i + 1);
+        if rule.under.is_empty() {
+            return Err(format!("{label} has an empty `under` list"));
+        }
+        if rule.name_patterns.is_empty() {
+            return Err(format!("{label} has an empty `name_patterns` list"));
+        }
+
+        let mut locations = std::collections::BTreeSet::new();
+        for pattern in &rule.under {
+            if pattern.is_empty() {
+                return Err(format!("{label} `under` contains an empty path"));
+            }
+            let portable = pattern.replace('\\', "/");
+            let tree_suffix = portable.ends_with("/**");
+            let stem = portable.strip_suffix("/**").unwrap_or(&portable);
+            if stem.contains('*')
+                || portable.contains('?')
+                || portable.contains('[')
+                || portable.contains(']')
+                || (!tree_suffix && portable.contains('*'))
+            {
+                return Err(format!(
+                    "{label} `under` contains '{pattern}' — use an exact path or one tree ending in `/**`"
+                ));
+            }
+            let normalized = crate::paths::fold_case(&portable);
+            if !locations.insert(normalized) {
+                return Err(format!("{label} has a duplicate `under` path '{pattern}'"));
+            }
+        }
+
+        let mut names = std::collections::BTreeSet::new();
+        for pattern in &rule.name_patterns {
+            let star_count = pattern.chars().filter(|&c| c == '*').count();
+            let literal = pattern.strip_suffix('*').unwrap_or(pattern);
+            let bad = pattern.is_empty()
+                || pattern == "*"
+                || star_count > usize::from(pattern.ends_with('*'))
+                || pattern.contains(['/', '\\', '?', '[', ']', '$', '\'', '"'])
+                || pattern.chars().any(char::is_whitespace)
+                || literal.to_ascii_lowercase().ends_with(".exe");
+            if bad {
+                return Err(format!(
+                    "{label} `name_patterns` contains '{pattern}' — use an exact logical name or one non-empty literal prefix followed by terminal `*` (without `.exe`)"
+                ));
+            }
+            let normalized = crate::paths::fold_case(pattern);
+            if !names.insert(normalized) {
+                return Err(format!(
+                    "{label} has a duplicate `name_patterns` convention '{pattern}'"
+                ));
+            }
+        }
+
+        for location in &locations {
+            for name in &names {
+                if !seen_pairs.insert((location.clone(), name.clone())) {
+                    return Err(format!(
+                        "{label} repeats a duplicate program-location pair from an earlier entry"
+                    ));
+                }
+            }
         }
     }
     for s in &cfg.write.scope {
@@ -1034,4 +1146,175 @@ pub fn inert_place_rules(cfg: &Config, home: &str, project_root: Option<&str>) -
     }
 
     out
+}
+
+fn program_pattern_contains(
+    outer: &crate::paths::CanonicalPattern,
+    inner: &crate::paths::CanonicalPattern,
+) -> bool {
+    if outer.tree {
+        crate::paths::paths_eq(&outer.root, &inner.root)
+            || crate::paths::glob_match(
+                &format!("{}/**", outer.root.trim_end_matches('/')),
+                &inner.root,
+            )
+    } else {
+        !inner.tree && crate::paths::paths_eq(&outer.root, &inner.root)
+    }
+}
+
+fn name_pattern_contains(outer: &str, inner: &str) -> bool {
+    let outer = crate::paths::fold_case(outer);
+    let inner = crate::paths::fold_case(inner);
+    match outer.strip_suffix('*') {
+        Some(prefix) => inner.strip_suffix('*').unwrap_or(&inner).starts_with(prefix),
+        None => !inner.ends_with('*') && outer == inner,
+    }
+}
+
+/// Counts current regular files matching each convention without returning a
+/// filename or directory listing. A partial walk yields no empty-family claim:
+/// doctor must not turn an unreadable subtree into a false zero.
+fn program_family_counts(
+    location: &crate::paths::CanonicalPattern,
+    names: &[String],
+) -> Option<Vec<usize>> {
+    let mut counts = vec![0; names.len()];
+    let mut candidates = Vec::new();
+    if location.tree {
+        let mut dirs = vec![std::path::PathBuf::from(&location.root)];
+        while let Some(dir) = dirs.pop() {
+            let entries = std::fs::read_dir(dir).ok()?;
+            for entry in entries {
+                let entry = entry.ok()?;
+                let kind = entry.file_type().ok()?;
+                if kind.is_dir() && !kind.is_symlink() {
+                    dirs.push(entry.path());
+                } else if kind.is_file() || kind.is_symlink() {
+                    if let Ok(file) = crate::paths::canonical_existing_file(
+                        &entry.path().to_string_lossy().replace('\\', "/"),
+                    ) {
+                        if location.matches(&file) {
+                            candidates.push(crate::paths::logical_program_name(&file));
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        candidates.push(crate::paths::logical_program_name(&location.root));
+    }
+    for candidate in candidates {
+        for (index, pattern) in names.iter().enumerate() {
+            if program_name_pattern_matches(pattern, &candidate) {
+                counts[index] += 1;
+            }
+        }
+    }
+    Some(counts)
+}
+
+/// Advisory findings for program-location recognition. These are facts about
+/// the current filesystem and config, so missing build output is inert now,
+/// not invalid forever. Findings expose config spellings and counts only.
+pub fn program_location_findings(
+    cfg: &Config,
+    home: &str,
+    project_root: Option<&str>,
+) -> Vec<String> {
+    #[derive(Clone)]
+    struct ReadyRule {
+        entry: usize,
+        under: Vec<crate::paths::CanonicalPattern>,
+        names: Vec<String>,
+    }
+
+    let mut findings = Vec::new();
+    let mut ready = Vec::new();
+    for (index, rule) in cfg.run.trust_program.iter().enumerate() {
+        let entry = index + 1;
+        let mut resolved = Vec::new();
+        let mut all_ready = true;
+        for written in &rule.under {
+            match crate::paths::canonical_existing_pattern_root(written, home, project_root) {
+                Ok(location) => {
+                    if let Some(counts) = program_family_counts(&location, &rule.name_patterns) {
+                        for (name, count) in rule.name_patterns.iter().zip(counts) {
+                            if count == 0 {
+                                findings.push(format!(
+                                    "[[run.trust_program]] #{entry} `under` = {written:?} and \
+                                     `name_patterns` member {name:?} currently match 0 regular \
+                                     files — this target family is inert now"
+                                ));
+                            }
+                        }
+                    }
+                    resolved.push(location);
+                }
+                Err(error) => {
+                    all_ready = false;
+                    let why = error.current_state_words();
+                    findings.push(format!(
+                        "[[run.trust_program]] #{entry} `under` = {written:?} {why} — advisory: \
+                         this location clause is inert now, not permanently invalid"
+                    ));
+                }
+            }
+        }
+        if all_ready {
+            ready.push(ReadyRule {
+                entry,
+                under: resolved,
+                names: rule.name_patterns.clone(),
+            });
+        }
+    }
+
+    for (later_index, later) in ready.iter().enumerate() {
+        let earlier = &ready[..later_index];
+        if earlier.is_empty() {
+            continue;
+        }
+        let fully_shadowed = later.under.iter().all(|location| {
+            later.names.iter().all(|name| {
+                earlier.iter().any(|prior| {
+                    prior
+                        .under
+                        .iter()
+                        .any(|outer| program_pattern_contains(outer, location))
+                        && prior
+                            .names
+                            .iter()
+                            .any(|outer| name_pattern_contains(outer, name))
+                })
+            })
+        });
+        if fully_shadowed {
+            let prior_entries = earlier
+                .iter()
+                .filter(|prior| {
+                    later.under.iter().any(|location| {
+                        prior
+                            .under
+                            .iter()
+                            .any(|outer| program_pattern_contains(outer, location))
+                    }) && later.names.iter().any(|name| {
+                        prior
+                            .names
+                            .iter()
+                            .any(|outer| name_pattern_contains(outer, name))
+                    })
+                })
+                .map(|prior| format!("#{}", prior.entry))
+                .collect::<Vec<_>>()
+                .join(", ");
+            findings.push(format!(
+                "[[run.trust_program]] #{} is shadowed by earlier {} — every `under` and \
+                 `name_patterns` pair is already matched first",
+                later.entry, prior_entries
+            ));
+        }
+    }
+
+    findings
 }

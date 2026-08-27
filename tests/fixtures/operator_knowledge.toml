@@ -1,18 +1,17 @@
-# An operator-shaped `my-knowledge`, exercising the keys the SHIPPED knowledge
-# never uses.
+# An operator-shaped `my-knowledge`, exercising the breadth the shipped
+# knowledge does not carry.
 #
 # Committed because a whole class of question is otherwise unaskable (#8,
-# ROADMAP M2.144). `knowledge.toml` contains ZERO `[[program]]` entries using
-# `subcommands` and ZERO using `all_subcommands`, so any count of either shape
-# over the shipped file returns 0 out of 0 candidates — and a zero out of zero
-# reads exactly like "this shape does not happen", which is the deny-list error
-# mode §1 names, living in the measurement layer instead of the engine.
+# ROADMAP M2.144). `knowledge.toml` contains one deliberately scoped entry for
+# vouch itself and ZERO using `all_subcommands`; neither represents the varied
+# operator vocabulary this fixture exercises. Candidate counts must distinguish
+# one, zero, and many rather than treating any as "this shape does not happen."
 #
 # What it is FOR: giving a test or a measurement about operator-side shapes
 # something honest to run against. The shapes that matter here are the ones an
-# operator's file routinely has and the shipped file never does — verb-scoped
-# recognition, whole-program recognition, and rules keyed on a verb or on a
-# verb's second word.
+# operator's file routinely has in combinations the shipped set does not —
+# verb-scoped recognition, whole-program recognition, and rules keyed on a verb
+# or on a verb's second word.
 #
 # What it is NOT: a copy of anyone's real file, ever. Every name below is
 # invented, and the rules exist to be matched against, not because these

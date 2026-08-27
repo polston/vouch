@@ -15,8 +15,8 @@ ask for the same go again.
 
 ## Authorization boundary
 
-Proceed automatically through private integration and push, CI inspection, a
-clean release-please pull-request merge, public publish-branch push, exact-head
+Proceed automatically through private integration and push, CI inspection, an
+exact release-please pull-request landing, public publish-branch push, exact-head
 landing, tag, release verification, reinstall, probes, state docs, and cleanup.
 Record the readiness numbers before the first remote write so the evidence is
 auditable even though it is no longer an approval checkpoint.
@@ -27,6 +27,16 @@ force/history rewrite, an unresolved conflict, missing credentials, a live
 trust/config choice, or any departure from the scanned exact-object route.
 Tooling may still display a platform approval prompt for an authorized command;
 request that capability and continue when it is granted.
+
+After the operator explicitly authorizes repairing a real privacy finding, do
+not use `--no-verify` and do not hand the command back to them. If the clean
+replacement is an ancestor of private master's exact advertised tip, use the
+hook's only repair seam:
+`VOUCH_ALLOW_SCANNED_ANCESTOR_REWIND=1 git push --force-with-lease=refs/heads/master:<bad-tip> origin <clean-ancestor>:refs/heads/master`.
+The hook permits only private master, proves the ancestry direction, and scans
+the replacement's complete reachable history before sending anything. A
+divergent replacement, another ref, stale lease, or any finding still refuses;
+those remain new operator decisions rather than reasons to bypass verification.
 
 ## Preconditions
 
@@ -80,9 +90,10 @@ Run from the vouch checkout root; every path below is relative to it.
      from `.release-please-manifest.json`;
    - whether `git diff --name-only master...<branch>` intersects the publish
      `MANIFEST` in `scripts/publish-mirror.sh`;
-   - every review boundary, in order: merge the private version pull request
-     when release-please opens one, then review the public publish pull request
-     and exact-land its scanned head when published files changed;
+   - every review boundary, in order: exact-land the private version pull
+     request with `scripts/land-private-release.sh` when release-please opens
+     one, then review the public publish pull request and exact-land its scanned
+     head when published files changed;
    - what follows those landings: mirror verification, public tag and release
      build, paired live reinstall, changed-skill reinstall, live probes, state
      docs, and branch teardown;
@@ -151,20 +162,26 @@ Run from the vouch checkout root; every path below is relative to it.
 4a. **Publishing, when the changeset touches published files.** Publishing is
    a distinct exact-object phase inside the automatic finish line:
    **The fixed route is automatic.** Run the local dry run, scans, history
-   checks, private version pull-request merge, public publish pull request,
+   checks, private version pull-request exact landing, public publish pull request,
    exact landing, verification, and tag when this point is reached. The
    standing authorization covers those normal remote writes. It never covers
    a history rewrite or a departure from this route.
-   1. If release-please opened a version pull request here on the step 4
-      push, fetch its generated branch and run the all-ref history audit before
-      offering it for merge. The branch must be exactly one commit ahead of
-      current private master, its final changelog and pull-request body must be
-      forge-remnant-free, and all six history checks must be clean. The
-      workflow's registered release-please plugin sanitizes both views and
-      scans the title, body, paths and every candidate file before the remote write; a
-      second cleanup commit is a defect, not an accepted transient. Merge the
-      clean version pull request first — the mirror only picks up the new
-      version once this repository's own version fields carry it.
+   1. If release-please opened a version pull request here on the step 4 push,
+      run `bash scripts/land-private-release.sh <pr-number>` as the dry run,
+      review its exact one-commit/head/body/range/all-ref evidence, then run
+      `bash scripts/land-private-release.sh <pr-number> --land`. That executable
+      repeats the reads at the mutation boundary, uses exact leases, and
+      fast-forwards private master to the already-scanned PR head. It then
+      proves the forge marked that exact object merged, repeats the all-ref
+      audit, and deletes the generated branch. **Never use `gh pr merge`, the
+      forge merge button, squash, rebase, or merge mode for a private release
+      PR:** every one synthesizes an object that did not exist during review.
+      The workflow's registered release-please plugin sanitizes both generated
+      text views and scans the title, body, paths, and every candidate file
+      before its remote write; a second cleanup commit is a defect, not an
+      accepted transient. Exact-land the clean version PR before publishing —
+      the mirror only picks up the new version once this repository's own
+      version fields carry it.
    2. Dry run: `bash scripts/publish-mirror.sh <public-clone>` with no flag —
       read the scan result, diffstat, and assembled public candidate's locked
       release-test result. The publisher also repeats that candidate gate
@@ -294,6 +311,8 @@ the knowledge install.
   asking again after they are clean recreates the friction this skill removes.
 - Using the forge merge button on a public publish pull request; `--land` is
   the only path that preserves the exact scanned commit.
+- Using any forge merge method on a private release pull request;
+  `scripts/land-private-release.sh --land` is its only exact-object path.
 - Treating the docs sweep as a landing chore. It is a plan task that runs
   before the final review; this skill refuses to start without its report.
 - Reinstalling the knowledge but not the skills when the branch changed both.

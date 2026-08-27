@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::io::{BufRead, Read};
 use vouch::config::{load, Config};
 use vouch::journal;
 use vouch::protocol::{parse_input, render_for, Decision, Host};
@@ -9,6 +9,136 @@ fn home() -> String {
         .or_else(|_| std::env::var("HOME"))
         .unwrap_or_default()
         .replace('\\', "/")
+}
+
+enum HookCall {
+    Refused,
+    Processed(Option<String>),
+}
+
+/// Decide one normalized hook document using the config already loaded by the
+/// process. The ordinary hook path calls this once; the evidence replay path
+/// calls it for each JSONL row so config/knowledge loading and process startup
+/// are paid once per worker rather than once per recorded tool call.
+fn run_hook_call(
+    raw: &str,
+    cfg: &Config,
+    notice: Option<&str>,
+    hook_options: &vouch::cli::HookOptions,
+    state_dir: &std::path::Path,
+    home_dir: &str,
+) -> HookCall {
+    let shadow = hook_options.shadow;
+    let host = hook_options.host;
+    let mut input = match parse_input(raw) {
+        Ok(input) => input,
+        Err(_) => return HookCall::Refused,
+    };
+    if host == Host::Codex
+        && hook_options.shell == Some(vouch::cli::InstallShell::PowerShell)
+        && input.tool_name == "Bash"
+    {
+        input.tool_name = "PowerShell".into();
+    }
+
+    // Terminal events report what actually happened. They never decide anything.
+    if let Some(o) = vouch::outcome::Outcome::from_event(&input.hook_event_name) {
+        let detail = if !input.reason.is_empty() {
+            input.reason.clone()
+        } else if input.is_interrupt {
+            "interrupted".to_string()
+        } else {
+            input.error.clone()
+        };
+        let _ = journal::append_outcome(
+            state_dir,
+            &journal::OutcomeRecord {
+                id: input.tool_use_id.clone(),
+                outcome: o,
+                detail: detail.clone(),
+                host: host.as_str().into(),
+            },
+        );
+        if host == Host::Codex {
+            if let Ok(Some(original_id)) =
+                vouch::approval::take_outcome_alias(state_dir, &input.tool_use_id)
+            {
+                let _ = journal::append_outcome(
+                    state_dir,
+                    &journal::OutcomeRecord {
+                        id: original_id,
+                        outcome: o,
+                        detail: "outcome of the exact approved retry".into(),
+                        host: host.as_str().into(),
+                    },
+                );
+            }
+        }
+        return HookCall::Processed(None);
+    }
+
+    let outcome = vouch::route::decide(
+        cfg,
+        vouch::guards::in_effect(),
+        home_dir,
+        &input,
+    );
+    let mut decision = with_banner(outcome.decision, notice);
+
+    // The emission step of mode-keyed shadow is computed before journalling,
+    // because the rows' `mode` word depends on it.
+    let (emit, mode) = if shadow {
+        (false, "shadow")
+    } else {
+        let protection =
+            matches!(&decision, Decision::Ask(r) if vouch::engine::is_protection_ask(r));
+        vouch::protocol::stand_down_emission(
+            cfg.stand_down(),
+            cfg.stands_down_in(&input.permission_mode),
+            &decision,
+            protection,
+        )
+    };
+
+    if host == Host::Codex && emit {
+        if let Decision::Ask(reason) = &decision {
+            let now = journal::now_epoch_secs().parse::<u64>().unwrap_or_default();
+            decision = match vouch::approval::gate(state_dir, &input, reason, now) {
+                Ok(vouch::approval::GateResult::Granted) => {
+                    Decision::Allow("one-time human approval for this exact retry".into())
+                }
+                Ok(vouch::approval::GateResult::Pending { request_id }) => Decision::Ask(format!(
+                    "{reason}\n  approval request: {request_id}\n  call mcp__vouch_approval__request_approval with that request_id, then retry this exact tool call once"
+                )),
+                Err(error) => Decision::Deny(format!(
+                    "vouch could not create a one-time Codex approval request: {error}"
+                )),
+            };
+        }
+    }
+
+    // A config-named allow short-circuits extraction, so it uses the single
+    // record fallback. Snippet-bearing calls retain one record per snippet.
+    if outcome.snippets.is_empty() {
+        let rec = journal::record_from_host(host, &input, &decision, mode);
+        let _ = journal::append(state_dir, &rec);
+    } else {
+        for rec in vouch::journal::records_from_snippets_host(
+            host,
+            &input,
+            &decision,
+            mode,
+            &outcome.snippets,
+        ) {
+            let _ = journal::append(state_dir, &rec);
+        }
+    }
+
+    if !emit {
+        HookCall::Processed(None)
+    } else {
+        HookCall::Processed(render_for(host, &decision))
+    }
 }
 
 /// The directory a manual verdict is judged from: `--cwd` when the caller gave
@@ -1024,6 +1154,22 @@ fn main() {
             println!();
         }
 
+        let program_findings = vouch::config::program_location_findings(
+            &cfg,
+            &home(),
+            project_root(".").as_deref(),
+        );
+        if !program_findings.is_empty() {
+            println!(
+                "program-location rules needing attention ({}):",
+                program_findings.len()
+            );
+            for finding in program_findings.iter().take(20) {
+                println!("  {finding}");
+            }
+            println!();
+        }
+
         // Fifth bucket, same reason the fourth runs ahead of the
         // empty-journal exit: `guards::notes()` is a fact about the
         // operator's OWN config alone (Task 4's `narrowing_noops`, a
@@ -1373,11 +1519,16 @@ fn main() {
     }
 
     // Anything that is not a hook invocation must never block on stdin.
-    if args.is_empty() || !args.iter().any(|a| a == "--hook") {
+    if args.is_empty()
+        || !args
+            .iter()
+            .any(|a| matches!(a.as_str(), "--hook" | "--hook-batch"))
+    {
         println!("vouch {}", env!("CARGO_PKG_VERSION"));
         println!("usage:");
         println!("  vouch --hook [--host claude|codex] [--shell bash|powershell] [--state-dir <absolute>] [--shadow]");
         println!("                            decide a tool call (reads hook JSON on stdin)");
+        println!("  vouch --hook-batch       replay JSONL hook calls in one process (status JSONL out)");
         println!("  vouch explain '<cmd>'     what vouch decides, and why");
         println!("  vouch why '<cmd>'         the same, for a command already run");
         println!("  vouch why                 explain the last recorded decision");
@@ -1398,131 +1549,59 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let shadow = hook_options.shadow;
-    let host = hook_options.host;
     let state_dir = hook_options
         .state_dir
         .as_deref()
         .map(std::path::PathBuf::from)
         .unwrap_or_else(journal::state_dir);
+    let home_dir = home();
+
+    if hook_options.batch {
+        let stdin = std::io::stdin();
+        for (index, line) in stdin.lock().lines().enumerate() {
+            let line = match line {
+                Ok(line) => line,
+                Err(error) => {
+                    eprintln!("vouch: could not read batch hook input: {error}");
+                    std::process::exit(2);
+                }
+            };
+            let (status, emitted) = match run_hook_call(
+                &line,
+                &cfg,
+                notice.as_deref(),
+                &hook_options,
+                &state_dir,
+                &home_dir,
+            ) {
+                HookCall::Refused => ("refused", false),
+                HookCall::Processed(output) => ("processed", output.is_some()),
+            };
+            println!(
+                "{}",
+                serde_json::json!({
+                    "index": index,
+                    "status": status,
+                    "emitted": emitted,
+                })
+            );
+        }
+        std::process::exit(0);
+    }
 
     let mut raw = String::new();
     if std::io::stdin().read_to_string(&mut raw).is_err() {
         std::process::exit(0);
     }
-    let mut input = match parse_input(&raw) {
-        Ok(i) => i,
-        Err(_) => std::process::exit(0),
-    };
-    if host == Host::Codex
-        && hook_options.shell == Some(vouch::cli::InstallShell::PowerShell)
-        && input.tool_name == "Bash"
-    {
-        input.tool_name = "PowerShell".into();
-    }
-
-    // Terminal events report what actually happened. They never decide anything.
-    if let Some(o) = vouch::outcome::Outcome::from_event(&input.hook_event_name) {
-        let detail = if !input.reason.is_empty() {
-            input.reason.clone()
-        } else if input.is_interrupt {
-            "interrupted".to_string()
-        } else {
-            input.error.clone()
-        };
-        let _ = journal::append_outcome(
-            &state_dir,
-            &journal::OutcomeRecord {
-                id: input.tool_use_id.clone(),
-                outcome: o,
-                detail,
-                host: host.as_str().into(),
-            },
-        );
-        if host == Host::Codex {
-            if let Ok(Some(original_id)) =
-                vouch::approval::take_outcome_alias(&state_dir, &input.tool_use_id)
-            {
-                let _ = journal::append_outcome(
-                    &state_dir,
-                    &journal::OutcomeRecord {
-                        id: original_id,
-                        outcome: o,
-                        detail: "outcome of the exact approved retry".into(),
-                        host: host.as_str().into(),
-                    },
-                );
-            }
-        }
-        std::process::exit(0);
-    }
-
-    let outcome = vouch::route::decide(&cfg, vouch::guards::in_effect(), &home(), &input);
-    let mut decision = with_banner(outcome.decision, notice.as_deref());
-
-    // The emission step of mode-keyed shadow, computed BEFORE the journal
-    // writes because the rows' `mode` word depends on it. The --shadow flag
-    // wins: vouch is not the live gate at all, nothing is emitted and rows
-    // say "shadow", whatever [shadow] says.
-    let (emit, mode) = if shadow {
-        (false, "shadow")
-    } else {
-        let protection =
-            matches!(&decision, Decision::Ask(r) if vouch::engine::is_protection_ask(r));
-        vouch::protocol::stand_down_emission(
-            cfg.stand_down(),
-            cfg.stands_down_in(&input.permission_mode),
-            &decision,
-            protection,
-        )
-    };
-
-    if host == Host::Codex && emit {
-        if let Decision::Ask(reason) = &decision {
-            let now = journal::now_epoch_secs().parse::<u64>().unwrap_or_default();
-            decision = match vouch::approval::gate(&state_dir, &input, reason, now) {
-                Ok(vouch::approval::GateResult::Granted) => {
-                    Decision::Allow("one-time human approval for this exact retry".into())
-                }
-                Ok(vouch::approval::GateResult::Pending { request_id }) => Decision::Ask(format!(
-                    "{reason}\n  approval request: {request_id}\n  call mcp__vouch_approval__request_approval with that request_id, then retry this exact tool call once"
-                )),
-                Err(error) => Decision::Deny(format!(
-                    "vouch could not create a one-time Codex approval request: {error}"
-                )),
-            };
-        }
-    }
-
-    let dir = state_dir;
-    // A config-named allow short-circuits `route::decide_tool` before
-    // extraction ever runs (spec §Decision flow step 1), so `outcome.snippets`
-    // is empty for it — that tool journals through the single-record
-    // fallback, unchanged, with no `lang` claimed: the snippet was never
-    // looked at. Everything else journals one record per extracted snippet,
-    // still carrying the banner-bearing `decision` composed above.
-    if outcome.snippets.is_empty() {
-        let rec = journal::record_from_host(host, &input, &decision, mode);
-        let _ = journal::append(&dir, &rec);
-    } else {
-        for rec in vouch::journal::records_from_snippets_host(
-            host,
-            &input,
-            &decision,
-            mode,
-            &outcome.snippets,
-        ) {
-            let _ = journal::append(&dir, &rec);
-        }
-    }
-
-    // A shadow or stood-down call emits nothing at all — the rows above are
-    // the record of what vouch would have said.
-    if !emit {
-        std::process::exit(0);
-    }
-    if let Some(out) = render_for(host, &decision) {
-        println!("{out}");
+    if let HookCall::Processed(Some(output)) = run_hook_call(
+        &raw,
+        &cfg,
+        notice.as_deref(),
+        &hook_options,
+        &state_dir,
+        &home_dir,
+    ) {
+        println!("{output}");
     }
     std::process::exit(0);
 }

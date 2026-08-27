@@ -130,6 +130,10 @@ pub struct HookOptions {
     pub shell: Option<InstallShell>,
     pub shadow: bool,
     pub state_dir: Option<String>,
+    /// Read one hook document per line and emit one counts-only status line
+    /// per input. This is the private-history replay transport; ordinary host
+    /// registrations continue to use `--hook` and the native hook protocol.
+    pub batch: bool,
 }
 
 /// A hook command runs from the session cwd, so a relative state directory
@@ -161,10 +165,13 @@ pub fn parse_hook_options(args: &[String]) -> Result<HookOptions, String> {
     let mut shell = None;
     let mut shadow = false;
     let mut state_dir = None;
+    let mut batch = false;
+    let mut hook = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--hook" => {}
+            "--hook" => hook = true,
+            "--hook-batch" => batch = true,
             "--shadow" => shadow = true,
             "--host" | "--shell" | "--state-dir" if i + 1 == args.len() => {
                 return Err(format!("vouch: {} needs a value", args[i]));
@@ -186,6 +193,9 @@ pub fn parse_hook_options(args: &[String]) -> Result<HookOptions, String> {
         }
         i += 1;
     }
+    if hook == batch {
+        return Err("vouch: choose exactly one of --hook or --hook-batch".into());
+    }
     match (host, shell, state_dir.is_some()) {
         (InstallHost::Codex, None, _) => {
             Err("vouch: Codex hook needs --shell bash or --shell powershell".into())
@@ -201,6 +211,7 @@ pub fn parse_hook_options(args: &[String]) -> Result<HookOptions, String> {
             shell,
             shadow,
             state_dir,
+            batch,
         }),
     }
 }

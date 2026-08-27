@@ -563,10 +563,11 @@ fn hook_bash_stdout(
 
 // --- What an ON-DEMAND MEASUREMENT needs (M2.103) --------------------------
 //
-// The seven measurements under `examples/` include this module by `#[path]`.
-// They are not tests: no gate runs them, `cargo test` only compiles them, and
-// someone types their name when they want a number. That changes two things
-// about loading a corpus and one about where the run is allowed to happen.
+// The on-demand measurements under `examples/` that need corpus rows include
+// this module by `#[path]`. They are not tests: no gate runs them, `cargo test`
+// only compiles them, and someone types their name when they want a number.
+// That changes two things about loading a corpus and one about where the run
+// is allowed to happen.
 
 /// The real corpus for an on-demand measurement: someone typed the program's
 /// name, so an absent corpus is a failure rather than a skip.
@@ -624,9 +625,9 @@ fn under(root: &std::path::Path, candidate: &std::path::Path) -> bool {
 /// decides against the repository's own files rather than whatever the operator
 /// has installed. Cargo finds that file by walking up from the working directory,
 /// so `--manifest-path` from outside the tree never applies it and a bare run of
-/// the built binary gets nothing at all. Six of the seven measurements reach the
-/// process-global knowledge, so an unpinned run produces a full set of plausible
-/// numbers attributed to the wrong files.
+/// the built binary gets nothing at all. Measurements that reach process-global
+/// knowledge can otherwise produce plausible numbers attributed to the wrong
+/// files, so every shared corpus entry point enforces the same footing.
 ///
 /// Checked by CONTAINMENT. Not by presence: a value exported in the calling shell
 /// is present and wrong, and `force = true` never ran to override it — measured.

@@ -9,6 +9,7 @@
 
 use vouch::guards::unmodeled_descriptions;
 use vouch::knowledge::load_files;
+use vouch::protocol::Decision;
 use vouch::shell::parse;
 
 #[path = "common/mod.rs"]
@@ -99,4 +100,119 @@ fn a_recognised_command_produces_no_item() {
     let scan = parse("totallymadeupgit pull").unwrap();
     let items = unmodeled_descriptions(&kb, &scan.commands, "bash", true);
     assert!(items.is_empty(), "{items:?}");
+}
+
+fn program_rule_scratch(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "vouch-program-prompt-{tag}-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::canonicalize(dir).unwrap()
+}
+
+fn portable(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn program_rule_cfg(under: &str, names: &[&str]) -> vouch::config::Config {
+    let names = names
+        .iter()
+        .map(|name| format!("\"{name}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    vouch::config::load(&format!(
+        "[lang.bash]\ndefault = \"allow\"\n[lang.bash.constructs]\n\
+         unmodeled_command = \"ask\"\n[[run.trust_program]]\n\
+         under = [\"{under}\"]\nname_patterns = [{names}]\n"
+    ))
+    .unwrap()
+}
+
+fn ask_reason(cfg: &vouch::config::Config, command: &str, cwd: &std::path::Path) -> String {
+    match vouch::engine::decide_command_at(
+        cfg,
+        "bash",
+        command,
+        Some(portable(cwd).as_str()),
+        None,
+        Some(portable(cwd).as_str()),
+    ) {
+        Decision::Ask(reason) => reason,
+        other => panic!("expected program-location miss to ask: {other:?}"),
+    }
+}
+
+#[test]
+fn a_matching_name_with_an_unproven_file_names_the_location_clause() {
+    let root = program_rule_scratch("missing-file");
+    let cfg = program_rule_cfg(&format!("{}/**", portable(&root)), &["probe-*"]);
+    let reason = ask_reason(&cfg, "./probe-missing inspect", &root);
+
+    assert!(reason.contains("[[run.trust_program]] #1"), "{reason}");
+    assert!(reason.contains("`under`"), "{reason}");
+    assert!(reason.contains("does not exist"), "{reason}");
+    assert!(!reason.contains("use the vouch-trust skill"), "{reason}");
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_matching_location_with_the_wrong_name_points_to_name_patterns_not_vouch_trust() {
+    let root = program_rule_scratch("wrong-name");
+    let program = root.join("generated-alpha");
+    std::fs::write(&program, b"fixture").unwrap();
+    let cfg = program_rule_cfg(&format!("{}/**", portable(&root)), &["probe-*"]);
+    let reason = ask_reason(&cfg, &format!("{} inspect", portable(&program)), &root);
+
+    assert!(reason.contains("[[run.trust_program]] #1"), "{reason}");
+    assert!(reason.contains("`name_patterns`"), "{reason}");
+    assert!(reason.contains("generated-alpha"), "{reason}");
+    assert!(!reason.contains("use the vouch-trust skill"), "{reason}");
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_missing_configured_root_is_advisory_and_names_only_its_written_spelling() {
+    let root = program_rule_scratch("missing-root");
+    let program = root.join("probe-alpha");
+    std::fs::write(&program, b"fixture").unwrap();
+    let missing = root.join("not-built");
+    let written = format!("{}/**", portable(&missing));
+    let cfg = program_rule_cfg(&written, &["probe-*"]);
+    let reason = ask_reason(&cfg, &format!("{} inspect", portable(&program)), &root);
+
+    assert!(reason.contains("[[run.trust_program]] #1"), "{reason}");
+    assert!(reason.contains(&written), "{reason}");
+    assert!(reason.contains("inert now"), "{reason}");
+    assert!(!reason.contains("use the vouch-trust skill"), "{reason}");
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_bare_head_matching_a_convention_explains_that_path_is_never_searched() {
+    let root = program_rule_scratch("bare-head");
+    let cfg = program_rule_cfg(&format!("{}/**", portable(&root)), &["probe-*"]);
+    let reason = ask_reason(&cfg, "probe-alpha inspect", &root);
+
+    assert!(reason.contains("[[run.trust_program]] #1"), "{reason}");
+    assert!(reason.contains("PATH"), "{reason}");
+    assert!(reason.contains("`under`"), "{reason}");
+    assert!(!reason.contains("use the vouch-trust skill"), "{reason}");
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn an_unknown_unrelated_to_every_program_rule_keeps_the_ordinary_prompt() {
+    let root = program_rule_scratch("unrelated");
+    let cfg = program_rule_cfg(&format!("{}/**", portable(&root)), &["probe-*"]);
+    let reason = ask_reason(&cfg, "unrelated-tool inspect", &root);
+
+    assert!(!reason.contains("[[run.trust_program]]"), "{reason}");
+    assert!(reason.contains("use the vouch-trust skill"), "{reason}");
+
+    std::fs::remove_dir_all(root).unwrap();
 }

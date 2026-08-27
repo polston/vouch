@@ -23,7 +23,7 @@
       "$ref": "#/$defs/ProtectedSection"
     },
     "run": {
-      "description": "`[run]`: trust/distrust zones and place-scoped guard overrides.",
+      "description": "`[run]`: run-place zones, executable-place program trust, and\nplace-scoped guard overrides.",
       "$ref": "#/$defs/RunSection"
     },
     "shadow": {
@@ -170,6 +170,31 @@
       },
       "additionalProperties": false
     },
+    "ProgramLocationTrust": {
+      "description": "One `[[run.trust_program]]` entry: recognise a path-spelled shell program\nonly when its existing canonical file is under one of `under`'s trees AND\nits logical filename follows one of `name_patterns`' exact/prefix\nconventions. This recognises the whole matching program, not one verb, and\nnever searches PATH. Recognition only; guards and write rules still apply.",
+      "type": "object",
+      "properties": {
+        "name_patterns": {
+          "description": "Logical executable names, either exact or a non-empty literal prefix\nfollowed by one terminal `*`. The platform `.exe` suffix is removed\nbefore matching; path separators and `*` alone are refused.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "under": {
+          "description": "Exact executable paths or executable trees ending in `/**`. `~` and\n`$PROJECT_ROOT` expand at decision time. Unlike every other `under`\nkey, this names where the PROGRAM FILE lives, not where it runs.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "under",
+        "name_patterns"
+      ]
+    },
     "ProtectedSection": {
       "description": "The `[protected]` table: paths no `allow_paths` entry can ever open,\nhowever broadly it is written. Checked before every allow rule, by\nidentity rather than by folder.",
       "type": "object",
@@ -186,7 +211,7 @@
       "additionalProperties": false
     },
     "RunSection": {
-      "description": "The `[run]` table: trust and distrust zones, and place-scoped guard\noverrides.",
+      "description": "The `[run]` table: run-place trust and distrust zones, executable-place\nprogram trust, and place-scoped guard overrides.",
       "type": "object",
       "properties": {
         "guards": {
@@ -216,6 +241,13 @@
           "default": null,
           "items": {
             "type": "string"
+          }
+        },
+        "trust_program": {
+          "description": "Program-location trust rules, written as `[[run.trust_program]]`.\nBoth an existing canonical executable location and a logical filename\nconvention must match; bare names and uncertainty grant nothing.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProgramLocationTrust"
           }
         }
       },

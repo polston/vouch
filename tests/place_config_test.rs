@@ -417,3 +417,97 @@ fn validate_place_scopes_is_wired_into_load_files() {
     assert!(loaded.gaps[0].why.contains("examplecmd"), "the gap must name the offending entry: {:?}", loaded.gaps[0]);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+fn program_doctor_root(tag: &str) -> std::path::PathBuf {
+    let root = std::env::temp_dir().join(format!(
+        "vouch-program-doctor-{tag}-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::canonicalize(root).unwrap()
+}
+
+fn program_doctor_cfg(entries: &[(&str, &str)]) -> config::Config {
+    let text = entries
+        .iter()
+        .map(|(under, name)| {
+            format!(
+                "[[run.trust_program]]\nunder = [\"{under}\"]\n\
+                 name_patterns = [\"{name}\"]\n"
+            )
+        })
+        .collect::<String>();
+    config::load(&text).unwrap()
+}
+
+#[test]
+fn program_location_doctor_reports_missing_roots_as_advisory_inert_now() {
+    let root = program_doctor_root("missing");
+    let written = format!("{}/not-built/**", root.to_string_lossy().replace('\\', "/"));
+    let cfg = program_doctor_cfg(&[(&written, "probe-*")]);
+    let findings = config::program_location_findings(&cfg, "", None);
+
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(findings[0].contains("[[run.trust_program]] #1"), "{:?}", findings[0]);
+    assert!(findings[0].contains(&written), "{:?}", findings[0]);
+    assert!(findings[0].contains("advisory") && findings[0].contains("inert now"));
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn program_location_doctor_reports_an_unexpandable_project_root_without_guessing() {
+    let cfg = program_doctor_cfg(&[("$PROJECT_ROOT/generated/**", "probe-*")]);
+    let findings = config::program_location_findings(&cfg, "", None);
+
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(findings[0].contains("$PROJECT_ROOT/generated/**"), "{:?}", findings[0]);
+    assert!(findings[0].contains("cannot be expanded"), "{:?}", findings[0]);
+    assert!(findings[0].contains("advisory") && findings[0].contains("inert now"));
+}
+
+#[test]
+fn program_location_doctor_reports_zero_counts_without_listing_discovered_names() {
+    let root = program_doctor_root("empty-family");
+    std::fs::write(root.join("unrelated-discovered-name"), b"fixture").unwrap();
+    let written = format!("{}/**", root.to_string_lossy().replace('\\', "/"));
+    let cfg = program_doctor_cfg(&[(&written, "probe-*")]);
+    let findings = config::program_location_findings(&cfg, "", None);
+
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(findings[0].contains("0 regular files"), "{:?}", findings[0]);
+    assert!(findings[0].contains("`under`") && findings[0].contains("`name_patterns`"));
+    assert!(!findings[0].contains("unrelated-discovered-name"), "{:?}", findings[0]);
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn program_location_doctor_is_quiet_for_a_nonempty_unshadowed_family() {
+    let root = program_doctor_root("nonempty");
+    std::fs::write(root.join("probe-alpha"), b"fixture").unwrap();
+    let written = format!("{}/**", root.to_string_lossy().replace('\\', "/"));
+    let cfg = program_doctor_cfg(&[(&written, "probe-*")]);
+    let findings = config::program_location_findings(&cfg, "", None);
+
+    assert!(findings.is_empty(), "{findings:?}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn program_location_doctor_reports_a_later_rule_fully_shadowed_by_an_earlier_one() {
+    let root = program_doctor_root("shadowed");
+    let nested = root.join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    std::fs::write(nested.join("probe-alpha"), b"fixture").unwrap();
+    let outer = format!("{}/**", root.to_string_lossy().replace('\\', "/"));
+    let inner = format!("{}/**", nested.to_string_lossy().replace('\\', "/"));
+    let cfg = program_doctor_cfg(&[(&outer, "probe-*"), (&inner, "probe-alpha")]);
+    let findings = config::program_location_findings(&cfg, "", None);
+
+    let shadow = findings.iter().find(|finding| finding.contains("shadowed")).unwrap();
+    assert!(shadow.contains("#2") && shadow.contains("#1"), "{shadow}");
+    assert!(shadow.contains("`under`") && shadow.contains("`name_patterns`"), "{shadow}");
+
+    std::fs::remove_dir_all(root).unwrap();
+}

@@ -1,6 +1,6 @@
 {
   "name": "vouch",
-  "version": "0.4.1",
+  "version": "0.5.1",
   "description": "An allow-list permission gate for Claude Code and Codex: every observed tool call is judged against declared knowledge, and every prompt names the setting that turns it off.",
   "author": {
     "name": "vouch"

@@ -1852,6 +1852,38 @@ guard = "disk_or_system"
 source = "inferred: never fired in the recorded corpus"
 any_arg_prefix = ["of="]
 
+# vouch is part of its own setup and diagnostic loop. Its query/report verbs
+# read configuration, knowledge, journals, or caller-supplied text and print a
+# result. `install` also only prints a proposed hook document; the operator is
+# the one who chooses whether to save it. Three shapes do mutate files and are
+# described honestly by the in-place-edit guard: `trust`, `review --accept`,
+# and `schema --write`. The guard is unset-by-default ask, so recognising the
+# CLI does not silently allow those writes.
+[[program]]
+match = ["vouch"]
+subcommands = ["explain", "why", "doctor", "review", "import", "install", "schema", "trust"]
+standalone_flags = ["--help", "--version"]
+value_options = ["--accept", "--host", "--shell", "--state-dir"]
+no_value_options = ["--help", "--version", "--write", "--print", "--shadow", "--whole-server", "--all-subcommands", "--hook", "--hook-batch"]
+case_sensitive_flags = true
+
+[[program.rule]]
+guard = "in_place_edit"
+source = "requested: vouch trust updates the operator's knowledge file"
+subcommand_in = ["trust"]
+
+[[program.rule]]
+guard = "in_place_edit"
+source = "requested: vouch review --accept updates the operator's knowledge file"
+subcommand_in = ["review"]
+any_flag = ["--accept"]
+
+[[program.rule]]
+guard = "in_place_edit"
+source = "requested: vouch schema --write regenerates the repository's schema files"
+subcommand_in = ["schema"]
+any_flag = ["--write"]
+
 # ============================================================================
 # DESCRIBED AS READ-ONLY
 #

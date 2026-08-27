@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.5.1 (2026-08-27)
+
+
+### Bug Fixes
+
+* harden and accelerate release closeout
+
+## 0.5.0 (2026-08-26)
+
+
+### Features
+
+* define program-location trust rules
+* explain program-location recognition
+* recognise programs by proven location
+* resolve existing program locations
+
+
+### Bug Fixes
+
+* preserve program-location path identity
+
 ## 0.4.1 (2026-08-26)
 
 

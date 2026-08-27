@@ -310,14 +310,17 @@ What it does, and why each part is the way it is:
    decision per call, with the extra rows counted as their own figure. stdout
    is used only as a cross-check. `abstain` and `stood-down` are their own
    classes, never folded into allow.
-5. **Cost, honestly stated.** The harness counts rows first, calibrates on its
-   own first rows at run time, and prints the real row count and a MEASURED
-   estimate before the bulk run starts — never a hardcoded constant, because
-   the per-call cost depends on how the call is made. It fans out across worker
-   processes (`--workers`, default CPU count), each with its own state
-   directory. `--cap N` truncates the row set AFTER the harvest counters print,
-   so "found" is never understated by the cap; use it for a quick look, and
-   drop it for the real number.
+5. **Cost, honestly stated.** The harness counts rows first, calibrates its
+   first rows through the binary's `--hook-batch` JSONL transport, and prints
+   the real row count and a MEASURED estimate before the bulk run starts. It
+   fans out one persistent batch process per worker (`--workers`, default CPU
+   count), each with its own state directory; config, knowledge, and process
+   startup are loaded once per worker rather than once per recorded call.
+   `--cap N` truncates AFTER the harvest counters print, so "found" is never
+   understated by the cap; use it for a quick look, and drop it for the real
+   number. A binary lacking `--hook-batch` is too old for this shipped harness:
+   update the binary/plugin pair together rather than falling back silently to
+   the process-per-call path this transport replaced.
 6. **Output is counts only**, every figure printed twice — occurrences and
    distinct shapes, both labelled, because deduplication is itself a
    denominator choice and the operator should see both. Decisions by class; ask
@@ -399,10 +402,13 @@ Per accepted change, one at a time:
    working; say so and answer it.
 2. **Prove it with `vouch explain`, both directions.** The thing now allowed
    must allow; a neighbouring thing that must still ask must still ask. Pass
-   `--cwd '<the directory it runs in>'` on both — every place rule is judged
-   against where the command runs, and every run prints a `judged from:` line
-   worth reading. For a recognition entry the neighbour is the same program
-   with a different verb; for a write rule it is a path just outside the tree.
+   `--cwd '<the directory it runs in>'` on both — every run-place rule is
+   judged against where the command runs, relative executable and write paths
+   resolve from there, and every run prints a `judged from:` line worth
+   reading. An absolute executable-place rule is judged by the program file's
+   own canonical location instead. For a recognition entry the neighbour is
+   the same program with a different verb; for a write rule it is a path just
+   outside the tree.
 3. **On anything declined, say in one line that it stays a prompt on purpose**
    — and nothing more. A declined proposal is not a problem to solve.
 

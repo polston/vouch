@@ -101,6 +101,56 @@ fn empty_input_never_breaks_the_session() {
 }
 
 #[test]
+fn batch_hook_reuses_one_process_and_reports_one_counts_only_status_per_input() {
+    let state = std::env::temp_dir().join(format!(
+        "vouch_cli_test_hook_batch_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&state);
+    std::fs::create_dir_all(&state).unwrap();
+    let home = pinned_home();
+    let mut child = Command::new(bin())
+        .arg("--hook-batch")
+        .env("VOUCH_STATE_DIR", &state)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(
+            br#"{"session_id":"batch-0","cwd":"C:/Users/dev","tool_name":"Bash","tool_input":{"command":"ls -la"}}
+not json
+{"hook_event_name":"PostToolUse","tool_use_id":"batch-2","session_id":"batch-2","tool_name":"Bash"}
+"#,
+        )
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let statuses = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(statuses.len(), 3, "one status per input: {statuses:?}");
+    assert_eq!(statuses[0]["status"], "processed");
+    assert_eq!(statuses[0]["emitted"], true);
+    assert_eq!(statuses[1]["status"], "refused");
+    assert_eq!(statuses[1]["emitted"], false);
+    assert_eq!(statuses[2]["status"], "processed");
+    assert_eq!(statuses[2]["emitted"], false);
+
+    let journal = std::fs::read_to_string(state.join("journal.jsonl")).unwrap();
+    assert_eq!(journal.lines().count(), 1, "the refused row must not journal");
+    assert!(state.join("outcomes.jsonl").is_file());
+    let _ = std::fs::remove_dir_all(state);
+}
+
+#[test]
 fn every_tool_gets_a_decision() {
     // This test used to assert the opposite — that vouch stays silent on tools
     // it has no scanner for. That silence was the same "unknown means allowed"
@@ -131,6 +181,56 @@ fn an_unrecognised_tool_asks_and_names_its_setting() {
         out.contains("tools.SomeToolNobodyDescribed"),
         "the prompt must name the setting that turns it off, got: {out}"
     );
+}
+
+#[test]
+fn vouch_recognises_its_read_only_setup_and_diagnostic_operations() {
+    for command in [
+        "vouch --version",
+        "vouch explain 'ls -la'",
+        "vouch why",
+        "vouch doctor",
+        "vouch review",
+        "vouch import candidate.toml",
+        "vouch install --print",
+        "vouch schema config",
+    ] {
+        let input = serde_json::json!({
+            "session_id": "self-read",
+            "cwd": "C:/Users/dev",
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+        });
+        let (ok, out) = run_hook(&input.to_string(), &[]);
+        assert!(ok, "vouch rejected its own hook input for {command:?}");
+        assert!(
+            out.contains("\"allow\""),
+            "read-only vouch operation {command:?} did not allow: {out}"
+        );
+    }
+}
+
+#[test]
+fn vouch_recognises_but_asks_on_its_file_mutating_operations() {
+    for command in [
+        "vouch trust newcli get",
+        "vouch review --accept candidate",
+        "vouch schema config --write",
+    ] {
+        let input = serde_json::json!({
+            "session_id": "self-write",
+            "cwd": "C:/Users/dev",
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+        });
+        let (ok, out) = run_hook(&input.to_string(), &[]);
+        assert!(ok, "vouch rejected its own hook input for {command:?}");
+        assert!(out.contains("\"ask\""), "mutating vouch operation allowed: {out}");
+        assert!(
+            out.contains("in_place_edit"),
+            "mutating vouch operation did not name its effect setting: {out}"
+        );
+    }
 }
 
 // --- reason wording: a tool can ask for three different reasons, and the ---
@@ -603,6 +703,159 @@ fn explain_names_the_setting() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("dynamic_command"), "got: {text}");
     assert!(text.contains("lang.bash.constructs"), "got: {text}");
+}
+
+fn program_location_cli_fixture(
+    tag: &str,
+) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+    let base = std::env::temp_dir().join(format!(
+        "vouch-cli-program-location-{tag}-{}",
+        std::process::id()
+    ));
+    let root = base.join("trusted");
+    let outside = base.join("outside");
+    let bin_dir = root.join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let base = std::fs::canonicalize(base).unwrap();
+    let root = base.join("trusted");
+    let outside = base.join("outside");
+    std::fs::write(root.join("bin/probe-alpha"), b"fixture").unwrap();
+    let config = base.join("config.toml");
+    let root_text = root.to_string_lossy().replace('\\', "/");
+    std::fs::write(
+        &config,
+        format!(
+            "[lang.bash]\ndefault = \"allow\"\n[lang.bash.constructs]\n\
+             unmodeled_command = \"ask\"\n[[run.trust_program]]\n\
+             under = [\"{root_text}/**\"]\nname_patterns = [\"probe-*\"]\n"
+        ),
+    )
+    .unwrap();
+    (base, outside, config)
+}
+
+#[test]
+fn explain_cwd_changes_program_location_recognition_in_both_directions() {
+    let home = pinned_home();
+    let (base, outside, config) = program_location_cli_fixture("explain-cwd");
+    let root = base.join("trusted");
+    let state = base.join("state");
+
+    let run = |cwd: &std::path::Path| {
+        Command::new(bin())
+            .args(["explain", "--cwd"])
+            .arg(cwd)
+            .arg("./bin/probe-alpha inspect")
+            .env("VOUCH_CONFIG", &config)
+            .env("VOUCH_STATE_DIR", &state)
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .output()
+            .unwrap()
+    };
+    let inside = run(&root);
+    let outside_result = run(&outside);
+    let inside_text = String::from_utf8_lossy(&inside.stdout);
+    let outside_text = String::from_utf8_lossy(&outside_result.stdout);
+
+    assert!(inside.status.success(), "{}", String::from_utf8_lossy(&inside.stderr));
+    assert!(inside_text.contains("ALLOW"), "{inside_text}");
+    assert!(inside_text.contains("[[run.trust_program]] #1"), "{inside_text}");
+    assert!(outside_result.status.success(), "{}", String::from_utf8_lossy(&outside_result.stderr));
+    assert!(outside_text.contains("ASK"), "{outside_text}");
+    assert!(outside_text.contains("`under`"), "{outside_text}");
+
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn explain_without_cwd_does_not_borrow_a_different_directory_for_a_relative_head() {
+    let home = pinned_home();
+    let (base, outside, config) = program_location_cli_fixture("explain-implicit-cwd");
+    let out = Command::new(bin())
+        .args(["explain", "./bin/probe-alpha inspect"])
+        .current_dir(&outside)
+        .env("VOUCH_CONFIG", &config)
+        .env("VOUCH_STATE_DIR", base.join("state"))
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(text.contains("ASK"), "{text}");
+    assert!(text.contains("does not exist"), "{text}");
+
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn why_replays_program_location_recognition_from_the_recorded_directory() {
+    let home = pinned_home();
+    let (base, _outside, config) = program_location_cli_fixture("why-replay");
+    let root = base.join("trusted");
+    let state = base.join("state");
+    let rec = vouch::journal::Record {
+        id: "program-location-row".into(),
+        ts: vouch::journal::now_epoch_secs(),
+        session: "fixture-session".into(),
+        tool: "Bash".into(),
+        cmd: "./bin/probe-alpha inspect".into(),
+        verdict: "ask".into(),
+        reason: "fixture prior decision".into(),
+        mode: "live".into(),
+        cwd: root.to_string_lossy().replace('\\', "/"),
+        outcome: vouch::outcome::Outcome::Pending,
+        lang: "bash".into(),
+        permission_mode: String::new(),
+        host: "claude".into(),
+    };
+    vouch::journal::append(&state, &rec).unwrap();
+
+    let out = Command::new(bin())
+        .arg("why")
+        .env("VOUCH_CONFIG", &config)
+        .env("VOUCH_STATE_DIR", &state)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(text.contains("fixture prior decision"), "{text}");
+    assert!(text.contains("re-decided now"), "{text}");
+    assert!(text.contains("ALLOW"), "{text}");
+    assert!(text.contains("[[run.trust_program]] #1"), "{text}");
+
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn doctor_reports_an_inert_program_family_before_any_decision_exists() {
+    let home = pinned_home();
+    let (base, _outside, config) = program_location_cli_fixture("doctor-fresh");
+    std::fs::remove_file(base.join("trusted/bin/probe-alpha")).unwrap();
+    let state = base.join("fresh-state");
+
+    let out = Command::new(bin())
+        .arg("doctor")
+        .env("VOUCH_CONFIG", &config)
+        .env("VOUCH_STATE_DIR", &state)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(text.contains("program-location rules needing attention"), "{text}");
+    assert!(text.contains("0 regular files"), "{text}");
+    assert!(text.contains("no decisions recorded yet"), "{text}");
+
+    std::fs::remove_dir_all(base).unwrap();
 }
 
 /// Task 12: `explain` now always announces where it judged from, so the

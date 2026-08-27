@@ -360,6 +360,154 @@ pub fn resolve_links(p: &str) -> String {
     p.to_string()
 }
 
+/// Why a path could not become existing-only evidence for a recognition
+/// grant. No variant carries the local path itself: the caller already has
+/// the written spelling for an interactive explanation, while tests and
+/// measurements can classify the cause without copying machine paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExistingPathError {
+    /// `$PROJECT_ROOT` was written but this decision has no project root.
+    CannotExpandPattern,
+    /// The complete path does not exist (a broken link counts as missing).
+    Missing,
+    /// The complete path exists but is not a regular file.
+    NotRegularFile,
+    /// A tree pattern's root exists but is not a directory.
+    NotDirectory,
+    /// The operating system refused canonicalization for another reason.
+    CannotCanonicalize,
+}
+
+impl ExistingPathError {
+    /// Stable wording for a configured location that is inert in the current
+    /// filesystem/context. Both doctor and decision prompts use this so the
+    /// same typed failure cannot acquire two explanations.
+    pub fn current_state_words(self) -> &'static str {
+        match self {
+            Self::CannotExpandPattern => "cannot be expanded in this context",
+            Self::Missing => "does not exist",
+            Self::NotRegularFile => "is not a regular file",
+            Self::NotDirectory => "is not a directory",
+            Self::CannotCanonicalize => "cannot be canonicalized",
+        }
+    }
+}
+
+/// One configured executable location after expansion and existing-only
+/// canonicalization. `tree` distinguishes an exact file from a trailing
+/// `/**` tree without reconstructing the operator's grammar later.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalPattern {
+    pub root: String,
+    pub tree: bool,
+}
+
+impl CanonicalPattern {
+    /// Whether a canonical existing file is exactly this configured file or
+    /// inside this configured tree. Both sides are already canonical; the
+    /// shared matcher supplies platform path equality and root containment.
+    pub fn matches(&self, canonical_file: &str) -> bool {
+        if self.tree {
+            glob_match(&format!("{}/**", self.root.trim_end_matches('/')), canonical_file)
+        } else {
+            paths_eq(&self.root, canonical_file)
+        }
+    }
+}
+
+fn canonical_text(path: &std::path::Path) -> String {
+    let mut text = path.to_string_lossy().replace('\\', "/");
+    if let Some(stripped) = text.strip_prefix("//?/") {
+        text = stripped.to_string();
+    }
+    normalize(&text, "")
+}
+
+/// Logical executable name derived from a canonical file path. Windows drops
+/// its platform executable suffix; other platforms treat `.exe` literally.
+pub fn logical_program_name(canonical_file: &str) -> String {
+    let mut name = canonical_file
+        .replace('\\', "/")
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .to_string();
+    if cfg!(windows) && name.to_ascii_lowercase().ends_with(".exe") {
+        name.truncate(name.len() - 4);
+    }
+    name
+}
+
+fn canonicalize_complete(path: &str) -> Result<std::path::PathBuf, ExistingPathError> {
+    std::fs::canonicalize(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            ExistingPathError::Missing
+        } else {
+            ExistingPathError::CannotCanonicalize
+        }
+    })
+}
+
+/// Canonicalize the COMPLETE path and require an existing regular file.
+///
+/// This is deliberately not `resolve_links`: that sibling canonicalizes the
+/// deepest existing ancestor and appends a missing tail because writes may
+/// create their leaf. Recognition must never manufacture proof for a program
+/// file that is not there now.
+pub fn canonical_existing_file(path: &str) -> Result<String, ExistingPathError> {
+    let canonical = canonicalize_complete(path)?;
+    let metadata = std::fs::metadata(&canonical).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            ExistingPathError::Missing
+        } else {
+            ExistingPathError::CannotCanonicalize
+        }
+    })?;
+    if !metadata.is_file() {
+        return Err(ExistingPathError::NotRegularFile);
+    }
+    Ok(canonical_text(&canonical))
+}
+
+/// Expand and canonicalize an exact executable path or trailing-`/**` tree
+/// root. A missing build tree is an inert grant for this decision, not a load
+/// error; the typed failure is also what doctor reports.
+pub fn canonical_existing_pattern_root(
+    pattern: &str,
+    home: &str,
+    project_root: Option<&str>,
+) -> Result<CanonicalPattern, ExistingPathError> {
+    let expanded = expand_pattern(pattern, home, project_root)
+        .ok_or(ExistingPathError::CannotExpandPattern)?;
+    let tree = expanded.ends_with("/**");
+    let mut root = expanded.strip_suffix("/**").unwrap_or(&expanded).to_string();
+    if tree && root.is_empty() {
+        root.push('/');
+    } else if tree
+        && root.len() == 2
+        && root.as_bytes()[0].is_ascii_alphabetic()
+        && root.as_bytes()[1] == b':'
+    {
+        root.push('/');
+    }
+    let canonical = canonicalize_complete(&root)?;
+    let metadata = std::fs::metadata(&canonical).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            ExistingPathError::Missing
+        } else {
+            ExistingPathError::CannotCanonicalize
+        }
+    })?;
+    if tree {
+        if !metadata.is_dir() {
+            return Err(ExistingPathError::NotDirectory);
+        }
+    } else if !metadata.is_file() {
+        return Err(ExistingPathError::NotRegularFile);
+    }
+    Ok(CanonicalPattern { root: canonical_text(&canonical), tree })
+}
+
 /// Path equality follows the platform: NTFS and APFS are case-preserving
 /// but case-insensitive by default, so two case-spellings name one tree
 /// there; ext4 is exact. A restriction missed by a case variant fails

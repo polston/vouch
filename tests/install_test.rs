@@ -320,6 +320,18 @@ fn codex_hook_requires_the_same_explicit_shell_adapter() {
 }
 
 #[test]
+fn hook_batch_is_explicit_and_mutually_exclusive_with_the_native_hook() {
+    let batch = vec!["--hook-batch".to_string()];
+    assert!(parse_hook_options(&batch).unwrap().batch);
+
+    let both = vec!["--hook".to_string(), "--hook-batch".to_string()];
+    assert!(parse_hook_options(&both).is_err());
+
+    let neither = Vec::new();
+    assert!(parse_hook_options(&neither).is_err());
+}
+
+#[test]
 fn codex_state_dir_is_absolute_and_reaches_both_parsers() {
     let install = vec![
         "--host".to_string(),

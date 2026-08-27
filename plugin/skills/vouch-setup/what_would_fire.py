@@ -16,7 +16,9 @@ as the code spells them:
   src/protocol.rs `HookInput` (no serde renames): `hook_event_name`,
   `tool_use_id`, `session_id`, `cwd`, `permission_mode`, `tool_name`,
   `tool_input`. `tool_input` itself carries `command`, `file_path`, `url`
-  and keeps every other key. `--hook` reads ONE JSON object on stdin.
+  and keeps every other key. `--hook` reads ONE JSON object on stdin;
+  `--hook-batch` reads one object per line and emits only index/status/emitted
+  JSONL, while applying the same decision and journal path to every object.
 
   src/journal.rs `Record`: `id`, `ts`, `session`, `tool`, `cmd`, `verdict`,
   `reason`, `mode`, `cwd`, `outcome`, `lang`, `permission_mode`. The row's
@@ -26,8 +28,8 @@ as the code spells them:
   is itself harvested text and must die with the run.
 
 Two journal facts the join is built around, both from src/main.rs:
-  - a call whose input the binary cannot parse exits 0 having written NO
-    journal row (`parse_input` error -> exit 0, before any journalling)
+  - a batch row whose input the binary cannot parse reports `refused` and
+    writes NO journal row (`parse_input` error, before any journalling)
   - a snippet-bearing call writes ONE ROW PER SNIPPET, all carrying the same
     decision, so the join is many-to-one and reconciled by count
 """
@@ -435,6 +437,42 @@ def run_call(binary, payload, env, timeout=60):
     return (r.returncode, r.stdout, r.stderr)
 
 
+def run_batch(binary, payloads, env, timeout=60):
+    """Replay many calls in one process; return (rc, status rows).
+
+    The batch protocol emits counts-only JSONL: local index, processed/refused,
+    and whether the native hook path would have emitted output. It never echoes
+    a payload or decision reason into this process's stdout.
+    """
+    body = b"\n".join(json.dumps(p).encode("utf-8") for p in payloads) + b"\n"
+    try:
+        r = subprocess.run(
+            [binary, "--hook-batch"],
+            input=body,
+            capture_output=True,
+            env=env,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return (None, None)
+    if r.returncode != 0:
+        return (r.returncode, None)
+    try:
+        statuses = [json.loads(line) for line in r.stdout.splitlines() if line.strip()]
+    except Exception:
+        return (r.returncode, None)
+    if len(statuses) != len(payloads):
+        return (r.returncode, None)
+    for index, status in enumerate(statuses):
+        if (
+            status.get("index") != index
+            or status.get("status") not in ("processed", "refused")
+            or not isinstance(status.get("emitted"), bool)
+        ):
+            return (r.returncode, None)
+    return (r.returncode, statuses)
+
+
 def read_journal(state_dir):
     p = os.path.join(state_dir, "journal.jsonl")
     rows = []
@@ -581,11 +619,12 @@ def sentinel(args, scratch):
 # -------------------------------------------------------------------- replay
 
 
-def _run_chunk(args, chunk, state_dir, fallback_cwd):
-    """Replay one partition serially into its OWN state dir.
+def _run_chunk(args, chunk, state_dir, fallback_cwd, timeout=60):
+    """Replay one partition in one process into its OWN state dir.
 
-    Each worker gets its own VOUCH_STATE_DIR because concurrent appends to
-    one journal interleave.
+    Each worker gets one long-lived batch process and its own VOUCH_STATE_DIR
+    because concurrent appends to one journal interleave. Process/config load
+    overhead is therefore paid once per partition, not once per row.
 
     Returns the stdout tally AND the indices of calls where the BINARY
     failed - timed out, or exited nonzero. Those indices must not be dropped:
@@ -598,16 +637,16 @@ def _run_chunk(args, chunk, state_dir, fallback_cwd):
     env = candidate_env(args, args.config, state_dir)
     tally = {"empty": 0, "nonempty": 0, "timeout": 0, "nonzero_exit": 0}
     failures = {}
-    for idx, row in chunk:
-        rc, out, _err = run_call(args.binary, hook_json(row, idx, fallback_cwd), env)
-        if rc is None:
-            tally["timeout"] += 1
-            failures[idx] = "binary-timeout"
-            continue
-        if rc != 0:
-            tally["nonzero_exit"] += 1
-            failures[idx] = "binary-error"
-        if out.strip():
+    payloads = [hook_json(row, idx, fallback_cwd) for idx, row in chunk]
+    rc, statuses = run_batch(args.binary, payloads, env, timeout=timeout)
+    if rc is None:
+        tally["timeout"] = len(chunk)
+        return tally, {idx: "binary-timeout" for idx, _row in chunk}
+    if rc != 0 or statuses is None:
+        tally["nonzero_exit"] = len(chunk)
+        return tally, {idx: "binary-error" for idx, _row in chunk}
+    for (idx, _row), status in zip(chunk, statuses):
+        if status["emitted"]:
             tally["nonempty"] += 1
         else:
             tally["empty"] += 1
@@ -615,12 +654,12 @@ def _run_chunk(args, chunk, state_dir, fallback_cwd):
 
 
 def replay(rows, args, scratch, fallback_cwd):
-    """Calibrate, fan out, then join the journal rows this run caused.
+    """Calibrate, fan out persistent workers, then join this run's rows.
 
     Calibration is MEASURED, never a constant: the first rows are replayed
-    serially and timed, and the printed estimate comes from that measurement
-    divided across the workers. Those rows are real replays - every row is
-    replayed exactly once.
+    in one batch and timed, and the printed estimate comes from that measured
+    batch transport divided across the workers. Those rows are real replays -
+    every row is replayed exactly once.
 
     The join is by `session` (journal) against `session_id` (input):
       - MANY rows per session are possible, one per snippet: collapsed to one
@@ -668,6 +707,13 @@ def replay(rows, args, scratch, fallback_cwd):
     if rest:
         chunks = [rest[i::workers] for i in range(workers)]
         chunks = [c for c in chunks if c]
+        # A stuck batch must not hang forever, while normal large corpora need
+        # more than the sentinel's fixed minute. Ten measured runtimes plus a
+        # minute floor leaves generous headroom without restoring per-row waits.
+        batch_timeout = max(
+            60,
+            int(max(len(chunk) for chunk in chunks) * ms / 1000.0 * 10) + 1,
+        )
         sys.stderr.write("replaying %d rows...\n" % len(rest))
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(chunks)) as ex:
             futs = [
@@ -677,6 +723,7 @@ def replay(rows, args, scratch, fallback_cwd):
                     c,
                     os.path.join(state_root, "w-%d" % i),
                     fallback_cwd,
+                    batch_timeout,
                 )
                 for i, c in enumerate(chunks)
             ]

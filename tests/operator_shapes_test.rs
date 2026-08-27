@@ -1,13 +1,12 @@
-//! The operator-side knowledge shapes, and why a corpus measurement cannot see
-//! them (#8, ROADMAP M2.144).
+//! Operator-side knowledge shapes, and why one shipped verb-scoped entry does
+//! not make a corpus measurement representative of an operator's vocabulary
+//! (#8, ROADMAP M2.144).
 //!
 //! `.cargo/config.toml` pins every test and every `examples/` measurement to
 //! THIS repository's `knowledge.toml`. That is exactly right for
-//! reproducibility, and it makes one class of question unaskable: the shipped
-//! file uses none of the keys an operator's own file routinely uses, so a count
-//! of a shape that depends on them comes back 0 out of 0 candidates. A zero out
-//! of zero and a zero out of many are different findings, and only one of them
-//! means "this does not happen".
+//! reproducibility, but one deliberately scoped shipped CLI is not the varied
+//! operator vocabulary a measurement is trying to model. Candidate counts are
+//! still mandatory: one candidate and many are different findings.
 //!
 //! These tests pin both halves — that the shipped file really is blind, and
 //! that the committed fixture really does exercise what it claims — so a later
@@ -20,12 +19,11 @@ fn fixture() -> String {
         .expect("the operator fixture is committed")
 }
 
-/// The fact that makes the measurement blind. If this ever fails because the
-/// shipped file gained a `subcommands` entry, that is good news and this test
-/// is the place to find out — but the fixture's reason for existing changes,
-/// and so does anything that cites this count.
+/// The shipped set has one deliberate verb-scoped exception: vouch itself.
+/// `all_subcommands` remains operator-only, and the fixture remains the broad,
+/// invented vocabulary used to exercise both shapes.
 #[test]
-fn the_shipped_knowledge_uses_none_of_the_operator_side_recognition_keys() {
+fn the_shipped_knowledge_scopes_only_vouch_and_never_uses_all_subcommands() {
     let kb = common::shipped_kb();
     let names_where = |pred: fn(&vouch::guards::Program) -> bool| -> Vec<&str> {
         kb.program
@@ -37,11 +35,7 @@ fn the_shipped_knowledge_uses_none_of_the_operator_side_recognition_keys() {
     };
 
     let scoped = names_where(|p| p.subcommands.is_some());
-    assert!(
-        scoped.is_empty(),
-        "shipped entries now use `subcommands`, so measurements over the \
-         shipped file are no longer structurally blind to verb scoping: {scoped:?}"
-    );
+    assert_eq!(scoped, ["vouch"], "unexpected shipped verb scopes: {scoped:?}");
 
     let widened = names_where(|p| p.all_subcommands);
     assert!(
@@ -50,8 +44,8 @@ fn the_shipped_knowledge_uses_none_of_the_operator_side_recognition_keys() {
     );
 }
 
-/// And the fixture is not blind. Every key the test above proves absent from
-/// the shipped file is present here, or the fixture is not doing its job.
+/// The fixture carries both recognition shapes and keyed rules, rather than
+/// treating vouch's one entry as representative operator evidence.
 #[test]
 fn the_operator_fixture_exercises_the_keys_the_shipped_file_never_does() {
     let kb = common::kb_with(&fixture());

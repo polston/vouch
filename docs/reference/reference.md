@@ -17,7 +17,7 @@ setting must never become permission.
 | `guards` | map of string to Action | (none) | What commands DO, written as `[guards]`. Shared across every language: a guard fires the same way whichever scanner recognised the command that tripped it. Every key must be one of vouch's known guard names (`delete_recursive`, `grant_execute`, `history_rewrite`, `publish_outward`, `process_control`, `privilege_escalation`, `disk_or_system`, `in_place_edit`, `remote_execution`); an unset guard always resolves to `ask`. |
 | `lang` | map of string to LangConfig | (none) | Every language section, written as `[lang.<name>]` — `bash`, `powershell`, and `python` ship with vouch. One map, so a new scanner needs no new key here. |
 | `protected` | ProtectedSection | (none) | `[protected]`: paths no `allow_paths` entry can ever open. |
-| `run` | RunSection | (none) | `[run]`: trust/distrust zones and place-scoped guard overrides. |
+| `run` | RunSection | (none) | `[run]`: run-place zones, executable-place program trust, and place-scoped guard overrides. |
 | `shadow` | ShadowSection (optional) | (none) | `[shadow]`: mode-keyed shadow (design 2026-08-16). |
 | `tools` | map of string to Action | (none) | Per-tool actions, written as `[tools]`. vouch used to say NOTHING about any tool it had no scanner for — 46.5% of recorded tool calls — which is the same "unknown means allowed" inversion as unmodelled programs, one level up. Naming a FIRST tool here makes this section govern every tool, not only the one named; see `Config::tool_decision`. |
 | `version` | integer (optional) | (unset) | Accepted as a top-level key but not yet consumed; reserved for future versioning of the config format. |
@@ -67,6 +67,19 @@ Settings for one language: `[lang.bash]`, `[lang.powershell]`,
 | `default` | Action | (none) | Verdict when nothing this language's scanner recognised objected. Never applies to a construct — an unset construct always resolves to `ask`, whatever this says. |
 | `wrap_depth` | integer (optional) | (unset) | How many layers of wrapper nesting are scanned before a deeper nest trips `wrap_depth_exceeded` and asks. `None` means the operator has not set it, so the built-in cap (4) applies. Read by the engine's wrapper walk, not by this file. |
 
+### `ProgramLocationTrust`
+
+One `[[run.trust_program]]` entry: recognise a path-spelled shell program
+only when its existing canonical file is under one of `under`'s trees AND
+its logical filename follows one of `name_patterns`' exact/prefix
+conventions. This recognises the whole matching program, not one verb, and
+never searches PATH. Recognition only; guards and write rules still apply.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `name_patterns` | array of string | (required) | Logical executable names, either exact or a non-empty literal prefix followed by one terminal `*`. The platform `.exe` suffix is removed before matching; path separators and `*` alone are refused. |
+| `under` | array of string | (required) | Exact executable paths or executable trees ending in `/**`. `~` and `$PROJECT_ROOT` expand at decision time. Unlike every other `under` key, this names where the PROGRAM FILE lives, not where it runs. |
+
 ### `ProtectedSection`
 
 The `[protected]` table: paths no `allow_paths` entry can ever open,
@@ -79,14 +92,15 @@ identity rather than by folder.
 
 ### `RunSection`
 
-The `[run]` table: trust and distrust zones, and place-scoped guard
-overrides.
+The `[run]` table: run-place trust and distrust zones, executable-place
+program trust, and place-scoped guard overrides.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `guards` | array of GuardOverride | (none) | Place-scoped guard overrides, written as `[[run.guards]]`. |
 | `trust_all_under` | array of string (optional) | (unset) | Trust zone: any command run from under one of these trees is recognised, whatever it is — recognition only, guards and write rules still apply. `None` means absent (fine); a written empty list is refused at load, since it can never apply. |
 | `trust_nothing_under` | array of string (optional) | (unset) | Distrust zone: no command run from under one of these trees is recognised, whatever it is — even a program a knowledge entry describes. Refused when written empty, same as the grants above: a written empty list can only be a mistake. |
+| `trust_program` | array of ProgramLocationTrust | (none) | Program-location trust rules, written as `[[run.trust_program]]`. Both an existing canonical executable location and a logical filename convention must match; bare names and uncertainty grant nothing. |
 
 ### `ShadowSection`
 
