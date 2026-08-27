@@ -16,6 +16,10 @@ pub struct Cmd {
     /// scanner could not resolve. This is out of band because a literal
     /// argument may legally equal any marker spelling.
     pub unread_args: std::collections::HashSet<usize>,
+    /// Argument positions emitted from named/keyword syntax rather than
+    /// positional syntax. Out of band because a positional string may
+    /// legally contain the identical `name=value` text.
+    pub keyword_args: std::collections::HashSet<usize>,
     /// This command's position in an `&&`/`||` and-or chain, `None` when it
     /// is not part of one — a plain `;`/newline-separated statement, or the
     /// sole member of a trivial one-pipeline "chain" with no `&&`/`||` link
@@ -314,6 +318,7 @@ impl Scan {
             head,
             args,
             unread_args: Default::default(),
+            keyword_args: Default::default(),
             chain,
             prefix_assigns,
             receiver_origin: ValueOrigin::Unknown,

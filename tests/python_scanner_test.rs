@@ -1,5 +1,5 @@
 use vouch::python::parse;
-use vouch::syntax::{CallArguments, ValueOrigin};
+use vouch::syntax::{CallArguments, Order, ValueOrigin};
 
 mod common;
 
@@ -19,6 +19,62 @@ fn the_per_command_arrays_stay_parallel_to_commands() {
         let p = parse(src).expect("scans");
         assert_eq!(p.input_source.len(), p.commands.len(), "input_source: {src}");
         assert_eq!(p.args_complete.len(), p.commands.len(), "args_complete: {src}");
+    }
+}
+
+fn order_of(scan: &vouch::syntax::Scan, head: &str) -> Order {
+    let index = scan
+        .commands
+        .iter()
+        .position(|command| command.head == head)
+        .unwrap_or_else(|| panic!("missing {head}: {:?}", scan.commands));
+    scan.order[index].clone()
+}
+
+#[test]
+fn linear_python_call_order_follows_evaluation_not_emission_traversal() {
+    let scan = parse("first(); outer(inner()); last()").unwrap();
+    assert_eq!(order_of(&scan, "python:first"), Order::Seq(0));
+    assert_eq!(order_of(&scan, "python:inner"), Order::Seq(1));
+    assert_eq!(order_of(&scan, "python:outer"), Order::Seq(2));
+    assert_eq!(order_of(&scan, "python:last"), Order::Seq(3));
+}
+
+#[test]
+fn conditional_and_loop_bodies_are_unordered_but_their_entry_expressions_are_linear() {
+    let conditional = parse("before()\nif test():\n    branch()\nafter()").unwrap();
+    assert_eq!(order_of(&conditional, "python:before"), Order::Seq(0));
+    assert_eq!(order_of(&conditional, "python:test"), Order::Seq(1));
+    assert_eq!(order_of(&conditional, "python:branch"), Order::Unordered);
+    assert_eq!(order_of(&conditional, "python:after"), Order::Seq(2));
+
+    let looped = parse("for item in source():\n    body()\nafter()").unwrap();
+    assert_eq!(order_of(&looped, "python:source"), Order::Seq(0));
+    assert_eq!(order_of(&looped, "python:body"), Order::Unordered);
+    assert_eq!(order_of(&looped, "python:after"), Order::Seq(1));
+}
+
+#[test]
+fn deferred_exceptional_and_comprehension_calls_are_unordered() {
+    for (source, unordered) in [
+        ("def later():\n    deferred()\nafter()", "python:deferred"),
+        (
+            "from __future__ import annotations\nvalue: deferred()\nafter()",
+            "python:deferred",
+        ),
+        ("first() < second() < deferred()\nafter()", "python:deferred"),
+        (
+            "try:\n    attempted()\nexcept Exception:\n    handled()\nafter()",
+            "python:attempted",
+        ),
+        ("[mapped(item) for item in items]\nafter()", "python:mapped"),
+    ] {
+        let scan = parse(source).unwrap();
+        assert_eq!(order_of(&scan, unordered), Order::Unordered, "{source}");
+        assert!(
+            matches!(order_of(&scan, "python:after"), Order::Seq(_)),
+            "{source}"
+        );
     }
 }
 
@@ -278,6 +334,15 @@ fn keyword_arguments_carry_their_name() {
     let s = parse(r#"open(file="x", mode="w")"#).unwrap();
     let c = s.commands.iter().find(|c| c.head == "python:open").unwrap();
     assert_eq!(c.args, vec!["file=x", "mode=w"]);
+    assert_eq!(c.keyword_args, std::collections::HashSet::from([0, 1]));
+
+    let positional = parse(r#"open("file=x")"#).unwrap();
+    let c = positional
+        .commands
+        .iter()
+        .find(|c| c.head == "python:open")
+        .unwrap();
+    assert!(c.keyword_args.is_empty());
 }
 
 #[test]

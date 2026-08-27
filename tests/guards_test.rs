@@ -555,6 +555,7 @@ fn cmd(head: &str, args: &[&str]) -> vouch::syntax::Cmd {
         head: head.into(),
         args: args.iter().map(|s| s.to_string()).collect(),
         unread_args: Default::default(),
+        keyword_args: Default::default(),
         chain: None,
         prefix_assigns: vec![],
         receiver_origin: vouch::syntax::ValueOrigin::Unknown,
@@ -995,6 +996,69 @@ fn py_written(kb: &vouch::guards::Knowledge, src: &str) -> vouch::guards::WriteT
     vouch::guards::written_paths(kb, &py_cmd(src))
 }
 
+fn effective_open_args(src: &str) -> vouch::guards::EffectiveArgs {
+    let kb = open_kb();
+    vouch::guards::effective_args(&kb.program[0], &py_cmd(src))
+}
+
+#[test]
+fn effective_python_arguments_preserve_keyword_positions_and_readability() {
+    let positional = effective_open_args(r#"open("C:/t/x", "w")"#);
+    assert_eq!(positional.values, vec!["C:/t/x", "w"]);
+    assert!(positional.unread.is_empty());
+    assert!(positional.padding.is_empty());
+
+    let equals_literal = effective_open_args(r#"open("file=C:/t/x")"#);
+    assert_eq!(equals_literal.values, vec!["file=C:/t/x"]);
+    assert!(equals_literal.unread.is_empty());
+    assert!(equals_literal.padding.is_empty());
+
+    let keyword = effective_open_args(r#"open(mode="w", file=value)"#);
+    assert_eq!(keyword.values, vec!["$value", "w"]);
+    assert_eq!(keyword.unread, std::collections::HashSet::from([0]));
+    assert!(keyword.padding.is_empty());
+}
+
+#[test]
+fn effective_python_arguments_distinguish_padding_and_literal_marker_text() {
+    let padded = effective_open_args(r#"open(mode="w")"#);
+    assert_eq!(padded.padding, std::collections::HashSet::from([0]));
+    assert!(padded.unread.is_empty());
+
+    let literal = effective_open_args(r#"open(file="$?", mode="w")"#);
+    assert_eq!(literal.values, vec!["$?", "w"]);
+    assert!(
+        literal.unread.is_empty(),
+        "literal marker text is still readable"
+    );
+    assert!(literal.padding.is_empty());
+}
+
+#[test]
+fn callback_and_unpack_detection_use_structural_argument_metadata() {
+    let kb = vouch::guards::load(
+        r#"
+[[program]]
+match = ["python:open"]
+arg_names = ["file", "mode", "buffering", "encoding", "errors", "newline", "closefd", "opener"]
+callback_args = ["opener"]
+"#,
+    )
+    .expect("parses");
+    assert!(!vouch::guards::callback_argument_used(
+        &kb,
+        &py_cmd(r#"open("opener=value")"#)
+    ));
+    assert!(!vouch::guards::callback_argument_used(
+        &kb,
+        &py_cmd(r#"open("$**")"#)
+    ));
+    assert!(vouch::guards::callback_argument_used(
+        &kb,
+        &py_cmd(r#"open("x", opener=value)"#)
+    ));
+}
+
 #[test]
 fn a_positional_write_mode_applies_the_write_claim() {
     let t = py_written(&open_kb(), r#"open("C:/t/x", "w")"#);
@@ -1087,14 +1151,17 @@ writes = "arg_0"
     .expect("parses");
     let t = py_written(&kb, r#"open(file="C:/t/x")"#);
     assert_eq!(t.paths, vec!["$?".to_string()], "got {t:?}");
+
+    let literal = py_written(&kb, r#"open("file=C:/t/x")"#);
+    assert_eq!(literal.paths, vec!["file=C:/t/x".to_string()], "got {literal:?}");
 }
 
 #[test]
 fn a_positional_path_containing_equals_is_not_mistaken_for_a_keyword() {
     // "a=b.txt" is a plain positional literal that happens to contain a
-    // literal `=` — it is not a keyword, because the unambiguous positional
-    // "w" comes after it in the same call, and the scanner never emits a
-    // real positional after a keyword-derived token. Region review, I1.
+    // literal `=`. The scanner's structural keyword-position set, not the
+    // token text or a neighbouring positional, proves which syntax produced
+    // it.
     let t = py_written(&open_kb(), r#"open("C:/t/a=b.txt", "w")"#);
     assert_eq!(t.paths, vec!["C:/t/a=b.txt".to_string()], "got {t:?}");
 }
@@ -1125,6 +1192,99 @@ fn wrap_srcs(kb: &vouch::guards::Knowledge, c: &vouch::syntax::Cmd) -> Vec<(Stri
         &|_| 4,
     )
     .srcs
+}
+
+fn expand_bash_source(src: &str) -> vouch::guards::ExpandedWrappers {
+    let scan = vouch::shell::parse(src).expect("bash parses");
+    vouch::guards::expand_wrappers_with_sources(
+        builtin(),
+        &scan.commands,
+        &scan.heredocs,
+        &scan.input_source,
+        &scan.args_complete,
+        "bash",
+        &|_| 4,
+    )
+}
+
+#[test]
+fn parsed_python_snippets_keep_one_child_scope_and_their_local_order() {
+    let expanded = expand_bash_source(r#"python -c "first(); second()""#);
+    assert_eq!(expanded.execution_sites.len(), expanded.cmds.len());
+    assert_eq!(expanded.scope_parents, vec![0]);
+
+    let first = expanded
+        .cmds
+        .iter()
+        .position(|command| command.head == "python:first")
+        .unwrap();
+    let second = expanded
+        .cmds
+        .iter()
+        .position(|command| command.head == "python:second")
+        .unwrap();
+    assert_eq!(expanded.execution_sites[first].scope, 1);
+    assert!(expanded.execution_sites[first].scanner_order);
+    assert_eq!(
+        expanded.execution_sites[first].local_order,
+        Some(vouch::syntax::Order::Seq(0))
+    );
+    assert_eq!(expanded.execution_sites[second].scope, 1);
+    assert!(expanded.execution_sites[second].scanner_order);
+    assert_eq!(
+        expanded.execution_sites[second].local_order,
+        Some(vouch::syntax::Order::Seq(1))
+    );
+}
+
+#[test]
+fn nested_and_held_snippets_keep_parent_indices_without_desynchronising() {
+    let nested = expand_bash_source(r#"python -c "import os; os.system('echo hi')""#);
+    let system = nested
+        .cmds
+        .iter()
+        .position(|command| command.head == "python:os.system")
+        .unwrap();
+    let echo = nested
+        .cmds
+        .iter()
+        .position(|command| command.head == "echo")
+        .unwrap();
+    assert_eq!(nested.scope_parents, vec![0, system]);
+    assert_eq!(nested.execution_sites[system].scope, 1);
+    assert_eq!(nested.execution_sites[echo].scope, 2);
+
+    let held = expand_bash_source("python - <<'PY'\nfirst()\nPY");
+    let first = held
+        .cmds
+        .iter()
+        .position(|command| command.head == "python:first")
+        .unwrap();
+    assert_eq!(held.scope_parents, vec![0]);
+    assert_eq!(held.execution_sites[first].scope, 1);
+    assert_eq!(
+        held.execution_sites[first].local_order,
+        Some(vouch::syntax::Order::Seq(0))
+    );
+}
+
+#[test]
+fn synthetic_rest_wrapper_commands_do_not_mint_a_parsed_scope() {
+    let kb = vouch::guards::load(
+        r#"
+[[program]]
+match = ["env9"]
+wraps = "rest"
+"#,
+    )
+    .unwrap();
+    let expanded = expand(&kb, &cmd("env9", &["alpha"]));
+    assert!(expanded.scope_parents.is_empty());
+    assert_eq!(expanded.execution_sites.len(), expanded.cmds.len());
+    assert!(expanded
+        .execution_sites
+        .iter()
+        .all(|site| site.scope == 0 && site.local_order.is_none() && !site.scanner_order));
 }
 
 #[test]

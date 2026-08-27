@@ -317,22 +317,51 @@ default = "allow"
 }
 
 #[test]
-fn a_snippet_dir_changer_is_looked_up_under_the_snippet_language() {
-    // `sl` is a dir-changer only in powershell. Inside a powershell snippet on
-    // a bash line it must still poison the timeline (probed ASK today; a
-    // host-language lookup would silently flip it to ALLOW — spec §2).
-    let cfg = snippet_lang_cfg();
-    let d = vouch::engine::decide_command_at(
+fn a_snippet_dir_changer_uses_its_language_and_stays_inside_its_scope() {
+    // `sl` is a dir-changer only in PowerShell. The first decision proves the
+    // lookup uses the snippet language by composing the relative Copy-Item
+    // target against `sl`'s destination. The second proves that child state
+    // does not move the parent shell's later write base.
+    let cfg = load(
+        r#"
+version = 1
+[lang.bash]
+default = "allow"
+[lang.bash.constructs]
+unmodeled_command = "allow"
+[lang.powershell]
+default = "allow"
+[lang.powershell.constructs]
+unmodeled_command = "allow"
+[write]
+default = "ask"
+allow_paths = ["C:/work/**"]
+"#,
+    )
+    .expect("parses");
+    let inside = vouch::engine::decide_command_at(
         &cfg,
         "bash",
-        r#"powershell -Command "sl C:/x" && echo hi > probe.txt"#,
+        r#"powershell -Command "sl C:/work; Copy-Item source.txt probe.txt""#,
         Some(HOME),
         None,
-        Some("C:/Users/dev/proj"),
+        Some("C:/elsewhere"),
     );
     assert!(
-        matches!(d, Decision::Ask(_)),
-        "snippet cd must stay fail-closed, got {d:?}"
+        matches!(inside, Decision::Allow(_)),
+        "snippet-language mover must compose inside its scope, got {inside:?}"
+    );
+    let outside = vouch::engine::decide_command_at(
+        &cfg,
+        "bash",
+        r#"powershell -Command "sl C:/work"; cp source.txt probe.txt"#,
+        Some(HOME),
+        None,
+        Some("C:/elsewhere"),
+    );
+    assert!(
+        matches!(outside, Decision::Ask(_)),
+        "snippet directory state must not leak to the parent, got {outside:?}"
     );
 }
 

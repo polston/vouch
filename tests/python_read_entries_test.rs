@@ -56,6 +56,25 @@ fn is_read_only(p: &vouch::guards::Program) -> bool {
         && p.wraps.is_empty()
         && p.evaluates_input.is_empty()
         && p.writes_via_handle.is_none()
+        && p.changes_dir.as_deref().unwrap_or("no") == "no"
+}
+
+#[test]
+fn shipped_os_chdir_is_a_stated_mover_with_one_named_path_argument() {
+    let entry = vouch::guards::in_effect()
+        .program
+        .iter()
+        .find(|program| {
+            program
+                .match_names
+                .iter()
+                .any(|name| name == "python:os.chdir")
+        })
+        .expect("python:os.chdir is shipped");
+    assert_eq!(entry.changes_dir.as_deref(), Some("stated"));
+    assert_eq!(entry.arg_names, vec!["path"]);
+    assert!(entry.writes.is_empty());
+    assert_eq!(vouch::knowledge::KNOWLEDGE_SCHEMA_VERSION, 10);
 }
 
 /// Synthesize a snippet whose one call is `name`, with the import a dotted

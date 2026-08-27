@@ -107,7 +107,7 @@ const PREFIX: &str = "python:";
 
 /// What an argument becomes when vouch cannot resolve it to text.
 ///
-/// `pub(crate)` so `guards::fold_kwargs` and `guards::written_paths` (the
+/// `pub(crate)` so `guards::effective_args` and `guards::written_paths` (the
 /// python argument model, Task 7) push this exact value rather than a second
 /// definition of the same literal — one source of truth for the marker every
 /// downstream reader compares against.
@@ -131,7 +131,7 @@ pub(crate) const MARKER: &str = "$?";
 /// literal `$` (`src/engine.rs`'s write-target checks) keeps working on this
 /// value without being told about it specifically. Sites that compare
 /// against `MARKER` by EXACT equality do have to be told: see
-/// `guards::fold_kwargs`'s `last_unambiguous_positional` computation, which
+/// `guards::effective_args`'s last-unambiguous-positional computation, which
 /// would otherwise misclassify an unpack as an ordinary resolved positional
 /// and stop folding a real `name=value` token that precedes it.
 ///
@@ -310,6 +310,116 @@ struct Flow {
     receiver_origins: HashMap<CallKey, crate::syntax::ValueOrigin>,
     call_heads: HashMap<CallKey, CallableRef>,
     call_results: HashMap<CallKey, crate::syntax::ValueOrigin>,
+}
+
+/// Execution order facts for effects whose meaning lives in knowledge.
+///
+/// This pass knows only syntax and call identity. A linear module-level call
+/// gets its real Python evaluation position; a call below a conditional,
+/// repeated, exceptional, or deferred boundary is deliberately unordered.
+/// The engine decides later whether any call is a directory mover.
+#[derive(Default)]
+struct ExecutionOrder {
+    calls: HashMap<CallKey, Order>,
+    next: u32,
+    unordered_depth: usize,
+}
+
+impl ExecutionOrder {
+    fn unordered(&mut self, f: impl FnOnce(&mut Self)) {
+        self.unordered_depth += 1;
+        f(self);
+        self.unordered_depth -= 1;
+    }
+
+    fn record(&mut self, call: &ast::ExprCall) {
+        let order = if self.unordered_depth == 0 {
+            let order = Order::Seq(self.next);
+            self.next += 1;
+            order
+        } else {
+            Order::Unordered
+        };
+        self.calls.insert(call_key(call), order);
+    }
+}
+
+impl<'a> Visitor<'a> for ExecutionOrder {
+    fn visit_stmt(&mut self, stmt: &'a ast::Stmt) {
+        if self.unordered_depth > 0 {
+            visitor::walk_stmt(self, stmt);
+            return;
+        }
+        match stmt {
+            ast::Stmt::If(statement) => {
+                // The primary test runs exactly once when this statement is
+                // reached. Every selected body and later clause is
+                // conditional, so none receives a linear claim.
+                self.visit_expr(&statement.test);
+                self.unordered(|order| {
+                    for body_stmt in &statement.body {
+                        order.visit_stmt(body_stmt);
+                    }
+                    for clause in &statement.elif_else_clauses {
+                        if let Some(test) = &clause.test {
+                            order.visit_expr(test);
+                        }
+                        for body_stmt in &clause.body {
+                            order.visit_stmt(body_stmt);
+                        }
+                    }
+                });
+            }
+            ast::Stmt::For(statement) => {
+                // The iterable expression is evaluated once before iteration;
+                // body and else execution depend on iteration/control flow.
+                self.visit_expr(&statement.iter);
+                self.unordered(|order| {
+                    for body_stmt in statement.body.iter().chain(&statement.orelse) {
+                        order.visit_stmt(body_stmt);
+                    }
+                });
+            }
+            ast::Stmt::While(_)
+            | ast::Stmt::Try(_)
+            | ast::Stmt::With(_)
+            | ast::Stmt::FunctionDef(_)
+            | ast::Stmt::ClassDef(_)
+            | ast::Stmt::TypeAlias(_)
+            | ast::Stmt::AnnAssign(_)
+            | ast::Stmt::Match(_) => {
+                self.unordered(|order| visitor::walk_stmt(order, stmt));
+            }
+            _ => visitor::walk_stmt(self, stmt),
+        }
+    }
+
+    fn visit_expr(&mut self, expr: &'a ast::Expr) {
+        if let ast::Expr::Call(call) = expr {
+            // Callable, receiver, and arguments are evaluated before the
+            // invocation itself. Recording after descent gives nested calls
+            // the positions Python actually executes first.
+            visitor::walk_expr(self, expr);
+            self.record(call);
+            return;
+        }
+        match expr {
+            ast::Expr::Lambda(_)
+            | ast::Expr::ListComp(_)
+            | ast::Expr::SetComp(_)
+            | ast::Expr::DictComp(_)
+            | ast::Expr::Generator(_)
+            | ast::Expr::If(_)
+            | ast::Expr::BoolOp(_)
+            | ast::Expr::Compare(_)
+            | ast::Expr::Await(_)
+            | ast::Expr::Yield(_)
+            | ast::Expr::YieldFrom(_) => {
+                self.unordered(|order| visitor::walk_expr(order, expr));
+            }
+            _ => visitor::walk_expr(self, expr),
+        }
+    }
 }
 
 /// Names whose flow facts may change before an exception leaves a suite.
@@ -1101,11 +1211,9 @@ struct Walk {
     /// Assigned callable aliases whose true heads override rebound-name
     /// refusal for exactly the call nodes proven to use them.
     call_heads: HashMap<CallKey, CallableRef>,
-    /// The next sequential position to hand out. Python has no
-    /// directory-changing constructs, so the cd walk stays inert over these
-    /// orders — sequential is correct and deliberate, mirroring the shell
-    /// scanner's own top-level counter (`src/shell.rs`).
-    counter: u32,
+    /// Syntax-only execution order, computed independently and keyed by the
+    /// call's stable source range. Missing means unordered, never sequential.
+    call_orders: HashMap<CallKey, Order>,
 }
 
 impl Walk {
@@ -1220,6 +1328,7 @@ impl Walk {
         }
         let mut args: Vec<String> = Vec::new();
         let mut unread_args = std::collections::HashSet::new();
+        let mut keyword_args = std::collections::HashSet::new();
         if let Some(r) = receiver {
             if !r.readable {
                 unread_args.insert(args.len());
@@ -1245,6 +1354,7 @@ impl Walk {
                     if !value.readable {
                         unread_args.insert(args.len());
                     }
+                    keyword_args.insert(args.len());
                     args.push(format!("{name}={}", value.text));
                 }
                 // `**opts` — a nameless keyword-unpacking argument. There is
@@ -1261,8 +1371,11 @@ impl Walk {
                 }
             }
         }
-        let order = Order::Seq(self.counter);
-        self.counter += 1;
+        let order = self
+            .call_orders
+            .get(&call_key(node))
+            .cloned()
+            .unwrap_or(Order::Unordered);
         // The input source is not POPULATED for python, and the reason is
         // structural rather than effort: a python snippet's standard input is
         // whatever the enclosing process was handed, so the answer belongs to
@@ -1282,6 +1395,7 @@ impl Walk {
         );
         if let Some(cmd) = self.out.commands.last_mut() {
             cmd.unread_args = unread_args;
+            cmd.keyword_args = keyword_args;
             cmd.receiver_origin =
                 self.receiver_origins.get(&call_key(node)).cloned().unwrap_or(crate::syntax::ValueOrigin::Unknown);
         }
@@ -1498,10 +1612,15 @@ pub fn parse(src: &str) -> Result<Scan, String> {
     }
     let mut flow = Flow { poisoned: binder.bound.clone(), ..Flow::default() };
     flow.analyze_suite(&module.body);
+    let mut execution_order = ExecutionOrder::default();
+    for stmt in &module.body {
+        execution_order.visit_stmt(stmt);
+    }
     let mut w = Walk {
         poisoned: binder.bound,
         receiver_origins: flow.receiver_origins,
         call_heads: flow.call_heads,
+        call_orders: execution_order.calls,
         ..Walk::default()
     };
     for stmt in &module.body {

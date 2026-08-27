@@ -615,13 +615,11 @@ fn judge_once(
     // 1. Guards — what the command DOES. Same set for every language.
     //
     // `collect_expanded` (below) walks `scan.commands` one top-level command
-    // at a time and expands wrappers, so every command that comes out of a
-    // wrapper keeps the ORDER of the command it came out of: a wrapped
-    // snippet has no position in the outer sequence of its own, so it takes
-    // the wrapper's. Expanding the whole list in one call and then indexing
-    // `scan.order` by position in the RESULT would read some other command's
-    // order — `scan.order` is parallel to `scan.commands`, never to the
-    // expanded list.
+    // at a time and expands wrappers. Each top-level occurrence keeps its
+    // outer order; a parsed child keeps its scanner-local order and scope;
+    // synthetic wrapper occurrences inherit attribution without claiming a
+    // scanner event. Expanding the whole list and indexing `scan.order` by
+    // position in the result would read some other command's order.
     let kb = crate::guards::in_effect();
     // How many layers of wrapper nesting the walk below scans before it stops
     // and reports rather than silently dropping the rest (M2.55): the
@@ -631,7 +629,8 @@ fn judge_once(
     let Expanded {
         cmds: all_cmds,
         orders: all_orders,
-        from_snippet,
+        execution_sites: all_execution_sites,
+        scope_parents,
         langs: all_langs,
         holds_input: all_holds_input,
         args_from_input: all_args_from_input,
@@ -695,11 +694,12 @@ fn judge_once(
     // be two answers to one question. Nothing about the write pass changes:
     // `home` is now handed over as the `Option` it already was, and the write
     // pass still refuses to run without one.
-    let timeline = cd_timeline(
+    let timeline = scoped_cd_timelines(
         &all_cmds,
-        &all_orders,
-        &from_snippet,
+        &all_execution_sites,
+        &scope_parents,
         &all_langs,
+        &all_inherited,
         &resolve,
         home,
         &start,
@@ -815,11 +815,7 @@ fn judge_once(
         // Where this one command runs: its position in the line, then its own
         // run-dir flag. Same call the write pass and the recognition pass make
         // — one command, one run place.
-        let base = timeline.base_at(
-            all_orders.get(i).unwrap_or(&crate::syntax::Order::Unordered),
-            all_cmds.get(i).and_then(|c| c.chain.as_ref()),
-            &start,
-        );
+        let base = timeline.base_at(i, &all_cmds);
         let clang = all_langs.get(i).map(String::as_str).unwrap_or(lang);
         let (state, _) = run_dir_place(
             kb,
@@ -937,12 +933,11 @@ fn judge_once(
             // position, so which stage is found does not matter; a redirect
             // whose position is unprovable finds nothing and folds only an
             // unconditional mover, which is the fail-closed direction.
-            let owner_chain = all_orders
-                .iter()
-                .position(|o| *o == order)
-                .and_then(|j| all_cmds.get(j))
-                .and_then(|c| c.chain.as_ref());
-            match place(&resolve(t), &timeline.base_at(&order, owner_chain, &start)) {
+            let owner = all_orders.iter().position(|o| *o == order);
+            let redirect_base = owner
+                .map(|index| timeline.base_at(index, &all_cmds))
+                .unwrap_or_else(|| timeline.root_base_at(&order, None));
+            match place(&resolve(t), &redirect_base) {
                 Placed::At(p) => targets.push((p, None, None)),
                 Placed::Nowhere(cause) => unplaced.push(Unplaced {
                     generic: where_it_lands(lang, &cause, Some(t)),
@@ -1003,11 +998,7 @@ fn judge_once(
                 });
             }
 
-            let order = all_orders
-                .get(i)
-                .cloned()
-                .unwrap_or(crate::syntax::Order::Unordered);
-            let here = timeline.base_at(&order, c.chain.as_ref(), &start);
+            let here = timeline.base_at(i, &all_cmds);
             let paths: Vec<String> = wt.paths.iter().map(|p| resolve(p)).collect();
             // A run-dir flag only has to resolve when something depends on
             // it. `git -C a -C b status` writes nothing, and a read must
@@ -1566,13 +1557,15 @@ fn judge_once(
         // directory while the same command's writes were judged at the flag's,
         // so `git -C <tree> <verb>` stepped around a zone that a `cd` into the
         // same tree would have entered.
-        let base = timeline.base_at(
-            all_orders.get(i).unwrap_or(&crate::syntax::Order::Unordered),
-            c.chain.as_ref(),
-            &start,
+        let base = timeline.base_at(i, &all_cmds);
+        let (state, _) = run_dir_place(
+            kb,
+            c,
+            clang,
+            &base,
+            inherited_at(&all_inherited, i),
+            &resolve,
         );
-        let (state, _) =
-            run_dir_place(kb, c, clang, &base, inherited_at(&all_inherited, i), &resolve);
         let place = place_of(&state, here_home);
 
         // 3a. The distrust zone, FIRST (spec §Precedence for recognition,
@@ -2093,11 +2086,18 @@ fn judge_once(
 /// per-command lookup is by the same index into each of them.
 struct Expanded {
     cmds: Vec<crate::shell::Cmd>,
+    /// Parallel to `cmds`: the outer scanner order used by redirects and
+    /// other caller-attributed facts. Parsed children deliberately retain
+    /// their wrapper's outer position here; their own order lives only in
+    /// `execution_sites` below.
     orders: Vec<crate::syntax::Order>,
-    /// Marks a command that came out of a wrapper's snippet rather than being
-    /// written at the top level — a snippet's internal sequence is not the
-    /// outer one, so a directory change inside it cannot be placed.
-    from_snippet: Vec<bool>,
+    /// Parallel to `cmds`: the parsed execution scope, the order used for
+    /// attribution inside it, and whether that order came from the scanner
+    /// for this exact occurrence rather than a synthesising wrapper.
+    execution_sites: Vec<ExpandedExecutionSite>,
+    /// Parent command index for scopes 1..N, after rebasing each one-command
+    /// wrapper expansion into this complete expanded line.
+    scope_parents: Vec<usize>,
     /// The language each expanded command is written in: the host `lang` for a
     /// top-level command or one unwrapped from the SAME syntax (`sudo`, `find
     /// -exec`), or the snippet's own language when the wrap crosses into a
@@ -2151,13 +2151,19 @@ struct Expanded {
     inherited_run_dir: Vec<Option<String>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExpandedExecutionSite {
+    scope: usize,
+    order: crate::syntax::Order,
+    scanner_order: bool,
+}
+
 /// Wrapper expansion, one top-level command at a time: for each
-/// `scan.commands[i]`, expand wrappers and push every resulting command with
-/// the ORIGINAL command's order — a wrapped snippet has no position of its
-/// own, so it takes the wrapper's. Expanding the whole list in one call and
-/// then indexing `scan.order` by position in the RESULT would read some other
-/// command's order, since `scan.order` is parallel to `scan.commands`, never
-/// to the expanded list.
+/// `scan.commands[i]`, expand wrappers, rebase child scope ids and parent
+/// indices, then retain either the parsed child's local order or the outer
+/// occurrence's order for attribution. The `scanner_order` bit keeps inherited
+/// positions from becoming effect events. Expanding the whole list and then
+/// indexing `scan.order` by result position would read a neighbour's answer.
 fn collect_expanded(
     kb: &crate::guards::Knowledge,
     scan: &crate::syntax::Scan,
@@ -2168,7 +2174,8 @@ fn collect_expanded(
     let mut out = Expanded {
         cmds: Vec::new(),
         orders: Vec::new(),
-        from_snippet: Vec::new(),
+        execution_sites: Vec::new(),
+        scope_parents: Vec::new(),
         langs: Vec::new(),
         holds_input: Vec::new(),
         args_from_input: Vec::new(),
@@ -2222,13 +2229,20 @@ fn collect_expanded(
             caps,
             fork,
         );
+        let command_offset = out.cmds.len();
+        let scope_offset = out.scope_parents.len();
+        let execution_sites = ex.execution_sites;
+        for parent in ex.scope_parents {
+            out.scope_parents.push(command_offset + parent);
+        }
         // Zipped rather than indexed, one more strand than before: the walk
         // builds these arrays in lockstep, and a zip that runs short stops
         // early instead of reading a neighbour's answer for the strand that
         // fell behind.
-        for (j, (((((ec, elang), eholds), einherited), efrom_input), ecomplete)) in ex
+        for (j, ((((((ec, site), elang), eholds), einherited), efrom_input), ecomplete)) in ex
             .cmds
             .into_iter()
+            .zip(execution_sites)
             .zip(ex.langs)
             .zip(ex.holds_input)
             .zip(ex.inherited_run_dir)
@@ -2236,9 +2250,19 @@ fn collect_expanded(
             .zip(ex.args_complete)
             .enumerate()
         {
+            let scope = if site.scope == 0 {
+                0
+            } else {
+                scope_offset + site.scope
+            };
+            let effective_order = site.local_order.unwrap_or_else(|| order.clone());
             out.cmds.push(ec);
             out.orders.push(order.clone());
-            out.from_snippet.push(j > 0);
+            out.execution_sites.push(ExpandedExecutionSite {
+                scope,
+                order: effective_order,
+                scanner_order: site.scanner_order || j == 0,
+            });
             out.langs.push(elang);
             out.holds_input.push(eholds);
             out.inherited_run_dir.push(einherited);
@@ -2282,8 +2306,20 @@ pub fn count_unknown_run_place_commands(lang: &str, src: &str) -> usize {
     // counts run places over whatever got scanned, using the built-in
     // default depth (this path has no `Config` to read an operator's
     // `wrap_depth` from) — same as `expand_wrappers`'s convenience form.
-    let Expanded { cmds: all_cmds, orders: all_orders, from_snippet, langs: all_langs, .. } =
-        collect_expanded(kb, &scan, lang, &|_| 4, &mut crate::guards::ForkCursor::new(&[]));
+    let Expanded {
+        cmds: all_cmds,
+        execution_sites,
+        scope_parents,
+        langs: all_langs,
+        inherited_run_dir,
+        ..
+    } = collect_expanded(
+        kb,
+        &scan,
+        lang,
+        &|_| 4,
+        &mut crate::guards::ForkCursor::new(&[]),
+    );
     // Mirror the engine's resolve enough to be honest: same-command literal
     // assignments resolve (scan.assignments), env lookups stay out — an env
     // dependence would make a "structural" count machine-dependent. A
@@ -2304,26 +2340,18 @@ pub fn count_unknown_run_place_commands(lang: &str, src: &str) -> usize {
         crate::paths::unquote(&t).to_string()
     };
     let start = CdState::NoDirectory;
-    let timeline = cd_timeline(
+    let timeline = scoped_cd_timelines(
         &all_cmds,
-        &all_orders,
-        &from_snippet,
+        &execution_sites,
+        &scope_parents,
         &all_langs,
+        &inherited_run_dir,
         &resolve,
         None,
         &start,
     );
     (0..all_cmds.len())
-        .filter(|i| {
-            matches!(
-                timeline.base_at(
-                    all_orders.get(*i).unwrap_or(&crate::syntax::Order::Unordered),
-                    all_cmds.get(*i).and_then(|c| c.chain.as_ref()),
-                    &start
-                ),
-                CdState::Unknown(_)
-            )
-        })
+        .filter(|i| matches!(timeline.base_at(*i, &all_cmds), CdState::Unknown(_)))
         .count()
 }
 
@@ -2413,8 +2441,8 @@ pub fn measure_program_locations(
     let mut fork = crate::guards::ForkCursor::new(&[]);
     let Expanded {
         cmds,
-        orders,
-        from_snippet,
+        execution_sites,
+        scope_parents,
         langs,
         inherited_run_dir,
         parse_failures,
@@ -2430,11 +2458,12 @@ pub fn measure_program_locations(
         .count();
 
     let start = start_state(cwd);
-    let timeline = cd_timeline(
+    let timeline = scoped_cd_timelines(
         &cmds,
-        &orders,
-        &from_snippet,
+        &execution_sites,
+        &scope_parents,
         &langs,
+        &inherited_run_dir,
         &resolve,
         Some(home),
         &start,
@@ -2449,11 +2478,7 @@ pub fn measure_program_locations(
         if !matches!(occurrence_lang, "bash" | "powershell") {
             continue;
         }
-        let base = timeline.base_at(
-            orders.get(index).unwrap_or(&crate::syntax::Order::Unordered),
-            command.chain.as_ref(),
-            &start,
-        );
+        let base = timeline.base_at(index, &cmds);
         let (state, _) = run_dir_place(
             kb,
             command,
@@ -3121,7 +3146,7 @@ fn place_of(state: &CdState, home: &str) -> Place {
 /// Returns the provenance line too, because a verdict that silently depended
 /// on a flag would repeat the defect being fixed: the write pass prints it, and
 /// the place passes discard it (their own sentences already name the tree).
-fn run_dir_place<F: Fn(&str) -> String>(
+fn run_dir_place<F: Fn(&str) -> String + ?Sized>(
     kb: &crate::guards::Knowledge,
     c: &crate::shell::Cmd,
     lang: &str,
@@ -3425,6 +3450,102 @@ struct CdTimeline {
     unplaceable: bool,
 }
 
+/// One independent directory timeline per parsed execution scope.
+///
+/// Scope zero is the caller's command line. Each parsed snippet starts in the
+/// run place of the command that invoked it, then keeps its own process-local
+/// directory changes without leaking them back to its parent or siblings.
+struct ScopedCdTimelines {
+    timelines: Vec<CdTimeline>,
+    starts: Vec<CdState>,
+    sites: Vec<ExpandedExecutionSite>,
+}
+
+impl ScopedCdTimelines {
+    fn base_at(&self, index: usize, cmds: &[crate::shell::Cmd]) -> CdState {
+        scoped_base_at_parts(index, cmds, &self.sites, &self.starts, &self.timelines)
+    }
+
+    fn root_base_at(
+        &self,
+        order: &crate::syntax::Order,
+        chain: Option<&crate::syntax::ChainPos>,
+    ) -> CdState {
+        match (self.timelines.first(), self.starts.first()) {
+            (Some(timeline), Some(start)) => timeline.base_at(order, chain, start),
+            _ => CdState::Unknown(UNPLACEABLE_CD.to_string()),
+        }
+    }
+}
+
+fn scoped_base_at_parts(
+    index: usize,
+    cmds: &[crate::shell::Cmd],
+    sites: &[ExpandedExecutionSite],
+    starts: &[CdState],
+    timelines: &[CdTimeline],
+) -> CdState {
+    let Some(site) = sites.get(index) else {
+        return CdState::Unknown(UNPLACEABLE_CD.to_string());
+    };
+    let Some(timeline) = timelines.get(site.scope) else {
+        return CdState::Unknown(UNPLACEABLE_CD.to_string());
+    };
+    let Some(start) = starts.get(site.scope) else {
+        return CdState::Unknown(UNPLACEABLE_CD.to_string());
+    };
+    timeline.base_at(
+        &site.order,
+        cmds.get(index).and_then(|command| command.chain.as_ref()),
+        start,
+    )
+}
+
+fn scoped_cd_timelines(
+    cmds: &[crate::shell::Cmd],
+    sites: &[ExpandedExecutionSite],
+    scope_parents: &[usize],
+    langs: &[String],
+    inherited_run_dir: &[Option<String>],
+    resolve: &dyn Fn(&str) -> String,
+    home: Option<&str>,
+    start: &CdState,
+) -> ScopedCdTimelines {
+    let kb = crate::guards::in_effect();
+    let mut timelines = Vec::with_capacity(scope_parents.len() + 1);
+    let mut starts = Vec::with_capacity(scope_parents.len() + 1);
+    for scope in 0..=scope_parents.len() {
+        let scope_start = if scope == 0 {
+            start.clone()
+        } else {
+            let parent = scope_parents[scope - 1];
+            let parent_base = scoped_base_at_parts(parent, cmds, sites, &starts, &timelines);
+            match (cmds.get(parent), langs.get(parent)) {
+                (Some(command), Some(lang)) => {
+                    run_dir_place(
+                        kb,
+                        command,
+                        lang,
+                        &parent_base,
+                        inherited_at(inherited_run_dir, parent),
+                        resolve,
+                    )
+                    .0
+                }
+                _ => CdState::Unknown(UNPLACEABLE_CD.to_string()),
+            }
+        };
+        let timeline = cd_timeline(cmds, sites, scope, langs, resolve, home, &scope_start);
+        starts.push(scope_start);
+        timelines.push(timeline);
+    }
+    ScopedCdTimelines {
+        timelines,
+        starts,
+        sites: sites.to_vec(),
+    }
+}
+
 impl CdTimeline {
     /// The directory a command at this position runs in. `start` is the state
     /// the line began in — the caller's directory, its absence, or its being
@@ -3505,9 +3626,11 @@ fn is_stack_rotate(arg: &str) -> bool {
 /// stays in code here is the VOCABULARY, not program names — nothing below
 /// names `cd`, `pushd`, `Set-Location`, or any other head.
 ///
-/// 1. Both languages: a token still holding a variable, backtick, or glob
-///    metacharacter is unknown — globs expand before `cd` runs, so the
-///    literal spelling is not the directory.
+/// 1. Shell languages: a token still holding a variable, backtick, or glob
+///    metacharacter is unknown — globs expand before a shell mover runs, so
+///    the literal spelling is not the directory. Python scanner values carry
+///    readability structurally, and these characters in a readable string
+///    literal have no expansion meaning there.
 /// 2. bash: any `~`-prefixed token other than plain home (`~` alone, or
 ///    `~/...`) is unknown — `~-`/`~+`/`~<digit>` walk OLDPWD/PWD/the
 ///    directory stack, and `~name` names ANOTHER user's home. None of those
@@ -3526,15 +3649,17 @@ fn is_stack_rotate(arg: &str) -> bool {
 ///    is not flag-shaped under any prefix this module declares, so it still
 ///    reaches this function exactly as it always did.)
 fn is_unresolvable_token(d: &str, lang: &str) -> bool {
-    if d.contains('$') || d.contains('%') || d.contains('`')
-        || d.contains('*') || d.contains('?') || d.contains('[')
-    {
-        return true;
-    }
+    let shell_expansion = d.contains('$')
+        || d.contains('%')
+        || d.contains('`')
+        || d.contains('*')
+        || d.contains('?')
+        || d.contains('[');
     match lang {
-        "bash" => d.starts_with('~') && d != "~" && !d.starts_with("~/"),
-        "powershell" => d == "-" || d == "+",
-        _ => false,
+        "python" => false,
+        "bash" => shell_expansion || (d.starts_with('~') && d != "~" && !d.starts_with("~/")),
+        "powershell" => shell_expansion || d == "-" || d == "+",
+        _ => shell_expansion,
     }
 }
 
@@ -3565,12 +3690,9 @@ fn classify_destination(d: &str, state: &CdState, lang: &str) -> CdState {
 
 /// The grammar walk, spec 2026-07-31 §4 rules 1-4 (rule 1 amended
 /// 2026-08-02, commit 5de2603), over one command's already RESOLVED
-/// arguments. `prog` is the entry's own knowledge — `None` for a head that
-/// reached this point some other way (it never does today: membership
-/// already required `entry_for` to answer, but this function does not
-/// assume that, so an absent entry simply declares nothing) — and an entry
-/// that declares nothing fails every option-shaped token closed via rule 4,
-/// exactly like one that never existed.
+/// arguments. `prog` is the same entry whose `changes_dir` claim admitted the
+/// command to the timeline. An entry that declares no option grammar fails
+/// every option-shaped token closed via rule 4.
 ///
 /// Returns the destination CANDIDATES left after every declared flag is
 /// consumed. `Err(Some(flag))` means rule 4 fired on that exact token — an
@@ -3614,21 +3736,14 @@ fn classify_destination(d: &str, state: &CdState, lang: &str) -> CdState {
 /// `Undescribed`, not as license to trust whatever follows it.
 fn dir_change_candidates(
     args: &[String],
-    prog: Option<&crate::guards::Program>,
+    prog: &crate::guards::Program,
 ) -> Result<Vec<String>, Option<String>> {
-    let empty: Vec<String> = Vec::new();
-    let (dest_dir_flags, value_options, no_value_options, flag_prefix, case_sensitive, colon_attach) =
-        match prog {
-            Some(p) => (
-                &p.dest_dir_flags,
-                &p.value_options,
-                &p.no_value_options,
-                &p.flag_prefix,
-                p.case_sensitive_flags.unwrap_or(false),
-                p.languages.iter().any(|l| l == "powershell"),
-            ),
-            None => (&empty, &empty, &empty, &empty, false, false),
-        };
+    let dest_dir_flags = &prog.dest_dir_flags;
+    let value_options = &prog.value_options;
+    let no_value_options = &prog.no_value_options;
+    let flag_prefix = &prog.flag_prefix;
+    let case_sensitive = prog.case_sensitive_flags.unwrap_or(false);
+    let colon_attach = prog.languages.iter().any(|lang| lang == "powershell");
     let abbreviation = if case_sensitive {
         crate::flags::Abbrev::Refuse
     } else {
@@ -3857,8 +3972,8 @@ fn stack_destination(
 /// found as PowerShell's mover, not silently missed as bash's non-mover.
 fn cd_timeline(
     cmds: &[crate::shell::Cmd],
-    orders: &[crate::syntax::Order],
-    from_snippet: &[bool],
+    sites: &[ExpandedExecutionSite],
+    scope: usize,
     langs: &[String],
     resolve: &dyn Fn(&str) -> String,
     home: Option<&str>,
@@ -3872,26 +3987,34 @@ fn cd_timeline(
     // `dir_change_entry` reads both off the SAME `entry_for` scan — it used
     // to be two separate scans of the same `(head, lang)`, one for the kind
     // and one for the entry.
-    let mut ordered: Vec<(u32, &crate::shell::Cmd, crate::guards::DirChangeKind, Option<&crate::guards::Program>, &str, String)> = Vec::new();
+    let mut ordered: Vec<(
+        u32,
+        &crate::shell::Cmd,
+        crate::guards::DirChangeKind,
+        &crate::guards::Program,
+        &str,
+        String,
+    )> = Vec::new();
     let mut unplaceable = false;
     for (i, c) in cmds.iter().enumerate() {
-        // A missing language is not a provable one either — falls back to
-        // "bash" only because every vector here is built parallel, index for
-        // index, by the one caller in `decide_command_at`; it never actually
-        // runs short.
-        let lang = langs.get(i).map(String::as_str).unwrap_or("bash");
+        let Some(site) = sites.get(i) else {
+            unplaceable = true;
+            continue;
+        };
+        if site.scope != scope {
+            continue;
+        }
+        let Some(lang) = langs.get(i).map(String::as_str) else {
+            unplaceable = true;
+            continue;
+        };
         let head = crate::guards::base_name(&c.head);
         let (kind, prog) = match crate::guards::dir_change_entry_for_cmd(kb, c, lang) {
-            Some((k, p)) if k != crate::guards::DirChangeKind::No => (k, Some(p)),
+            Some((k, p)) if k != crate::guards::DirChangeKind::No => (k, p),
             _ => continue,
         };
-        match (orders.get(i), from_snippet.get(i)) {
-            // A directory change inside a wrapped snippet has no position in
-            // the outer sequence — the snippet was handed to another scanner
-            // and its statements were never placed against this line's.
-            (Some(crate::syntax::Order::Seq(n)), Some(false)) => {
-                ordered.push((*n, c, kind, prog, lang, head))
-            }
+        match (&site.order, site.scanner_order) {
+            (crate::syntax::Order::Seq(n), true) => ordered.push((*n, c, kind, prog, lang, head)),
             _ => unplaceable = true,
         }
     }
@@ -3909,33 +4032,57 @@ fn cd_timeline(
         // named nowhere in the command. The same raw read made a quoted flag
         // (`cd "-P" <dir>`) the destination and never looked at the real path
         // after it. Resolving first is the §8 chain these tokens were missing.
-        let args: Vec<String> = c.args.iter().map(|a| resolve(a)).collect();
+        let effective = crate::guards::effective_args(prog, c);
+        let unread_destination = effective
+            .unread
+            .iter()
+            .any(|index| !effective.padding.contains(index));
+        let args: Vec<String> = effective
+            .values
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !effective.padding.contains(index))
+            .map(|(_, arg)| resolve(arg))
+            .collect();
         // ONE candidate walk per directory change, read by both the
         // destination derivation and the independence test below — it builds a
         // merged option list and classifies every token, so running it twice
         // for one command is work nobody needs.
         let cands = dir_change_candidates(&args, prog);
-        state = match kind {
-            // Changes directory to somewhere never derivable from the
-            // command line — every form is unknown, always.
-            crate::guards::DirChangeKind::Unstated => CdState::Unknown(UNPLACEABLE_CD.to_string()),
-            crate::guards::DirChangeKind::Stack => stack_destination(&args, &cands, &state, lang, &head),
-            crate::guards::DirChangeKind::Stated => stated_destination(&args, &cands, &state, lang, &head, home),
-            // Filtered out above: membership requires a kind other than `No`.
-            crate::guards::DirChangeKind::No => unreachable!("dir_change_entry filters this out"),
+        state = if unread_destination {
+            CdState::Unknown(UNPLACEABLE_CD.to_string())
+        } else {
+            match kind {
+                // Changes directory to somewhere never derivable from the
+                // command line — every form is unknown, always.
+                crate::guards::DirChangeKind::Unstated => {
+                    CdState::Unknown(UNPLACEABLE_CD.to_string())
+                }
+                crate::guards::DirChangeKind::Stack => {
+                    stack_destination(&args, &cands, &state, lang, &head)
+                }
+                crate::guards::DirChangeKind::Stated => {
+                    stated_destination(&args, &cands, &state, lang, &head, home)
+                }
+                // Filtered out above: membership requires a kind other than `No`.
+                crate::guards::DirChangeKind::No => {
+                    unreachable!("dir_change_entry filters this out")
+                }
+            }
         };
         // Stated absolutely? Read from the same candidate walk the
         // destination itself came from, never from the composed result — a
         // composed path and an absolute one that happens to sit under it are
         // the same text ("C:/workspace" then "C:/workspace/vouch-dev"), and only the walk
         // knows which was written.
-        let independent = matches!(
-            &cands,
-            Ok(c) if c.len() == 1
-                && !is_relative(&c[0])
-                && drive_relative(&c[0]).is_none()
-                && !is_unresolvable_token(&c[0], lang)
-        );
+        let independent = !unread_destination
+            && matches!(
+                &cands,
+                Ok(c) if c.len() == 1
+                    && !is_relative(&c[0])
+                    && drive_relative(&c[0]).is_none()
+                    && !is_unresolvable_token(&c[0], lang)
+            );
         events.push((n, state.clone(), c.chain.clone(), independent));
     }
     CdTimeline { events, unplaceable }

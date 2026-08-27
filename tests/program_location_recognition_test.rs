@@ -210,6 +210,34 @@ fn ordered_cd_and_wrapper_expansion_preserve_the_occurrences_run_directory() {
 }
 
 #[test]
+fn a_path_spelled_program_inherits_a_python_scopes_moved_directory() {
+    let root = scratch("python-scope");
+    let output = root.join("output");
+    let bin = output.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let program = bin.join("probe-alpha");
+    fs::write(&program, b"fixture").unwrap();
+    let cfg = cfg_with(
+        &format!("{}/**", path(&output)),
+        &["probe-*"],
+        "[lang.python]\ndefault = \"allow\"\n[lang.python.constructs]\nunmodeled_command = \"allow\"",
+        "",
+    );
+
+    let decision = decide_command_at(
+        &cfg,
+        "bash",
+        "python -c \"import os; os.chdir('output'); os.system('./bin/probe-alpha inspect')\"",
+        None,
+        None,
+        Some(path(&root).as_str()),
+    );
+    assert!(matches!(decision, Decision::Allow(_)), "{decision:?}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn a_top_level_powershell_path_uses_the_same_location_rule() {
     let root = scratch("powershell-top-level");
     let program = root.join("probe-alpha");

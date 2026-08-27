@@ -41,16 +41,22 @@ those remain new operator decisions rather than reasons to bypass verification.
 ## Preconditions
 
 Final whole-branch review clean; full gate green
-(`VOUCH_REQUIRE_REAL_CORPUS=1 cargo test --release`); working tree clean.
+(`VOUCH_REQUIRE_REAL_CORPUS=1 bash scripts/verify.sh --if-needed`); working
+tree clean. The conditional spelling is not a weaker gate: its reusable PASS
+is bound to the exact repository contents, real corpus, gate environment, and
+toolchain. A cleanup edit makes it run again.
 
 ## Steps
 
 Run from the vouch checkout root; every path below is relative to it.
 
 1. **Cleanup on the branch, BEFORE merge.** Run `/simplify` (code-simplifier)
-   over the branch diff, then re-run the full gate. Scoped-review the cleanup
-   diff (it touched reviewed code). Transfer every deferred finding into
-   `docs/ROADMAP.md` — scratch under `.superpowers/` dies with the worktree.
+   over the branch diff, then run
+   `VOUCH_REQUIRE_REAL_CORPUS=1 bash scripts/verify.sh --if-needed`. Scoped-review
+   the cleanup diff (it touched reviewed code). A changed input forces the full
+   gate; an unchanged tree reuses its exact PASS. Transfer every deferred
+   finding into `docs/ROADMAP.md` — scratch under `.superpowers/` dies with the
+   worktree.
 
 1a. **The docs sweep is a PLAN TASK, and it runs BEFORE the final
    whole-branch review — not here, and not "if the changeset didn't do it".**
@@ -78,6 +84,13 @@ Run from the vouch checkout root; every path below is relative to it.
    (`git merge-base --is-ancestor master <branch>`), gate
    green at HEAD, and show the operator the numbers (test count, transition
    matrix, parse rate).
+
+   Recover already-measured gate numbers with `bash scripts/verify.sh --last`;
+   use `--last-report` when the whole safe report is needed. Never rerun the
+   full verifier merely because terminal output or session context was lost.
+   Rerun only when `--last` refuses freshness, the latest completed gate failed,
+   or an explicit post-change gate is owed. Live-state assertions are snapshots:
+   refresh the relevant probe, not the release and publisher suites.
 
    **Before the first remote write, record the complete route from this
    branch to the finished release.** Do not summarize landing as merge, push,

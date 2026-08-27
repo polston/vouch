@@ -800,6 +800,15 @@ evaluates_input = "stdin"
 runs_file = "arg_0"
 runs_file_flags = ["-m"]
 
+# Python's process-local directory mover. The engine applies this stated path
+# only within the parsed snippet execution scope that contains the call; it
+# never moves the enclosing shell's later base. `arg_names` makes the keyword
+# spelling (`path=...`) identical to the positional one.
+[[program]]
+match = ["python:os.chdir"]
+arg_names = ["path"]
+changes_dir = "stated"
+
 # arg_names carries the FULL real signature, not just file/mode (task 2b
 # fix round 4): opener is positional-capable (no `*` before it in the real
 # signature, verified live), so a partial list would misplace it once any

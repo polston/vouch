@@ -189,6 +189,7 @@ fn probe() -> Cmd {
         head: "probe-tool".into(),
         args: vec!["x".into()],
         unread_args: Default::default(),
+        keyword_args: Default::default(),
         chain: None,
         prefix_assigns: vec![],
         receiver_origin: vouch::syntax::ValueOrigin::Unknown,

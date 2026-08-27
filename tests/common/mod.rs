@@ -283,6 +283,7 @@ pub fn cmd(head: &str, args: &[&str]) -> vouch::syntax::Cmd {
         head: head.into(),
         args: args.iter().map(|s| s.to_string()).collect(),
         unread_args: Default::default(),
+        keyword_args: Default::default(),
         chain: None,
         prefix_assigns: vec![],
         receiver_origin: vouch::syntax::ValueOrigin::Unknown,

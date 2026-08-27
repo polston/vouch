@@ -95,6 +95,13 @@ summary is not (per `superpowers:subagent-driven-development`). Read the
 ledger's last lines and the branch's last commits before deciding anything is
 done or not done.
 
+Before repeating a completed full gate, run
+`VOUCH_REQUIRE_REAL_CORPUS=1 bash scripts/verify.sh --last`. A fresh PASS is
+exact-input evidence and recovers the aggregate without tests; a refusal names
+the class of change that requires `--if-needed` to run the gate. If only live
+config, journal, hook, or installation state changed, run that specific probe
+instead of repeating the code, release, and publisher suites.
+
 ### 5. Report and proceed through the finish line
 
 A few lines: what is live, the next OPEN roadmap item in plain words, and any
@@ -120,6 +127,8 @@ ask exactly that one question.
   started.
 - Treating passing tests or a clean branch as a natural stopping point instead
   of chaining into `vouch-landing`.
+- Repeating a full verifier because its terminal output was lost instead of
+  reading the exact-input receipt with `scripts/verify.sh --last`.
 
 ## This skill fixes itself
 

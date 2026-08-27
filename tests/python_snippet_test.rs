@@ -544,7 +544,7 @@ fn a_bare_unpack_into_open_can_no_longer_hide_a_write_mode() {
 
 // 25. A keyword-spelled path alongside a trailing unpack must resolve to the
 // REAL path, not the unpack's own token — found by the round-3 re-review:
-// `fold_kwargs` was pushing the unpack sentinel into the folded array as if
+// `effective_args` was pushing the unpack sentinel into the folded array as if
 // it were a genuine positional occupant, so it landed in the prompt (or,
 // worse, silently in the write-judgment machinery) instead of the file the
 // operator actually named. Two shapes pin this: a path OUTSIDE the allowed
@@ -573,7 +573,7 @@ fn an_unpack_alongside_an_out_of_bounds_file_keyword_names_the_real_path_not_a_s
 // That is the CORRECT, more complete behaviour (proven by
 // `open_calling_a_reference_through_opener_via_unpack_asks` above), but it
 // means `open` can no longer demonstrate THIS test's actual point — the
-// `fold_kwargs` positional fix letting a real keyword-spelled value resolve
+// `effective_args` fold letting a real keyword-spelled value resolve
 // — in isolation. `codecs.open` shares the identical mode-gate shape
 // (`writes_only_with_file_mode`, `arg_names`) with no callback parameter of
 // its own, so it still can.
@@ -622,7 +622,7 @@ fn opens_own_explicit_readable_mode_does_not_suppress_the_opener_ask() {
 // argument after it would shift into the wrong slot. `os.rename` carries no
 // `arg_names` (its `writes = "all_args"` needs none), so this is the
 // scanner's own marker-holds-its-place behaviour reaching the engine
-// end-to-end, independent of round 3's `fold_kwargs` change entirely.
+// end-to-end, independent of round 3's effective-argument change entirely.
 #[test]
 fn an_unresolvable_first_argument_does_not_shift_the_real_destination() {
     let c = cfg("unmodeled_command = \"allow\"");
@@ -637,7 +637,7 @@ fn an_unresolvable_first_argument_does_not_shift_the_real_destination() {
     }
 }
 
-// A companion to 27 that exercises `fold_kwargs` itself (unlike
+// A companion to 27 that exercises `effective_args` itself (unlike
 // `os.rename`, `open`/`codecs.open` DO declare `arg_names`) and combines
 // every piece round 3 touches in one call: an unresolvable KEYWORD value
 // (`mode`, no name to attach a value to, but still a real argument) sitting

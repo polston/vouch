@@ -2009,7 +2009,7 @@ fn runs_file_in(prog: &Program, args: &[String]) -> bool {
 ///      hypothetical positional spelling are read identically.
 ///   2. a callback slot has no positional form at all (legitimately absent
 ///      from `arg_names` — most of json.load's callback parameters are
-///      keyword-only), so it never reaches `fold_kwargs`'s output; an
+///      keyword-only), so it never reaches `effective_args`'s output; an
 ///      unfolded `name=value` token in the RAW call is checked directly.
 ///   3. a nameless keyword-unpacking marker (`**opts`) is present ANYWHERE
 ///      in the RAW call — `f(**opts)` alone, with no other argument at all,
@@ -2042,22 +2042,31 @@ pub fn callback_argument_used(kb: &Knowledge, cmd: &Cmd) -> bool {
         if !prog.match_names.iter().any(|n| n.to_ascii_lowercase() == head) {
             continue;
         }
-        let (eff, padding, base_off) = fold_kwargs(prog, &cmd.args, &cmd.head);
+        let effective = effective_args(prog, cmd);
         // `eff_position_occupied`, not a bare `.is_some()` (task 2b fix
         // round 4): a slot the call never addressed at all can still show
         // up occupying `eff` if a LATER position was folded, which must
         // not read as "this callback slot was used."
-        if callback_arg_positions(prog, base_off).iter().any(|&p| eff_position_occupied(&eff, &padding, p)) {
+        if callback_arg_positions(prog, effective.base_offset)
+            .iter()
+            .any(|&p| eff_position_occupied(&effective.values, &effective.padding, p))
+        {
             return true;
         }
         if cmd
             .args
             .iter()
-            .any(|a| a.split_once('=').is_some_and(|(name, _)| prog.callback_args.iter().any(|c| c == name)))
+            .enumerate()
+            .any(|(i, a)| {
+                cmd.keyword_args.contains(&i)
+                    && a.split_once('=').is_some_and(|(name, _)| {
+                        prog.callback_args.iter().any(|c| c == name)
+                    })
+            })
         {
             return true;
         }
-        if has_unpack_arg(&cmd.args) {
+        if has_unpack_arg(cmd) {
             return true;
         }
     }
@@ -3214,6 +3223,7 @@ fn after_exec_commands(prog: &Program, args: &[String]) -> (Vec<Cmd>, Vec<String
                 head: h.clone(),
                 args: rest_args.to_vec(),
                 unread_args: Default::default(),
+                keyword_args: Default::default(),
                 chain: None,
                 prefix_assigns: vec![],
                 receiver_origin: crate::syntax::ValueOrigin::Unknown,
@@ -3443,6 +3453,8 @@ fn scan_snippet(lang: &str, src: &str, srcs: &mut Vec<(String, String)>) -> Resu
             heredocs: s.heredocs,
             input_source: s.input_source,
             args_complete: s.args_complete,
+            order: s.order,
+            parsed: true,
         })
         .map_err(|e| (lang.to_string(), e))
 }
@@ -3462,6 +3474,8 @@ struct SnippetScan {
     heredocs: Vec<crate::syntax::Heredoc>,
     input_source: Vec<crate::syntax::InputSource>,
     args_complete: Vec<bool>,
+    order: Vec<crate::syntax::Order>,
+    parsed: bool,
 }
 
 /// Runs `scan_snippet` for one wrap site and reads back what it decided:
@@ -3558,11 +3572,31 @@ pub fn expand_wrappers(kb: &Knowledge, cmds: &[Cmd], lang: &str) -> Vec<Cmd> {
 /// What one wrapper expansion found. Named rather than a positional tuple
 /// because two of its fields have the same type and only position told them
 /// apart — the same reason `engine::Expanded` is a struct.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionSite {
+    /// Zero is the caller's command-line scope; successfully parsed snippets
+    /// allocate child scopes in parent-before-child order.
+    pub scope: usize,
+    /// Scanner-supplied order inside this scope. `None` means wrapper
+    /// expansion synthesized the occurrence and it only inherits its caller's
+    /// position; that is not enough to make it a directory-mover event.
+    pub local_order: Option<crate::syntax::Order>,
+    /// True only when `local_order` came from the scanner for this exact
+    /// occurrence. Synthesised wrapper commands inherit their caller's
+    /// position for attribution, but that inherited position cannot prove a
+    /// process-local directory change occurred in the caller's scope.
+    pub scanner_order: bool,
+}
+
 pub struct ExpandedWrappers {
     /// Every occurrence: the top-level commands plus every command found
     /// inside a wrapper snippet or a consumed here-document body, in walk
     /// order.
     pub cmds: Vec<Cmd>,
+    /// Parallel to `cmds`: parsed-snippet scope and local scanner order.
+    pub execution_sites: Vec<ExecutionSite>,
+    /// Parent command index for child scopes 1..N, in allocation order.
+    pub scope_parents: Vec<usize>,
     /// Parallel to `cmds`: the language each occurrence was scanned under.
     pub langs: Vec<String>,
     /// Every `(language, source)` snippet the walk handed to a scanner.
@@ -3629,6 +3663,8 @@ pub struct ExpandedWrappers {
 #[derive(Default)]
 struct WalkOut {
     cmds: Vec<Cmd>,
+    execution_sites: Vec<ExecutionSite>,
+    scope_parents: Vec<usize>,
     langs: Vec<String>,
     holds: Vec<bool>,
     from_input: Vec<bool>,
@@ -3681,6 +3717,9 @@ pub fn expand_wrappers_forking(
         input_source: &[crate::syntax::InputSource],
         args_complete: &[bool],
         lang: &str,
+        scope: usize,
+        orders: &[crate::syntax::Order],
+        inherited_order: Option<&crate::syntax::Order>,
         depth: u8,
         caps: &dyn Fn(&str) -> u8,
         inherited: Option<&str>,
@@ -3712,7 +3751,13 @@ pub fn expand_wrappers_forking(
             // a parallel array populated somewhere else is the desync this
             // block's own comment warns about.
             let own_args_complete = args_complete.get(i).copied().unwrap_or(false);
+            let own_order = orders.get(i).or(inherited_order).cloned();
             out.cmds.push(cmd.clone());
+            out.execution_sites.push(ExecutionSite {
+                scope,
+                local_order: own_order.clone(),
+                scanner_order: orders.get(i).is_some(),
+            });
             out.langs.push(lang.to_string());
             // Pushed WITH the command, false for now, and back-patched by the
             // heredoc locator at the end of this iteration. The index has to be
@@ -3793,6 +3838,7 @@ pub fn expand_wrappers_forking(
                                     head: cmd.args[at].clone(),
                                     args: cmd.args[at + 1..].to_vec(),
                                     unread_args: Default::default(),
+                                    keyword_args: Default::default(),
                                     chain: None,
                                     // The env words this wrapper set for the
                                     // command it runs are that command's own
@@ -3953,6 +3999,7 @@ pub fn expand_wrappers_forking(
                                         head,
                                         args,
                                         unread_args: Default::default(),
+                                        keyword_args: Default::default(),
                                         chain: None,
                                         prefix_assigns: vec![],
                                         receiver_origin: crate::syntax::ValueOrigin::Unknown,
@@ -3996,6 +4043,18 @@ pub fn expand_wrappers_forking(
                     _ => SnippetScan::default(),
                 };
                 if !inner.cmds.is_empty() {
+                    let (inner_scope, inner_orders, inherited_inner_order, inner_run_dir) =
+                        if inner.parsed {
+                            let child_scope = out.scope_parents.len() + 1;
+                            out.scope_parents.push(self_idx);
+                            // The child scope starts in this occurrence's run
+                            // place. Reapplying that inherited directory to
+                            // every command inside the child would erase a
+                            // process-local directory change after it ran.
+                            (child_scope, inner.order.as_slice(), None, None)
+                        } else {
+                            (scope, &[][..], own_order.as_ref(), pass_down)
+                        };
                     go(
                         kb,
                         &inner.cmds,
@@ -4003,9 +4062,12 @@ pub fn expand_wrappers_forking(
                         &inner.input_source,
                         &inner.args_complete,
                         &next_lang,
+                        inner_scope,
+                        inner_orders,
+                        inherited_inner_order,
                         depth + 1,
                         caps,
-                        pass_down,
+                        inner_run_dir,
                         from_input || prog.args_from_input,
                         fork,
                         out,
@@ -4071,6 +4133,8 @@ pub fn expand_wrappers_forking(
                         out.holds[self_idx] = true;
                     }
                     if !scan.cmds.is_empty() {
+                        let child_scope = out.scope_parents.len() + 1;
+                        out.scope_parents.push(self_idx);
                         go(
                             kb,
                             &scan.cmds,
@@ -4078,9 +4142,12 @@ pub fn expand_wrappers_forking(
                             &scan.input_source,
                             &scan.args_complete,
                             &consumed_lang,
+                            child_scope,
+                            &scan.order,
+                            None,
                             depth + 1,
                             caps,
-                            pass_down,
+                            None,
                             from_input,
                             fork,
                             out,
@@ -4091,9 +4158,27 @@ pub fn expand_wrappers_forking(
         }
     }
     let mut walked = WalkOut::default();
-    go(kb, cmds, heredocs, input_source, args_complete, lang, 0, caps, None, false, fork, &mut walked);
+    go(
+        kb,
+        cmds,
+        heredocs,
+        input_source,
+        args_complete,
+        lang,
+        0,
+        &[],
+        None,
+        0,
+        caps,
+        None,
+        false,
+        fork,
+        &mut walked,
+    );
     ExpandedWrappers {
         cmds: walked.cmds,
+        execution_sites: walked.execution_sites,
+        scope_parents: walked.scope_parents,
         langs: walked.langs,
         srcs: walked.srcs,
         wrap_depth_exceeded: walked.exceeded,
@@ -4321,7 +4406,7 @@ fn is_unresolved_marker(a: &str) -> bool {
     a == crate::python::MARKER || a == crate::python::UNPACK_MARKER
 }
 
-/// What `fold_kwargs` pushes into a GAP — a position between two folded
+/// What `effective_args` pushes into a GAP — a position between two folded
 /// positions that no token in the call ever addressed at all, positional or
 /// keyword (task 2b fix round 4). Distinct from `python::MARKER` on
 /// purpose: `MARKER` means "the call gave a value here and vouch could not
@@ -4370,12 +4455,12 @@ const PADDING_MARKER: &str = "$,";
 
 /// Whether `eff[i]` is a REAL occupant — something a token in the call
 /// actually addressed, whether resolved or not — as opposed to a gap
-/// `fold_kwargs` filled only to reach a LATER position. `None` (past the
-/// end of `eff` entirely) and an index `fold_kwargs` recorded in `padding`
+/// `effective_args` filled only to reach a LATER position. `None` (past the
+/// end of `eff` entirely) and an index `effective_args` recorded in `padding`
 /// both mean "nothing here"; only a genuine value, including the ordinary
 /// unresolved marker, means "something here, unreadable or not."
 ///
-/// Reads `padding` — the index set `fold_kwargs` returns alongside `eff` —
+/// Reads `padding` — the index set `effective_args` returns alongside `eff` —
 /// rather than comparing `eff[i]` against `PADDING_MARKER`'s text (task 2b
 /// fix round 5): seeing its own OWN doc comment for why a text comparison
 /// is unsafe (a real argument can legally equal any fixed marker
@@ -4394,13 +4479,15 @@ fn is_any_internal_sentinel(v: &str) -> bool {
     is_unresolved_marker(v) || v == PADDING_MARKER
 }
 
-/// Whether ANY token in a call's raw arguments is a nameless `**` unpack
-/// (`python::UNPACK_MARKER`) — shared by `callback_argument_used` (an
-/// unpack anywhere could be carrying a declared callback slot) and
-/// `written_paths`'s `arg_<N>` arm (an unpack could be supplying `mode`
-/// invisibly, read by `mode_says_write`'s `has_unpack` parameter).
-fn has_unpack_arg(args: &[String]) -> bool {
-    args.iter().any(|a| a == crate::python::UNPACK_MARKER)
+/// Whether a structurally unread `python::UNPACK_MARKER` in a call is a
+/// nameless `**` unpack — shared by `callback_argument_used` (an unpack
+/// anywhere could carry a declared callback slot) and `written_paths`'s
+/// `arg_<N>` arm (it could supply `mode` invisibly). Identical readable
+/// positional text is a literal, not syntax.
+fn has_unpack_arg(cmd: &Cmd) -> bool {
+    cmd.args.iter().enumerate().any(|(i, a)| {
+        a == crate::python::UNPACK_MARKER && cmd.unread_args.contains(&i)
+    })
 }
 
 /// The set of `eff`/`padding` indices a declared `callback_args` name maps
@@ -4453,19 +4540,12 @@ fn push_write_target(out: &mut WriteTargets, v: &str) {
 /// completely untouched — every non-python entry, none of which sets
 /// `arg_names`, is unaffected by this function.
 ///
-/// A `=`-bearing token is only ever treated as a keyword candidate when it
-/// sits in the TRAILING keyword region — no later token is an unambiguous
-/// positional (one with neither a `=` nor an unresolved marker, `MARKER` or
-/// `UNPACK_MARKER`). The scanner always emits every real positional token
-/// before any keyword-derived one (`src/python.rs`'s call-building order:
-/// all of `node.arguments.args`, then all of `node.arguments.keywords`), so
-/// a `=` with an unambiguous positional somewhere after it can only be part
-/// of that token's own literal text — `open("a=b.txt", "w")` — never a
-/// keyword this call actually passed. Both markers are excluded from
-/// counting as an unambiguous positional, and for the same reason as each
-/// other: treating either as one would stop a real `name=value` token that
-/// PRECEDES it from folding at all (`open(file="x", **opts)` needs `file=`
-/// to still fold even though the unpack sits after it).
+/// `Cmd::keyword_args` decides whether a `name=value` token came from keyword
+/// syntax. The spelling alone never decides: a positional string can legally
+/// be `"file=x"` or `"path=output"`, and folding either by text would replace
+/// the real value with a different one. The Python scanner records keyword
+/// positions out of band for the same reason it records unread positions out
+/// of band; every other scanner leaves the set empty.
 ///
 /// `MARKER` and `UNPACK_MARKER` part ways past that, though (task 2b fix
 /// round 3): an ordinary unresolvable VALUE still has to OCCUPY a slot when
@@ -4473,8 +4553,8 @@ fn push_write_target(out: &mut WriteTargets, v: &str) {
 /// needs its first argument's marker to take position 0, or the second
 /// argument reads as the destination one slot too early. A `**` unpack is
 /// not a positional value at all, so it must NOT occupy a slot the same
-/// way: doing so let the unpack's own token displace a real, trailing
-/// `name=value` fold and land in the prompt as if it were the real
+/// way: doing so let the unpack's own token displace a real named-argument
+/// fold and land in the prompt as if it were the real
 /// argument — `open(file="C:/work/x.txt", **opts)` reported the literal
 /// text `$**` as the write target instead of the path the operator
 /// actually named, and a genuinely allowed destination could never resolve
@@ -4502,30 +4582,50 @@ fn push_write_target(out: &mut WriteTargets, v: &str) {
 /// alongside `eff`/`padding` to translate an `arg_names` position into an
 /// `eff` index, so it is computed once here rather than a second time at
 /// each call site.
-fn fold_kwargs(prog: &Program, args: &[String], head: &str) -> (Vec<String>, HashSet<usize>, usize) {
-    let base = usize::from(head_is_method_shaped(head));
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectiveArgs {
+    pub values: Vec<String>,
+    pub padding: HashSet<usize>,
+    pub unread: HashSet<usize>,
+    pub base_offset: usize,
+}
+
+/// Arguments in the positions an entry's `arg_names` declares.
+///
+/// Python keyword tokens are folded onto their named positions while the
+/// scanner's out-of-band readability and the fold's padding remain structural
+/// index sets. A literal equal to an internal marker is therefore still
+/// readable; an unread keyword value remains unread after it moves.
+pub fn effective_args(prog: &Program, cmd: &Cmd) -> EffectiveArgs {
+    let base = usize::from(head_is_method_shaped(&cmd.head));
     if prog.arg_names.is_empty() {
-        return (args.to_vec(), HashSet::new(), base);
-    }
-    let last_unambiguous_positional = args.iter().rposition(|a| !is_unresolved_marker(a) && !a.contains('='));
-    let mut eff: Vec<String> = Vec::new();
-    let mut folded: Vec<(usize, String)> = Vec::new();
-    for (i, a) in args.iter().enumerate() {
-        let in_keyword_region = match last_unambiguous_positional {
-            Some(p) => i > p,
-            None => true,
+        return EffectiveArgs {
+            values: cmd.args.clone(),
+            padding: HashSet::new(),
+            unread: cmd.unread_args.clone(),
+            base_offset: base,
         };
-        if in_keyword_region {
+    }
+    let mut eff: Vec<String> = Vec::new();
+    let mut unread: HashSet<usize> = HashSet::new();
+    let mut folded: Vec<(usize, String, bool)> = Vec::new();
+    for (i, a) in cmd.args.iter().enumerate() {
+        if cmd.keyword_args.contains(&i) {
             if let Some((name, value)) = a.split_once('=') {
                 if let Some(p) = prog.arg_names.iter().position(|n| n == name) {
-                    folded.push((base + p, value.to_string()));
+                    folded.push((base + p, value.to_string(), cmd.unread_args.contains(&i)));
                 }
-                continue;
             }
-            if a == crate::python::UNPACK_MARKER {
-                // Not a positional argument — see the doc comment above.
-                continue;
-            }
+            continue;
+        }
+        if a == crate::python::UNPACK_MARKER && cmd.unread_args.contains(&i) {
+            // A nameless keyword unpack is not a positional argument. The
+            // structural unread bit distinguishes it from identical literal
+            // text supplied positionally.
+            continue;
+        }
+        if cmd.unread_args.contains(&i) {
+            unread.insert(eff.len());
         }
         eff.push(a.clone());
     }
@@ -4535,18 +4635,26 @@ fn fold_kwargs(prog: &Program, args: &[String], head: &str) -> (Vec<String>, Has
     // spelling. `sort_by_key` is stable, so a real positional's "first
     // occupant wins" claim on a position (already in `eff` before this loop
     // runs) is unaffected either way.
-    folded.sort_by_key(|(pos, _)| *pos);
+    folded.sort_by_key(|(pos, ..)| *pos);
     let mut padding: HashSet<usize> = HashSet::new();
-    for (pos, value) in folded {
+    for (pos, value, value_unread) in folded {
         while eff.len() < pos {
             padding.insert(eff.len());
             eff.push(PADDING_MARKER.to_string()); // never addressed at all — see its own doc comment
         }
         if eff.len() == pos {
+            if value_unread {
+                unread.insert(pos);
+            }
             eff.push(value); // first occupant wins
         }
     }
-    (eff, padding, base)
+    EffectiveArgs {
+        values: eff,
+        padding,
+        unread,
+        base_offset: base,
+    }
 }
 
 /// Whether a `writes_only_with_file_mode` claim's own "mode" position says
@@ -4615,7 +4723,10 @@ pub fn written_paths_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> WriteTargets {
         // position lives in — see `eff_position_occupied`'s doc comment for
         // why occupancy is tracked by index rather than by comparing a
         // position's text against `PADDING_MARKER`.
-        let (eff, padding, base_off) = fold_kwargs(prog, &cmd.args, &cmd.head);
+        let effective = effective_args(prog, cmd);
+        let eff = effective.values;
+        let padding = effective.padding;
+        let base_off = effective.base_offset;
         // A flag's VALUE is not a positional argument. Without this,
         // `truncate -s 0 <file>` records `0` as a written path, and the
         // positional fallback below can pick a flag's value as a destination.
@@ -4764,7 +4875,7 @@ pub fn written_paths_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> WriteTargets {
             // function signature (see `arg_names`).
             s if s.starts_with("arg_") => {
                 if let Some(i) = s.strip_prefix("arg_").and_then(|n| n.parse::<usize>().ok()) {
-                    let has_unpack = has_unpack_arg(&cmd.args);
+                    let has_unpack = has_unpack_arg(cmd);
                     let mode_blocks = prog.writes_only_with_file_mode == Some(true)
                         && !mode_says_write(prog, &eff, &padding, base_off, has_unpack);
                     if !mode_blocks {
@@ -4777,13 +4888,13 @@ pub fn written_paths_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> WriteTargets {
                             crate::python::MARKER.to_string()
                         } else {
                             let v = &eff[i];
-                            // A token still shaped like an unfolded keyword
-                            // (`name=value`) never names a resolved
-                            // position: with no `arg_names` to check it
-                            // against, `fold_kwargs` could not tell whether
-                            // it was ever meant for this slot, so it is no
-                            // more trustworthy than an absent one.
-                            if prog.arg_names.is_empty() && v.split_once('=').is_some() {
+                            // A structurally marked but unfolded keyword never
+                            // names a resolved position: with no `arg_names`
+                            // to map it through, it is no more trustworthy
+                            // than an absent one. Literal positional
+                            // `name=value` text is not a keyword and remains
+                            // the real target.
+                            if prog.arg_names.is_empty() && cmd.keyword_args.contains(&i) {
                                 crate::python::MARKER.to_string()
                             } else {
                                 v.clone()

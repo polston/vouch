@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.0 (2026-08-27)
+
+
+### Features
+
+* track Python directory changes
+
 ## 0.6.0 (2026-08-27)
 
 
