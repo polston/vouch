@@ -740,6 +740,136 @@ fn program_location_cli_fixture(
     (base, outside, config)
 }
 
+fn project_root_program_location_cli_fixture(
+    tag: &str,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let base = std::env::temp_dir().join(format!(
+        "vouch-cli-project-root-program-location-{tag}-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(base.join(".git")).unwrap();
+    std::fs::create_dir_all(base.join("target/release")).unwrap();
+    let base = std::fs::canonicalize(base).unwrap();
+    std::fs::write(base.join("target/release/probe-alpha"), b"fixture").unwrap();
+    let config = base.join("config.toml");
+    std::fs::write(
+        &config,
+        "[lang.bash]\ndefault = \"allow\"\n[lang.bash.constructs]\n\
+         unmodeled_command = \"ask\"\n[[run.trust_program]]\n\
+         under = [\"$PROJECT_ROOT/target/release/**\"]\n\
+         name_patterns = [\"probe-*\"]\n",
+    )
+    .unwrap();
+    (base, config)
+}
+
+#[test]
+fn explain_expands_project_root_from_its_judged_directory() {
+    let home = pinned_home();
+    let (base, config) = project_root_program_location_cli_fixture("explain");
+    let out = Command::new(bin())
+        .args(["explain", "--cwd"])
+        .arg(portable_fixture_path(&base))
+        .arg("./target/release/probe-alpha inspect")
+        .env("VOUCH_CONFIG", &config)
+        .env("VOUCH_STATE_DIR", base.join("state"))
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(text.contains("ALLOW"), "{text}");
+    assert!(text.contains("[[run.trust_program]] #1"), "{text}");
+
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn why_with_a_command_expands_project_root_from_its_judged_directory() {
+    let home = pinned_home();
+    let (base, config) = project_root_program_location_cli_fixture("why-command");
+    let out = Command::new(bin())
+        .args(["why", "--cwd"])
+        .arg(portable_fixture_path(&base))
+        .arg("./target/release/probe-alpha inspect")
+        .env("VOUCH_CONFIG", &config)
+        .env("VOUCH_STATE_DIR", base.join("state"))
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(text.contains("ALLOW"), "{text}");
+    assert!(text.contains("[[run.trust_program]] #1"), "{text}");
+
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn why_replay_expands_project_root_from_the_recorded_directory() {
+    let home = pinned_home();
+    let (base, config) = project_root_program_location_cli_fixture("why-replay-root");
+    let state = base.join("state");
+    let rec = vouch::journal::Record {
+        id: "project-root-program-location-row".into(),
+        ts: vouch::journal::now_epoch_secs(),
+        session: "fixture-session".into(),
+        tool: "Bash".into(),
+        cmd: "./target/release/probe-alpha inspect".into(),
+        verdict: "ask".into(),
+        reason: "fixture prior decision".into(),
+        mode: "live".into(),
+        cwd: portable_fixture_path(&base),
+        outcome: vouch::outcome::Outcome::Pending,
+        lang: "bash".into(),
+        permission_mode: String::new(),
+        host: "claude".into(),
+    };
+    vouch::journal::append(&state, &rec).unwrap();
+
+    let out = Command::new(bin())
+        .arg("why")
+        .env("VOUCH_CONFIG", &config)
+        .env("VOUCH_STATE_DIR", &state)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(text.contains("ALLOW"), "{text}");
+    assert!(text.contains("[[run.trust_program]] #1"), "{text}");
+
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn doctor_expands_project_root_from_the_process_directory() {
+    let home = pinned_home();
+    let (base, config) = project_root_program_location_cli_fixture("doctor");
+    let out = Command::new(bin())
+        .arg("doctor")
+        .current_dir(&base)
+        .env("VOUCH_CONFIG", &config)
+        .env("VOUCH_STATE_DIR", base.join("state"))
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(!text.contains("cannot be expanded"), "{text}");
+    assert!(!text.contains("program-location rules needing attention"), "{text}");
+
+    std::fs::remove_dir_all(base).unwrap();
+}
+
 #[test]
 fn explain_cwd_changes_program_location_recognition_in_both_directions() {
     let home = pinned_home();

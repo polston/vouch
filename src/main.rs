@@ -727,11 +727,12 @@ fn main() {
         // was: a verdict with no stated location is a verdict about an
         // unstated place.
         let here = judged_from(target.cwd.clone());
+        let root = project_root(&here);
         println!("judged from: {here}");
         let d = with_banner(
             vouch::engine::decide_command_at(
                 &cfg, target.lang, &target.cmd, Some(&home()),
-                project_root(".").as_deref(), Some(&here),
+                root.as_deref(), Some(&here),
             ),
             notice.as_deref(),
         );
@@ -756,6 +757,7 @@ fn main() {
         if !target.cmd.is_empty() {
             let (lang, cmd, cwd) = (target.lang, target.cmd, target.cwd);
             let here = judged_from(cwd);
+            let root = project_root(&here);
             println!("command: {cmd}");
             println!("judged from: {here}");
             let d = with_banner(
@@ -764,7 +766,7 @@ fn main() {
                     lang,
                     &cmd,
                     Some(&home()),
-                    project_root(".").as_deref(),
+                    root.as_deref(),
                     Some(&here),
                 ),
                 notice.as_deref(),
@@ -794,6 +796,7 @@ fn main() {
                 // `parse_target` itself defaults to for the same reason.
                 let lang = if rec.lang.is_empty() { "bash" } else { rec.lang.as_str() };
                 let cwd = if rec.cwd.is_empty() { None } else { Some(rec.cwd.as_str()) };
+                let root = cwd.and_then(project_root);
                 match cwd {
                     Some(dir) => print!("re-decided now, from {dir}: "),
                     None => println!("re-decided now (no directory was recorded)"),
@@ -801,7 +804,7 @@ fn main() {
                 let d = with_banner(
                     vouch::engine::decide_command_at(
                         &cfg, lang, &rec.cmd, Some(&home()),
-                        project_root(".").as_deref(), cwd,
+                        root.as_deref(), cwd,
                     ),
                     notice.as_deref(),
                 );
@@ -1126,6 +1129,8 @@ fn main() {
     // `vouch doctor` — what vouch could not read or describe. These are vouch's
     // own gaps, surfaced so they get fixed instead of silently becoming prompts.
     if args.first().map(String::as_str) == Some("doctor") {
+        let here = judged_from(None);
+        let root = project_root(&here);
         // `vouch::engine::parse_undeclared_option_line` scrapes one line of a
         // recorded `journal::Record.reason` for the marker
         // `engine::undeclared_option_line` writes on a rule-4 ask — the two
@@ -1145,7 +1150,7 @@ fn main() {
         // `cfg` is the one `main()` already loaded above (line 510) — every
         // other branch in this function reads that same binding by
         // reference, and doctor is no exception.
-        let inert = vouch::config::inert_place_rules(&cfg, &home(), project_root(".").as_deref());
+        let inert = vouch::config::inert_place_rules(&cfg, &home(), root.as_deref());
         if !inert.is_empty() {
             println!("place rules that can never fire ({}):", inert.len());
             for f in inert.iter().take(20) {
@@ -1157,7 +1162,7 @@ fn main() {
         let program_findings = vouch::config::program_location_findings(
             &cfg,
             &home(),
-            project_root(".").as_deref(),
+            root.as_deref(),
         );
         if !program_findings.is_empty() {
             println!(

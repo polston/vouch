@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.4 (2026-08-27)
+
+
+### Bug Fixes
+
+* resolve project roots in diagnostics
+
 ## 0.5.3 (2026-08-27)
 
 

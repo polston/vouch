@@ -9,7 +9,7 @@
       "name": "vouch",
       "source": "./plugin",
       "description": "Skills for running vouch with Claude Code or Codex: evidence-first setup, safe program recognition, session procedures, and private-data removal.",
-      "version": "0.5.3",
+      "version": "0.5.4",
       "keywords": [
         "permissions",
         "security",
