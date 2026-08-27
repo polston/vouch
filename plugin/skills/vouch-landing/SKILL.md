@@ -111,9 +111,11 @@ Run from the vouch checkout root; every path below is relative to it.
    Derive and report all of these from the current branch and files:
    - how the implementation enters the private `master` (this procedure's
      direct fast-forward, not an implementation pull request);
-   - the conventional prefixes in `master..<branch>`, whether release-please
-     will open a private version pull request, and the expected next version
-     from `.release-please-manifest.json`;
+   - the conventional prefixes in `master..<branch>` and, for every authored
+     `feat`/`fix`, the complete structured release-note block; derive whether
+     release-please will open a private version pull request and the expected
+     next version from the strongest nested entry plus
+     `.release-please-manifest.json` — the private summary is filtered;
    - whether `git diff --name-only master...<branch>` intersects the publish
      `MANIFEST` in `scripts/publish-mirror.sh`;
    - every review boundary, in order: exact-land the private version pull

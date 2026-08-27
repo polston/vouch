@@ -297,9 +297,11 @@ the same skill under two different names.
 
 ### Releases
 
-Version numbers and `CHANGELOG.md` are generated from conventional commit
-subjects; each release lands as one reviewed change, and the public-mirror tag
-that follows triggers the build workflow to attach the binaries.
+Version numbers and `CHANGELOG.md` are generated from structured `feat`/`fix`
+entries recorded in each release-bearing commit. The private subject summarizes
+the changeset; one nested entry names each independently visible public outcome.
+Each release lands as one reviewed change, and the public-mirror tag that
+follows triggers the build workflow to attach the binaries.
 
 The mirror publisher scans the configured Git identity and the exact candidate
 message, metadata, paths, patch, and files before it pushes a review branch.
