@@ -112,7 +112,8 @@ fn program_rule_scratch(tag: &str) -> std::path::PathBuf {
 }
 
 fn portable(path: &std::path::Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+    let text = path.to_string_lossy().replace('\\', "/");
+    text.strip_prefix("//?/").unwrap_or(&text).to_string()
 }
 
 fn program_rule_cfg(under: &str, names: &[&str]) -> vouch::config::Config {

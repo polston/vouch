@@ -705,6 +705,11 @@ fn explain_names_the_setting() {
     assert!(text.contains("lang.bash.constructs"), "got: {text}");
 }
 
+fn portable_fixture_path(path: &std::path::Path) -> String {
+    let text = path.to_string_lossy().replace('\\', "/");
+    text.strip_prefix("//?/").unwrap_or(&text).to_string()
+}
+
 fn program_location_cli_fixture(
     tag: &str,
 ) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
@@ -722,7 +727,7 @@ fn program_location_cli_fixture(
     let outside = base.join("outside");
     std::fs::write(root.join("bin/probe-alpha"), b"fixture").unwrap();
     let config = base.join("config.toml");
-    let root_text = root.to_string_lossy().replace('\\', "/");
+    let root_text = portable_fixture_path(&root);
     std::fs::write(
         &config,
         format!(
@@ -806,7 +811,7 @@ fn why_replays_program_location_recognition_from_the_recorded_directory() {
         verdict: "ask".into(),
         reason: "fixture prior decision".into(),
         mode: "live".into(),
-        cwd: root.to_string_lossy().replace('\\', "/"),
+        cwd: portable_fixture_path(&root),
         outcome: vouch::outcome::Outcome::Pending,
         lang: "bash".into(),
         permission_mode: String::new(),

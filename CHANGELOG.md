@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.2 (2026-08-27)
+
+
+### Bug Fixes
+
+* normalize Windows program-location fixtures
+
 ## 0.5.1 (2026-08-27)
 
 

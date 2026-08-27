@@ -427,6 +427,11 @@ fn program_doctor_root(tag: &str) -> std::path::PathBuf {
     std::fs::canonicalize(root).unwrap()
 }
 
+fn program_doctor_path(path: &std::path::Path) -> String {
+    let text = path.to_string_lossy().replace('\\', "/");
+    text.strip_prefix("//?/").unwrap_or(&text).to_string()
+}
+
 fn program_doctor_cfg(entries: &[(&str, &str)]) -> config::Config {
     let text = entries
         .iter()
@@ -443,7 +448,7 @@ fn program_doctor_cfg(entries: &[(&str, &str)]) -> config::Config {
 #[test]
 fn program_location_doctor_reports_missing_roots_as_advisory_inert_now() {
     let root = program_doctor_root("missing");
-    let written = format!("{}/not-built/**", root.to_string_lossy().replace('\\', "/"));
+    let written = format!("{}/not-built/**", program_doctor_path(&root));
     let cfg = program_doctor_cfg(&[(&written, "probe-*")]);
     let findings = config::program_location_findings(&cfg, "", None);
 
@@ -470,7 +475,7 @@ fn program_location_doctor_reports_an_unexpandable_project_root_without_guessing
 fn program_location_doctor_reports_zero_counts_without_listing_discovered_names() {
     let root = program_doctor_root("empty-family");
     std::fs::write(root.join("unrelated-discovered-name"), b"fixture").unwrap();
-    let written = format!("{}/**", root.to_string_lossy().replace('\\', "/"));
+    let written = format!("{}/**", program_doctor_path(&root));
     let cfg = program_doctor_cfg(&[(&written, "probe-*")]);
     let findings = config::program_location_findings(&cfg, "", None);
 
@@ -486,7 +491,7 @@ fn program_location_doctor_reports_zero_counts_without_listing_discovered_names(
 fn program_location_doctor_is_quiet_for_a_nonempty_unshadowed_family() {
     let root = program_doctor_root("nonempty");
     std::fs::write(root.join("probe-alpha"), b"fixture").unwrap();
-    let written = format!("{}/**", root.to_string_lossy().replace('\\', "/"));
+    let written = format!("{}/**", program_doctor_path(&root));
     let cfg = program_doctor_cfg(&[(&written, "probe-*")]);
     let findings = config::program_location_findings(&cfg, "", None);
 
@@ -500,8 +505,8 @@ fn program_location_doctor_reports_a_later_rule_fully_shadowed_by_an_earlier_one
     let nested = root.join("nested");
     std::fs::create_dir(&nested).unwrap();
     std::fs::write(nested.join("probe-alpha"), b"fixture").unwrap();
-    let outer = format!("{}/**", root.to_string_lossy().replace('\\', "/"));
-    let inner = format!("{}/**", nested.to_string_lossy().replace('\\', "/"));
+    let outer = format!("{}/**", program_doctor_path(&root));
+    let inner = format!("{}/**", program_doctor_path(&nested));
     let cfg = program_doctor_cfg(&[(&outer, "probe-*"), (&inner, "probe-alpha")]);
     let findings = config::program_location_findings(&cfg, "", None);
 

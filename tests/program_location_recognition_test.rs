@@ -19,7 +19,8 @@ fn scratch(tag: &str) -> PathBuf {
 }
 
 fn path(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+    let text = path.to_string_lossy().replace('\\', "/");
+    text.strip_prefix("//?/").unwrap_or(&text).to_string()
 }
 
 fn cfg_with(
