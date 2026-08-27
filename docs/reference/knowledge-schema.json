@@ -250,10 +250,32 @@
             "type": "string"
           }
         },
+        "produces": {
+          "description": "Origin tags this call's return value is known to produce. Tags are\npolicy vocabulary declared by knowledge, not a closed set in code.\nA call that occupies one of this entry's declared `callback_args`\nwithholds these tags because the callback may customize the result.\n`None` means this entry is silent; `Some([])` explicitly retracts a\nshipped producer claim during an overlay.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "default": null,
+          "items": {
+            "type": "string"
+          }
+        },
         "rebinds_name_flags": {
           "description": "Flags in which this program BINDS a name to something else — `hash -p\n<path> <name>` installs `<path>` under `<name>` in the shell's own\nlookup table, so a later `<name>` on the line runs that path\n(verified by running). The name-side twin of `[[env_name]]`'s\n`\"lookup\"` effect: there a variable the shell reads is assigned, here\na program is told to change the table directly. Raises\n`rebound_name`.",
           "type": "array",
           "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "receiver_from": {
+          "description": "Origin tags required of a method call's receiver before any claim on\nthis entry applies. `None` leaves the entry unconditional; `Some([])`\nexplicitly removes a shipped receiver gate during an overlay.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "default": null,
           "items": {
             "type": "string"
           }
@@ -397,7 +419,7 @@
           "default": null
         },
         "writes_via_handle": {
-          "description": "This ENTRY's claim: at the named position (\"arg_<N>\", receiver = 0)\nor keyword-only parameter (the same ASCII identifier grammar\n`callback_args` uses), the call writes\nthrough a file object already judged where it was minted — so the\nengine extracts NO write target from this call itself; the value is\ndocumentary, and validation checks only its spelling and its\nexclusivity with the other write claims.\n\nThis is narrower than \"the call carries no path anywhere\". The entry\nmatches by NAME alone (python text carries no receiver types), so it\ncannot rule out some OTHER standard-library receiver whose method of\nthe same name takes a real destination path at a DIFFERENT position\nthis entry never inspects. Live-verified counterexample (fix round 1,\nM2.86 task 5, 2026-08-10): `xml.etree.ElementTree.ElementTree` — an\nin-memory tree, never opened, never a handle — has its own\n`.write(file_or_filename, ...)`, whose first argument is a real path\nthat a plain string there writes to on disk. Contrast, checked the\nsame way and NOT a trap (fix round 2): `zipfile.ZipFile.write\n(filename, ...)` also takes `filename` as a real argument, but live\nverification shows it is READ from, not written to — the archive\nreceiver (arg_0) is the actual write destination there, consistent\nwith this entry's own claim.\n\nThe trap is specifically a receiver whose SAME-NAMED method takes its\nwrite DESTINATION as an argument, the way ElementTree's does — not\n\"any receiver exposing this name at all\" (zipfile's does too, and is\nnot a trap). This stays fail-closed today only because every route to\nthe ElementTree case runs through an unmodelled constructor call that\nasks (`ET.ElementTree`/`ET.parse` are both undescribed) — if a\nconstructor for a receiver of THAT shape is ever described, every\nentry setting this field must be revisited in the SAME change. Scope\nand residue: docs/specs/2026-08-09-python-read-only-builtins-design.md;\nreceiver-provenance retirement: docs/ROADMAP.md M2.87.\n\n`None` means the entry did not say. Same `Option` merge rule as\n`writes_only_with_file_mode`.",
+          "description": "This ENTRY's claim: at the named position (\"arg_<N>\", receiver = 0)\nor keyword-only parameter (the same ASCII identifier grammar\n`callback_args` uses), the call writes\nthrough a file object already judged where it was minted — so the\nengine extracts NO write target from this call itself; the value is\ndocumentary, and validation checks only its spelling and its\nexclusivity with the other write claims.\n\nThis field does not itself prove the named value is a handle. A\nreceiver-shaped entry whose claim depends on that fact pairs it with\n`receiver_from`; the shipped `.write`/`.writelines` entry requires a\nreceiver carrying `file_handle`, so an ElementTree or other unknown\nsame-named receiver gets no applicable claim and asks. Direct calls\nsuch as `json.dump` and `print` name their explicit handle parameter\ninstead and need no receiver gate.\n\n`None` means the entry did not say. Same `Option` merge rule as\n`writes_only_with_file_mode`.",
           "type": [
             "string",
             "null"

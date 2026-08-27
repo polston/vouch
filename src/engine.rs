@@ -1050,7 +1050,7 @@ fn judge_once(
             // remote for `scp` and is a local file with a colon in its name
             // for `cp` — on NTFS, an alternate data stream of the file before
             // the colon, which is a real write.
-            let remote_ok = crate::guards::entry_for(kb, &c.head, clang)
+            let remote_ok = crate::guards::entry_for_cmd(kb, c, clang)
                 .is_some_and(|e| e.remote_dest);
             for p in paths {
                 if remote_ok && is_remote_spec(&p) {
@@ -3881,7 +3881,7 @@ fn cd_timeline(
         // runs short.
         let lang = langs.get(i).map(String::as_str).unwrap_or("bash");
         let head = crate::guards::base_name(&c.head);
-        let (kind, prog) = match crate::guards::dir_change_entry(kb, &head, lang) {
+        let (kind, prog) = match crate::guards::dir_change_entry_for_cmd(kb, c, lang) {
             Some((k, p)) if k != crate::guards::DirChangeKind::No => (k, Some(p)),
             _ => continue,
         };

@@ -149,6 +149,29 @@ fn dotted(e: &ast::Expr) -> Option<String> {
     }
 }
 
+/// The plain name whose value a mutation target reaches through.
+fn mutation_root(e: &ast::Expr) -> Option<&str> {
+    match e {
+        ast::Expr::Name(name) => Some(name.id.as_str()),
+        ast::Expr::Attribute(attribute) => mutation_root(&attribute.value),
+        ast::Expr::Subscript(subscript) => mutation_root(&subscript.value),
+        ast::Expr::Starred(starred) => mutation_root(&starred.value),
+        _ => None,
+    }
+}
+
+fn binding_names(e: &ast::Expr, names: &mut std::collections::HashSet<String>) {
+    match e {
+        ast::Expr::Name(name) => {
+            names.insert(name.id.to_string());
+        }
+        ast::Expr::Tuple(tuple) => tuple.elts.iter().for_each(|item| binding_names(item, names)),
+        ast::Expr::List(list) => list.elts.iter().for_each(|item| binding_names(item, names)),
+        ast::Expr::Starred(starred) => binding_names(&starred.value, names),
+        _ => {}
+    }
+}
+
 /// Whatever text a Python expression is known to evaluate to.
 ///
 /// Resolution mirrors the shell path deliberately (CLAUDE.md §8: paths and
@@ -206,9 +229,7 @@ fn argument_value(e: &ast::Expr, assigned: &HashMap<String, String>) -> Argument
                     ast::FStringPart::FString(fstring) => {
                         for el in &fstring.elements {
                             match el {
-                                ast::InterpolatedStringElement::Literal(lit) => {
-                                    out.push_str(&lit.value)
-                                }
+                                ast::InterpolatedStringElement::Literal(lit) => out.push_str(&lit.value),
                                 ast::InterpolatedStringElement::Interpolation(interp) => {
                                     let v = argument_value(&interp.expression, assigned);
                                     out.push_str(&v.text);
@@ -226,10 +247,7 @@ fn argument_value(e: &ast::Expr, assigned: &HashMap<String, String>) -> Argument
         ast::Expr::BinOp(b) if matches!(b.op, ast::Operator::Add) => {
             let l = argument_value(&b.left, assigned);
             let r = argument_value(&b.right, assigned);
-            ArgumentValue {
-                text: format!("{}{}", l.text, r.text),
-                readable: l.readable && r.readable,
-            }
+            ArgumentValue { text: format!("{}{}", l.text, r.text), readable: l.readable && r.readable }
         }
         _ => ArgumentValue::unread(MARKER),
     }
@@ -238,6 +256,825 @@ fn argument_value(e: &ast::Expr, assigned: &HashMap<String, String>) -> Argument
 fn literal(e: &ast::Expr, assigned: &HashMap<String, String>) -> Option<String> {
     let value = argument_value(e, assigned);
     value.readable.then_some(value.text)
+}
+
+type CallKey = (u32, u32);
+
+fn call_key(call: &ast::ExprCall) -> CallKey {
+    (call.range.start().to_u32(), call.range.end().to_u32())
+}
+
+fn call_arguments(call: &ast::ExprCall) -> crate::syntax::CallArguments {
+    let mut arguments = crate::syntax::CallArguments::default();
+    for argument in &call.arguments.args {
+        if matches!(argument, ast::Expr::Starred(_)) {
+            arguments.starred = true;
+        } else {
+            arguments.positional += 1;
+        }
+    }
+    for keyword in &call.arguments.keywords {
+        match &keyword.arg {
+            Some(name) => arguments.keywords.push(name.to_string()),
+            None => arguments.keyword_unpack = true,
+        }
+    }
+    arguments
+}
+
+/// The flow-sensitive facts the emitter cannot derive from one call node.
+///
+/// This pass knows only Python syntax: names, assignments, imports, calls,
+/// collections, branches, and iteration. It never decides which callable is
+/// pure or what an origin means; those claims remain in `knowledge.toml`.
+#[derive(Debug, Default, Clone)]
+struct FlowEnv {
+    values: HashMap<String, crate::syntax::ValueOrigin>,
+    imported: HashMap<String, String>,
+    callable_aliases: HashMap<String, CallableRef>,
+    /// Symmetric may-alias edges between local names. Branch joins union
+    /// these edges because an alias on either path must invalidate both.
+    aliases: HashMap<String, std::collections::HashSet<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct CallableRef {
+    head: String,
+    receiver: Option<crate::syntax::ValueOrigin>,
+}
+
+#[derive(Default)]
+struct Flow {
+    env: FlowEnv,
+    poisoned: std::collections::HashSet<String>,
+    receiver_origins: HashMap<CallKey, crate::syntax::ValueOrigin>,
+    call_heads: HashMap<CallKey, CallableRef>,
+    call_results: HashMap<CallKey, crate::syntax::ValueOrigin>,
+}
+
+/// Names whose flow facts may change before an exception leaves a suite.
+///
+/// `Binder` supplies ordinary bindings. This companion covers the two flow
+/// changes Binder deliberately does not collect: imports, and the named
+/// receiver invalidation performed after a method call.
+#[derive(Default)]
+struct ExceptionalHazards {
+    names: std::collections::HashSet<String>,
+}
+
+#[derive(Default)]
+struct ReferencedNames {
+    names: std::collections::HashSet<String>,
+}
+
+impl<'a> Visitor<'a> for ReferencedNames {
+    fn visit_expr(&mut self, expr: &'a ast::Expr) {
+        if let ast::Expr::Name(name) = expr {
+            self.names.insert(name.id.to_string());
+        }
+        visitor::walk_expr(self, expr);
+    }
+}
+
+impl<'a> Visitor<'a> for ExceptionalHazards {
+    fn visit_stmt(&mut self, stmt: &'a ast::Stmt) {
+        match stmt {
+            ast::Stmt::Import(import) => {
+                for alias in &import.names {
+                    let bound = alias.asname.as_ref().unwrap_or(&alias.name);
+                    self.names.insert(bound.to_string());
+                }
+            }
+            ast::Stmt::ImportFrom(import) => {
+                for alias in &import.names {
+                    let bound = alias.asname.as_ref().unwrap_or(&alias.name);
+                    self.names.insert(bound.to_string());
+                }
+            }
+            ast::Stmt::Assign(assign) => {
+                for target in &assign.targets {
+                    if matches!(target, ast::Expr::Attribute(_) | ast::Expr::Subscript(_)) {
+                        if let Some(root) = mutation_root(target) {
+                            self.names.insert(root.to_string());
+                        }
+                    }
+                }
+            }
+            ast::Stmt::AnnAssign(assign)
+                if matches!(assign.target.as_ref(), ast::Expr::Attribute(_) | ast::Expr::Subscript(_)) =>
+            {
+                if let Some(root) = mutation_root(&assign.target) {
+                    self.names.insert(root.to_string());
+                }
+            }
+            ast::Stmt::AugAssign(assign) => {
+                if let Some(root) = mutation_root(&assign.target) {
+                    self.names.insert(root.to_string());
+                }
+            }
+            ast::Stmt::Delete(statement) => {
+                for target in &statement.targets {
+                    if let Some(root) = mutation_root(target) {
+                        self.names.insert(root.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+        visitor::walk_stmt(self, stmt);
+    }
+
+    fn visit_expr(&mut self, expr: &'a ast::Expr) {
+        if let ast::Expr::Call(call) = expr {
+            if let ast::Expr::Attribute(attribute) = call.func.as_ref() {
+                if let Some(root) = mutation_root(&attribute.value) {
+                    self.names.insert(root.to_string());
+                }
+            }
+        }
+        visitor::walk_expr(self, expr);
+    }
+}
+
+impl Flow {
+    fn alias_component(&self, name: &str) -> std::collections::HashSet<String> {
+        let mut found = std::collections::HashSet::from([name.to_string()]);
+        let mut pending = vec![name.to_string()];
+        while let Some(current) = pending.pop() {
+            for neighbor in self.env.aliases.get(&current).into_iter().flatten() {
+                if found.insert(neighbor.clone()) {
+                    pending.push(neighbor.clone());
+                }
+            }
+        }
+        found
+    }
+
+    fn detach_alias(&mut self, name: &str) {
+        if let Some(neighbors) = self.env.aliases.remove(name) {
+            for neighbor in neighbors {
+                if let Some(edges) = self.env.aliases.get_mut(&neighbor) {
+                    edges.remove(name);
+                }
+            }
+        }
+    }
+
+    fn link_aliases(&mut self, names: &std::collections::HashSet<String>) {
+        for name in names {
+            let edges = self.env.aliases.entry(name.clone()).or_default();
+            edges.extend(names.iter().filter(|other| *other != name).cloned());
+        }
+    }
+
+    fn clear_name(&mut self, name: &str) {
+        self.detach_alias(name);
+        self.env.values.remove(name);
+        self.env.imported.remove(name);
+        self.env.callable_aliases.remove(name);
+    }
+
+    fn invalidate_alias_component(&mut self, name: &str) {
+        for alias in self.alias_component(name) {
+            self.env.values.remove(&alias);
+            self.env.imported.remove(&alias);
+            self.env.callable_aliases.remove(&alias);
+        }
+    }
+
+    fn assignment_aliases(&self, targets: &[ast::Expr], value: &ast::Expr) -> std::collections::HashSet<String> {
+        let mut all_targets = std::collections::HashSet::new();
+        for target in targets {
+            binding_names(target, &mut all_targets);
+        }
+        // Separate direct targets are chained assignment (`a = b = value`)
+        // and receive the same object. Names inside one tuple/list target are
+        // destructured members and do not alias each other merely by sharing
+        // that target shape.
+        let mut aliases: std::collections::HashSet<String> = targets
+            .iter()
+            .filter_map(|target| match target {
+                ast::Expr::Name(name) => Some(name.id.to_string()),
+                _ => None,
+            })
+            .collect();
+        let mut referenced = ReferencedNames::default();
+        referenced.visit_expr(value);
+        let mut sources = std::collections::HashSet::new();
+        for source in referenced.names {
+            if self.env.values.contains_key(&source) || self.env.aliases.contains_key(&source) {
+                sources.extend(self.alias_component(&source));
+            }
+        }
+        if !sources.is_empty() {
+            aliases.extend(all_targets);
+            aliases.extend(sources);
+        }
+        aliases
+    }
+
+    fn callable_ref(&self, expr: &ast::Expr) -> Option<CallableRef> {
+        match expr {
+            ast::Expr::Name(name) => {
+                if let Some(alias) = self.env.callable_aliases.get(name.id.as_str()) {
+                    return Some(alias.clone());
+                }
+                if let Some(imported) = self.env.imported.get(name.id.as_str()) {
+                    return Some(CallableRef { head: imported.clone(), receiver: None });
+                }
+                if self.poisoned.contains(name.id.as_str()) {
+                    return None;
+                }
+                Some(CallableRef { head: name.id.to_string(), receiver: None })
+            }
+            ast::Expr::Attribute(_) => {
+                let path = dotted(expr)?;
+                let (root, rest) = path.split_once('.')?;
+                if let Some(module) = self.env.imported.get(root) {
+                    return Some(CallableRef { head: format!("{module}.{rest}"), receiver: None });
+                }
+                let ast::Expr::Attribute(attribute) = expr else {
+                    return None;
+                };
+                Some(CallableRef {
+                    head: format!(".{}", attribute.attr),
+                    receiver: Some(self.origin(&attribute.value)),
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn target_origin(&self, func: &ast::Expr) -> (String, Option<crate::syntax::ValueOrigin>, Option<String>) {
+        if let ast::Expr::Name(name) = func {
+            if let Some(alias) = self.env.callable_aliases.get(name.id.as_str()) {
+                let receiver_name = alias.receiver.as_ref().map(|_| name.id.to_string());
+                return (alias.head.clone(), alias.receiver.clone(), receiver_name);
+            }
+            let resolved = self.env.imported.get(name.id.as_str()).cloned().unwrap_or_else(|| name.id.to_string());
+            return (resolved, None, None);
+        }
+        if let Some(path) = dotted(func) {
+            if let Some((root, rest)) = path.split_once('.') {
+                if let Some(module) = self.env.imported.get(root) {
+                    return (format!("{module}.{rest}"), None, None);
+                }
+            }
+        }
+        if let ast::Expr::Attribute(attribute) = func {
+            let direct_name = mutation_root(&attribute.value).map(str::to_string);
+            return (format!(".{}", attribute.attr), Some(self.origin(&attribute.value)), direct_name);
+        }
+        (UNNAMEABLE.to_string(), None, None)
+    }
+
+    fn origin(&self, expr: &ast::Expr) -> crate::syntax::ValueOrigin {
+        use crate::syntax::ValueOrigin;
+        match expr {
+            ast::Expr::StringLiteral(_)
+            | ast::Expr::BytesLiteral(_)
+            | ast::Expr::NumberLiteral(_)
+            | ast::Expr::BooleanLiteral(_)
+            | ast::Expr::NoneLiteral(_)
+            | ast::Expr::EllipsisLiteral(_)
+            | ast::Expr::FString(_) => ValueOrigin::Literal,
+            ast::Expr::Name(name) => self.env.values.get(name.id.as_str()).cloned().unwrap_or(ValueOrigin::Unknown),
+            ast::Expr::List(list) if list.elts.is_empty() => ValueOrigin::Literal,
+            ast::Expr::List(list) => ValueOrigin::Aggregate(list.elts.iter().map(|item| self.origin(item)).collect()),
+            ast::Expr::Tuple(tuple) if tuple.elts.is_empty() => ValueOrigin::Literal,
+            ast::Expr::Tuple(tuple) => {
+                ValueOrigin::Aggregate(tuple.elts.iter().map(|item| self.origin(item)).collect())
+            }
+            ast::Expr::Set(set) if set.elts.is_empty() => ValueOrigin::Literal,
+            ast::Expr::Set(set) => ValueOrigin::Aggregate(set.elts.iter().map(|item| self.origin(item)).collect()),
+            ast::Expr::Dict(dict) if dict.items.is_empty() => ValueOrigin::Literal,
+            ast::Expr::Dict(dict) => ValueOrigin::Aggregate(
+                dict.items
+                    .iter()
+                    .flat_map(|item| item.key.iter().chain(std::iter::once(&item.value)))
+                    .map(|item| self.origin(item))
+                    .collect(),
+            ),
+            ast::Expr::Subscript(subscript) => self.origin(&subscript.value),
+            ast::Expr::Named(named) => self.origin(&named.value),
+            ast::Expr::BinOp(bin) => {
+                let left = self.origin(&bin.left);
+                let right = self.origin(&bin.right);
+                if left == ValueOrigin::Unknown || right == ValueOrigin::Unknown {
+                    ValueOrigin::Unknown
+                } else {
+                    ValueOrigin::Aggregate(vec![left, right])
+                }
+            }
+            ast::Expr::Call(call) => self.call_results.get(&call_key(call)).cloned().unwrap_or_else(|| {
+                let (head, receiver, _) = self.target_origin(&call.func);
+                if head == UNNAMEABLE {
+                    ValueOrigin::Unknown
+                } else {
+                    ValueOrigin::Call {
+                        head: format!("{PREFIX}{head}"),
+                        receiver: receiver.map(Box::new),
+                        arguments: call_arguments(call),
+                    }
+                }
+            }),
+            _ => ValueOrigin::Unknown,
+        }
+    }
+
+    fn bind_origin(&mut self, target: &ast::Expr, origin: crate::syntax::ValueOrigin) {
+        use crate::syntax::ValueOrigin;
+        match target {
+            ast::Expr::Name(name) => {
+                self.detach_alias(name.id.as_str());
+                if origin == ValueOrigin::Unknown {
+                    self.env.values.remove(name.id.as_str());
+                } else {
+                    self.env.values.insert(name.id.to_string(), origin);
+                }
+            }
+            ast::Expr::Tuple(tuple) => self.bind_sequence(&tuple.elts, origin),
+            ast::Expr::List(list) => self.bind_sequence(&list.elts, origin),
+            ast::Expr::Starred(starred) => self.bind_origin(&starred.value, origin),
+            ast::Expr::Attribute(_) | ast::Expr::Subscript(_) => self.invalidate_mutation(target),
+            _ => {}
+        }
+    }
+
+    fn invalidate_mutation(&mut self, target: &ast::Expr) {
+        let Some(root) = mutation_root(target) else {
+            return;
+        };
+        self.invalidate_alias_component(root);
+    }
+
+    fn bind_sequence(&mut self, targets: &[ast::Expr], origin: crate::syntax::ValueOrigin) {
+        let members = match origin {
+            crate::syntax::ValueOrigin::Aggregate(members) if members.len() == targets.len() => members,
+            _ => vec![crate::syntax::ValueOrigin::Unknown; targets.len()],
+        };
+        for (target, member) in targets.iter().zip(members) {
+            self.bind_origin(target, member);
+        }
+    }
+
+    fn bind_callable(&mut self, target: &ast::Expr, value: &ast::Expr) {
+        let ast::Expr::Name(name) = target else {
+            return;
+        };
+        match self.callable_ref(value) {
+            Some(callable) => {
+                self.env.callable_aliases.insert(name.id.to_string(), callable);
+            }
+            None => {
+                self.env.callable_aliases.remove(name.id.as_str());
+            }
+        }
+    }
+
+    fn iteration_origin(&self, iterable: &ast::Expr) -> crate::syntax::ValueOrigin {
+        match self.origin(iterable) {
+            crate::syntax::ValueOrigin::Aggregate(members) => {
+                let Some(first) = members.first() else {
+                    return crate::syntax::ValueOrigin::Literal;
+                };
+                if members.iter().all(|member| member == first) {
+                    first.clone()
+                } else {
+                    crate::syntax::ValueOrigin::Unknown
+                }
+            }
+            origin => origin,
+        }
+    }
+
+    fn analyze_suite(&mut self, suite: &[ast::Stmt]) {
+        for statement in suite {
+            self.visit_stmt(statement);
+        }
+    }
+
+    fn remove_parameter_bindings(&mut self, parameters: &ast::Parameters) {
+        for parameter in parameters.iter() {
+            self.clear_name(parameter.name().as_str());
+        }
+    }
+
+    /// Facts safe to carry into code whose execution happens later.
+    ///
+    /// A function, lambda, or generator can run after any outer value binding
+    /// has changed, so assignment-derived origins and aliases cannot cross
+    /// that boundary. An imported name that the whole-snippet binder never
+    /// sees rebound remains usable; local statements rebuild their own facts
+    /// in execution order from this conservative entry.
+    fn deferred_entry(&self) -> FlowEnv {
+        FlowEnv {
+            imported: self
+                .env
+                .imported
+                .iter()
+                .filter(|(name, _)| !self.poisoned.contains(name.as_str()))
+                .map(|(name, target)| (name.clone(), target.clone()))
+                .collect(),
+            ..FlowEnv::default()
+        }
+    }
+
+    fn analyze_branch(&mut self, start: &FlowEnv, suite: &[ast::Stmt]) -> FlowEnv {
+        self.env = start.clone();
+        self.analyze_suite(suite);
+        self.env.clone()
+    }
+
+    fn prefix_stable_entry(&self, start: &FlowEnv, suite: &[ast::Stmt]) -> FlowEnv {
+        let mut bindings = Binder::default();
+        let mut hazards = ExceptionalHazards::default();
+        for statement in suite {
+            bindings.visit_stmt(statement);
+            hazards.visit_stmt(statement);
+        }
+        let mut conservative = Flow { env: start.clone(), poisoned: self.poisoned.clone(), ..Flow::default() };
+        for name in &hazards.names {
+            conservative.invalidate_alias_component(name);
+        }
+        for name in &bindings.bound {
+            conservative.clear_name(name);
+        }
+        conservative.env
+    }
+
+    fn remove_names<'a>(&mut self, names: impl IntoIterator<Item = &'a String>) {
+        for name in names {
+            self.clear_name(name);
+        }
+    }
+
+    fn analyze_comprehension<'a>(
+        &mut self,
+        generators: &'a [ast::Comprehension],
+        outputs: impl IntoIterator<Item = &'a ast::Expr>,
+    ) {
+        let outputs: Vec<&ast::Expr> = outputs.into_iter().collect();
+        let outer = self.env.clone();
+        let mut bindings = Binder::default();
+        let mut hazards = ExceptionalHazards::default();
+        for generator in generators {
+            bindings.visit_expr(&generator.iter);
+            hazards.visit_expr(&generator.iter);
+            for condition in &generator.ifs {
+                bindings.visit_expr(condition);
+                hazards.visit_expr(condition);
+            }
+        }
+        for output in &outputs {
+            bindings.visit_expr(output);
+            hazards.visit_expr(output);
+        }
+        self.remove_names(bindings.bound.iter().chain(&hazards.names));
+        for generator in generators {
+            self.visit_expr(&generator.iter);
+            let origin = self.iteration_origin(&generator.iter);
+            let aliases = self.assignment_aliases(std::slice::from_ref(&generator.target), &generator.iter);
+            self.bind_origin(&generator.target, origin);
+            self.link_aliases(&aliases);
+            for condition in &generator.ifs {
+                self.visit_expr(condition);
+            }
+        }
+        for output in outputs {
+            self.visit_expr(output);
+        }
+        self.env = outer;
+        self.remove_names(bindings.bound.iter().chain(&hazards.names));
+    }
+
+    fn merge_branches(branches: &[FlowEnv]) -> FlowEnv {
+        fn common<T: Clone + PartialEq>(
+            branches: &[FlowEnv],
+            get: impl Fn(&FlowEnv) -> &HashMap<String, T>,
+        ) -> HashMap<String, T> {
+            let Some(first) = branches.first() else {
+                return HashMap::new();
+            };
+            get(first)
+                .iter()
+                .filter(|(name, value)| branches.iter().skip(1).all(|branch| get(branch).get(*name) == Some(*value)))
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect()
+        }
+        FlowEnv {
+            values: common(branches, |branch| &branch.values),
+            imported: common(branches, |branch| &branch.imported),
+            callable_aliases: common(branches, |branch| &branch.callable_aliases),
+            aliases: {
+                let mut aliases: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+                for branch in branches {
+                    for (name, neighbors) in &branch.aliases {
+                        aliases.entry(name.clone()).or_default().extend(neighbors.iter().cloned());
+                    }
+                }
+                aliases
+            },
+        }
+    }
+}
+
+impl<'a> Visitor<'a> for Flow {
+    fn visit_stmt(&mut self, stmt: &'a ast::Stmt) {
+        match stmt {
+            ast::Stmt::Assign(assign) => {
+                self.visit_expr(&assign.value);
+                let origin = self.origin(&assign.value);
+                let aliases = self.assignment_aliases(&assign.targets, &assign.value);
+                for target in &assign.targets {
+                    self.bind_origin(target, origin.clone());
+                    self.bind_callable(target, &assign.value);
+                }
+                self.link_aliases(&aliases);
+            }
+            ast::Stmt::AnnAssign(assign) => {
+                if let Some(value) = &assign.value {
+                    self.visit_expr(value);
+                    let origin = self.origin(value);
+                    let aliases = self.assignment_aliases(std::slice::from_ref(assign.target.as_ref()), value);
+                    self.bind_origin(&assign.target, origin);
+                    self.bind_callable(&assign.target, value);
+                    self.link_aliases(&aliases);
+                } else {
+                    self.bind_origin(&assign.target, crate::syntax::ValueOrigin::Unknown);
+                }
+            }
+            ast::Stmt::AugAssign(assign) => {
+                self.visit_expr(&assign.target);
+                self.visit_expr(&assign.value);
+                self.invalidate_mutation(&assign.target);
+                self.bind_origin(&assign.target, crate::syntax::ValueOrigin::Unknown);
+                if let ast::Expr::Name(name) = assign.target.as_ref() {
+                    self.env.callable_aliases.remove(name.id.as_str());
+                }
+            }
+            ast::Stmt::Delete(statement) => {
+                for target in &statement.targets {
+                    self.visit_expr(target);
+                    match target {
+                        ast::Expr::Name(name) => self.clear_name(name.id.as_str()),
+                        _ => self.invalidate_mutation(target),
+                    }
+                }
+            }
+            ast::Stmt::Import(import) => {
+                for alias in &import.names {
+                    let bound = alias.asname.as_ref().unwrap_or(&alias.name);
+                    self.clear_name(bound.as_str());
+                    self.env.imported.insert(bound.to_string(), alias.name.to_string());
+                }
+            }
+            ast::Stmt::ImportFrom(import) => {
+                if let Some(module) = &import.module {
+                    for alias in &import.names {
+                        let bound = alias.asname.as_ref().unwrap_or(&alias.name);
+                        self.clear_name(bound.as_str());
+                        self.env.imported.insert(bound.to_string(), format!("{module}.{}", alias.name));
+                    }
+                }
+            }
+            ast::Stmt::For(statement) => {
+                self.visit_expr(&statement.iter);
+                let item_origin = self.iteration_origin(&statement.iter);
+                let start = self.env.clone();
+                let aliases =
+                    self.assignment_aliases(std::slice::from_ref(statement.target.as_ref()), &statement.iter);
+                self.env = self.prefix_stable_entry(&start, &statement.body);
+                self.bind_origin(&statement.target, item_origin);
+                self.link_aliases(&aliases);
+                self.analyze_suite(&statement.body);
+                let body = self.env.clone();
+                let post_loop = Self::merge_branches(&[start.clone(), body.clone()]);
+                let otherwise = self.analyze_branch(&post_loop, &statement.orelse);
+                self.env = Self::merge_branches(&[start, body, otherwise]);
+            }
+            ast::Stmt::While(statement) => {
+                self.visit_expr(&statement.test);
+                let start = self.env.clone();
+                let body_entry = self.prefix_stable_entry(&start, &statement.body);
+                let body = self.analyze_branch(&body_entry, &statement.body);
+                let post_loop = Self::merge_branches(&[start.clone(), body.clone()]);
+                let otherwise = self.analyze_branch(&post_loop, &statement.orelse);
+                self.env = Self::merge_branches(&[start, body, otherwise]);
+            }
+            ast::Stmt::If(statement) => {
+                self.visit_expr(&statement.test);
+                let start = self.env.clone();
+                let mut branches = vec![self.analyze_branch(&start, &statement.body)];
+                let mut has_else = false;
+                for clause in &statement.elif_else_clauses {
+                    self.env = start.clone();
+                    if let Some(test) = &clause.test {
+                        self.visit_expr(test);
+                    } else {
+                        has_else = true;
+                    }
+                    self.analyze_suite(&clause.body);
+                    branches.push(self.env.clone());
+                }
+                if !has_else {
+                    branches.push(start);
+                }
+                self.env = Self::merge_branches(&branches);
+            }
+            ast::Stmt::Match(statement) => {
+                self.visit_expr(&statement.subject);
+                let start = self.env.clone();
+                // Keep the unmatched path even when a pattern appears
+                // irrefutable. That is deliberately conservative: proving
+                // exhaustiveness is not this syntax-only pass's job.
+                let mut branches = vec![start.clone()];
+                for case in &statement.cases {
+                    self.env = start.clone();
+                    let mut captures = Binder::default();
+                    captures.visit_pattern(&case.pattern);
+                    self.remove_names(&captures.bound);
+                    if let Some(guard) = &case.guard {
+                        self.visit_expr(guard);
+                    }
+                    self.analyze_suite(&case.body);
+                    branches.push(self.env.clone());
+                }
+                self.env = Self::merge_branches(&branches);
+            }
+            ast::Stmt::Try(statement) => {
+                let start = self.env.clone();
+                let body_exception = self.prefix_stable_entry(&start, &statement.body);
+                self.env = start.clone();
+                self.analyze_suite(&statement.body);
+                let body = self.env.clone();
+                let else_exception = self.prefix_stable_entry(&body, &statement.orelse);
+                self.analyze_suite(&statement.orelse);
+                let mut branches = vec![self.env.clone()];
+                let mut final_inputs = vec![body_exception.clone(), else_exception];
+                for handler in &statement.handlers {
+                    self.env = body_exception.clone();
+                    let ast::ExceptHandler::ExceptHandler(handler) = handler;
+                    if let Some(kind) = &handler.type_ {
+                        self.visit_expr(kind);
+                    }
+                    if let Some(name) = &handler.name {
+                        let name = name.to_string();
+                        self.remove_names(std::iter::once(&name));
+                    }
+                    final_inputs.push(self.prefix_stable_entry(&self.env, &handler.body));
+                    self.analyze_suite(&handler.body);
+                    branches.push(self.env.clone());
+                }
+                let continuing = Self::merge_branches(&branches);
+                final_inputs.push(continuing.clone());
+                self.env = Self::merge_branches(&final_inputs);
+                self.analyze_suite(&statement.finalbody);
+
+                // Calls in `finally` must use the conservative state above,
+                // because the suite also runs while an exception propagates.
+                // Only continuing paths reach statements after the `try`, so
+                // compute that outgoing state separately without replacing
+                // the conservative call facts already recorded.
+                let mut outgoing = Flow { env: continuing, poisoned: self.poisoned.clone(), ..Flow::default() };
+                outgoing.analyze_suite(&statement.finalbody);
+                self.env = outgoing.env;
+            }
+            ast::Stmt::With(statement) => {
+                let mut bound = Vec::new();
+                for item in &statement.items {
+                    self.visit_expr(&item.context_expr);
+                    if let Some(target) = &item.optional_vars {
+                        let origin = self.origin(&item.context_expr);
+                        let aliases =
+                            self.assignment_aliases(std::slice::from_ref(target.as_ref()), &item.context_expr);
+                        self.bind_origin(target, origin);
+                        self.link_aliases(&aliases);
+                        if let ast::Expr::Name(name) = target.as_ref() {
+                            bound.push(name.id.to_string());
+                        }
+                    }
+                }
+                self.analyze_suite(&statement.body);
+                for name in bound {
+                    self.clear_name(&name);
+                }
+            }
+            ast::Stmt::FunctionDef(function) => {
+                let outer = self.env.clone();
+                self.env = self.deferred_entry();
+                self.remove_parameter_bindings(&function.parameters);
+                self.analyze_suite(&function.body);
+                self.env = outer;
+                self.clear_name(function.name.as_str());
+            }
+            ast::Stmt::ClassDef(class) => {
+                let outer = self.env.clone();
+                self.analyze_suite(&class.body);
+                self.env = outer;
+                self.clear_name(class.name.as_str());
+            }
+            _ => visitor::walk_stmt(self, stmt),
+        }
+    }
+
+    fn visit_expr(&mut self, expr: &'a ast::Expr) {
+        if let ast::Expr::Call(call) = expr {
+            let key = call_key(call);
+            let (head, mut receiver, direct_receiver) = self.target_origin(&call.func);
+            let alias = match call.func.as_ref() {
+                ast::Expr::Name(name) => self.env.callable_aliases.get(name.id.as_str()).cloned(),
+                _ => None,
+            };
+            visitor::walk_expr(self, expr);
+            // Python resolves the callable before its arguments, so keep the
+            // original head. Arguments run before invocation, though, and an
+            // inner call may mutate the named receiver whose method object was
+            // just obtained. Refresh that receiver fact after walking them.
+            if direct_receiver.is_some() {
+                match call.func.as_ref() {
+                    ast::Expr::Attribute(attribute) => {
+                        receiver = Some(self.origin(&attribute.value));
+                    }
+                    ast::Expr::Name(name) if alias.as_ref().is_some_and(|callable| callable.receiver.is_some()) => {
+                        receiver = Some(
+                            self.env
+                                .callable_aliases
+                                .get(name.id.as_str())
+                                .and_then(|callable| callable.receiver.clone())
+                                .unwrap_or(crate::syntax::ValueOrigin::Unknown),
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(receiver) = receiver.clone() {
+                self.receiver_origins.insert(key, receiver);
+            }
+            if let Some(alias) = alias {
+                self.call_heads.insert(key, alias);
+            }
+            let result = if head == UNNAMEABLE {
+                crate::syntax::ValueOrigin::Unknown
+            } else {
+                crate::syntax::ValueOrigin::Call {
+                    head: format!("{PREFIX}{head}"),
+                    receiver: receiver.map(Box::new),
+                    arguments: call_arguments(call),
+                }
+            };
+            self.call_results.insert(key, result);
+            if let Some(name) = direct_receiver {
+                self.invalidate_alias_component(&name);
+            }
+            return;
+        }
+        if let ast::Expr::Named(named) = expr {
+            self.visit_expr(&named.value);
+            let origin = self.origin(&named.value);
+            let aliases = self.assignment_aliases(std::slice::from_ref(named.target.as_ref()), &named.value);
+            self.bind_origin(&named.target, origin);
+            self.bind_callable(&named.target, &named.value);
+            self.link_aliases(&aliases);
+            return;
+        }
+        if let ast::Expr::Lambda(lambda) = expr {
+            let outer = self.env.clone();
+            self.env = self.deferred_entry();
+            if let Some(parameters) = &lambda.parameters {
+                self.remove_parameter_bindings(parameters);
+            }
+            self.visit_expr(&lambda.body);
+            self.env = outer;
+            return;
+        }
+        match expr {
+            ast::Expr::ListComp(comprehension) => {
+                self.analyze_comprehension(&comprehension.generators, std::iter::once(comprehension.elt.as_ref()));
+                return;
+            }
+            ast::Expr::SetComp(comprehension) => {
+                self.analyze_comprehension(&comprehension.generators, std::iter::once(comprehension.elt.as_ref()));
+                return;
+            }
+            ast::Expr::DictComp(comprehension) => {
+                self.analyze_comprehension(
+                    &comprehension.generators,
+                    comprehension.key.iter().map(Box::as_ref).chain(std::iter::once(comprehension.value.as_ref())),
+                );
+                return;
+            }
+            ast::Expr::Generator(generator) => {
+                let outer = self.env.clone();
+                self.env = self.deferred_entry();
+                self.analyze_comprehension(&generator.generators, std::iter::once(generator.elt.as_ref()));
+                self.env = outer;
+                return;
+            }
+            _ => {}
+        }
+        visitor::walk_expr(self, expr);
+    }
 }
 
 /// Collects calls, in the order they appear.
@@ -258,6 +1095,12 @@ struct Walk {
     /// call textually before its rebinding is refused just like one after it
     /// — coarse and order-blind on purpose (CLAUDE.md §0.0 `rebound_name`).
     poisoned: std::collections::HashSet<String>,
+    /// Flow facts computed independently of emission, keyed by the call's
+    /// stable source range so traversal order cannot pair facts incorrectly.
+    receiver_origins: HashMap<CallKey, crate::syntax::ValueOrigin>,
+    /// Assigned callable aliases whose true heads override rebound-name
+    /// refusal for exactly the call nodes proven to use them.
+    call_heads: HashMap<CallKey, CallableRef>,
     /// The next sequential position to hand out. Python has no
     /// directory-changing constructs, so the cd walk stays inert over these
     /// orders — sequential is correct and deliberate, mirroring the shell
@@ -290,9 +1133,10 @@ impl Walk {
             // bare poisoned name always refuses. A poisoned DOTTED root
             // only refuses when it would otherwise be read as a module
             // (i.e. it was also imported) — a poisoned root that was never
-            // a module falls through to the method-call arm below, whose
-            // receiver-unknown basis is group C's, not this check's, so a
-            // poisoned local variable's own methods are unaffected here.
+            // a module falls through to the method-call arm below. The flow
+            // pass supplies that method's receiver origin separately, so a
+            // poisoned local variable's method occurrence is still emitted
+            // and its knowledge gate decides whether any claim applies.
             if self.poisoned.contains(root) && (split.is_none() || self.imported.contains_key(root)) {
                 return (REBOUND.to_string(), None);
             }
@@ -316,9 +1160,7 @@ impl Walk {
         // receiver comes from the same `Attribute` node the method name did,
         // so testing the shape a second time would only re-derive it.
         if let ast::Expr::Attribute(a) = func {
-            let recv = self
-                .receiver_path(&a.value)
-                .unwrap_or_else(|| ArgumentValue::unread(MARKER));
+            let recv = self.receiver_path(&a.value).unwrap_or_else(|| ArgumentValue::unread(MARKER));
             return (format!(".{}", a.attr), Some(recv));
         }
         (UNNAMEABLE.to_string(), None)
@@ -353,9 +1195,7 @@ impl Walk {
             return Some(direct);
         }
         match e {
-            ast::Expr::Call(c)
-                if c.arguments.args.len() == 1 && c.arguments.keywords.is_empty() =>
-            {
+            ast::Expr::Call(c) if c.arguments.args.len() == 1 && c.arguments.keywords.is_empty() => {
                 match self.target(&c.func) {
                     (_, None) => Some(argument_value(&c.arguments.args[0], &self.assigned)),
                     (_, Some(_)) => None,
@@ -366,7 +1206,10 @@ impl Walk {
     }
 
     fn call(&mut self, node: &ast::ExprCall) {
-        let (head, receiver) = self.target(&node.func);
+        let (head, receiver) = match self.call_heads.get(&call_key(node)) {
+            Some(alias) => (alias.head.clone(), alias.receiver.as_ref().map(|_| ArgumentValue::unread(MARKER))),
+            None => self.target(&node.func),
+        };
         if head == UNNAMEABLE {
             self.out.note("dynamic_call");
             return;
@@ -439,6 +1282,8 @@ impl Walk {
         );
         if let Some(cmd) = self.out.commands.last_mut() {
             cmd.unread_args = unread_args;
+            cmd.receiver_origin =
+                self.receiver_origins.get(&call_key(node)).cloned().unwrap_or(crate::syntax::ValueOrigin::Unknown);
         }
     }
 }
@@ -483,8 +1328,7 @@ impl<'a> Visitor<'a> for Walk {
                 if let Some(module) = &import_from.module {
                     for a in &import_from.names {
                         let bound = a.asname.as_ref().unwrap_or(&a.name);
-                        self.imported
-                            .insert(bound.to_string(), format!("{module}.{}", a.name));
+                        self.imported.insert(bound.to_string(), format!("{module}.{}", a.name));
                     }
                 }
             }
@@ -501,7 +1345,7 @@ impl<'a> Visitor<'a> for Walk {
     }
 }
 
-/// Collects every name the snippet binds by a non-import form, in a pass
+/// Collects every name the snippet binds or mutates by a non-import form, in a pass
 /// over the whole module BEFORE `Walk` judges any call. Coarse and
 /// order-blind on purpose: a poisoned name refuses entry-matching
 /// everywhere in the snippet, which can only cost an unnecessary ask, never
@@ -515,7 +1359,8 @@ struct Binder {
 }
 
 impl Binder {
-    /// Names inside an assignment-target shape: `a`, `(a, b)`, `[a, *b]`.
+    /// Names inside an assignment-target shape, including the root reached
+    /// through an attribute or subscript mutation.
     fn bind_target(&mut self, e: &ast::Expr) {
         match e {
             ast::Expr::Name(n) => {
@@ -524,6 +1369,11 @@ impl Binder {
             ast::Expr::Tuple(t) => t.elts.iter().for_each(|e| self.bind_target(e)),
             ast::Expr::List(l) => l.elts.iter().for_each(|e| self.bind_target(e)),
             ast::Expr::Starred(s) => self.bind_target(&s.value),
+            ast::Expr::Attribute(_) | ast::Expr::Subscript(_) => {
+                if let Some(root) = mutation_root(e) {
+                    self.bound.insert(root.to_string());
+                }
+            }
             _ => {}
         }
     }
@@ -557,6 +1407,7 @@ impl<'a> Visitor<'a> for Binder {
             ast::Stmt::Assign(a) => a.targets.iter().for_each(|t| self.bind_target(t)),
             ast::Stmt::AugAssign(a) => self.bind_target(&a.target),
             ast::Stmt::AnnAssign(a) => self.bind_target(&a.target),
+            ast::Stmt::Delete(d) => d.targets.iter().for_each(|t| self.bind_target(t)),
             ast::Stmt::For(f) => self.bind_target(&f.target),
             ast::Stmt::FunctionDef(f) => {
                 self.bound.insert(f.name.to_string());
@@ -645,8 +1496,12 @@ pub fn parse(src: &str) -> Result<Scan, String> {
     for stmt in &module.body {
         binder.visit_stmt(stmt);
     }
+    let mut flow = Flow { poisoned: binder.bound.clone(), ..Flow::default() };
+    flow.analyze_suite(&module.body);
     let mut w = Walk {
         poisoned: binder.bound,
+        receiver_origins: flow.receiver_origins,
+        call_heads: flow.call_heads,
         ..Walk::default()
     };
     for stmt in &module.body {
@@ -756,18 +1611,18 @@ mod tests {
     #[test]
     fn a_rebound_name_is_not_read_as_the_original() {
         for src in [
-            "p = 1\np('x')",                 // assignment
-            "p += 1\np('x')",                // augmented
-            "p: int = 1\np('x')",            // annotated
-            "(p := 1)\np('x')",              // walrus
-            "def p(a): pass\np('x')",        // def
-            "class p: pass\np('x')",         // class
-            "for p in y: p('x')",            // for target
-            "with y as p: p('x')",           // with-as
-            "[p for p in y]\np('x')",        // comprehension target
+            "p = 1\np('x')",                              // assignment
+            "p += 1\np('x')",                             // augmented
+            "p: int = 1\np('x')",                         // annotated
+            "(p := 1)\np('x')",                           // walrus
+            "def p(a): pass\np('x')",                     // def
+            "class p: pass\np('x')",                      // class
+            "for p in y: p('x')",                         // for target
+            "with y as p: p('x')",                        // with-as
+            "[p for p in y]\np('x')",                     // comprehension target
             "try:\n    pass\nexcept E as p:\n    p('x')", // except-as
             "match y:\n    case p:\n        p('x')",      // match capture
-            "def f(p):\n    p('x')",         // parameter called in the body
+            "def f(p):\n    p('x')",                      // parameter called in the body
         ] {
             let scan = parse(src).expect(src);
             assert!(

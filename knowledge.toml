@@ -68,7 +68,10 @@
 # 8 (2026-08-20): `[[program]]` gained `standalone_flags`; `subcommands`
 # moved from an always-present list to a three-state key — ABSENT covers the
 # whole program, present (even empty) scopes it.
-version = 9
+# 9 (2026-08-25): structured tool write paths and apply-patch envelopes.
+# 10 (2026-08-26): `[[program]]` gained `produces` and `receiver_from` value
+# origin claims.
+version = 10
 
 # ============================================================================
 # FROM YOUR EXISTING POLICY — these are rules your current tool already applies
@@ -808,6 +811,7 @@ runs_file_flags = ["-m"]
 match = ["python:open", "python:io.open"]
 writes = "arg_0"
 writes_only_with_file_mode = true
+produces = ["file_handle"]
 arg_names = ["file", "mode", "buffering", "encoding", "errors", "newline", "closefd", "opener"]
 callback_args = ["opener"]
 
@@ -817,14 +821,8 @@ callback_args = ["opener"]
 match = ["python:codecs.open"]
 writes = "arg_0"
 writes_only_with_file_mode = true
+produces = ["file_handle"]
 arg_names = ["filename", "mode"]
-
-# Path.open: position 0 is the RECEIVER (the path); names start at 1.
-[[program]]
-match = ["python:.open"]
-writes = "arg_0"
-writes_only_with_file_mode = true
-arg_names = ["mode"]
 
 [[program]]
 match = ["python:.write_text", "python:.write_bytes", "python:.touch", "python:.mkdir"]
@@ -1054,6 +1052,7 @@ match = [
 [[program]]
 match = ["python:json.load", "python:json.loads"]
 callback_args = ["object_hook", "object_pairs_hook", "parse_float", "parse_int", "parse_constant", "cls"]
+produces = ["data"]
 
 # json.dumps' callback set differs from load/loads' (cls is shared, default
 # is dumps-only) — a separate entry so neither list makes a false claim
@@ -1064,9 +1063,14 @@ callback_args = ["object_hook", "object_pairs_hook", "parse_float", "parse_int",
 [[program]]
 match = ["python:json.dumps"]
 callback_args = ["cls", "default"]
+produces = ["data"]
 
 [[program]]
-match = ["python:sys.exit", "python:sys.stdin.read", "python:sys.stdin.readline", "python:sys.stdin.readlines"]
+match = ["python:sys.exit"]
+
+[[program]]
+match = ["python:sys.stdin.read", "python:sys.stdin.readline", "python:sys.stdin.readlines"]
+produces = ["data"]
 
 # THIRD-PARTY, shipped deliberately (see the third-party note in the
 # exclusion list above): the SAFE loader is the whole point — it builds only
@@ -1075,6 +1079,7 @@ match = ["python:sys.exit", "python:sys.stdin.read", "python:sys.stdin.readline"
 # unmodeled.
 [[program]]
 match = ["python:yaml.safe_load", "python:yaml.safe_load_all"]
+produces = ["data"]
 
 [[program]]
 match = ["python:collections.Counter"]
@@ -1101,6 +1106,7 @@ match = [
   "python:re.fullmatch", "python:re.findall", "python:re.finditer",
   "python:re.split", "python:re.escape",
 ]
+produces = ["data"]
 
 # re.sub's own signature differs from its re.* siblings above (positional
 # repl at position 1), so it cannot share their entry. repl accepts EITHER
@@ -1111,120 +1117,51 @@ match = [
 match = ["python:re.sub"]
 arg_names = ["pattern", "repl", "string", "count", "flags"]
 callback_args = ["repl"]
+produces = ["data"]
 
-# ── TEMPORARY: method names on unknown receivers (M2.86 group C) ──────────
-# vouch reads code as text; python text carries no receiver types, so these
-# claims rest on the method NAME alone — accepted by the operator 2026-08-09
-# as a stopgap AT BEST. They RETIRE back to ask when M2.87 (receiver
-# provenance) lands. .write/.writelines are NOT here (group D:
-# writes_via_handle); .close/.flush are absent unless census-observed.
+# ── Pure methods on proven data receivers (M2.87) ─────────────────────────
+# These claims apply only when scanner provenance reaches a producer or
+# literal carrying the `data` tag. An unknown receiver gets no claim and asks.
+# .write/.writelines use the separate file_handle gate below; .close/.flush
+# remain absent unless census-observed and separately curated.
 #
-# Every name below is checked on TWO axes, not one (fix round 1 widened the
-# original invoked-parameter-only audit after review found two shipped names
-# were falsifiable on a different receiver):
-#   (a) invoked parameters — checked against a live interpreter's own
-#       signature; none of the shipped names has one, so none needs
-#       `arg_names`/`callback_args`.
-#   (b) same-NAME collision — because this group claims on the name alone,
-#       the entry covers every receiver that name could belong to, not just
-#       the common one. A name pure on its obvious receiver but
-#       filesystem/directory/process-affecting on some OTHER real receiver
-#       fails this axis and is dropped, its falsifying receiver named below
-#       (live-verified, not from memory).
+# Every name below was checked for invoked parameters against a live
+# interpreter; none invokes one, so none needs `callback_args`. Same-name
+# methods on unrelated receivers are no longer covered: a third-party or
+# uncurated result carries no `data` provenance and therefore gets no claim.
 #
-#       THE FLOOR (fix round 2, ruled 2026-08-10): axis (b)'s floor is
-#       PYTHON ITSELF AND THE STANDARD LIBRARY, not the wider ecosystem. A
-#       builtin type or standard-library type exposing the exact name with a
-#       disk-write, directory-change, or process-start effect drops the
-#       name. A collision that exists ONLY on a third-party type does NOT
-#       disqualify it — any method name here could be redefined by SOME
-#       third-party library to do anything at all, so a floorless bar is one
-#       no name could ever clear, and this group would collapse to nothing.
-#       A third-party collision is instead a known, accepted, and
-#       unavoidable property of every name in this group, exactly why the
-#       whole group is TEMPORARY (see the top of this comment) and exactly
-#       what it retires when M2.87 (receiver provenance) lands — not
-#       something this text-only stopgap can rule out while standing still.
+# Names with effectful ordinary meanings remain excluded rather than relying
+# on their current producers staying untagged: pathlib.Path.replace renames,
+# TarFile.add writes an archive, shelve setdefault/update persist, Cursor.execute
+# can write SQL, and run is process-shaped. list.sort remains excluded because
+# `key` is invoked. Low-volume names stay out until separately curated.
 #
-# Dropped for a (b) failure, falsifying receiver named:
-#   .replace — pure on str, but pathlib.Path.replace(target) renames/
-#     overwrites a file on disk (live-verified: source path stops existing,
-#     target path exists after the call).
-#   .add — pure on set, but tarfile.TarFile.add(name) writes a new member
-#     into a disk-backed archive (live-verified: archive file size grows
-#     from empty to non-empty after the call).
-#   .setdefault, .update — pure on dict, but shelve.Shelf (a standard-
-#     library persistent, file-backed mapping opened via shelve.open(path))
-#     inherits both from MutableMapping's default implementation, which
-#     writes through __setitem__ — live-verified: values set only via
-#     .setdefault/.update on a shelf survive close and reopen in a fresh
-#     process, proving the write reached disk. shelve.Shelf.get, by
-#     contrast, only reads (live-verified: file mtime unchanged across a
-#     .get call on both a hit and a miss), so it does not collide. (Named
-#     here only as documentation of why these two names are excluded from
-#     this knowledge file — vouch itself never opens or reads a shelf.)
-#
-# .get is BY FAR the highest-volume name in the census (3676 occurrences)
-# and was reviewed specifically for a network-session receiver
-# (`requests.Session.get` / `requests.get`). Adjudicated to KEEP: the
-# criterion is "cannot touch the filesystem, move the process directory, or
-# start anything" — a network fetch is none of the three. Recorded here so
-# the decision reads as a reviewed adjudication, not an oversight.
-#
-# .append was reviewed the same way (fix round 2): a third-party disk-backed
-# store type exposes `.append` and writes at call time. Adjudicated to KEEP,
-# by THE FLOOR above — the collision is outside python and the standard
-# library, so it does not disqualify the name; it is the expected,
-# accepted kind of gap this whole group carries until M2.87 lands.
-#
-# Census-observed dot-method names considered and left out, one line each:
-#   .sort (17 occurrences) — fails axis (a): list.sort(key=...) calls key
-#     once per element, the same invoked-parameter shape callback_args
-#     exists to catch; needs its own entry with that declared, not this
-#     no-callback flat group.
-#   .close (2) — reserved for the writes_via_handle group below (the
-#     "Writers through an already-opened file" header): finalizes buffered
-#     writes through a handle; not shipped there yet — held back for the
-#     same reason as here, absent unless census-observed.
-#   .urlretrieve (4) — urllib.request.urlretrieve(url, filename) both
-#     fetches over the network and writes the result to disk on its own
-#     canonical receiver, no second receiver needed to falsify it.
-#   .max (4) — name too generic/ambiguous to trust by receiver-name alone;
-#     higher chance of colliding with a type whose .max() is not a plain
-#     reduction.
-#   .execute (1) — sqlite3.Cursor.execute(sql) can write to a database file
-#     on disk (and run arbitrary SQL); collision on a common receiver.
-#   .run (1) — name shaped like process-start; low count, left out on a
-#     conservative basis rather than a proven collision.
-#   .urlopen (1) — urllib.request.urlopen itself only opens a network
-#     connection, which clears this group's criterion the same way .get
-#     does (network access is none of filesystem/directory/process-start).
-#     Excluded for LACK OF USAGE (count 1, no volume case the way .get's
-#     3676 makes one), not because it fails the criterion — this is not a
-#     safety claim against the name.
-#   .find_spec (2), .getpixel (2), .convert (1), .namelist (1), .quote (1),
-#   .isupper (1), .pop (1), .search (2), .findall (1) — single- or
-#   low-digit census counts, several module-specific (importlib, PIL,
-#   zipfile); not curated into this round's shipped set. (.pop also fails
-#   axis (b) the same way .setdefault/.update do — shelve.Shelf.pop deletes
-#   a persisted key — reinforcing, not driving, why it stays out.)
+# The M2.87 census still has `.get` as the dominant method head: 3,135 of
+# 3,851 method calls. That is name-level volume only; applicability is now
+# decided per occurrence from the receiver origin.
 [[program]]
 match = [
   "python:.get", "python:.items", "python:.keys", "python:.values",
   "python:.lower", "python:.upper", "python:.strip", "python:.lstrip",
   "python:.rstrip", "python:.startswith", "python:.endswith",
   "python:.split", "python:.rsplit", "python:.splitlines", "python:.join",
-  "python:.read", "python:.readline", "python:.readlines",
   "python:.append", "python:.extend", "python:.group",
   "python:.groups", "python:.groupdict", "python:.format", "python:.count",
   "python:.find", "python:.index", "python:.encode", "python:.decode",
   "python:.isdigit", "python:.most_common", "python:.rfind", "python:.ljust",
   "python:.discard", "python:.astype",
 ]
+receiver_from = ["data"]
+produces = ["data"]
 # `.astype` is the one THIRD-PARTY name in this block, shipped deliberately
 # (see the third-party note in the exclusion list above): numpy and pandas
 # are its only real receivers and both return a converted COPY — no write,
 # no directory change, no process start.
+
+[[program]]
+match = ["python:.read", "python:.readline", "python:.readlines"]
+receiver_from = ["file_handle"]
+produces = ["data"]
 
 # Path-STRING math only, zero filesystem access. Note this is a property of
 # these names, not the group's bar: os.path.exists and os.path.isdir DO
@@ -1236,6 +1173,7 @@ match = [
   "python:os.path.join", "python:os.path.dirname",
   "python:os.path.basename", "python:os.path.relpath",
 ]
+produces = ["data"]
 
 # os.environ is a mapping populated once at process start; reading it is an
 # in-memory dict lookup, not a filesystem or subprocess access.
@@ -1249,6 +1187,7 @@ match = ["python:ast.parse"]
 # Pure string transforms, no I/O.
 [[program]]
 match = ["python:textwrap.fill", "python:html.unescape"]
+produces = ["data"]
 
 # tomllib.load reads from an ALREADY OPEN file object, same shape as
 # json.load — the handle's own open() call is judged separately.
@@ -1260,6 +1199,7 @@ match = ["python:textwrap.fill", "python:html.unescape"]
 [[program]]
 match = ["python:tomllib.load"]
 callback_args = ["parse_float"]
+produces = ["data"]
 
 # Pure construction/parsing and a system-clock read — none of the four touch
 # the filesystem, move the process directory, or start anything.
@@ -1288,46 +1228,12 @@ match = ["python:hashlib.sha1", "python:hashlib.sha256"]
 match = ["python:math.ceil"]
 
 # ── Writers through an already-opened file (writes_via_handle) ────────────
-# The claim is narrower than "the call carries no path anywhere": the
-# position each entry names in its own writes_via_handle is a claimed
-# handle, already judged where it was minted (open's mode gate + the write
-# rules; sys.stdout is the process stream). That field names the position,
-# not arg_names — three of the four entries below declare no arg_names at
-# all, because a receiver (arg_0) and a keyword-only parameter (print's
-# file) each need no positional list to be named. It is NOT a claim that no OTHER position in a call matching this
-# NAME could ever be a real path on some other receiver — these entries
-# match by method NAME alone, and python text carries no receiver types.
-#
-# Live-verified falsifying receiver (fix round 1, 2026-08-10, Python 3.12):
-# xml.etree.ElementTree.ElementTree — an in-memory tree, never opened, never
-# a handle — has its own `.write(file_or_filename, ...)`, whose FIRST
-# argument (arg_1, not the arg_0 this entry claims is the handle) is a real
-# destination path; a plain string there writes a real file on disk
-# (live-verified). zipfile.ZipFile.write(filename, ...) also takes filename
-# as its own real argument, though live verification shows it is READ from,
-# not written to — the receiver itself (arg_0) is the actual write
-# destination there, consistent with this entry — but it still shows a
-# stdlib receiver can carry a path this entry's grammar never inspects.
-#
-# FUTURE TRAP (fix round 2 — corrected which class this names): this stays
-# fail-closed today only because no route to the ElementTree receiver is
-# described — ET.ElementTree/ET.parse are both unmodeled constructors, so a
-# snippet reaching one already asks on the constructor call regardless of
-# what `.write` then does. The trap is specifically a receiver whose
-# SAME-NAMED method takes its write DESTINATION as an argument, the way
-# ElementTree's does — NOT "any receiver exposing this name at all"
-# (zipfile's does too, per the contrast above, and is not a trap). If a
-# constructor for a receiver of THAT shape is ever described, this entry's
-# claim stops being fail-closed for it and MUST be revisited in the SAME
-# change — narrowed with a receiver check or excluded for that name, not
-# left standing. See docs/ROADMAP.md M2.87.
-#
-# Receiver-unknown residue for the method spellings shares group C's basis
-# and retires with M2.87 — this covers not only a handle minted by an
-# unmodeled CALL that asks, but any handle vouch never sees minted at all (a
-# function parameter, a name bound outside the snippet, anything the scanner
-# does not trace back to a call): accepted on the method name alone, exactly
-# like group C's other unknown-receiver claims.
+# The position named by writes_via_handle is a claimed handle whose destination
+# was judged where it was minted. The field identifies the write channel; it
+# does not prove handle provenance by itself. The method-shaped entry below
+# therefore also requires `receiver_from = ["file_handle"]`. ElementTree.write,
+# ZipFile.write, function parameters, and other unknown receivers get no claim
+# from it. json.dump and print name explicit handle parameters instead.
 #
 # Invoked-parameter audit (task 5, same live-interpreter method group C
 # uses): json.dump shares json.dumps' keyword set exactly (`inspect.signature`
@@ -1348,6 +1254,7 @@ callback_args = ["cls", "default"]
 [[program]]
 match = ["python:.write", "python:.writelines"]
 writes_via_handle = "arg_0"
+receiver_from = ["file_handle"]
 
 [[program]]
 match = ["python:print"]

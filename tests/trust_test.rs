@@ -67,6 +67,7 @@ fn a_cli_is_not_one_operation() {
         unread_args: Default::default(),
         chain: None,
         prefix_assigns: vec![],
+        receiver_origin: vouch::syntax::ValueOrigin::Unknown,
     };
 
     // Hand-built probes, so the argument record is complete and closed by
@@ -92,6 +93,7 @@ fn an_entry_with_no_subcommands_covers_the_whole_program() {
             unread_args: Default::default(),
             chain: None,
             prefix_assigns: vec![],
+            receiver_origin: vouch::syntax::ValueOrigin::Unknown,
         },
         "bash",
         true

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.0 (2026-08-27)
+
+
+### Features
+
+* track Python value provenance
+
 ## 0.5.4 (2026-08-27)
 
 

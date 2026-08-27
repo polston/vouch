@@ -191,6 +191,7 @@ fn probe() -> Cmd {
         unread_args: Default::default(),
         chain: None,
         prefix_assigns: vec![],
+        receiver_origin: vouch::syntax::ValueOrigin::Unknown,
     }
 }
 

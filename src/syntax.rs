@@ -25,6 +25,45 @@ pub struct Cmd {
     /// never `cmd FOO=bar`) — the env vouch knows this one invocation ran
     /// with, independent of whether the assigned VALUE was itself readable.
     pub prefix_assigns: Vec<String>,
+    /// Where the receiver of a method-style command came from. Non-method
+    /// commands and scanners that do not track values leave this `Unknown`;
+    /// knowledge must never infer a receiver claim from missing metadata.
+    pub receiver_origin: ValueOrigin,
+}
+
+/// A scanner's language-neutral account of where a runtime value came from.
+///
+/// Origins describe syntax and flow, not policy. The knowledge registry gives
+/// producer calls meaning; scanners merely preserve their structure. No list
+/// position is stored, so merging scans cannot invalidate an origin reference.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub enum ValueOrigin {
+    /// The scanner cannot prove where the value came from.
+    #[default]
+    Unknown,
+    /// A literal value written directly in the source.
+    Literal,
+    /// A literal collection or destructured value made from these origins.
+    Aggregate(Vec<ValueOrigin>),
+    /// The result of calling `head`, optionally as a method on another value.
+    Call {
+        head: String,
+        receiver: Option<Box<ValueOrigin>>,
+        arguments: CallArguments,
+    },
+}
+
+/// Argument-shape facts needed to qualify a producer claim.
+///
+/// Values are deliberately absent: knowledge needs only which declared
+/// callback positions could be occupied, while scanners keep policy names
+/// out of their implementations.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct CallArguments {
+    pub positional: usize,
+    pub keywords: Vec<String>,
+    pub starred: bool,
+    pub keyword_unpack: bool,
 }
 
 /// One command's position within a bash/powershell and-or chain (`&&`/`||`).
@@ -277,6 +316,7 @@ impl Scan {
             unread_args: Default::default(),
             chain,
             prefix_assigns,
+            receiver_origin: ValueOrigin::Unknown,
         });
         self.order.push(order);
         self.input_source.push(input_source);

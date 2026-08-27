@@ -66,11 +66,20 @@ fn is_read_only(p: &vouch::guards::Program) -> bool {
 /// generic probe value there would occupy that slot and wrongly trip
 /// `callback_argument` on what is meant to be the "no callback used" case.
 /// Every entry in the shipped set accepts zero arguments when this applies.
-fn snippet_for(name: &str, argless: bool) -> String {
+fn snippet_for(p: &vouch::guards::Program, name: &str, argless: bool) -> String {
     let bare = name.strip_prefix("python:").expect("python: prefix");
-    let arg = if argless { "" } else { "'k'" };
+    let arg = if argless {
+        ""
+    } else {
+        "'k'"
+    };
     if let Some(method) = bare.strip_prefix('.') {
-        format!("x.{method}({arg})")
+        let receiver = match p.receiver_from.as_deref() {
+            Some(tags) if tags.iter().any(|tag| tag == "data") => "{}",
+            Some(tags) if tags.iter().any(|tag| tag == "file_handle") => "open('C:/work/origin.txt', 'w')",
+            _ => "x",
+        };
+        format!("{receiver}.{method}({arg})")
     } else if let Some((root, _)) = bare.split_once('.') {
         format!("import {root}; {bare}({arg})")
     } else {
@@ -92,7 +101,7 @@ fn every_read_only_python_entry_recognises_its_own_call() {
     for p in kb.program.iter().filter(|p| is_read_only(p)) {
         let argless = position_zero_is_a_callback(p);
         for name in p.match_names.iter().filter(|n| n.starts_with("python:")) {
-            let cmd = format!("python -c \"{}\"", snippet_for(name, argless));
+            let cmd = format!("python -c \"{}\"", snippet_for(p, name, argless));
             match decide(&cmd) {
                 Decision::Allow(_) => checked += 1,
                 other => panic!("{name}: expected Allow for {cmd}, got {other:?}"),
@@ -135,12 +144,7 @@ fn every_declared_callback_slot_trips_the_construct() {
                 // (if it has one — a keyword-only slot has none, and one
                 // safe positional is still supplied so any write-target
                 // position at index 0 resolves cleanly).
-                let n_positional = p
-                    .arg_names
-                    .iter()
-                    .position(|n| n == slot)
-                    .map(|i| i + 1)
-                    .unwrap_or(1);
+                let n_positional = p.arg_names.iter().position(|n| n == slot).map(|i| i + 1).unwrap_or(1);
                 let positionals = vec!["'C:/work/x'"; n_positional].join(", ");
                 let args_text = format!("{positionals}, {slot}=g");
                 let snippet = if let Some((root, _)) = bare.split_once('.') {
@@ -151,7 +155,10 @@ fn every_declared_callback_slot_trips_the_construct() {
                 let cmd = format!("python -c \"{snippet}\"");
                 match decide_with(&guards_off, &cmd) {
                     Decision::Ask(r) => {
-                        assert!(r.contains("callback_argument"), "{name}/{slot}: reason does not name callback_argument: {r}");
+                        assert!(
+                            r.contains("callback_argument"),
+                            "{name}/{slot}: reason does not name callback_argument: {r}"
+                        );
                         assert!(
                             r.contains("lang.python.constructs.callback_argument"),
                             "{name}/{slot}: reason does not name the setting: {r}"
@@ -357,10 +364,24 @@ fn the_typical_read_only_one_liner_allows() {
 }
 
 #[test]
-fn a_method_call_on_an_unknown_receiver_is_recognised_by_the_temporary_entries() {
+fn a_method_call_on_an_unknown_receiver_asks() {
     match decide(r#"python -c "d.get('k')""#) {
-        Decision::Allow(_) => {}
-        other => panic!("expected Allow, got {other:?}"),
+        Decision::Ask(r) => assert!(r.contains("unmodeled_command"), "got: {r}"),
+        other => panic!("expected Ask, got {other:?}"),
+    }
+}
+
+#[test]
+fn method_shaped_open_remains_unknown_without_a_proven_receiver_model() {
+    match decide(r#"python -c "value.open()""#) {
+        Decision::Ask(reason) => assert!(reason.contains("unmodeled_command"), "{reason}"),
+        other => panic!("unknown .open receiver must Ask, got {other:?}"),
+    }
+    match decide(
+        r#"python -c "from pathlib import Path; Path('C:/work/log.txt').open('w').write('data')""#,
+    ) {
+        Decision::Ask(reason) => assert!(reason.contains("unmodeled_command"), "{reason}"),
+        other => panic!("Path construction and .open stay unmodeled, got {other:?}"),
     }
 }
 
@@ -418,7 +439,7 @@ fn update_is_not_shipped_for_the_persistent_mapping_receiver_collision() {
 #[test]
 fn the_widened_audit_additions_are_now_recognised() {
     for method in ["isdigit", "most_common", "rfind", "ljust", "discard", "astype"] {
-        let cmd = format!("python -c \"x.{method}('k')\"");
+        let cmd = format!("python -c \"import json; json.loads('{{}}').{method}('k')\"");
         match decide(&cmd) {
             Decision::Allow(_) => {}
             other => panic!("{method}: expected Allow, got {other:?}"),
@@ -474,13 +495,17 @@ fn plain_print_allows_and_print_into_an_opened_file_is_judged_by_the_open() {
 }
 
 #[test]
-fn a_write_method_call_allows_and_a_write_mode_open_chained_into_it_is_judged_by_the_open() {
+fn a_write_method_requires_a_known_handle_and_open_still_judges_its_path() {
     // Fix round 1: the two method-spelled group D entries (`.write`,
     // `.writelines`) shipped with no dedicated test at all — this and the
     // sibling below close that, mirroring the json.dump/print treatment.
     match decide(r#"python -c "f.write('data')""#) {
+        Decision::Ask(r) => assert!(r.contains("unmodeled_command"), "got: {r}"),
+        other => panic!("expected Ask, got {other:?}"),
+    }
+    match decide(r#"python -c "open('C:/work/log.txt', 'w').write('data')""#) {
         Decision::Allow(_) => {}
-        other => panic!("expected Allow, got {other:?}"),
+        other => panic!("expected Allow for an allowed-path handle, got {other:?}"),
     }
     match decide(r#"python -c "open('C:/Windows/log.txt', 'w').write('data')""#) {
         Decision::Ask(r) => assert!(r.contains("C:/Windows/log.txt"), "got: {r}"),
@@ -489,14 +514,112 @@ fn a_write_method_call_allows_and_a_write_mode_open_chained_into_it_is_judged_by
 }
 
 #[test]
-fn a_writelines_method_call_allows_and_a_write_mode_open_chained_into_it_is_judged_by_the_open() {
+fn a_writelines_method_requires_a_known_handle_and_open_still_judges_its_path() {
     match decide(r#"python -c "f.writelines(['a', 'b'])""#) {
+        Decision::Ask(r) => assert!(r.contains("unmodeled_command"), "got: {r}"),
+        other => panic!("expected Ask, got {other:?}"),
+    }
+    match decide(r#"python -c "open('C:/work/log.txt', 'w').writelines(['a'])""#) {
         Decision::Allow(_) => {}
-        other => panic!("expected Allow, got {other:?}"),
+        other => panic!("expected Allow for an allowed-path handle, got {other:?}"),
     }
     match decide(r#"python -c "open('C:/Windows/log.txt', 'w').writelines(['a'])""#) {
         Decision::Ask(r) => assert!(r.contains("C:/Windows/log.txt"), "got: {r}"),
         other => panic!("expected Ask on the open's path, got {other:?}"),
+    }
+}
+
+#[test]
+fn known_data_producers_enable_curated_methods() {
+    for cmd in [
+        r#"python -c "{}.get('name')""#,
+        r#"python -c "import json; json.loads('{}').get('name')""#,
+        r#"python -c "import yaml; yaml.safe_load('{}').get('name')""#,
+        r#"python -c "import sys; sys.stdin.read().strip()""#,
+        r#"python -c "import re; re.match('a', 'a').group()""#,
+        r#"python -c "import tomllib; tomllib.load(f).get('name')""#,
+    ] {
+        match decide(cmd) {
+            Decision::Allow(_) => {}
+            other => panic!("{cmd}: expected Allow, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_callback_customized_producer_withholds_data_provenance() {
+    let config = load(
+        "version = 1\n[lang.bash]\ndefault = \"allow\"\n[lang.bash.constructs]\nunmodeled_command = \"allow\"\n\
+         [lang.python]\ndefault = \"allow\"\n[lang.python.constructs]\nunmodeled_command = \"ask\"\ncallback_argument = \"allow\"\n\
+         [write]\ndefault = \"ask\"\nallow_paths = [\"C:/work/**\"]\n",
+    )
+    .expect("config parses");
+    match decide_with(
+        &config,
+        r#"python -c "import json; json.loads('{}', object_hook=custom).get('name')""#,
+    ) {
+        Decision::Ask(reason) => assert!(reason.contains("unmodeled_command"), "{reason}"),
+        other => panic!("callback-customized result must not mint data, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_with_bound_open_handle_can_read_and_chain_data_methods() {
+    match decide(
+        r#"python -c "with open('C:/work/input.txt') as handle:
+    print(handle.read().strip())""#,
+    ) {
+        Decision::Allow(_) => {}
+        other => panic!("expected Allow for a visibly opened handle, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_element_tree_same_name_write_trap_remains_asking() {
+    match decide(r#"python -c "import xml.etree.ElementTree as ET; ET.ElementTree().write('C:/work/out.xml')""#) {
+        Decision::Ask(reason) => assert!(reason.contains("unmodeled_command"), "{reason}"),
+        other => panic!("unmodeled ElementTree receiver must Ask, got {other:?}"),
+    }
+}
+
+#[test]
+fn every_receiver_gated_entry_has_known_and_unknown_receiver_probes() {
+    let knowledge = vouch::guards::in_effect();
+    let mut checked = 0;
+    for program in
+        knowledge.program.iter().filter(|program| program.receiver_from.as_ref().is_some_and(|tags| !tags.is_empty()))
+    {
+        let argless = position_zero_is_a_callback(program);
+        for name in program.match_names.iter().filter(|name| name.starts_with("python:.")) {
+            let known = format!("python -c \"{}\"", snippet_for(program, name, argless));
+            match decide(&known) {
+                Decision::Allow(_) => {}
+                other => panic!("{name}: known receiver should Allow for {known}, got {other:?}"),
+            }
+
+            let method = name.trim_start_matches("python:.");
+            let unknown = format!("python -c \"x.{method}('k')\"");
+            match decide(&unknown) {
+                Decision::Ask(reason) => {
+                    assert!(reason.contains("unmodeled_command"), "{name}: {reason}")
+                }
+                other => panic!("{name}: unknown receiver should Ask, got {other:?}"),
+            }
+            checked += 1;
+        }
+    }
+    assert!(checked > 0, "no receiver-gated method entries shipped");
+}
+
+#[test]
+fn assigned_callable_aliases_keep_open_and_delete_judgments() {
+    match decide(r#"python -c "writer = open; writer('C:/Windows/log.txt', 'w').write('data')""#) {
+        Decision::Ask(reason) => assert!(reason.contains("C:/Windows/log.txt"), "{reason}"),
+        other => panic!("open alias should preserve its path judgment, got {other:?}"),
+    }
+    match decide(r#"python -c "import shutil; deleter = shutil.rmtree; deleter('C:/work/tree')""#) {
+        Decision::Ask(reason) => assert!(reason.contains("delete_recursive"), "{reason}"),
+        other => panic!("delete alias should preserve its guard, got {other:?}"),
     }
 }
 

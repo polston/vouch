@@ -20,6 +20,7 @@ fn cmd(head: &str, args: &[&str]) -> Cmd {
         unread_args: Default::default(),
         chain: None,
         prefix_assigns: vec![],
+        receiver_origin: vouch::syntax::ValueOrigin::Unknown,
     }
 }
 fn prog<'a>(k: &'a Knowledge, name: &str) -> &'a vouch::guards::Program {
@@ -796,6 +797,10 @@ fn overlay_is_exhaustive_over_every_program_field() {
         // `callback_args` follows the same non-empty-replaces pattern as
         // `arg_names` (task 2b, M2.86 fix round).
         callback_args: vec!["cb".to_string()],
+        // Origin claims follow the Option pattern: absence preserves and an
+        // explicit empty list retracts (M2.87, knowledge schema v10).
+        produces: Some(vec!["data".to_string()]),
+        receiver_from: Some(vec!["file_handle".to_string()]),
         writes_only_with_file_mode: Some(true),
         // `writes_via_handle` follows the same Option pattern (task 5,
         // M2.86, knowledge schema v5). This test exercises only the overlay
@@ -972,6 +977,16 @@ fn overlay_is_exhaustive_over_every_program_field() {
         "callback_args did not arrive"
     );
     assert_eq!(
+        p.produces,
+        Some(vec!["data".to_string()]),
+        "produces did not arrive"
+    );
+    assert_eq!(
+        p.receiver_from,
+        Some(vec!["file_handle".to_string()]),
+        "receiver_from did not arrive"
+    );
+    assert_eq!(
         p.writes_only_with_file_mode,
         Some(true),
         "writes_only_with_file_mode did not arrive"
@@ -1040,6 +1055,14 @@ fn overlay_is_exhaustive_over_every_program_field() {
     assert!(
         leftover.callback_args.is_empty(),
         "mine's callback_args leaked into the scope mine never addressed"
+    );
+    assert!(
+        leftover.produces.is_none(),
+        "mine's produces leaked into the untouched scope"
+    );
+    assert!(
+        leftover.receiver_from.is_none(),
+        "mine's receiver_from leaked into the untouched scope"
     );
     assert!(
         leftover.writes_only_with_file_mode.is_none(),

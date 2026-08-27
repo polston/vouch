@@ -10,10 +10,10 @@
 //!
 //! Kept rather than deleted when the eight were sorted (M2.103): the roadmap made
 //! its deletion conditional on its numbers no longer being re-derived, and that
-//! condition is unmet. M2.87 retires the temporary method-name entries TO ASK,
-//! and this is the setting that makes that retirement visible at all — under the
-//! standing config an undescribed call already allows, so the retirement would
-//! show as nothing.
+//! condition remained unmet through M2.87's measurement. M2.87 retired the
+//! temporary method-name entries TO ASK, and this is the setting that made that
+//! retirement visible at all — under the standing config an undescribed call
+//! already allows, so the retirement would show as nothing.
 //!
 //! The setting is mutated on the LOADED config rather than appended as TOML text:
 //! `[lang.python.constructs]` is already written in `realistic_config`'s source,

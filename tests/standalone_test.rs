@@ -27,6 +27,7 @@ fn cmd(head: &str, args: &[&str]) -> Cmd {
         unread_args: Default::default(),
         chain: None,
         prefix_assigns: vec![],
+        receiver_origin: vouch::syntax::ValueOrigin::Unknown,
     }
 }
 

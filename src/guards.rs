@@ -372,6 +372,19 @@ pub struct Program {
     /// Non-empty replaces on merge, like `arg_names`.
     #[serde(default)]
     pub callback_args: Vec<String>,
+    /// Origin tags this call's return value is known to produce. Tags are
+    /// policy vocabulary declared by knowledge, not a closed set in code.
+    /// A call that occupies one of this entry's declared `callback_args`
+    /// withholds these tags because the callback may customize the result.
+    /// `None` means this entry is silent; `Some([])` explicitly retracts a
+    /// shipped producer claim during an overlay.
+    #[serde(default)]
+    pub produces: Option<Vec<String>>,
+    /// Origin tags required of a method call's receiver before any claim on
+    /// this entry applies. `None` leaves the entry unconditional; `Some([])`
+    /// explicitly removes a shipped receiver gate during an overlay.
+    #[serde(default)]
+    pub receiver_from: Option<Vec<String>>,
     /// A `writes = "arg_<N>"` claim only writes when this call's OWN "mode"
     /// argument says so — python's `open(file, mode)` shape, where a
     /// read-mode call touches nothing on disk. `true` needs a `"mode"`
@@ -393,31 +406,13 @@ pub struct Program {
     /// documentary, and validation checks only its spelling and its
     /// exclusivity with the other write claims.
     ///
-    /// This is narrower than "the call carries no path anywhere". The entry
-    /// matches by NAME alone (python text carries no receiver types), so it
-    /// cannot rule out some OTHER standard-library receiver whose method of
-    /// the same name takes a real destination path at a DIFFERENT position
-    /// this entry never inspects. Live-verified counterexample (fix round 1,
-    /// M2.86 task 5, 2026-08-10): `xml.etree.ElementTree.ElementTree` — an
-    /// in-memory tree, never opened, never a handle — has its own
-    /// `.write(file_or_filename, ...)`, whose first argument is a real path
-    /// that a plain string there writes to on disk. Contrast, checked the
-    /// same way and NOT a trap (fix round 2): `zipfile.ZipFile.write
-    /// (filename, ...)` also takes `filename` as a real argument, but live
-    /// verification shows it is READ from, not written to — the archive
-    /// receiver (arg_0) is the actual write destination there, consistent
-    /// with this entry's own claim.
-    ///
-    /// The trap is specifically a receiver whose SAME-NAMED method takes its
-    /// write DESTINATION as an argument, the way ElementTree's does — not
-    /// "any receiver exposing this name at all" (zipfile's does too, and is
-    /// not a trap). This stays fail-closed today only because every route to
-    /// the ElementTree case runs through an unmodelled constructor call that
-    /// asks (`ET.ElementTree`/`ET.parse` are both undescribed) — if a
-    /// constructor for a receiver of THAT shape is ever described, every
-    /// entry setting this field must be revisited in the SAME change. Scope
-    /// and residue: docs/specs/2026-08-09-python-read-only-builtins-design.md;
-    /// receiver-provenance retirement: docs/ROADMAP.md M2.87.
+    /// This field does not itself prove the named value is a handle. A
+    /// receiver-shaped entry whose claim depends on that fact pairs it with
+    /// `receiver_from`; the shipped `.write`/`.writelines` entry requires a
+    /// receiver carrying `file_handle`, so an ElementTree or other unknown
+    /// same-named receiver gets no applicable claim and asks. Direct calls
+    /// such as `json.dump` and `print` name their explicit handle parameter
+    /// instead and need no receiver gate.
     ///
     /// `None` means the entry did not say. Same `Option` merge rule as
     /// `writes_only_with_file_mode`.
@@ -874,10 +869,8 @@ static LOADED: std::sync::OnceLock<crate::knowledge::Loaded> = std::sync::OnceLo
 
 fn loaded() -> &'static crate::knowledge::Loaded {
     LOADED.get_or_init(|| {
-        let home = std::env::var("USERPROFILE")
-            .or_else(|_| std::env::var("HOME"))
-            .unwrap_or_default()
-            .replace('\\', "/");
+        let home =
+            std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default().replace('\\', "/");
         crate::knowledge::load_files(
             &crate::knowledge::knowledge_path(&home),
             &crate::knowledge::my_knowledge_path(&home),
@@ -920,7 +913,11 @@ fn base(head: &str) -> String {
         (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/'))
             || head.starts_with("\\\\")
     };
-    let h = if windows_rooted { head.replace('\\', "/") } else { head.to_string() };
+    let h = if windows_rooted {
+        head.replace('\\', "/")
+    } else {
+        head.to_string()
+    };
     let last = h.rsplit('/').next().unwrap_or(&h);
     // ASCII-only: full-Unicode lowercasing folds characters the shell and
     // the filesystem keep distinct (the Kelvin sign onto ASCII `k`,
@@ -1021,8 +1018,7 @@ pub fn resolve_verb(cmd: &Cmd, vocab: &crate::flags::Vocab, lang: &str) -> Verb 
             crate::flags::Class::Value { attached: None, .. } => skip_next = true,
             crate::flags::Class::Value { attached: Some(_), .. } => {}
             crate::flags::Class::Bool { .. } => {}
-            crate::flags::Class::Undescribed { token }
-            | crate::flags::Class::RefusedAbbrev { token, .. } => {
+            crate::flags::Class::Undescribed { token } | crate::flags::Class::RefusedAbbrev { token, .. } => {
                 if uncertainty.is_none() {
                     uncertainty = Some(token);
                 }
@@ -1074,11 +1070,7 @@ fn subcommand<'a>(cmd: &'a Cmd, vocab: &crate::flags::Vocab, lang: &str) -> Opti
 /// occurrence) pair builds it once and hands the same answer to both, so the
 /// two can never end up reading different grammars for the same tokens.
 fn entry_subcommand<'a>(p: &Program, cmd: &'a Cmd, lang: &str) -> Option<&'a str> {
-    subcommand(
-        cmd,
-        &crate::flags::vocab_for(p, wrap_abbrev(p)),
-        lang,
-    )
+    subcommand(cmd, &crate::flags::vocab_for(p, wrap_abbrev(p)), lang)
 }
 
 /// Whether this occurrence is a standalone run of `p` (spec 2026-08-20 §2):
@@ -1105,9 +1097,7 @@ fn standalone_run(p: &Program, cmd: &Cmd, sub: Option<&str>, eligible: bool) -> 
         return false;
     }
     let case_sensitive = p.case_sensitive_flags.unwrap_or(false);
-    cmd.args
-        .iter()
-        .all(|a| declares(&p.standalone_flags, crate::paths::unquote(a), case_sensitive))
+    cmd.args.iter().all(|a| declares(&p.standalone_flags, crate::paths::unquote(a), case_sensitive))
 }
 
 /// What `standalone_hint` found: the flags-only ask that remains may name
@@ -1144,9 +1134,7 @@ fn standalone_hint(prog: &Program, cmd: &Cmd, sub: Option<&str>, eligible: bool)
     if cmd.args.iter().any(|a| refused(crate::paths::unquote(a))) {
         return None;
     }
-    Some(StandaloneHint {
-        pair_no_value_options: !prog.runs_file.is_empty() || !prog.runs_file_flags.is_empty(),
-    })
+    Some(StandaloneHint { pair_no_value_options: !prog.runs_file.is_empty() || !prog.runs_file_flags.is_empty() })
 }
 
 /// The verb this command names, per the knowledge file's grammar for the
@@ -1174,8 +1162,7 @@ pub enum VerbWord {
 }
 
 pub fn verb_of_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> VerbWord {
-    let head = base(&cmd.head);
-    let owned = verb_vocab(kb, &head, lang);
+    let owned = verb_vocab(kb, cmd, lang);
     match resolve_verb(cmd, &owned.as_vocab(), lang) {
         Verb::At(i) => VerbWord::Word(cmd.args[i].clone()),
         Verb::None => VerbWord::Absent,
@@ -1185,8 +1172,7 @@ pub fn verb_of_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> VerbWord {
 
 /// Language-aware form used by the decision pipeline.
 pub fn subcommand_of_in<'a>(kb: &Knowledge, cmd: &'a Cmd, lang: &str) -> Option<&'a str> {
-    let head = base(&cmd.head);
-    let owned = verb_vocab(kb, &head, lang);
+    let owned = verb_vocab(kb, cmd, lang);
     subcommand(cmd, &owned.as_vocab(), lang)
 }
 
@@ -1218,12 +1204,12 @@ impl OwnedVerbVocab {
 /// One language-scoped grammar for locating a name's verb. Empty entry fields
 /// contribute nothing; non-empty claims combine, and the loader refuses the
 /// cross-entry contradictions that cannot be combined truthfully.
-fn verb_vocab(kb: &Knowledge, head: &str, lang: &str) -> OwnedVerbVocab {
+fn verb_vocab(kb: &Knowledge, cmd: &Cmd, lang: &str) -> OwnedVerbVocab {
     let mut value_options: Vec<String> = Vec::new();
     let mut no_value_options: Vec<String> = Vec::new();
     let mut flag_prefix: Vec<String> = Vec::new();
     let mut case_sensitive: Option<bool> = None;
-    for prog in entries_for(kb, head, lang) {
+    for prog in entries_for_cmd(kb, cmd, lang) {
         for value in &prog.value_options {
             if !value_options.contains(value) {
                 value_options.push(value.clone());
@@ -1299,15 +1285,13 @@ pub fn then_of(kb: &Knowledge, cmd: &Cmd) -> SecondWord {
 
 /// Language-aware form used by the decision pipeline.
 pub fn then_of_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> SecondWord {
-    let head = base(&cmd.head);
-    let owned = verb_vocab(kb, &head, lang);
+    let owned = verb_vocab(kb, cmd, lang);
     let sub_idx = match resolve_verb(cmd, &owned.as_vocab(), lang) {
         Verb::At(i) => i,
         Verb::None => return SecondWord::Absent,
         Verb::Unreadable { token, .. } => return SecondWord::Unknown(token),
     };
-    let (positionals, unknowable) =
-        walk_post_subcommand(&cmd.args[sub_idx + 1..], &owned.as_vocab());
+    let (positionals, unknowable) = walk_post_subcommand(&cmd.args[sub_idx + 1..], &owned.as_vocab());
     if let Some(tok) = unknowable.first() {
         return SecondWord::Unknown(tok.clone());
     }
@@ -1390,15 +1374,10 @@ pub fn run_dir_with_flag(kb: &Knowledge, cmd: &Cmd) -> (RunDir, Option<String>) 
     run_dir_with_flag_in(kb, cmd, "bash")
 }
 
-pub fn run_dir_with_flag_in(
-    kb: &Knowledge,
-    cmd: &Cmd,
-    lang: &str,
-) -> (RunDir, Option<String>) {
-    let head = base(&cmd.head);
+pub fn run_dir_with_flag_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> (RunDir, Option<String>) {
     let mut run_dir_flags: Vec<String> = Vec::new();
-    let owned = verb_vocab(kb, &head, lang);
-    for prog in entries_for(kb, &cmd.head, lang) {
+    let owned = verb_vocab(kb, cmd, lang);
+    for prog in entries_for_cmd(kb, cmd, lang) {
         run_dir_flags.extend(prog.run_dir_flags.iter().cloned());
     }
     let merged_value_options: Vec<String> =
@@ -1479,12 +1458,7 @@ enum WordRead<'a> {
     Unreadable(String),
 }
 
-fn sub_arg_0<'a>(
-    cmd: &'a Cmd,
-    vocab: &crate::flags::Vocab,
-    lang: &str,
-    verb: &Verb,
-) -> WordRead<'a> {
+fn sub_arg_0<'a>(cmd: &'a Cmd, vocab: &crate::flags::Vocab, lang: &str, verb: &Verb) -> WordRead<'a> {
     let start = match verb {
         Verb::At(i) => i + 1,
         Verb::None => return WordRead::Absent,
@@ -1508,10 +1482,8 @@ fn sub_arg_0<'a>(
             }
             crate::flags::Class::EndOfOptions => {}
             crate::flags::Class::Value { attached: None, .. } => skip_next = true,
-            crate::flags::Class::Value { attached: Some(_), .. }
-            | crate::flags::Class::Bool { .. } => {}
-            crate::flags::Class::Undescribed { token }
-            | crate::flags::Class::RefusedAbbrev { token, .. } => {
+            crate::flags::Class::Value { attached: Some(_), .. } | crate::flags::Class::Bool { .. } => {}
+            crate::flags::Class::Undescribed { token } | crate::flags::Class::RefusedAbbrev { token, .. } => {
                 return WordRead::Unreadable(token);
             }
         }
@@ -1552,9 +1524,7 @@ fn any_flag_spelled(flags: &[String], cmd: &Cmd, vocab: &crate::flags::Vocab) ->
             ended = true;
             return false;
         }
-        flags
-            .iter()
-            .any(|f| matches!(crate::flags::spells(f, a, vocab), crate::flags::Spell::Yes(_)))
+        flags.iter().any(|f| matches!(crate::flags::spells(f, a, vocab), crate::flags::Spell::Yes(_)))
     })
 }
 
@@ -1663,18 +1633,12 @@ fn rule_match_in(rule: &Rule, cmd: &Cmd, prog: &Program, lang: &str) -> RuleMatc
         return RuleMatch { matched: false, unread_verb: None };
     }
     if !rule.any_arg_exact.is_empty()
-        && !rule
-            .any_arg_exact
-            .iter()
-            .any(|x| cmd.args.iter().any(|a| crate::paths::unquote(a) == x))
+        && !rule.any_arg_exact.iter().any(|x| cmd.args.iter().any(|a| crate::paths::unquote(a) == x))
     {
         return RuleMatch { matched: false, unread_verb: None };
     }
     if !rule.any_arg_prefix.is_empty()
-        && !rule
-            .any_arg_prefix
-            .iter()
-            .any(|p| cmd.args.iter().any(|a| crate::paths::unquote(a).starts_with(p)))
+        && !rule.any_arg_prefix.iter().any(|p| cmd.args.iter().any(|a| crate::paths::unquote(a).starts_with(p)))
     {
         return RuleMatch { matched: false, unread_verb: None };
     }
@@ -1703,17 +1667,14 @@ pub fn check(kb: &Knowledge, cmd: &Cmd) -> Vec<Hit> {
 pub fn check_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> Vec<Hit> {
     let head = base(&cmd.head);
     let mut hits = Vec::new();
-    for prog in entries_for(kb, &cmd.head, lang) {
+    for prog in entries_for_cmd(kb, cmd, lang) {
         for rule in &prog.rule {
             let outcome = rule_match_in(rule, cmd, prog, lang);
             if outcome.matched {
                 hits.push(Hit {
                     guard: rule.guard.clone(),
                     source: rule.source.clone(),
-                    detail: format!("{} {}", head, cmd.args.join(" "))
-                        .chars()
-                        .take(200)
-                        .collect(),
+                    detail: format!("{} {}", head, cmd.args.join(" ")).chars().take(200).collect(),
                     unread_verb: outcome.unread_verb,
                 });
             }
@@ -1744,9 +1705,7 @@ pub fn reads_stdin(cmd: &Cmd) -> bool {
         return true;
     }
     // `sh -s` and `bash -` both read the script from stdin.
-    cmd.args
-        .iter()
-        .any(|a| a == "-s" || a == "-" || a.eq_ignore_ascii_case("-s"))
+    cmd.args.iter().any(|a| a == "-s" || a == "-" || a.eq_ignore_ascii_case("-s"))
 }
 
 /// True when this command runs text obtained at execution time, plus the
@@ -1791,7 +1750,7 @@ pub fn evaluates_input_in(
     holds_input: bool,
     standalone_eligible: bool,
 ) -> (bool, Option<String>, Option<StandaloneHint>) {
-    for prog in entries_for(kb, &cmd.head, lang) {
+    for prog in entries_for_cmd(kb, cmd, lang) {
         let wrap_lang = (!prog.wrap_lang.is_empty()).then(|| prog.wrap_lang.clone());
         match prog.evaluates_input.as_str() {
             // Untouched by the flag on purpose: an always-entry runs computed
@@ -1849,11 +1808,8 @@ pub fn evaluates_input_in(
 /// an entry claiming no write, no rule and no hand-off says the same thing
 /// however many arguments it is given.
 pub fn appended_args_could_change_the_answer(kb: &Knowledge, cmd: &Cmd, lang: &str) -> bool {
-    let head = base(&cmd.head);
-    entries_for(kb, &head, lang).any(|prog| {
-        let claims_write = !prog.writes.is_empty()
-            || !prog.write_flags.is_empty()
-            || !prog.sub_write.is_empty();
+    entries_for_cmd(kb, cmd, lang).any(|prog| {
+        let claims_write = !prog.writes.is_empty() || !prog.write_flags.is_empty() || !prog.sub_write.is_empty();
         let rule_could_match = prog.rule.iter().any(|r| {
             !r.any_flag.is_empty()
                 || !r.any_arg_exact.is_empty()
@@ -1868,9 +1824,7 @@ pub fn appended_args_could_change_the_answer(kb: &Knowledge, cmd: &Cmd, lang: &s
                 // nothing here could change that.
                 || r.grants_execute
         });
-        let hands_on = !prog.runs_file.is_empty()
-            || !prog.runs_file_flags.is_empty()
-            || !prog.wraps.is_empty();
+        let hands_on = !prog.runs_file.is_empty() || !prog.runs_file_flags.is_empty() || !prog.wraps.is_empty();
         claims_write || rule_could_match || hands_on
     })
 }
@@ -1884,11 +1838,7 @@ pub fn appended_args_could_change_the_answer(kb: &Knowledge, cmd: &Cmd, lang: &s
 /// language speaks for every one, `BASH_ENV` speaks only for bash. Names the
 /// file does not list return `None` and stay inert, which is the whole reason
 /// the shipped list is short and measured rather than guessed at.
-pub fn env_name_effect<'a>(
-    kb: &'a Knowledge,
-    names: &[String],
-    lang: &str,
-) -> Option<(&'a str, &'a str)> {
+pub fn env_name_effect<'a>(kb: &'a Knowledge, names: &[String], lang: &str) -> Option<(&'a str, &'a str)> {
     // Case matters in bash — `path=x` sets an ordinary variable and changes
     // nothing — and does NOT on Windows, where `$env:Path` and `$env:PATH`
     // are one variable (verified by running: setting one spelling and reading
@@ -1900,7 +1850,13 @@ pub fn env_name_effect<'a>(
         kb.env_name
             .iter()
             .filter(|e| e.languages.is_empty() || e.languages.iter().any(|l| l == lang))
-            .find(|e| if fold { e.name.eq_ignore_ascii_case(n) } else { e.name == *n })
+            .find(|e| {
+                if fold {
+                    e.name.eq_ignore_ascii_case(n)
+                } else {
+                    e.name == *n
+                }
+            })
             .map(|e| (e.name.as_str(), e.effect.as_str()))
     })
 }
@@ -1910,7 +1866,18 @@ pub fn env_name_effect<'a>(
 /// (M2.113). Matched through the shared primitive, so an attached or
 /// abbreviated spelling is read exactly as the guard rules read one.
 pub fn rebinds_a_name<'a>(kb: &'a Knowledge, cmd: &Cmd, lang: &str) -> Option<&'a str> {
-    let prog = entry_for(kb, &cmd.head, lang)?;
+    let mut first = None;
+    let mut scoped = None;
+    for program in entries_for_cmd(kb, cmd, lang) {
+        if first.is_none() {
+            first = Some(program);
+        }
+        if !program.languages.is_empty() {
+            scoped = Some(program);
+            break;
+        }
+    }
+    let prog = scoped.or(first)?;
     let vocab = crate::flags::vocab_for(prog, wrap_abbrev(prog));
     prog.rebinds_name_flags.iter().find_map(|f| {
         cmd.args
@@ -1948,6 +1915,9 @@ pub fn rebinds_a_name<'a>(kb: &'a Knowledge, cmd: &Cmd, lang: &str) -> Option<&'
 pub fn runs_file_positional(kb: &Knowledge, cmd: &Cmd) -> (bool, Option<String>) {
     let head = base(&cmd.head);
     for prog in &kb.program {
+        if !receiver_gate_holds(kb, prog, &cmd.receiver_origin) {
+            continue;
+        }
         if !prog.match_names.iter().any(|n| n.to_ascii_lowercase() == head) {
             continue;
         }
@@ -1962,10 +1932,7 @@ pub fn runs_file_positional(kb: &Knowledge, cmd: &Cmd) -> (bool, Option<String>)
 }
 
 fn runs_file_in(prog: &Program, args: &[String]) -> bool {
-    let want = prog
-        .runs_file
-        .strip_prefix("arg_")
-        .and_then(|n| n.parse::<usize>().ok());
+    let want = prog.runs_file.strip_prefix("arg_").and_then(|n| n.parse::<usize>().ok());
     let vocab = crate::flags::vocab_for(prog, wrap_abbrev(prog));
     let mut walk = crate::flags::ArgWalk::new(&vocab);
     let mut skip_next = false;
@@ -2010,9 +1977,7 @@ fn runs_file_in(prog: &Program, args: &[String]) -> bool {
                     skip_next = true;
                 }
             }
-            crate::flags::Class::Undescribed { .. } | crate::flags::Class::RefusedAbbrev { .. } => {
-                return true
-            }
+            crate::flags::Class::Undescribed { .. } | crate::flags::Class::RefusedAbbrev { .. } => return true,
             crate::flags::Class::NotFlag => {
                 // A lone `-` is the standard-input spelling in every shell
                 // this key describes, never a filename — `evaluates_input`
@@ -2068,6 +2033,9 @@ fn runs_file_in(prog: &Program, args: &[String]) -> bool {
 pub fn callback_argument_used(kb: &Knowledge, cmd: &Cmd) -> bool {
     let head = base(&cmd.head);
     for prog in &kb.program {
+        if !receiver_gate_holds(kb, prog, &cmd.receiver_origin) {
+            continue;
+        }
         if prog.callback_args.is_empty() {
             continue;
         }
@@ -2079,16 +2047,14 @@ pub fn callback_argument_used(kb: &Knowledge, cmd: &Cmd) -> bool {
         // round 4): a slot the call never addressed at all can still show
         // up occupying `eff` if a LATER position was folded, which must
         // not read as "this callback slot was used."
-        if callback_arg_positions(prog, base_off)
-            .iter()
-            .any(|&p| eff_position_occupied(&eff, &padding, p))
-        {
+        if callback_arg_positions(prog, base_off).iter().any(|&p| eff_position_occupied(&eff, &padding, p)) {
             return true;
         }
-        if cmd.args.iter().any(|a| {
-            a.split_once('=')
-                .is_some_and(|(name, _)| prog.callback_args.iter().any(|c| c == name))
-        }) {
+        if cmd
+            .args
+            .iter()
+            .any(|a| a.split_once('=').is_some_and(|(name, _)| prog.callback_args.iter().any(|c| c == name)))
+        {
             return true;
         }
         if has_unpack_arg(&cmd.args) {
@@ -2133,6 +2099,9 @@ pub fn heredoc_feeds<'k>(
 ) -> Option<(&'k Program, &'k str)> {
     let head = base(&cmd.head);
     for prog in &kb.program {
+        if !receiver_gate_holds(kb, prog, &cmd.receiver_origin) {
+            continue;
+        }
         if !prog.match_names.iter().any(|n| n.to_ascii_lowercase() == head) {
             continue;
         }
@@ -2207,8 +2176,8 @@ fn holds_input(
     // on delivery — pairs collapse, line continuations vanish — so a
     // backslash-bearing unquoted body can differ from what was scanned even
     // with no expansion character present.
-    let verbatim = delivered.quoted_delimiter
-        || (!carries_expansion(&delivered.body) && !delivered.body.contains('\\'));
+    let verbatim =
+        delivered.quoted_delimiter || (!carries_expansion(&delivered.body) && !delivered.body.contains('\\'));
     if !verbatim {
         return false;
     }
@@ -2254,6 +2223,67 @@ fn entries_for<'k>(kb: &'k Knowledge, head: &str, lang: &str) -> impl Iterator<I
     })
 }
 
+/// Whether one structured origin carries a tag under the knowledge registry.
+///
+/// The scanner supplies only syntax facts. Calls acquire tags from matching
+/// producer entries here, including the producer entry's own receiver gate,
+/// so a method chain can propagate a claim without granting its first method
+/// on an unknown value.
+fn origin_has_tag(kb: &Knowledge, origin: &crate::syntax::ValueOrigin, tag: &str) -> bool {
+    use crate::syntax::ValueOrigin;
+    match origin {
+        ValueOrigin::Unknown => false,
+        ValueOrigin::Literal => tag == "data",
+        ValueOrigin::Aggregate(members) => {
+            !members.is_empty() && members.iter().all(|member| origin_has_tag(kb, member, tag))
+        }
+        ValueOrigin::Call { head, receiver, arguments } => {
+            let unknown = ValueOrigin::Unknown;
+            let receiver = receiver.as_deref().unwrap_or(&unknown);
+            entries_for(kb, head, "python").any(|producer| {
+                producer.produces.as_ref().is_some_and(|tags| tags.iter().any(|produced| produced == tag))
+                    && receiver_gate_holds(kb, producer, receiver)
+                    && !producer_callback_possible(producer, arguments)
+            })
+        }
+    }
+}
+
+fn producer_callback_possible(program: &Program, arguments: &crate::syntax::CallArguments) -> bool {
+    if program.callback_args.is_empty() {
+        return false;
+    }
+    if arguments.keyword_unpack
+        || arguments.keywords.iter().any(|name| program.callback_args.iter().any(|callback| callback == name))
+    {
+        return true;
+    }
+    program.callback_args.iter().any(|callback| {
+        program
+            .arg_names
+            .iter()
+            .position(|name| name == callback)
+            .is_some_and(|position| arguments.positional > position || arguments.starred)
+    })
+}
+
+/// Missing or explicitly empty is unconditional. A non-empty receiver gate
+/// accepts when any declared tag is proven by the command's structured origin.
+fn receiver_gate_holds(kb: &Knowledge, program: &Program, receiver: &crate::syntax::ValueOrigin) -> bool {
+    program
+        .receiver_from
+        .as_ref()
+        .map_or(true, |tags| tags.is_empty() || tags.iter().any(|tag| origin_has_tag(kb, receiver, tag)))
+}
+
+/// Every entry whose complete claim applies to this command occurrence.
+fn entries_for_cmd<'k>(kb: &'k Knowledge, cmd: &Cmd, lang: &str) -> std::vec::IntoIter<&'k Program> {
+    entries_for(kb, &cmd.head, lang)
+        .filter(|program| receiver_gate_holds(kb, program, &cmd.receiver_origin))
+        .collect::<Vec<_>>()
+        .into_iter()
+}
+
 /// The ONE program-lookup primitive every language-aware caller goes
 /// through: `base_name(head)` equality AND (`languages` empty or contains
 /// `lang`) — spec 2026-07-31 §2.
@@ -2297,6 +2327,22 @@ pub fn entry_for<'k>(kb: &'k Knowledge, head: &str, lang: &str) -> Option<&'k Pr
     first
 }
 
+/// The single-entry selector for one command occurrence. It preserves
+/// `entry_for`'s language-scope and file-order precedence after removing
+/// entries whose receiver gates do not hold for this command.
+pub fn entry_for_cmd<'k>(kb: &'k Knowledge, cmd: &Cmd, lang: &str) -> Option<&'k Program> {
+    let mut first: Option<&'k Program> = None;
+    for program in entries_for_cmd(kb, cmd, lang) {
+        if !program.languages.is_empty() {
+            return Some(program);
+        }
+        if first.is_none() {
+            first = Some(program);
+        }
+    }
+    first
+}
+
 /// True when the knowledge file has any entry for this program, scoped to
 /// `lang`. `chdir` and `sl` are PowerShell-only claims: modelled on a
 /// PowerShell line, unmodelled on a bash line, because in bash they are
@@ -2332,25 +2378,19 @@ pub fn listable_standalone(kb: &Knowledge, cmd: &Cmd, eligible: bool) -> Option<
     listable_standalone_in(kb, cmd, "bash", eligible)
 }
 
-fn listable_standalone_in(
-    kb: &Knowledge,
-    cmd: &Cmd,
-    lang: &str,
-    eligible: bool,
-) -> Option<ListableStandalone> {
+fn listable_standalone_in(kb: &Knowledge, cmd: &Cmd, lang: &str, eligible: bool) -> Option<ListableStandalone> {
     if !eligible || cmd.args.is_empty() {
         return None;
     }
     // The union walk is built ONCE and both readings come off it: the verb
     // (what `subcommand_of` would rebuild from the same lists) and the flag
     // prefixes the member check needs.
-    let head = base(&cmd.head);
-    let owned = verb_vocab(kb, &head, lang);
+    let owned = verb_vocab(kb, cmd, lang);
     if subcommand(cmd, &owned.as_vocab(), lang).is_some() {
         return None;
     }
     let flag_prefix = prefixes(&owned.flag_prefix);
-    let same_name: Vec<&Program> = entries_for(kb, &head, lang).collect();
+    let same_name: Vec<&Program> = entries_for_cmd(kb, cmd, lang).collect();
     let mut flags: Vec<String> = Vec::new();
     for a in &cmd.args {
         let t = crate::paths::unquote(a);
@@ -2449,9 +2489,7 @@ pub fn unmodeled_descriptions(
             match subcommand_of_in(kb, c, lang) {
                 Some(sub) => (
                     format!("{} {sub}", c.head),
-                    format!(
-                        "an entry would recognise the `{sub}` operation of `{bare}` and nothing else"
-                    ),
+                    format!("an entry would recognise the `{sub}` operation of `{bare}` and nothing else"),
                 ),
                 None if c.args.is_empty() => (
                     // A bare run names no operation at all, so nothing about
@@ -2494,10 +2532,7 @@ pub fn unmodeled_descriptions(
         } else if bare == c.head.to_ascii_lowercase() {
             match &narrow {
                 Some(l) => (c.head.clone(), standalone_offer_text(&bare, l, false)),
-                None => (
-                    c.head.clone(),
-                    format!("an entry would recognise every operation of `{bare}`"),
-                ),
+                None => (c.head.clone(), format!("an entry would recognise every operation of `{bare}`")),
             }
         } else {
             (
@@ -2546,12 +2581,8 @@ pub enum DirChangeKind {
 /// membership test treats `None` and `Some((DirChangeKind::No, _))` alike —
 /// `No` is kept as its own value so an operator's explicit retraction is
 /// never confused with "nobody said" (spec §1).
-pub fn dir_change_entry<'k>(
-    kb: &'k Knowledge,
-    head: &str,
-    lang: &str,
-) -> Option<(DirChangeKind, &'k Program)> {
-    let p = entry_for(kb, head, lang)?;
+fn dir_change_from_program(program: &Program) -> Option<(DirChangeKind, &Program)> {
+    let p = program;
     let cd = p.changes_dir.as_deref()?;
     let kind = match cd {
         "no" => DirChangeKind::No,
@@ -2565,6 +2596,19 @@ pub fn dir_change_entry<'k>(
         _ => return None,
     };
     Some((kind, p))
+}
+
+pub fn dir_change_entry<'k>(kb: &'k Knowledge, head: &str, lang: &str) -> Option<(DirChangeKind, &'k Program)> {
+    dir_change_from_program(entry_for(kb, head, lang)?)
+}
+
+/// Receiver-aware directory-change lookup for a concrete occurrence.
+pub fn dir_change_entry_for_cmd<'k>(
+    kb: &'k Knowledge,
+    cmd: &Cmd,
+    lang: &str,
+) -> Option<(DirChangeKind, &'k Program)> {
+    dir_change_from_program(entry_for_cmd(kb, cmd, lang)?)
 }
 
 /// Thin wrapper over `dir_change_entry`, just above, for callers that only
@@ -2679,7 +2723,7 @@ pub fn recognition_at(
     place: RecognitionPlace<'_>,
     standalone_eligible: bool,
 ) -> Recognised {
-    for p in entries_for(kb, &cmd.head, lang) {
+    for p in entries_for_cmd(kb, cmd, lang) {
         let mut at_place: Option<&String> = None;
         if let Some(globs) = &p.only_under {
             let Some(dir) = place.dir else { continue };
@@ -2709,8 +2753,7 @@ pub fn recognition_at(
                 // Both halves ask about the verb under THIS entry's
                 // vocabulary, so the walk that finds it runs once.
                 let sub = entry_subcommand(p, cmd, lang);
-                (!subs.is_empty()
-                    && sub.is_some_and(|sub| subs.iter().any(|s| s.eq_ignore_ascii_case(sub))))
+                (!subs.is_empty() && sub.is_some_and(|sub| subs.iter().any(|s| s.eq_ignore_ascii_case(sub))))
                     || standalone_run(p, cmd, sub, standalone_eligible)
             }
         };
@@ -2814,8 +2857,7 @@ enum ClusterHit {
 
 fn cluster_switch(prog: &Program, flag: &str, raw: &str) -> ClusterHit {
     let s = crate::paths::unquote(raw);
-    let (Some(letter), true) = (bare_short_letter(flag), is_cluster_vocabulary(prog) && is_short_cluster(s))
-    else {
+    let (Some(letter), true) = (bare_short_letter(flag), is_cluster_vocabulary(prog) && is_short_cluster(s)) else {
         return ClusterHit::No;
     };
     let letters: Vec<char> = s[1..].chars().collect();
@@ -2901,7 +2943,13 @@ fn same_letter(a: char, b: char, case_sensitive: bool) -> bool {
 }
 
 fn declares(list: &[String], flag: &str, case_sensitive: bool) -> bool {
-    list.iter().any(|d| if case_sensitive { d == flag } else { d.eq_ignore_ascii_case(flag) })
+    list.iter().any(|d| {
+        if case_sensitive {
+            d == flag
+        } else {
+            d.eq_ignore_ascii_case(flag)
+        }
+    })
 }
 
 /// Finds the snippet a wrap flag carries, in every spelling the interpreter
@@ -2958,16 +3006,14 @@ fn locate_after_flag(prog: &Program, args: &[String]) -> Payload {
         }
         for f in &prog.wrap_flags {
             match crate::flags::spells(f, raw, &vocab) {
-                crate::flags::Spell::Yes(Some(v)) => {
-                    return Payload::Found(crate::paths::unquote_snippet(&v))
-                }
+                crate::flags::Spell::Yes(Some(v)) => return Payload::Found(crate::paths::unquote_snippet(&v)),
                 crate::flags::Spell::Yes(None) => return payload_after(prog, args, i, f),
                 crate::flags::Spell::RefusedAbbrev { declared } => {
                     return Payload::Unlocated(format!(
                         "`{raw}` reads as an abbreviation of `{declared}`, which this program's \
                          flags are matched exactly — vouch cannot tell whether the code it \
                          carries was meant to run"
-                    ))
+                    ));
                 }
                 crate::flags::Spell::No => {}
             }
@@ -2999,8 +3045,7 @@ fn payload_after(prog: &Program, args: &[String], i: usize, flag: &str) -> Paylo
         ));
     }
     if prog.wrap_join == Some(true) {
-        let joined: Vec<String> =
-            rest.iter().map(|t| crate::paths::unquote_snippet(t)).collect();
+        let joined: Vec<String> = rest.iter().map(|t| crate::paths::unquote_snippet(t)).collect();
         return Payload::Found(joined.join(" "));
     }
     Payload::Found(crate::paths::unquote_snippet(&rest[0]))
@@ -3050,7 +3095,7 @@ fn start_process_args(prog: &Program, args: &[String]) -> ListPayload {
                     return ListPayload::Unlocated(format!(
                         "`{raw}` reads as an abbreviation of `{declared}`, which this entry's \
                          flags are matched exactly — vouch cannot tell what is being started"
-                    ))
+                    ));
                 }
                 crate::flags::Spell::No => {}
             }
@@ -3059,7 +3104,9 @@ fn start_process_args(prog: &Program, args: &[String]) -> ListPayload {
             break;
         }
     }
-    let Some(at) = at else { return ListPayload::Absent };
+    let Some(at) = at else {
+        return ListPayload::Absent;
+    };
     let mut items: Vec<String> = Vec::new();
     for raw in &args[at + 1..] {
         // A PowerShell array expression rather than plain strings. vouch does
@@ -3109,12 +3156,8 @@ fn start_process_head(prog: &Program, args: &[String], fork: &mut ForkCursor) ->
         }
         for f in &prog.wrap_head_flags {
             match crate::flags::spells(f, raw, &vocab) {
-                crate::flags::Spell::Yes(Some(v)) => {
-                    return Some(crate::paths::unquote(&v).to_string())
-                }
-                crate::flags::Spell::Yes(None) => {
-                    return args.get(i + 1).map(|v| crate::paths::unquote(v).to_string())
-                }
+                crate::flags::Spell::Yes(Some(v)) => return Some(crate::paths::unquote(&v).to_string()),
+                crate::flags::Spell::Yes(None) => return args.get(i + 1).map(|v| crate::paths::unquote(v).to_string()),
                 // Loud, like everywhere else: a refused abbreviation is not a
                 // token that failed to be this flag, it is one vouch will not
                 // guess about. Answering `None` here reaches the arm's
@@ -3134,10 +3177,7 @@ fn start_process_head(prog: &Program, args: &[String], fork: &mut ForkCursor) ->
 /// One `-ArgumentList` token into its items: the list is comma-separated and
 /// each item may be quoted (`"-Command","Remove-Item …"`).
 fn split_list(raw: &str) -> Vec<String> {
-    raw.split(',')
-        .map(|part| crate::paths::unquote(part.trim()).to_string())
-        .filter(|p| !p.is_empty())
-        .collect()
+    raw.split(',').map(|part| crate::paths::unquote(part.trim()).to_string()).filter(|p| !p.is_empty()).collect()
 }
 
 /// Every command an `after_exec` entry's declared flags introduce, plus a
@@ -3158,9 +3198,7 @@ fn after_exec_commands(prog: &Program, args: &[String]) -> (Vec<Cmd>, Vec<String
         }
         let rest: Vec<String> = args[i + 1..]
             .iter()
-            .take_while(|t| {
-                !declares(&prog.wrap_exec_terminators, crate::paths::unquote(t), case_sensitive)
-            })
+            .take_while(|t| !declares(&prog.wrap_exec_terminators, crate::paths::unquote(t), case_sensitive))
             .cloned()
             .collect();
         if rest.len() == args.len() - i - 1 {
@@ -3178,6 +3216,7 @@ fn after_exec_commands(prog: &Program, args: &[String]) -> (Vec<Cmd>, Vec<String
                 unread_args: Default::default(),
                 chain: None,
                 prefix_assigns: vec![],
+                receiver_origin: crate::syntax::ValueOrigin::Unknown,
             }),
             None => unlocated.push(format!(
                 "`{a}` is followed straight by its terminator, so vouch cannot tell what it \
@@ -3239,11 +3278,7 @@ impl ForkCursor {
     /// Record a decision point and answer which reading this pass takes.
     fn pick(&mut self, factor: usize, token: &str, program: &str) -> usize {
         let chosen = self.picks.get(self.next).copied().unwrap_or(0).min(factor.saturating_sub(1));
-        self.points.push(ForkPoint {
-            factor,
-            token: token.to_string(),
-            program: program.to_string(),
-        });
+        self.points.push(ForkPoint { factor, token: token.to_string(), program: program.to_string() });
         self.next += 1;
         chosen
     }
@@ -3278,21 +3313,11 @@ struct OperandWalk {
 /// listing it; reading 1 treats the next token as its value. Both are judged
 /// and the more restrictive verdict wins, so neither reading has to be right
 /// for the answer to be safe.
-fn operand_walk(
-    prog: &Program,
-    args: &[String],
-    wrap_flag: Option<&[String]>,
-    fork: &mut ForkCursor,
-) -> OperandWalk {
+fn operand_walk(prog: &Program, args: &[String], wrap_flag: Option<&[String]>, fork: &mut ForkCursor) -> OperandWalk {
     let vocab = crate::flags::vocab_for(prog, wrap_abbrev(prog));
     let mut walk = crate::flags::ArgWalk::new(&vocab);
     let name = prog.match_names.first().cloned().unwrap_or_default();
-    let mut out = OperandWalk {
-        operand: None,
-        assigns: Vec::new(),
-        flag_seen: false,
-        unlocated: None,
-    };
+    let mut out = OperandWalk { operand: None, assigns: Vec::new(), flag_seen: false, unlocated: None };
     let mut leading = prog.leading_args.unwrap_or(0);
     let mut i = 0usize;
     while i < args.len() {
@@ -3406,11 +3431,7 @@ fn operand_walk(
 /// error))` when the registry has a scanner for this language but the text
 /// did not parse — `lang` is the language actually scanned, so the reason it
 /// drives names a setting that is really the decider.
-fn scan_snippet(
-    lang: &str,
-    src: &str,
-    srcs: &mut Vec<(String, String)>,
-) -> Result<SnippetScan, (String, String)> {
+fn scan_snippet(lang: &str, src: &str, srcs: &mut Vec<(String, String)>) -> Result<SnippetScan, (String, String)> {
     srcs.push((lang.to_string(), src.to_string()));
     let Some(scanner) = crate::syntax::scanner_for(lang) else {
         return Ok(SnippetScan::default());
@@ -3482,10 +3503,7 @@ fn scan_wrap_snippet(
         ));
     }
     let result = scan_snippet(wrap_lang, src, srcs);
-    let lang = srcs
-        .last()
-        .map(|(l, _)| l.clone())
-        .unwrap_or_else(|| wrap_lang.to_string());
+    let lang = srcs.last().map(|(l, _)| l.clone()).unwrap_or_else(|| wrap_lang.to_string());
     match result {
         Ok(scan) => (scan, lang),
         Err(e) => {
@@ -3632,16 +3650,7 @@ pub fn expand_wrappers_with_sources(
     lang: &str,
     caps: &dyn Fn(&str) -> u8,
 ) -> ExpandedWrappers {
-    expand_wrappers_forking(
-        kb,
-        cmds,
-        heredocs,
-        input_source,
-        args_complete,
-        lang,
-        caps,
-        &mut ForkCursor::new(&[]),
-    )
+    expand_wrappers_forking(kb, cmds, heredocs, input_source, args_complete, lang, caps, &mut ForkCursor::new(&[]))
 }
 
 /// The same expansion, run under ONE reading of every ambiguous wrapper.
@@ -3727,12 +3736,12 @@ pub fn expand_wrappers_forking(
             // The same positional read with the same fail-closed default, for
             // the fact the synthesising wrap arms deliberately leave empty (an
             // unscanned here-document body is not this command's input).
-            let own_source = input_source
-                .get(i)
-                .cloned()
-                .unwrap_or(crate::syntax::InputSource::Unknown);
+            let own_source = input_source.get(i).cloned().unwrap_or(crate::syntax::InputSource::Unknown);
             let head = base(&cmd.head);
             for prog in &kb.program {
+                if !receiver_gate_holds(kb, prog, &cmd.receiver_origin) {
+                    continue;
+                }
                 // Name lookup only, not `entries_for` — that also filters by
                 // language, which would add a language decision to wrapper
                 // lookup this refactor must not make.
@@ -3790,6 +3799,7 @@ pub fn expand_wrappers_forking(
                                     // prefix assignments — `env FOO=1 prog` and
                                     // `FOO=1 prog` bind the same name.
                                     prefix_assigns: walk.assigns,
+                                    receiver_origin: crate::syntax::ValueOrigin::Unknown,
                                 }],
                                 args_complete: vec![own_args_complete],
                                 ..SnippetScan::default()
@@ -3877,39 +3887,38 @@ pub fn expand_wrappers_forking(
                     // has. That is `evaluated_input` exactly: the command
                     // string is known to EXIST and known to be unreadable,
                     // which is not the same as an empty scan (M2.123).
-                    s if s.starts_with("arg_") => match s
-                        .strip_prefix("arg_")
-                        .and_then(|n| n.parse::<usize>().ok())
-                        .and_then(|i| cmd.args.get(i))
-                    {
-                        Some(v) if !is_unresolved_marker(v) => {
-                            let (scan, lang) = scan_wrap_snippet(
-                                &cmd.head,
-                                &prog.wrap_lang,
-                                v,
-                                &mut out.srcs,
-                                &mut out.failures,
-                                &mut out.constructs,
-                            );
-                            next_lang = lang;
-                            scan
-                        }
-                        Some(_) => {
-                            out.constructs.push((
-                                "evaluated_input".to_string(),
-                                format!(
-                                    "`{}` is handed a command string vouch could not read the \
+                    s if s.starts_with("arg_") => {
+                        match s.strip_prefix("arg_").and_then(|n| n.parse::<usize>().ok()).and_then(|i| cmd.args.get(i))
+                        {
+                            Some(v) if !is_unresolved_marker(v) => {
+                                let (scan, lang) = scan_wrap_snippet(
+                                    &cmd.head,
+                                    &prog.wrap_lang,
+                                    v,
+                                    &mut out.srcs,
+                                    &mut out.failures,
+                                    &mut out.constructs,
+                                );
+                                next_lang = lang;
+                                scan
+                            }
+                            Some(_) => {
+                                out.constructs.push((
+                                    "evaluated_input".to_string(),
+                                    format!(
+                                        "`{}` is handed a command string vouch could not read the \
                                      value of",
-                                    cmd.head
-                                ),
-                            ));
-                            SnippetScan::default()
+                                        cmd.head
+                                    ),
+                                ));
+                                SnippetScan::default()
+                            }
+                            // The declared position is not there at all: the call
+                            // wraps nothing, which is a fact about the call rather
+                            // than a miss.
+                            None => SnippetScan::default(),
                         }
-                        // The declared position is not there at all: the call
-                        // wraps nothing, which is a fact about the call rather
-                        // than a miss.
-                        None => SnippetScan::default(),
-                    },
+                    }
                     // `Start-Process powershell -ArgumentList "-Command","…"`.
                     // The arguments are the list parameter's items and the
                     // program is either a declared head flag's value
@@ -3946,6 +3955,7 @@ pub fn expand_wrappers_forking(
                                         unread_args: Default::default(),
                                         chain: None,
                                         prefix_assigns: vec![],
+                                        receiver_origin: crate::syntax::ValueOrigin::Unknown,
                                     }],
                                     args_complete: vec![own_args_complete],
                                     ..SnippetScan::default()
@@ -3981,11 +3991,7 @@ pub fn expand_wrappers_forking(
                             out.constructs.push(("wrap_unlocated".to_string(), detail));
                         }
                         let complete = vec![own_args_complete; found.len()];
-                        SnippetScan {
-                            cmds: found,
-                            args_complete: complete,
-                            ..SnippetScan::default()
-                        }
+                        SnippetScan { cmds: found, args_complete: complete, ..SnippetScan::default() }
                     }
                     _ => SnippetScan::default(),
                 };
@@ -4023,8 +4029,7 @@ pub fn expand_wrappers_forking(
             // `heredoc_feeds` again per sibling would walk the knowledge a
             // second time for records this loop already judged, and would put a
             // second site in charge of "was this sibling consumed".
-            let attached: Vec<&crate::syntax::Heredoc> =
-                heredocs.iter().filter(|h| h.cmd_index == i).collect();
+            let attached: Vec<&crate::syntax::Heredoc> = heredocs.iter().filter(|h| h.cmd_index == i).collect();
             let consumption: Vec<Option<(&Program, &str)>> =
                 attached.iter().map(|h| heredoc_feeds(kb, cmd, h)).collect();
             for (nth, heredoc) in attached.iter().enumerate() {
@@ -4061,15 +4066,7 @@ pub fn expand_wrappers_forking(
                     // sibling); an id never has to coincide, because it is not
                     // a position in either list (M2.127).
                     if own_source == crate::syntax::InputSource::Heredoc(heredoc.id)
-                        && holds_input(
-                            cmd,
-                            own_args_complete,
-                            lang,
-                            &attached,
-                            &consumption,
-                            nth,
-                            entry,
-                        )
+                        && holds_input(cmd, own_args_complete, lang, &attached, &consumption, nth, entry)
                     {
                         out.holds[self_idx] = true;
                     }
@@ -4141,12 +4138,7 @@ pub struct WriteTargets {
 /// the write derivation counts it — a rule that read raw tokens here would
 /// answer "no destination named" for `tar -xf a.tar -C./d` and claim the run
 /// place for a command that states its own.
-fn here_write_applies(
-    prog: &Program,
-    cmd: &Cmd,
-    lang: &str,
-    operands: &[&String],
-) -> bool {
+fn here_write_applies(prog: &Program, cmd: &Cmd, lang: &str, operands: &[&String]) -> bool {
     if prog.here_write.is_empty() {
         return false;
     }
@@ -4239,10 +4231,7 @@ fn here_write_applies(
 /// candidate (under a case-sensitive name-wide grammar, spec §4.1.7) is
 /// unknowable too, for the same reason: silently accepting or silently
 /// dropping it would both be a guess this walk exists to refuse.
-fn walk_post_subcommand<'a>(
-    args: &'a [String],
-    vocab: &crate::flags::Vocab,
-) -> (Vec<&'a String>, Vec<String>) {
+fn walk_post_subcommand<'a>(args: &'a [String], vocab: &crate::flags::Vocab) -> (Vec<&'a String>, Vec<String>) {
     let mut walk = crate::flags::ArgWalk::new(vocab);
     let mut positionals: Vec<&String> = Vec::new();
     let mut unknowable: Vec<String> = Vec::new();
@@ -4422,11 +4411,7 @@ fn has_unpack_arg(args: &[String]) -> bool {
 /// parameter) contributes no position here, matching `arg_names`'s own doc
 /// comment on `callback_args`.
 fn callback_arg_positions(prog: &Program, base_off: usize) -> HashSet<usize> {
-    prog.callback_args
-        .iter()
-        .filter_map(|c| prog.arg_names.iter().position(|n| n == c))
-        .map(|p| p + base_off)
-        .collect()
+    prog.callback_args.iter().filter_map(|c| prog.arg_names.iter().position(|n| n == c)).map(|p| p + base_off).collect()
 }
 
 /// The one place a write-target CANDIDATE becomes a write target vouch will
@@ -4522,9 +4507,7 @@ fn fold_kwargs(prog: &Program, args: &[String], head: &str) -> (Vec<String>, Has
     if prog.arg_names.is_empty() {
         return (args.to_vec(), HashSet::new(), base);
     }
-    let last_unambiguous_positional = args
-        .iter()
-        .rposition(|a| !is_unresolved_marker(a) && !a.contains('='));
+    let last_unambiguous_positional = args.iter().rposition(|a| !is_unresolved_marker(a) && !a.contains('='));
     let mut eff: Vec<String> = Vec::new();
     let mut folded: Vec<(usize, String)> = Vec::new();
     for (i, a) in args.iter().enumerate() {
@@ -4588,13 +4571,7 @@ fn fold_kwargs(prog: &Program, args: &[String], head: &str) -> (Vec<String>, Has
 /// was. When an unpack is present, "absent" no longer means "genuinely
 /// never given" — it means "vouch cannot tell", so this returns `true`
 /// (cannot rule out a write) instead of the ordinary read default.
-fn mode_says_write(
-    prog: &Program,
-    eff: &[String],
-    padding: &HashSet<usize>,
-    base: usize,
-    has_unpack: bool,
-) -> bool {
+fn mode_says_write(prog: &Program, eff: &[String], padding: &HashSet<usize>, base: usize, has_unpack: bool) -> bool {
     // Validation (`knowledge::validate`) requires `arg_names` to contain
     // "mode" whenever `writes_only_with_file_mode = true` is set on a loaded
     // file; a caller that builds a `Program` without going through that
@@ -4627,10 +4604,9 @@ pub fn written_paths(kb: &Knowledge, cmd: &Cmd) -> WriteTargets {
 }
 
 pub fn written_paths_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> WriteTargets {
-    let head = base(&cmd.head);
     let mut out = WriteTargets::default();
-    let verb_grammar = verb_vocab(kb, &head, lang);
-    for prog in entries_for(kb, &cmd.head, lang) {
+    let verb_grammar = verb_vocab(kb, cmd, lang);
+    for prog in entries_for_cmd(kb, cmd, lang) {
         // Keyword arguments folded onto the positions `arg_names` claims for
         // them (a no-op for every entry that never sets `arg_names`, which is
         // every non-python entry) — every arm below reads this instead of
@@ -4843,8 +4819,7 @@ pub fn written_paths_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> WriteTargets {
                     if cmd.args[sub_idx] != sw.subcommand {
                         continue;
                     }
-                    let (positionals, unk) =
-                        walk_post_subcommand(&cmd.args[sub_idx + 1..], &verb_grammar.as_vocab());
+                    let (positionals, unk) = walk_post_subcommand(&cmd.args[sub_idx + 1..], &verb_grammar.as_vocab());
                     // Something after the subcommand could not be
                     // classified — vouch does not know whether it takes a
                     // value, so the positional count and ORDER from that
@@ -4904,9 +4879,7 @@ pub fn written_paths_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> WriteTargets {
                                 // printed name and the "add to
                                 // write.allow_paths" remedy must say the
                                 // directory git actually creates.
-                                let bare = cmd.args[sub_idx + 1..]
-                                    .iter()
-                                    .any(|a| a == "--bare" || a == "--mirror");
+                                let bare = cmd.args[sub_idx + 1..].iter().any(|a| a == "--bare" || a == "--mirror");
                                 if bare {
                                     name.push_str(".git");
                                 }

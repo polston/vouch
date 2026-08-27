@@ -55,6 +55,7 @@ fn firing_cmd(head: &str, rule: &Rule) -> Cmd {
         unread_args: Default::default(),
         chain: None,
         prefix_assigns: vec![],
+        receiver_origin: vouch::syntax::ValueOrigin::Unknown,
     }
 }
 
@@ -65,6 +66,7 @@ fn bare(head: &str) -> Cmd {
         unread_args: Default::default(),
         chain: None,
         prefix_assigns: vec![],
+        receiver_origin: vouch::syntax::ValueOrigin::Unknown,
     }
 }
 

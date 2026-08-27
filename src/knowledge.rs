@@ -381,8 +381,9 @@ fn scope_of(languages: &[String]) -> HashSet<String> {
 /// `subcommands = []` now means "no verb at all" rather than "every verb",
 /// so the version gate is what turns that silent reinterpretation into a
 /// loud refusal instead. Structured tool `write_path` declarations and the
-/// `apply_patch` path-envelope format take it to 9.
-pub const KNOWLEDGE_SCHEMA_VERSION: u32 = 9;
+/// `apply_patch` path-envelope format take it to 9. Value-origin producer and
+/// receiver claims (`produces`, `receiver_from`) take it to 10.
+pub const KNOWLEDGE_SCHEMA_VERSION: u32 = 10;
 
 /// Semantic checks `deny_unknown_fields` cannot express: a `takes` value
 /// outside the closed set, a `run_dir_flags` entry that is not also in
@@ -749,6 +750,19 @@ pub(crate) fn validate(kb: &Knowledge) -> Result<(), String> {
                     "[[program]] {:?}: callback_args entry {name:?} is not a valid identifier",
                     prog.match_names
                 ));
+            }
+        }
+        for (field, tags) in [
+            ("produces", prog.produces.as_deref()),
+            ("receiver_from", prog.receiver_from.as_deref()),
+        ] {
+            for tag in tags.into_iter().flatten() {
+                if !is_parameter_name(tag) {
+                    return Err(format!(
+                        "[[program]] {:?}: {field} entry {tag:?} is not a valid identifier",
+                        prog.match_names
+                    ));
+                }
             }
         }
         // A match name the lookup can never reach is not a smaller claim, it
@@ -1555,6 +1569,12 @@ fn overlay(base: &mut Program, mine: &Program) {
     }
     if !mine.callback_args.is_empty() {
         base.callback_args = mine.callback_args.clone();
+    }
+    if mine.produces.is_some() {
+        base.produces = mine.produces.clone();
+    }
+    if mine.receiver_from.is_some() {
+        base.receiver_from = mine.receiver_from.clone();
     }
     if mine.case_sensitive_flags.is_some() {
         base.case_sensitive_flags = mine.case_sensitive_flags;

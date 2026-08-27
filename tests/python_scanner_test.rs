@@ -1,4 +1,5 @@
 use vouch::python::parse;
+use vouch::syntax::{CallArguments, ValueOrigin};
 
 mod common;
 
@@ -107,10 +108,7 @@ fn contains_as_literal(src: &str, name: &str) -> bool {
     let is_ident = |c: char| c.is_alphanumeric() || c == '_';
     stripped.match_indices(name).any(|(idx, m)| {
         let before_ok = stripped[..idx].chars().next_back().map_or(true, |c| !is_ident(c));
-        let after_ok = stripped[idx + m.len()..]
-            .chars()
-            .next()
-            .map_or(true, |c| !is_ident(c));
+        let after_ok = stripped[idx + m.len()..].chars().next().map_or(true, |c| !is_ident(c));
         before_ok && after_ok
     })
 }
@@ -163,14 +161,8 @@ fn contains_as_shipped_name(src: &str, name: &str) -> bool {
     let contents = string_literal_contents(scanned);
     let is_ident = |c: char| c.is_alphanumeric() || c == '_';
     contents.match_indices(name).any(|(idx, m)| {
-        let before_ok = contents[..idx]
-            .chars()
-            .next_back()
-            .map_or(true, |c| !is_ident(c));
-        let after_ok = contents[idx + m.len()..]
-            .chars()
-            .next()
-            .map_or(true, |c| !is_ident(c));
+        let before_ok = contents[..idx].chars().next_back().map_or(true, |c| !is_ident(c));
+        let after_ok = contents[idx + m.len()..].chars().next().map_or(true, |c| !is_ident(c));
         before_ok && after_ok
     })
 }
@@ -181,10 +173,7 @@ fn the_literal_occurrence_check_fires_on_code_and_not_on_comments() {
     // distinguishes "mentioned in code" from "mentioned only in prose",
     // independent of whatever the shipped knowledge currently contains.
     let in_code = "let x = \"shutil.rmtree\";\n";
-    assert!(
-        contains_as_literal(in_code, "shutil.rmtree"),
-        "must fire when the name is a real string literal"
-    );
+    assert!(contains_as_literal(in_code, "shutil.rmtree"), "must fire when the name is a real string literal");
 
     let in_line_comment = "// this module talks about shutil.rmtree in prose\nlet y = 1;\n";
     assert!(
@@ -253,10 +242,7 @@ fn shipped_python_api_names_never_appear_as_literals_in_the_scanner_source() {
          so the scan below cannot truncate before its test module and would \
          silently scan un-truncated"
     );
-    let offenders: Vec<&String> = api_names
-        .iter()
-        .filter(|name| contains_as_shipped_name(src, name))
-        .collect();
+    let offenders: Vec<&String> = api_names.iter().filter(|name| contains_as_shipped_name(src, name)).collect();
 
     assert!(
         offenders.is_empty(),
@@ -276,21 +262,14 @@ fn a_plain_call_becomes_a_prefixed_cmd() {
 #[test]
 fn a_dotted_module_call_keeps_the_module_path() {
     let s = parse("import os\nos.remove(\"f\")").unwrap();
-    assert!(s
-        .commands
-        .iter()
-        .any(|c| c.head == "python:os.remove" && c.args == vec!["f"]));
+    assert!(s.commands.iter().any(|c| c.head == "python:os.remove" && c.args == vec!["f"]));
 }
 
 #[test]
 fn an_unresolvable_argument_occupies_its_position() {
     // os.rename(compute(), "C:/x") — position 1 must still be the destination.
     let s = parse("import os\nos.rename(compute(), \"C:/x\")").unwrap();
-    let c = s
-        .commands
-        .iter()
-        .find(|c| c.head == "python:os.rename")
-        .unwrap();
+    let c = s.commands.iter().find(|c| c.head == "python:os.rename").unwrap();
     assert_eq!(c.args, vec!["$?", "C:/x"]);
 }
 
@@ -381,11 +360,7 @@ fn plus_concatenation_of_literals_resolves() {
 #[test]
 fn a_method_call_carries_its_receiver_as_argument_zero() {
     let s = parse("from pathlib import Path\nPath(\"C:/x\").write_text(\"hi\")").unwrap();
-    let c = s
-        .commands
-        .iter()
-        .find(|c| c.head == "python:.write_text")
-        .unwrap();
+    let c = s.commands.iter().find(|c| c.head == "python:.write_text").unwrap();
     assert_eq!(c.args[0], "C:/x");
 }
 
@@ -394,17 +369,9 @@ fn an_unresolvable_receiver_is_a_marker_not_a_vanished_position() {
     // The reference branch dropped the receiver here, positions shifted,
     // and a writes="arg_0" entry had nothing to point at — a silent allow.
     let s = parse("p.mkdir()").unwrap();
-    let c = s
-        .commands
-        .iter()
-        .find(|c| c.head == "python:.mkdir")
-        .unwrap();
+    let c = s.commands.iter().find(|c| c.head == "python:.mkdir").unwrap();
     assert_eq!(c.args.len(), 1);
-    assert!(
-        c.args[0].starts_with('$'),
-        "receiver must be a marker: {:?}",
-        c.args
-    );
+    assert!(c.args[0].starts_with('$'), "receiver must be a marker: {:?}", c.args);
 }
 
 #[test]
@@ -424,15 +391,100 @@ fn a_chained_method_calls_argument_is_not_mistaken_for_the_receiver() {
     // report a resolved-looking but wrong value (".bak" instead of the
     // actual, unresolvable, changed-suffix path).
     let s = parse("p.with_suffix(\".bak\").write_text(\"hi\")").unwrap();
-    let c = s
-        .commands
-        .iter()
-        .find(|c| c.head == "python:.write_text")
-        .unwrap();
+    let c = s.commands.iter().find(|c| c.head == "python:.write_text").unwrap();
     assert_ne!(c.args[0], ".bak");
-    assert!(
-        c.args[0].starts_with('$'),
-        "receiver must be a marker, not a fragment of the chain: {:?}",
-        c.args
+    assert!(c.args[0].starts_with('$'), "receiver must be a marker, not a fragment of the chain: {:?}", c.args);
+}
+
+fn producer(head: &str) -> ValueOrigin {
+    ValueOrigin::Call {
+        head: head.to_string(),
+        receiver: None,
+        arguments: CallArguments { positional: 1, ..CallArguments::default() },
+    }
+}
+
+#[test]
+fn a_producer_origin_flows_through_assignment_and_subscript() {
+    let scan = parse("import json\npayload = json.loads('{}')\nalias = payload\nalias['name'].strip()").unwrap();
+    let strip = scan.commands.iter().find(|cmd| cmd.head == "python:.strip").unwrap();
+
+    assert_eq!(strip.receiver_origin, producer("python:json.loads"));
+}
+
+#[test]
+fn iteration_binds_each_item_to_the_iterables_origin() {
+    let scan = parse("import json\npayload = json.loads('[]')\nfor item in payload:\n    item.strip()").unwrap();
+    let strip = scan.commands.iter().find(|cmd| cmd.head == "python:.strip").unwrap();
+
+    assert_eq!(strip.receiver_origin, producer("python:json.loads"));
+}
+
+#[test]
+fn a_pure_method_chain_keeps_the_producer_chain_structural() {
+    let scan = parse("import json\njson.loads('{}').get('name').strip()").unwrap();
+    let strip = scan.commands.iter().find(|cmd| cmd.head == "python:.strip").unwrap();
+
+    assert_eq!(
+        strip.receiver_origin,
+        ValueOrigin::Call {
+            head: "python:.get".to_string(),
+            receiver: Some(Box::new(producer("python:json.loads"))),
+            arguments: CallArguments { positional: 1, ..CallArguments::default() },
+        }
     );
+}
+
+#[test]
+fn a_call_origin_records_argument_shape_without_policy_names() {
+    let scan = parse("source(*items, hook=callback, **options).get('name')").unwrap();
+    let get = scan.commands.iter().find(|cmd| cmd.head == "python:.get").unwrap();
+
+    assert_eq!(
+        get.receiver_origin,
+        ValueOrigin::Call {
+            head: "python:source".to_string(),
+            receiver: None,
+            arguments: CallArguments {
+                positional: 0,
+                keywords: vec!["hook".to_string()],
+                starred: true,
+                keyword_unpack: true,
+            },
+        }
+    );
+}
+
+#[test]
+fn an_assigned_callable_alias_resolves_before_rebound_refusal() {
+    let scan = parse("print = open\nprint('x.txt')").unwrap();
+
+    assert!(scan.commands.iter().any(|cmd| cmd.head == "python:open"));
+    assert!(!scan.constructs.iter().any(|construct| construct == "rebound_name"));
+}
+
+#[test]
+fn an_assigned_bound_method_keeps_its_receiver_origin() {
+    let scan = parse("import json\npayload = json.loads('{}')\nlookup = payload.get\nlookup('name')").unwrap();
+    let lookup = scan.commands.iter().find(|cmd| cmd.head == "python:.get").unwrap();
+
+    assert_eq!(lookup.receiver_origin, producer("python:json.loads"));
+    assert_eq!(lookup.args.first().map(String::as_str), Some("$?"));
+    assert!(!scan.constructs.iter().any(|construct| construct == "rebound_name"));
+}
+
+#[test]
+fn a_literal_collection_is_a_known_aggregate_receiver() {
+    let scan = parse("items = {'name': 'value'}\nitems.get('name')").unwrap();
+    let get = scan.commands.iter().find(|cmd| cmd.head == "python:.get").unwrap();
+
+    assert!(matches!(get.receiver_origin, ValueOrigin::Aggregate(_)));
+}
+
+#[test]
+fn a_named_receiver_is_invalidated_after_a_method_may_mutate_it() {
+    let scan = parse("import json\npayload = json.loads('{}')\npayload.clear()\npayload.get('name')").unwrap();
+    let get = scan.commands.iter().find(|cmd| cmd.head == "python:.get").unwrap();
+
+    assert_eq!(get.receiver_origin, ValueOrigin::Unknown);
 }

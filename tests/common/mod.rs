@@ -285,6 +285,7 @@ pub fn cmd(head: &str, args: &[&str]) -> vouch::syntax::Cmd {
         unread_args: Default::default(),
         chain: None,
         prefix_assigns: vec![],
+        receiver_origin: vouch::syntax::ValueOrigin::Unknown,
     }
 }
 
