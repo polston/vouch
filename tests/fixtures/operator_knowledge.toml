@@ -2,10 +2,11 @@
 # knowledge does not carry.
 #
 # Committed because a whole class of question is otherwise unaskable (#8,
-# ROADMAP M2.144). `knowledge.toml` contains one deliberately scoped entry for
-# vouch itself and ZERO using `all_subcommands`; neither represents the varied
-# operator vocabulary this fixture exercises. Candidate counts must distinguish
-# one, zero, and many rather than treating any as "this shape does not happen."
+# ROADMAP M2.144). `knowledge.toml` contains deliberate scoped entries for
+# vouch and Codex and ZERO using `all_subcommands`; that small set does not
+# represent the varied operator combinations this fixture exercises. Candidate
+# counts must distinguish one, zero, and many rather than treating any as "this
+# shape does not happen."
 #
 # What it is FOR: giving a test or a measurement about operator-side shapes
 # something honest to run against. The shapes that matter here are the ones an
@@ -38,8 +39,8 @@ guard = "process_control"
 source = "declared: invented fixture rule, for tests only"
 subcommand_in = ["approve", "ratify", "override"]
 
-# Verb-scoped recognition: the entry covers these verbs and nothing else, which
-# is what `subcommands` is for and what the shipped file never exercises.
+# Verb-scoped recognition: the entry covers these invented verbs and nothing
+# else, demonstrating the operator-side shape without borrowing shipped names.
 [[program]]
 match = ["gadget"]
 case_sensitive_flags = true

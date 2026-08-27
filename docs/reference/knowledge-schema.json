@@ -129,7 +129,7 @@
       "type": "object",
       "properties": {
         "all_subcommands": {
-          "description": "Claims every subcommand, in an entry that would otherwise read as adding\nto a scoped one.\n\n`subcommands` widens and never narrows, so a file cannot go from \"these\nthree verbs\" to \"all of them\" by leaving the list out — that would make\nan omission permissive. Saying it out loud is the same rule as\n`vouch trust --all-subcommands` (§2).",
+          "description": "Claims every subcommand, in an entry that would otherwise read as adding\nto a scoped one.\n\n`subcommands` and `subcommand_paths` widen and never narrow, so a file\ncannot go from scoped coverage to all operations by leaving both keys\nout — that would make an omission permissive. Saying it out loud is\nthe same rule as `vouch trust --all-subcommands` (§2).",
           "type": "boolean",
           "default": false
         },
@@ -328,6 +328,20 @@
             "$ref": "#/$defs/SubWrite"
           }
         },
+        "subcommand_paths": {
+          "description": "Exact positional command paths this entry recognises.\n\nEach non-empty inner vector is matched from the first positional word\nunder this entry's flag grammar. `[[\"mcp\", \"get\"]]` recognises that\noperation without recognising `mcp add` or another sibling. Either\nthis key or `subcommands` being present makes the entry scoped; both\nabsent still means whole-program coverage. When both are present their\nscopes are unioned.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "default": null,
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
         "subcommands": {
           "description": "Which subcommands this entry recognises.\n\nThree states (spec 2026-08-20 §3): the key ABSENT (`None`) covers the\nwhole program — every run; a non-empty list covers those verbs, plus\nstandalone runs when `standalone_flags` is present; an explicitly\nEMPTY list covers no verb at all — only standalone runs, and the\nloader refuses that spelling without a non-empty `standalone_flags`\n(an entry that can never recognise anything reads as installed\nprotection and is worse than none).",
           "type": [
@@ -471,7 +485,7 @@
           "default": false
         },
         "guard": {
-          "description": "The guard this rule trips — one of vouch's known guard names\n(`delete_recursive`, `grant_execute`, `history_rewrite`,\n`publish_outward`, `process_control`, `privilege_escalation`,\n`disk_or_system`, `in_place_edit`, `remote_execution`).",
+          "description": "The guard this rule trips — one of vouch's known guard names\n(`confidential_output`, `delete_recursive`, `grant_execute`, `history_rewrite`,\n`publish_outward`, `process_control`, `privilege_escalation`,\n`disk_or_system`, `in_place_edit`, `local_state_write`,\n`remote_execution`).",
           "type": "string"
         },
         "source": {

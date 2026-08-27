@@ -455,7 +455,7 @@ fn a_run_dir_flag_carries_a_command_into_a_distrust_zone() {
 /// PROVEN inside its tree, and here the only thing that puts it there is the
 /// run-dir flag. `probe-tool` is described with a verb list, so
 /// `probe-tool <unknown verb>` is unrecognised and the zone is what decides it
-/// — the shipped `git` entry lists no subcommands, so nothing about it is ever
+/// — the shipped `git` entry states neither recognition scope, so nothing about it is ever
 /// unrecognised and it cannot show this.
 #[test]
 fn a_run_dir_flag_carries_a_command_into_a_trust_zone() {

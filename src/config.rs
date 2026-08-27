@@ -415,10 +415,11 @@ struct Raw {
     /// What commands DO, written as `[guards]`. Shared across every
     /// language: a guard fires the same way whichever scanner recognised the
     /// command that tripped it. Every key must be one of vouch's known guard
-    /// names (`delete_recursive`, `grant_execute`, `history_rewrite`,
+    /// names (`confidential_output`, `delete_recursive`, `grant_execute`,
+    /// `history_rewrite`,
     /// `publish_outward`, `process_control`, `privilege_escalation`,
-    /// `disk_or_system`, `in_place_edit`, `remote_execution`); an unset guard
-    /// always resolves to `ask`.
+    /// `disk_or_system`, `in_place_edit`, `local_state_write`,
+    /// `remote_execution`); an unset guard always resolves to `ask`.
     #[serde(default)]
     guards: HashMap<String, Action>,
     /// `[run]`: run-place zones, executable-place program trust, and

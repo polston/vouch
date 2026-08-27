@@ -29,6 +29,16 @@ fields are only what the harness actually declares (rule 6 below).
    every verb the program has, including ones they have never run, and the
    still-asks proof in step 7 becomes a different unknown program instead of
    a sibling verb (there is no sibling left to ask).
+   **Nested command paths are narrower than their grouping verb.** If the
+   operation's identity needs two or more positional command words, never
+   collapse it to `vouch trust <program> <first-word>`: that would recognise
+   every sibling below the group. Propose an exact hand-written
+   `subcommand_paths = [["group", "operation"]]` entry instead. The CLI does
+   not write this schema shape; show the full `[[program]]` block, wait for
+   explicit accept, preserve a private byte-for-byte backup, edit the active
+   `my-knowledge.toml`, and run `vouch doctor` before proving the named path
+   plus an unlisted sibling. A load gap or failed boundary restores the exact
+   backup; remove it only after both directions pass.
    **Rule 2a — narrower still, when the program only ever runs in one
    tree:** an `only_under` list on the `[[program]]` entry — place-scoped
    recognition — recognises it inside those trees and nowhere else. `vouch
@@ -165,9 +175,10 @@ invocations — that is the gate working; answer its prompt.
      four pass, remove the backup, report the verdicts, and stop this workflow;
      do not fall through to the bare-name `vouch trust` steps below.
 
-4. Decide the narrowest entry: bare program (no verbs) or program + the one
-   verb. A path-spelled head is recognised by its bare name — `vouch trust`
-   normalises this itself and says so.
+4. Decide the narrowest entry: bare program (no verbs), program + one first
+   verb, or an exact nested path under rule 2. A path-spelled head is
+   recognised by its bare name — `vouch trust` normalises this itself and says
+   so.
 
    **A flags-only run gets its own shape, `standalone_flags` — never the
    whole program.** If the command that triggered this is a program run with
@@ -202,7 +213,9 @@ invocations — that is the gate working; answer its prompt.
 5. Tell the operator, in one line per entry, exactly what it would trust
    ("recognise the `pull` operation of `frob` and nothing else — guards and
    write rules still apply"). Ask for an accept. Stop here without one.
-6. On accept, run `vouch trust <program> [<verb>]`. It must print
+6. On accept, run `vouch trust <program> [<verb>]`. For a nested path, use the
+   accepted hand-edit and backup procedure in rule 2 instead; do not run the
+   broader first-verb command. The CLI route must print
    `verified: an entry now recognises …` — if it instead reports the entry
    did not fire and was removed again, that is a vouch defect: report it to
    the operator and record it per rule 5. One case where the undo is CORRECT
@@ -215,9 +228,10 @@ invocations — that is the gate working; answer its prompt.
    - `vouch explain --cwd '<dir>' '<the original command>'` — must no longer
      stop on `unmodeled_command`.
    - `vouch explain --cwd '<dir>' '<a neighbouring command that must still
-     ask>'` — for a verb-scoped entry, the same program with a DIFFERENT
-     verb; for a new program or an all-subcommands entry, any other unknown
-     program. Must still ask. A too-broad entry shows up here and must be
+     ask>'` — for a nested path, an unlisted sibling below the same group; for
+     a verb-scoped entry, the same program with a DIFFERENT verb; for a new
+     program or an all-subcommands entry, any other unknown program. Must
+     still ask. A too-broad entry shows up here and must be
      reported, not shrugged at — with one alternative to rule out first: if
      the operator has a **trust zone** (`run.trust_all_under`) covering this
      directory, the neighbour is recognised BY THE ZONE and would allow with

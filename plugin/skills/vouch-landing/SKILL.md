@@ -46,6 +46,19 @@ tree clean. The conditional spelling is not a weaker gate: its reusable PASS
 is bound to the exact repository contents, real corpus, gate environment, and
 toolchain. A cleanup edit makes it run again.
 
+## Observing long-running gates
+
+Keep one attached watcher on a long-running verifier or publisher. Let that
+watcher wait in 30-to-60-second blocks and surface new output or process exit;
+do not repeatedly poll the process from the agent turn.
+
+Once an exact-input gate starts, freeze the entire worktree until it exits.
+That includes tracked edits, untracked public-manifest files, formatting, and
+temporary changes that will be restored: the publisher assembles the source
+tree more than once, and the reusable receipt fingerprints its inputs. Record
+a procedural note after the process exits and before the next gate instead of
+changing the tree underneath the running one.
+
 ## Steps
 
 Run from the vouch checkout root; every path below is relative to it.

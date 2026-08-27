@@ -17,6 +17,7 @@ use serde::Deserialize;
 use std::collections::HashSet;
 
 pub const KNOWN_GUARDS: &[&str] = &[
+    "confidential_output",
     "delete_recursive",
     "grant_execute",
     "history_rewrite",
@@ -25,6 +26,7 @@ pub const KNOWN_GUARDS: &[&str] = &[
     "privilege_escalation",
     "disk_or_system",
     "in_place_edit",
+    "local_state_write",
     "remote_execution",
 ];
 
@@ -48,9 +50,10 @@ pub struct Hit {
 #[serde(deny_unknown_fields)]
 pub struct Rule {
     /// The guard this rule trips — one of vouch's known guard names
-    /// (`delete_recursive`, `grant_execute`, `history_rewrite`,
+    /// (`confidential_output`, `delete_recursive`, `grant_execute`, `history_rewrite`,
     /// `publish_outward`, `process_control`, `privilege_escalation`,
-    /// `disk_or_system`, `in_place_edit`, `remote_execution`).
+    /// `disk_or_system`, `in_place_edit`, `local_state_write`,
+    /// `remote_execution`).
     pub guard: String,
     /// Where this rule came from: `declared` (the operator's own config),
     /// `requested` (they asked for it), or `inferred` (a guess). Surfaced in
@@ -281,6 +284,16 @@ pub struct Program {
     /// protection and is worse than none).
     #[serde(default)]
     pub subcommands: Option<Vec<String>>,
+    /// Exact positional command paths this entry recognises.
+    ///
+    /// Each non-empty inner vector is matched from the first positional word
+    /// under this entry's flag grammar. `[["mcp", "get"]]` recognises that
+    /// operation without recognising `mcp add` or another sibling. Either
+    /// this key or `subcommands` being present makes the entry scoped; both
+    /// absent still means whole-program coverage. When both are present their
+    /// scopes are unioned.
+    #[serde(default)]
+    pub subcommand_paths: Option<Vec<Vec<String>>>,
     /// Flags this entry vouches for ALONE: a run whose every argument is one
     /// of these (whole-token, unquoted view, the entry's case rule) is a
     /// standalone run — covered by the entry, and read as evaluating no
@@ -293,10 +306,10 @@ pub struct Program {
     /// Claims every subcommand, in an entry that would otherwise read as adding
     /// to a scoped one.
     ///
-    /// `subcommands` widens and never narrows, so a file cannot go from "these
-    /// three verbs" to "all of them" by leaving the list out — that would make
-    /// an omission permissive. Saying it out loud is the same rule as
-    /// `vouch trust --all-subcommands` (§2).
+    /// `subcommands` and `subcommand_paths` widen and never narrow, so a file
+    /// cannot go from scoped coverage to all operations by leaving both keys
+    /// out — that would make an omission permissive. Saying it out loud is
+    /// the same rule as `vouch trust --all-subcommands` (§2).
     #[serde(default)]
     pub all_subcommands: bool,
     /// The dir-change kind: what the walk can KNOW about where the shell goes
@@ -889,7 +902,7 @@ pub fn gaps() -> &'static [crate::knowledge::Gap] {
     &loaded().gaps
 }
 
-/// Sentences about operator `subcommands` spellings the merge silently
+/// Sentences about operator recognition-scope spellings the merge silently
 /// discarded (`knowledge::narrowing_noops`) — never a gap, since nothing
 /// failed to load. Empty is the normal case. Printed by `doctor`, not by the
 /// per-command prompt path.
@@ -1071,6 +1084,63 @@ fn subcommand<'a>(cmd: &'a Cmd, vocab: &crate::flags::Vocab, lang: &str) -> Opti
 /// two can never end up reading different grammars for the same tokens.
 fn entry_subcommand<'a>(p: &Program, cmd: &'a Cmd, lang: &str) -> Option<&'a str> {
     subcommand(cmd, &crate::flags::vocab_for(p, wrap_abbrev(p)), lang)
+}
+
+/// Whether one of this entry's exact positional command paths matches.
+///
+/// This is a recognition grant, so every ambiguity before a complete match is
+/// strict: an unread word, undescribed flag, refused abbreviation, or missing
+/// value grants nothing. Once a declared path is complete, later flags and
+/// operands belong to that already-named operation and cannot turn it into a
+/// sibling path.
+fn entry_subcommand_path_matches(p: &Program, cmd: &Cmd, lang: &str) -> bool {
+    let Some(paths) = &p.subcommand_paths else {
+        return false;
+    };
+    if paths.is_empty() {
+        return false;
+    }
+
+    let vocab = crate::flags::vocab_for(p, wrap_abbrev(p));
+    let mut walk = crate::flags::ArgWalk::new(&vocab);
+    let mut candidates: Vec<&Vec<String>> = paths.iter().collect();
+    let mut word_index = 0usize;
+    let mut skip_next = false;
+
+    for (arg_index, arg) in cmd.args.iter().enumerate() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        match walk.next(arg) {
+            crate::flags::Class::NotFlag => {
+                if token_is_unreadable(cmd, arg_index, lang) {
+                    return false;
+                }
+                candidates.retain(|path| {
+                    path.get(word_index)
+                        .is_some_and(|word| word.eq_ignore_ascii_case(arg))
+                });
+                if candidates.is_empty() {
+                    return false;
+                }
+                word_index += 1;
+                if candidates.iter().any(|path| path.len() == word_index) {
+                    return true;
+                }
+            }
+            crate::flags::Class::EndOfOptions => {}
+            crate::flags::Class::Value { attached: None, .. } => skip_next = true,
+            crate::flags::Class::Value {
+                attached: Some(_), ..
+            }
+            | crate::flags::Class::Bool { .. } => {}
+            crate::flags::Class::Undescribed { .. } | crate::flags::Class::RefusedAbbrev { .. } => {
+                return false
+            }
+        }
+    }
+    false
 }
 
 /// Whether this occurrence is a standalone run of `p` (spec 2026-08-20 §2):
@@ -2318,7 +2388,7 @@ fn entries_for_cmd<'k>(kb: &'k Knowledge, cmd: &Cmd, lang: &str) -> std::vec::In
 ///    `tests/knowledge_merge_test.rs`.
 ///
 /// Callers that must see EVERY claim for a name instead of picking one —
-/// `recognises`, below, unioning `subcommands` across duplicate entries —
+/// `recognises`, below, unioning recognition scopes across duplicate entries —
 /// do not call this function at all; they walk `entries_for` directly.
 pub fn entry_for<'k>(kb: &'k Knowledge, head: &str, lang: &str) -> Option<&'k Program> {
     // One pass: return the instant an entry actually scoped to `lang` is
@@ -2627,14 +2697,14 @@ pub fn dir_change_kind(kb: &Knowledge, head: &str, lang: &str) -> Option<DirChan
 }
 
 /// True when this WHOLE command is recognised — the program AND, when the entry
-/// scopes itself to particular subcommands, this subcommand — for the language
-/// it was scanned as.
+/// scopes itself to particular subcommands or positional command paths, that
+/// scope — for the language it was scanned as.
 ///
 /// A CLI is not one operation. Recognising the name `kubectl` says nothing about
 /// `kubectl delete` versus `kubectl get pods`, and treating the name as the
 /// unit of trust is the blanket-allow this design exists to remove. An entry
-/// with no `subcommands` covers the whole program, which is right for `ls` and
-/// wrong for anything with a verb.
+/// with neither scope key covers the whole program, which is right for `ls`
+/// and wrong for anything with verbs.
 ///
 /// `standalone_eligible` is the one boolean per OCCURRENCE that the standalone
 /// arm needs and that this function cannot derive: whether the recorded
@@ -2750,21 +2820,22 @@ pub fn recognition_at(
             };
             at_place = Some(hit);
         }
-        // Key-absent covers the whole program. A stated list — non-empty or
-        // explicitly empty — covers its own verbs, and beside them a
-        // standalone run over the entry's own `standalone_flags`. The
-        // standalone arm is the only way an explicitly-empty entry ever
+        // Both scope keys absent covers the whole program. Once either is
+        // present, first verbs, exact nested paths, and standalone runs are
+        // the union. The standalone arm is the only way a fully empty scope
         // recognises anything, which is why the loader refuses that spelling
         // without a non-empty flag list (§3, §4).
-        let covers = match &p.subcommands {
-            None => true,
-            Some(subs) => {
-                // Both halves ask about the verb under THIS entry's
-                // vocabulary, so the walk that finds it runs once.
-                let sub = entry_subcommand(p, cmd, lang);
-                (!subs.is_empty() && sub.is_some_and(|sub| subs.iter().any(|s| s.eq_ignore_ascii_case(sub))))
-                    || standalone_run(p, cmd, sub, standalone_eligible)
-            }
+        let covers = if p.subcommands.is_none() && p.subcommand_paths.is_none() {
+            true
+        } else {
+            // The first-verb and standalone halves ask about the verb under
+            // THIS entry's vocabulary, so that lookup runs once.
+            let sub = entry_subcommand(p, cmd, lang);
+            p.subcommands.as_ref().is_some_and(|subs| {
+                !subs.is_empty()
+                    && sub.is_some_and(|sub| subs.iter().any(|s| s.eq_ignore_ascii_case(sub)))
+            }) || entry_subcommand_path_matches(p, cmd, lang)
+                || standalone_run(p, cmd, sub, standalone_eligible)
         };
         if covers {
             return match at_place {
@@ -2773,7 +2844,7 @@ pub fn recognition_at(
             };
         }
     }
-    // Named by some entry, but every one of them scoped to other subcommands —
+    // Named by some entry, but every one of them scoped to other operations —
     // or to other places.
     Recognised::No
 }

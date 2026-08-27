@@ -79,6 +79,6 @@ fn origin_tags_use_the_shared_ascii_identifier_grammar() {
 }
 
 #[test]
-fn origin_claims_are_knowledge_schema_ten() {
-    assert_eq!(KNOWLEDGE_SCHEMA_VERSION, 10);
+fn origin_claims_remain_available_after_schema_ten() {
+    assert!(KNOWLEDGE_SCHEMA_VERSION >= 10);
 }

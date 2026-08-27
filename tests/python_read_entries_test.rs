@@ -74,7 +74,7 @@ fn shipped_os_chdir_is_a_stated_mover_with_one_named_path_argument() {
     assert_eq!(entry.changes_dir.as_deref(), Some("stated"));
     assert_eq!(entry.arg_names, vec!["path"]);
     assert!(entry.writes.is_empty());
-    assert_eq!(vouch::knowledge::KNOWLEDGE_SCHEMA_VERSION, 10);
+    assert!(vouch::knowledge::KNOWLEDGE_SCHEMA_VERSION >= 10);
 }
 
 /// Synthesize a snippet whose one call is `name`, with the import a dotted

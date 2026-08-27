@@ -775,6 +775,9 @@ fn overlay_is_exhaustive_over_every_program_field() {
             takes: "last".to_string(),
         }],
         subcommands: Some(vec!["describe".to_string()]),
+        // Nested path scopes union by complete token vector, beside the
+        // existing first-verb scopes (M2.197, knowledge schema v11).
+        subcommand_paths: Some(vec![vec!["group".to_string(), "list".to_string()]]),
         all_subcommands: true,
         // `standalone_flags` follows the `value_options` non-empty-replaces
         // pattern (Task 1, spec 2026-08-20 §2/§3, knowledge schema v8).

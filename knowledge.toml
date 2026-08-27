@@ -56,6 +56,9 @@
 #                            (never consulted when a write_flags member
 #                            matched): "first" or "last" (the default) names
 #                            the destination when none did
+#   subcommand_paths = [[...]] exact positional command-word paths; either
+#                            this key or subcommands scopes recognition, and
+#                            the two are additive when both are present
 #
 # `version` (below) gates this whole file's schema, not a per-entry predicate.
 
@@ -71,7 +74,9 @@
 # 9 (2026-08-25): structured tool write paths and apply-patch envelopes.
 # 10 (2026-08-26): `[[program]]` gained `produces` and `receiver_from` value
 # origin claims.
-version = 10
+# 11 (2026-08-27): `[[program]]` gained structured `subcommand_paths` for
+# exact nested operation recognition.
+version = 11
 
 # ============================================================================
 # FROM YOUR EXISTING POLICY — these are rules your current tool already applies
@@ -1799,6 +1804,47 @@ guard = "in_place_edit"
 source = "requested: vouch schema --write regenerates the repository's schema files"
 subcommand_in = ["schema"]
 any_flag = ["--write"]
+
+# Codex groups MCP and plugin operations beneath two first-level verbs. The
+# path scope is exact: adding these four does not recognise `mcp add`, `plugin
+# add`, marketplace mutation, or another present/future sibling. Only flags
+# needed to locate the two words are claimed; an undescribed flag before or
+# between them keeps the command unrecognised.
+[[program]]
+match = ["codex"]
+subcommand_paths = [
+  ["mcp", "get"],
+  ["mcp", "remove"],
+  ["plugin", "list"],
+  ["plugin", "remove"],
+]
+value_options = ["-c", "--config", "--enable", "--disable"]
+no_value_options = ["-h", "--help"]
+case_sensitive_flags = true
+
+[[program.rule]]
+guard = "confidential_output"
+source = "requested: safely ship Codex MCP get; an isolated synthetic probe showed stored environment values in its output"
+subcommand_in = ["mcp"]
+sub_arg_0_in = ["get"]
+
+[[program.rule]]
+guard = "in_place_edit"
+source = "requested: safely model Codex removal operations that update local config or cache"
+subcommand_in = ["mcp", "plugin"]
+sub_arg_0_in = ["remove"]
+
+[[program.rule]]
+guard = "local_state_write"
+source = "requested: safely ship Codex operations; an isolated synthetic probe showed local tmp/arg0 initialization"
+subcommand_in = ["mcp"]
+sub_arg_0_in = ["get", "remove"]
+
+[[program.rule]]
+guard = "local_state_write"
+source = "requested: safely ship Codex operations; an isolated synthetic probe showed local tmp/arg0 initialization"
+subcommand_in = ["plugin"]
+sub_arg_0_in = ["list", "remove"]
 
 # ============================================================================
 # DESCRIBED AS READ-ONLY

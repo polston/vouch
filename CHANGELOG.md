@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.0 (2026-08-27)
+
+
+### Features
+
+* recognize exact nested Codex commands
+
 ## 0.7.0 (2026-08-27)
 
 

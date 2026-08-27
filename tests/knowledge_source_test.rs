@@ -1625,3 +1625,28 @@ fn a_discarded_narrowing_produces_a_note_not_silence() {
     );
     assert!(loaded.notes.iter().any(|n| n.contains("cc") && n.contains("verb")), "{:?}", loaded.notes);
 }
+
+#[test]
+fn a_discarded_nested_path_narrowing_produces_a_note() {
+    let shipped = scratch(
+        "shipped_path_narrowing.toml",
+        &format!(
+            "version = {}\n[[program]]\nmatch = [\"aa\"]\nsubcommand_paths = [[\"group\", \"list\"]]\n",
+            v()
+        ),
+    );
+    let mine = scratch(
+        "mine_path_narrowing.toml",
+        "[[program]]\nmatch = [\"aa\"]\nsubcommand_paths = []\n\
+         standalone_flags = [\"--version\"]\ncase_sensitive_flags = true\n",
+    );
+    let loaded = load_files(&shipped, &mine);
+    assert!(loaded.gaps.is_empty(), "{:?}", loaded.gaps);
+    assert_eq!(loaded.notes.len(), 1, "{:?}", loaded.notes);
+    assert!(
+        loaded.notes[0].contains("subcommand_paths = []")
+            && loaded.notes[0].contains("nested-path coverage"),
+        "{:?}",
+        loaded.notes
+    );
+}

@@ -184,10 +184,10 @@ pub fn display_path(p: &Path) -> String {
 pub struct Loaded {
     pub kb: Knowledge,
     pub gaps: Vec<Gap>,
-    /// One sentence per operator `subcommands` spelling the merge silently
+    /// One sentence per operator recognition-scope spelling the merge silently
     /// discarded (`narrowing_noops`) — never a gap: nothing failed to load
-    /// and nothing goes unrecognised, the operator's file is simply not
-    /// doing what one particular line of it might look like it does.
+    /// and nothing goes unrecognised, the operator's file is simply not doing
+    /// what one particular line of it might look like it does.
     /// Exposed by `guards::notes()`; printed by `doctor` (Task 8), not by
     /// the per-command prompt path.
     pub notes: Vec<String>,
@@ -382,8 +382,9 @@ fn scope_of(languages: &[String]) -> HashSet<String> {
 /// so the version gate is what turns that silent reinterpretation into a
 /// loud refusal instead. Structured tool `write_path` declarations and the
 /// `apply_patch` path-envelope format take it to 9. Value-origin producer and
-/// receiver claims (`produces`, `receiver_from`) take it to 10.
-pub const KNOWLEDGE_SCHEMA_VERSION: u32 = 10;
+/// receiver claims (`produces`, `receiver_from`) take it to 10. Structured
+/// nested recognition paths (`subcommand_paths`) take it to 11.
+pub const KNOWLEDGE_SCHEMA_VERSION: u32 = 11;
 
 /// Semantic checks `deny_unknown_fields` cannot express: a `takes` value
 /// outside the closed set, a `run_dir_flags` entry that is not also in
@@ -439,7 +440,7 @@ pub(crate) fn validate(kb: &Knowledge) -> Result<(), String> {
             }
         }
         // `standalone_flags` recognises a run whose every argument is one of
-        // these — an inert-shape refusal (an empty `subcommands` pairing
+        // these — an inert-shape refusal (empty recognition scopes paired
         // with nothing that could ever fire), a per-member shape check
         // (`member_shape_ok`, shared with the prompt-side listability test
         // and vouch trust's pre-checks so the three sites cannot drift), the
@@ -449,10 +450,32 @@ pub(crate) fn validate(kb: &Knowledge) -> Result<(), String> {
         // post-merge stage). Runs whether or not the entry states its own
         // `value_options` — unlike the two subset checks above, which only
         // make sense once `value_options` is known.
+        if let Some(paths) = &prog.subcommand_paths {
+            for path in paths {
+                if path.is_empty() {
+                    return Err(format!(
+                        "[[program]] {:?}: subcommand_paths contains an empty path — every path must name at least one positional command word",
+                        prog.match_names
+                    ));
+                }
+                if path.iter().any(|word| word.is_empty()) {
+                    return Err(format!(
+                        "[[program]] {:?}: subcommand_paths contains an empty word in {:?}",
+                        prog.match_names, path
+                    ));
+                }
+            }
+        }
         let standalone_declared = !prog.standalone_flags.is_empty();
-        if prog.subcommands.as_ref().is_some_and(|s| s.is_empty()) && !standalone_declared {
+        let scope_is_stated = prog.subcommands.is_some() || prog.subcommand_paths.is_some();
+        let scope_has_member = prog.subcommands.as_ref().is_some_and(|s| !s.is_empty())
+            || prog
+                .subcommand_paths
+                .as_ref()
+                .is_some_and(|p| !p.is_empty());
+        if scope_is_stated && !scope_has_member && !standalone_declared {
             return Err(format!(
-                "[[program]] {:?}: subcommands = [] covers no verb, and without \
+                "[[program]] {:?}: empty subcommands/subcommand_paths cover no operation, and without \
                  standalone_flags the entry can never recognise anything — an \
                  installed-looking entry that covers nothing is refused, the same \
                  rule as a veto with no positive condition",
@@ -1636,26 +1659,35 @@ fn overlay(base: &mut Program, mine: &Program) {
     // copying `mine.languages` here would silently erase the shipped claim's
     // powershell coverage instead of splitting it off. See `overlay_all`.
 
-    // Recognition widens, never narrows — the full three-state merge matrix
+    // Recognition widens, never narrows — the scope merge matrix
     // (spec 2026-08-20 §3), pinned cell by cell in
     // tests/knowledge_merge_test.rs (Task 2): a base `None` (whole program)
     // is never narrowed by any `mine` value, list or explicit empty; a base
     // `Some` list left unset by `mine` (key-absent, `None`) is a no-op; two
     // `Some`s union, which makes an empty `mine` list a no-op union (the
     // wider, shipped side stands) and an empty `base` list widen to
-    // whatever `mine` states. `all_subcommands = true` in `mine` always
-    // clears to the whole-program state (`None`), overriding all of the
-    // above.
+    // whatever `mine` states. Nested path vectors obey the same union. Both
+    // scope keys absent is the whole-program state; `all_subcommands = true`
+    // clears both keys back to it.
     if mine.all_subcommands {
         base.subcommands = None;
+        base.subcommand_paths = None;
     } else {
-        match (&mut base.subcommands, &mine.subcommands) {
-            (None, _) => {}
-            (_, None) => {}
-            (Some(b), Some(m)) => {
-                for s in m {
-                    if !b.contains(s) {
-                        b.push(s.clone());
+        let base_is_scoped = base.subcommands.is_some() || base.subcommand_paths.is_some();
+        if base_is_scoped {
+            if let Some(mine_subcommands) = &mine.subcommands {
+                let base_subcommands = base.subcommands.get_or_insert_default();
+                for subcommand in mine_subcommands {
+                    if !base_subcommands.contains(subcommand) {
+                        base_subcommands.push(subcommand.clone());
+                    }
+                }
+            }
+            if let Some(mine_paths) = &mine.subcommand_paths {
+                let base_paths = base.subcommand_paths.get_or_insert_default();
+                for path in mine_paths {
+                    if !base_paths.contains(path) {
+                        base_paths.push(path.clone());
                     }
                 }
             }
@@ -2066,46 +2098,66 @@ pub fn validate_place_scopes(shipped: &Knowledge, mine: &Knowledge) -> Result<()
     Ok(())
 }
 
-/// One sentence per operator entry whose `subcommands` spelling the merge
-/// will silently discard — a list or an explicit `[]` laid over a shipped
-/// WHOLE-PROGRAM entry (`overlay`'s own comment: "a base `None` is never
-/// narrowed by any `mine` value, list or explicit empty"), or an explicit
-/// `[]` laid over a shipped VERB list (union with nothing is nothing). A
-/// list of real verbs laid over a shipped verb list is NOT here — that
+/// One sentence per operator entry whose `subcommands` or
+/// `subcommand_paths` spelling the merge will silently discard — a scoped
+/// value laid over shipped WHOLE-PROGRAM coverage, or an explicit empty list
+/// laid over a non-empty shipped list (union with nothing is nothing). A
+/// non-empty scope laid over shipped scoped coverage is NOT here — that
 /// unions, a real effect.
 ///
 /// Computed on `base`/`own` BEFORE `merge` runs, called from `load_files`
 /// the same way `validate_retraction` is: the merge already erases the
 /// distinction between "the operator wrote an explicit empty list" and "the
-/// operator wrote nothing at all" — both land on the same post-merge
-/// `subcommands` — so only the pre-merge shapes can still tell a discarded
-/// overlay apart from a real widen. Not a gap: nothing failed to load and
-/// nothing goes unrecognised, so these are returned on `Loaded.notes`
-/// rather than pushed onto `gaps`.
+/// operator wrote nothing at all" — so only the pre-merge scope shapes can
+/// still tell a discarded overlay apart from a real widen. Not a gap: nothing
+/// failed to load and nothing goes unrecognised, so these are returned on
+/// `Loaded.notes` rather than pushed onto `gaps`.
 fn narrowing_noops(base: &Knowledge, own: &Knowledge) -> Vec<String> {
     let mut notes = Vec::new();
     for m in &own.program {
-        let Some(m_sub) = &m.subcommands else {
+        if m.subcommands.is_none() && m.subcommand_paths.is_none() {
             continue;
-        };
+        }
         for n in &m.match_names {
             for b in base
                 .program
                 .iter()
                 .filter(|p| p.match_names.iter().any(|sn| Program::same_name(sn, n)))
             {
-                match &b.subcommands {
-                    None => notes.push(format!(
-                        "[[program]] {n:?}: your subcommands = {m_sub:?} is discarded by the \
-                         merge — the shipped whole-program coverage still stands \
-                         (subcommands never narrows below the whole program)"
-                    )),
-                    Some(b_sub) if m_sub.is_empty() && !b_sub.is_empty() => notes.push(format!(
+                let base_is_whole = b.subcommands.is_none() && b.subcommand_paths.is_none();
+                if base_is_whole {
+                    let mut stated = Vec::new();
+                    if let Some(value) = &m.subcommands {
+                        stated.push(format!("subcommands = {value:?}"));
+                    }
+                    if let Some(value) = &m.subcommand_paths {
+                        stated.push(format!("subcommand_paths = {value:?}"));
+                    }
+                    notes.push(format!(
+                        "[[program]] {n:?}: your {} is discarded by the merge — the shipped \
+                         whole-program coverage still stands (recognition scopes never narrow \
+                         below the whole program)",
+                        stated.join(" and ")
+                    ));
+                    continue;
+                }
+                if m.subcommands.as_ref().is_some_and(Vec::is_empty)
+                    && b.subcommands.as_ref().is_some_and(|v| !v.is_empty())
+                {
+                    notes.push(format!(
                         "[[program]] {n:?}: your subcommands = [] is discarded by the merge \
                          — the shipped verb coverage still stands (an empty list unions \
                          with nothing)"
-                    )),
-                    _ => {}
+                    ));
+                }
+                if m.subcommand_paths.as_ref().is_some_and(Vec::is_empty)
+                    && b.subcommand_paths.as_ref().is_some_and(|v| !v.is_empty())
+                {
+                    notes.push(format!(
+                        "[[program]] {n:?}: your subcommand_paths = [] is discarded by the \
+                         merge — the shipped nested-path coverage still stands (an empty list \
+                         unions with nothing)"
+                    ));
                 }
             }
         }

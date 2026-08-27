@@ -1,16 +1,16 @@
-//! Operator-side knowledge shapes, and why one shipped verb-scoped entry does
+//! Operator-side knowledge shapes, and why the small shipped scoped set does
 //! not make a corpus measurement representative of an operator's vocabulary
 //! (#8, ROADMAP M2.144).
 //!
 //! `.cargo/config.toml` pins every test and every `examples/` measurement to
 //! THIS repository's `knowledge.toml`. That is exactly right for
-//! reproducibility, but one deliberately scoped shipped CLI is not the varied
-//! operator vocabulary a measurement is trying to model. Candidate counts are
-//! still mandatory: one candidate and many are different findings.
+//! reproducibility, but the deliberately scoped shipped CLIs are not the
+//! varied operator vocabulary a measurement is trying to model. Candidate
+//! counts are still mandatory: one candidate and many are different findings.
 //!
-//! These tests pin both halves — that the shipped file really is blind, and
-//! that the committed fixture really does exercise what it claims — so a later
-//! measurement can be pointed at the fixture and believed.
+//! These tests pin both halves — the exact small scope set that ships and the
+//! broader combinations the committed fixture claims — so a later measurement
+//! can be pointed at the fixture and believed.
 
 mod common;
 
@@ -19,11 +19,11 @@ fn fixture() -> String {
         .expect("the operator fixture is committed")
 }
 
-/// The shipped set has one deliberate verb-scoped exception: vouch itself.
+/// The shipped set scopes vouch by first verb and Codex by exact nested path.
 /// `all_subcommands` remains operator-only, and the fixture remains the broad,
-/// invented vocabulary used to exercise both shapes.
+/// invented vocabulary used to exercise operator-side combinations.
 #[test]
-fn the_shipped_knowledge_scopes_only_vouch_and_never_uses_all_subcommands() {
+fn the_shipped_knowledge_scopes_only_the_two_deliberate_clis() {
     let kb = common::shipped_kb();
     let names_where = |pred: fn(&vouch::guards::Program) -> bool| -> Vec<&str> {
         kb.program
@@ -37,6 +37,13 @@ fn the_shipped_knowledge_scopes_only_vouch_and_never_uses_all_subcommands() {
     let scoped = names_where(|p| p.subcommands.is_some());
     assert_eq!(scoped, ["vouch"], "unexpected shipped verb scopes: {scoped:?}");
 
+    let nested = names_where(|p| p.subcommand_paths.is_some());
+    assert_eq!(
+        nested,
+        ["codex"],
+        "unexpected shipped nested scopes: {nested:?}"
+    );
+
     let widened = names_where(|p| p.all_subcommands);
     assert!(
         widened.is_empty(),
@@ -44,10 +51,10 @@ fn the_shipped_knowledge_scopes_only_vouch_and_never_uses_all_subcommands() {
     );
 }
 
-/// The fixture carries both recognition shapes and keyed rules, rather than
-/// treating vouch's one entry as representative operator evidence.
+/// The fixture carries the operator-only whole-program shape plus keyed rules,
+/// rather than treating the small shipped scoped set as representative.
 #[test]
-fn the_operator_fixture_exercises_the_keys_the_shipped_file_never_does() {
+fn the_operator_fixture_exercises_varied_operator_side_combinations() {
     let kb = common::kb_with(&fixture());
 
     assert!(
@@ -75,8 +82,8 @@ fn the_operator_fixture_exercises_the_keys_the_shipped_file_never_does() {
 }
 
 /// A verb-scoped entry recognises the verbs it names and nothing else — §2,
-/// "recognition is per COMMAND, not per program name". Unexercisable against
-/// the shipped file, which is the whole point.
+/// "recognition is per COMMAND, not per program name". The invented fixture
+/// keeps that proof independent of whichever real CLIs happen to ship.
 #[test]
 fn a_verb_scoped_entry_covers_only_the_verbs_it_names() {
     let kb = common::kb_with(&fixture());

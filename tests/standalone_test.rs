@@ -102,7 +102,7 @@ fn a_bare_run_gains_nothing() {
     // Asserting false across all three would pin the wrong thing.
     assert!(
         recognises(&kb(WHOLE_PROGRAM), &cmd("mytool", &[]), "bash", true),
-        "key-absent `subcommands` still covers the whole program, bare runs included"
+        "both recognition-scope keys absent still covers the whole program, bare runs included"
     );
     assert!(
         !recognises(&kb(VERB_SCOPED), &cmd("mytool", &[]), "bash", true),
