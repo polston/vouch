@@ -750,7 +750,7 @@ fn explain_cwd_changes_program_location_recognition_in_both_directions() {
     let run = |cwd: &std::path::Path| {
         Command::new(bin())
             .args(["explain", "--cwd"])
-            .arg(cwd)
+            .arg(portable_fixture_path(cwd))
             .arg("./bin/probe-alpha inspect")
             .env("VOUCH_CONFIG", &config)
             .env("VOUCH_STATE_DIR", &state)
