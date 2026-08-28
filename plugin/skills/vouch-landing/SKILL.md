@@ -41,8 +41,8 @@ those remain new operator decisions rather than reasons to bypass verification.
 ## Preconditions
 
 Final whole-branch review clean; full gate green
-(`VOUCH_REQUIRE_REAL_CORPUS=1 bash scripts/verify.sh --if-needed`); working
-tree clean. The conditional spelling is not a weaker gate: its reusable PASS
+(`VOUCH_REQUIRE_REAL_CORPUS=1 bash scripts/verify.sh`); working
+tree clean. The ordinary spelling is not a weaker gate: its reusable PASS
 is bound to the exact repository contents, real corpus, gate environment, and
 toolchain. A cleanup edit makes it run again.
 
@@ -51,6 +51,27 @@ and run `git diff --check` plus `git diff --cached --check`. The ordinary
 worktree check cannot see untracked files, so gating before this preflight can
 waste a valid receipt on whitespace that staging reveals afterward. Leave the
 candidate bytes unchanged from that preflight through the commit.
+
+### Required-gate recovery
+
+A required gate is complete only when it records a successful PASS over the
+final required inputs. If an already-authorized required gate fails, enter
+bounded diagnose, fix, and rerun recovery automatically. A failed attempt does
+not consume an "exactly once" condition, and an in-scope fix that changes gate
+inputs makes the next execution owed rather than redundant. Do not pause for
+new authorization when the approved finish line already requires that PASS.
+
+Do not mechanically rerun unchanged failing inputs. Diagnose first, then rerun
+only after a relevant fix, or when the failure is demonstrably transient and
+the workflow already authorizes that retry. Keep the plan's turn and stall
+bounds in force. Privacy findings, new permissions, scope expansion, and the
+authorization boundary above still stop recovery.
+
+Never repeat a matching successful PASS merely to recover output. Use the
+receipt and report-recovery commands below. When the finish condition names
+`--rerun-current-inputs`, rerun that spelling after a fix because the final
+inputs changed; ordinary receipt-aware verification remains the recovery path
+when no forced final observation was required.
 
 ## Observing long-running gates
 
@@ -73,7 +94,7 @@ Run from the vouch checkout root; every path below is relative to it.
 
 1. **Cleanup on the branch, BEFORE merge.** Run `/simplify` (code-simplifier)
    over the branch diff, then run
-   `VOUCH_REQUIRE_REAL_CORPUS=1 bash scripts/verify.sh --if-needed`. Scoped-review
+   `VOUCH_REQUIRE_REAL_CORPUS=1 bash scripts/verify.sh`. Scoped-review
    the cleanup diff (it touched reviewed code). A changed input forces the full
    gate; an unchanged tree reuses its exact PASS. Transfer every deferred
    finding into `docs/ROADMAP.md` — scratch under `.superpowers/` dies with the
@@ -109,17 +130,17 @@ Run from the vouch checkout root; every path below is relative to it.
    Recover already-measured gate numbers with `bash scripts/verify.sh --last`;
    use `--last-report` when the whole safe report is needed. Never rerun the
    full verifier merely because terminal output or session context was lost.
-   Rerun only when `--last` refuses freshness, the latest completed gate failed,
-   or an explicit post-change gate is owed. Live-state assertions are snapshots:
+   Rerun only when `--last` refuses freshness, the latest attempt failed and
+   recovery is owed, or an explicit post-change gate is owed. Live-state assertions are snapshots:
    refresh the relevant probe, not the release and publisher suites.
 
    When the latest attempt failed only in the isolated publisher phase, the
-   same `--if-needed` spelling reuses exact-input PASSes for the optimized core
+   same ordinary spelling reuses exact-input PASSes for the optimized core
    and the five independent short suites, refreshes the cheap live
    observations, and reruns the publisher. The top-level receipt correctly
-   remains failed until that retry completes. Do not replace the conditional
-   spelling with plain `verify.sh`: plain invocation deliberately reruns every
-   phase.
+   remains failed until that retry completes. Use `--rerun-current-inputs` only
+   when a new observation over already-proven current inputs is explicitly
+   required.
 
    **Before the first remote write, record the complete route from this
    branch to the finished release.** Do not summarize landing as merge, push,
@@ -228,9 +249,11 @@ Run from the vouch checkout root; every path below is relative to it.
       version fields carry it.
    2. Dry run: `bash scripts/publish-mirror.sh <public-clone>` with no flag —
       read the scan result, diffstat, and assembled public candidate's locked
-      release-test result. The publisher also repeats that candidate gate
-      before `--push`; this catches tests or runtime code that still reach a
-      private-only file after the manifest removes it.
+      release-test result. Before `--push`, the publisher repeats assembly,
+      privacy checks, and mutation-boundary scans; it reuses only an exact
+      matching candidate test PASS and otherwise runs the owed test. This
+      catches tests or runtime code that still reach a private-only file after
+      the manifest removes it without repeating an unchanged test.
    3. `--push` — pushes a `publish/*` branch and opens a pull request in the
       mirror. Nothing has reached its master yet.
    4. Review that pull request against the scanned candidate, but do not use a

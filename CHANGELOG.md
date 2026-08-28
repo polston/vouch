@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.11.0 (2026-08-28)
+
+
+### Features
+
+* Reuse an exact public candidate test on publisher push while repeating every privacy and mutation-boundary scan
+* Reuse exact full and phase verification evidence by default while retaining an explicit forced-rerun command
+
+
+### Bug Fixes
+
+* Continue already-authorized required gates through bounded repair and rerun recovery without repeating a matching successful pass
+
 ## 0.10.0 (2026-08-28)
 
 

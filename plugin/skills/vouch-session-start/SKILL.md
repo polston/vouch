@@ -98,15 +98,16 @@ done or not done.
 Before repeating a completed full gate, run
 `VOUCH_REQUIRE_REAL_CORPUS=1 bash scripts/verify.sh --last`. A fresh PASS is
 exact-input evidence and recovers the aggregate without tests; a refusal names
-the class of change that requires `--if-needed` to run the gate. If only live
+the class of change that requires ordinary `scripts/verify.sh` to run the owed
+gate. If only live
 config, journal, hook, or installation state changed, run that specific probe
 instead of repeating the code, release, and publisher suites.
 
 A refused complete receipt can still contain exact-input phase evidence from a
-late publisher failure. Use the same `--if-needed` spelling: it may reuse the
+late publisher failure. Use the ordinary spelling: it may reuse the
 optimized core and five independent short-suite PASSes, refreshes cheap live
-observations, and reruns the publisher. Plain `verify.sh` deliberately discards
-that speed opportunity and runs every phase.
+observations, and reruns the publisher. Use `--rerun-current-inputs` only when
+the task explicitly requires a new run over already-proven current inputs.
 
 ### 5. Report and proceed through the finish line
 
