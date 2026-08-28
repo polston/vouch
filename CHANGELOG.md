@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.13.0 (2026-08-28)
+
+
+### Features
+
+* a /vouch:status command surfaces the status check beside /vouch:setup and /vouch:update
+* a vouch-status skill reports installed binary, knowledge, and plugin versions against the newest release, read-only
+
 ## 0.12.0 (2026-08-28)
 
 

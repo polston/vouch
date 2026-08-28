@@ -1,7 +1,7 @@
 {
   "name": "vouch",
-  "version": "0.12.0",
-  "description": "Skills for installing and operating the vouch allow-list permission gate with Codex and Claude Code.",
+  "version": "0.13.0",
+  "description": "Skills for installing and operating the vouch allow-list permission gate with Codex and Claude Code; vouch-setup provisions from evidence, vouch-status reports installed versus released versions, and vouch-update moves the gate on an explicit accept.",
   "author": {
     "name": "vouch"
   },
@@ -24,6 +24,7 @@
     ],
     "defaultPrompt": [
       "Set up vouch for this coding agent.",
+      "Check my installed vouch versions against the newest release.",
       "Explain why vouch blocked this tool call.",
       "Review my vouch configuration from evidence."
     ]

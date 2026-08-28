@@ -11,6 +11,9 @@ skill is the other half — the gate itself, updated over the same verified
 release route `vouch-setup` uses to provision a fresh machine, on an explicit
 operator accept.
 
+Checking without moving anything is `vouch-status` — the survey and
+comparison below, alone, with no proposal at the end.
+
 One delivery route per machine. A machine that develops vouch updates from its
 clone (`cargo build --release && scripts/install-binaries.sh &&
 scripts/install-knowledge.sh`) — if a clone built this install, say so and
