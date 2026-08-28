@@ -46,11 +46,19 @@ tree clean. The conditional spelling is not a weaker gate: its reusable PASS
 is bound to the exact repository contents, real corpus, gate environment, and
 toolchain. A cleanup edit makes it run again.
 
+Before starting the final gate, include every intended new file in the index
+and run `git diff --check` plus `git diff --cached --check`. The ordinary
+worktree check cannot see untracked files, so gating before this preflight can
+waste a valid receipt on whitespace that staging reveals afterward. Leave the
+candidate bytes unchanged from that preflight through the commit.
+
 ## Observing long-running gates
 
 Keep one attached watcher on a long-running verifier or publisher. Let that
-watcher wait in 30-to-60-second blocks and surface new output or process exit;
-do not repeatedly poll the process from the agent turn.
+watcher wait for output or process exit and notify the active turn; yield to
+that completion event instead of repeatedly polling the process from the agent
+turn. If the client only supports bounded waits, keep them inside that one
+watcher rather than issuing a new process query each time.
 
 Once an exact-input gate starts, freeze the entire worktree until it exits.
 That includes tracked edits, untracked public-manifest files, formatting, and
@@ -104,6 +112,14 @@ Run from the vouch checkout root; every path below is relative to it.
    Rerun only when `--last` refuses freshness, the latest completed gate failed,
    or an explicit post-change gate is owed. Live-state assertions are snapshots:
    refresh the relevant probe, not the release and publisher suites.
+
+   When the latest attempt failed only in the isolated publisher phase, the
+   same `--if-needed` spelling reuses exact-input PASSes for the optimized core
+   and the five independent short suites, refreshes the cheap live
+   observations, and reruns the publisher. The top-level receipt correctly
+   remains failed until that retry completes. Do not replace the conditional
+   spelling with plain `verify.sh`: plain invocation deliberately reruns every
+   phase.
 
    **Before the first remote write, record the complete route from this
    branch to the finished release.** Do not summarize landing as merge, push,

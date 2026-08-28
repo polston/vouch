@@ -102,6 +102,12 @@ the class of change that requires `--if-needed` to run the gate. If only live
 config, journal, hook, or installation state changed, run that specific probe
 instead of repeating the code, release, and publisher suites.
 
+A refused complete receipt can still contain exact-input phase evidence from a
+late publisher failure. Use the same `--if-needed` spelling: it may reuse the
+optimized core and five independent short-suite PASSes, refreshes cheap live
+observations, and reruns the publisher. Plain `verify.sh` deliberately discards
+that speed opportunity and runs every phase.
+
 ### 5. Report and proceed through the finish line
 
 A few lines: what is live, the next OPEN roadmap item in plain words, and any

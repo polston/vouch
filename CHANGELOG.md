@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.0 (2026-08-28)
+
+
+### Features
+
+* Resume exact completed verification phases after a later isolated phase fails
+* Run independent short verification suites concurrently while keeping publisher verification isolated
+
 ## 0.8.1 (2026-08-27)
 
 
