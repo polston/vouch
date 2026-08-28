@@ -136,7 +136,7 @@ Run from the vouch checkout root; every path below is relative to it.
 
    When the latest attempt failed only in the isolated publisher phase, the
    same ordinary spelling reuses exact-input PASSes for the optimized core
-   and the five independent short suites, refreshes the cheap live
+   and the six independent short suites, refreshes the cheap live
    observations, and reruns the publisher. The top-level receipt correctly
    remains failed until that retry completes. Use `--rerun-current-inputs` only
    when a new observation over already-proven current inputs is explicitly

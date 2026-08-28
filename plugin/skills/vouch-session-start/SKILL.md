@@ -105,7 +105,7 @@ instead of repeating the code, release, and publisher suites.
 
 A refused complete receipt can still contain exact-input phase evidence from a
 late publisher failure. Use the ordinary spelling: it may reuse the
-optimized core and five independent short-suite PASSes, refreshes cheap live
+optimized core and six independent short-suite PASSes, refreshes cheap live
 observations, and reruns the publisher. Use `--rerun-current-inputs` only when
 the task explicitly requires a new run over already-proven current inputs.
 
