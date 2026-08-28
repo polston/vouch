@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.12.0 (2026-08-28)
+
+
+### Features
+
+* a /vouch:update command surfaces the update procedure beside /vouch:setup
+* a vouch-update skill updates an installed gate from the newest verified release bundle on an explicit accept
+
 ## 0.11.0 (2026-08-28)
 
 

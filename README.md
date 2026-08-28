@@ -161,7 +161,8 @@ own recorded session history against a candidate config so you can see what
 would actually fire before accepting anything, and writes nothing without an
 explicit accept per change.
 
-The plugin carries the skills and the `/vouch:setup` command. It deliberately
+The plugin carries the skills and the `/vouch:setup` and `/vouch:update`
+commands. It deliberately
 does not carry the hooks: the live gate must not move when a plugin cache
 refreshes, and hook registration is a human save whatever ships.
 
@@ -175,6 +176,13 @@ claude plugin update vouch
 
 then restart Claude Code.
 
+That updates the procedures only. The gate — both binaries and
+`knowledge.toml` — updates through `/vouch:update`: it compares the installed
+version against the newest release, downloads the platform bundle, verifies it
+against `SHA256SUMS` before unpacking, installs binaries and knowledge
+together, and re-probes, all on an explicit accept. Run both when a release
+lands, so the skills and the binary they describe move in step.
+
 ### Codex plugin
 
 The same repository is a Codex marketplace:
@@ -184,7 +192,8 @@ codex plugin marketplace add <owner>/vouch
 codex plugin add vouch@vouch
 ```
 
-Start a new Codex thread and run `$vouch:vouch-setup`. The plugin carries the
+Start a new Codex thread and run `$vouch:vouch-setup`; updating an installed
+gate later is `$vouch:vouch-update`. The plugin carries the
 same procedures as Claude Code; it deliberately carries neither live hooks nor
 an executable, so plugin refreshes cannot silently replace the gate.
 

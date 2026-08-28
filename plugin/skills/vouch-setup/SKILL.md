@@ -175,6 +175,8 @@ re-importing over it.
 The binary and its knowledge move together, from the same release, in one
 step. They are version-gated against each other: between a new binary and an
 old knowledge file the gate refuses everything, so never update one alone.
+Moving an EXISTING install to a newer release is `vouch-update`'s procedure,
+not this phase — this phase provisions.
 
 **Fresh machine, release route.**
 
