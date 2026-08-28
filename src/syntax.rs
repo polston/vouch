@@ -70,6 +70,16 @@ pub struct CallArguments {
     pub keyword_unpack: bool,
 }
 
+/// One indexable value a language scanner can identify structurally without
+/// deciding where its runtime values come from. Knowledge at a wrapper
+/// boundary may connect the dotted `name` and static `index` to an enclosing
+/// program argument.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexedValueRef {
+    pub name: String,
+    pub index: usize,
+}
+
 /// One command's position within a bash/powershell and-or chain (`&&`/`||`).
 ///
 /// `id` distinguishes one and-or chain from another — unique within a
@@ -275,6 +285,10 @@ pub struct Scan {
     /// because a short array means the parallelism broke and the fail-closed
     /// reading is that the tokens cannot be trusted.
     pub args_complete: Vec<bool>,
+    /// Indexed value references carried by each command argument. Parallel to
+    /// `commands`; each map keys a command's argument index. Empty means the
+    /// scanner reported no connectable structure for that command.
+    pub indexed_values: Vec<std::collections::HashMap<usize, IndexedValueRef>>,
     /// The next `HeredocId` `alloc_heredoc_id` hands out. Private: nothing
     /// outside this `impl` block has a reason to read the counter itself,
     /// only to ask for a fresh id or to merge one scan's range into
@@ -326,6 +340,7 @@ impl Scan {
         self.order.push(order);
         self.input_source.push(input_source);
         self.args_complete.push(args_complete);
+        self.indexed_values.push(Default::default());
     }
 
     /// Merge a nested scan (a script block, a subshell) into this one.
@@ -407,6 +422,10 @@ impl Scan {
                 keep => keep,
             }));
         self.args_complete.extend(other.args_complete);
+        let mut indexed_values = other.indexed_values.into_iter();
+        self.indexed_values.extend(
+            (0..n_cmds).map(|_| indexed_values.next().unwrap_or_default()),
+        );
     }
 }
 

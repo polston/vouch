@@ -184,19 +184,50 @@ fn binding_names(e: &ast::Expr, names: &mut std::collections::HashSet<String>) {
 struct ArgumentValue {
     text: String,
     readable: bool,
+    indexed: Option<crate::syntax::IndexedValueRef>,
 }
 
 impl ArgumentValue {
     fn readable(text: impl Into<String>) -> Self {
-        Self { text: text.into(), readable: true }
+        Self { text: text.into(), readable: true, indexed: None }
     }
 
     fn unread(text: impl Into<String>) -> Self {
-        Self { text: text.into(), readable: false }
+        Self { text: text.into(), readable: false, indexed: None }
+    }
+
+    fn indexed(name: String, index: usize) -> Self {
+        Self {
+            text: MARKER.to_string(),
+            readable: false,
+            indexed: Some(crate::syntax::IndexedValueRef { name, index }),
+        }
     }
 }
 
-fn argument_value(e: &ast::Expr, assigned: &HashMap<String, String>) -> ArgumentValue {
+fn static_nonnegative_index(e: &ast::Expr) -> Option<usize> {
+    match e {
+        ast::Expr::NumberLiteral(number) => match &number.value {
+            ast::Number::Int(value) => value.to_string().parse().ok(),
+            _ => None,
+        },
+        ast::Expr::UnaryOp(unary) if matches!(unary.op, ast::UnaryOp::UAdd) => {
+            let ast::Expr::NumberLiteral(number) = unary.operand.as_ref() else {
+                return None;
+            };
+            let ast::Number::Int(value) = &number.value else {
+                return None;
+            };
+            value.to_string().parse().ok()
+        }
+        _ => None,
+    }
+}
+
+fn argument_value(
+    e: &ast::Expr,
+    assigned: &HashMap<String, ArgumentValue>,
+) -> ArgumentValue {
     match e {
         ast::Expr::StringLiteral(s) => ArgumentValue::readable(s.value.to_str()),
         ast::Expr::NumberLiteral(n) => match &n.value {
@@ -211,8 +242,13 @@ fn argument_value(e: &ast::Expr, assigned: &HashMap<String, String>) -> Argument
         ast::Expr::Name(n) => assigned
             .get(n.id.as_str())
             .cloned()
-            .map(ArgumentValue::readable)
             .unwrap_or_else(|| ArgumentValue::unread(format!("${}", n.id))),
+        ast::Expr::Subscript(subscript) => {
+            match (dotted(&subscript.value), static_nonnegative_index(&subscript.slice)) {
+                (Some(name), Some(index)) => ArgumentValue::indexed(name, index),
+                _ => ArgumentValue::unread(MARKER),
+            }
+        }
         // f"{d}/x.json" — literal segments keep their text, the
         // interpolated ones become markers. An adjacent plain literal —
         // "dir/" f"{d}.txt" is ONE value made of two PARTS — has to be
@@ -240,22 +276,21 @@ fn argument_value(e: &ast::Expr, assigned: &HashMap<String, String>) -> Argument
                     }
                 }
             }
-            ArgumentValue { text: out, readable }
+            ArgumentValue { text: out, readable, indexed: None }
         }
         // `d + "/x.json"`. Only concatenation; any other operator is
         // arithmetic on something that is not a path.
         ast::Expr::BinOp(b) if matches!(b.op, ast::Operator::Add) => {
             let l = argument_value(&b.left, assigned);
             let r = argument_value(&b.right, assigned);
-            ArgumentValue { text: format!("{}{}", l.text, r.text), readable: l.readable && r.readable }
+            ArgumentValue {
+                text: format!("{}{}", l.text, r.text),
+                readable: l.readable && r.readable,
+                indexed: None,
+            }
         }
         _ => ArgumentValue::unread(MARKER),
     }
-}
-
-fn literal(e: &ast::Expr, assigned: &HashMap<String, String>) -> Option<String> {
-    let value = argument_value(e, assigned);
-    value.readable.then_some(value.text)
 }
 
 type CallKey = (u32, u32);
@@ -1194,7 +1229,7 @@ struct Walk {
     /// Names bound to a literal string in this same snippet, and import
     /// aliases. Both answer the same question — what does this name refer
     /// to — so they share one map.
-    assigned: HashMap<String, String>,
+    assigned: HashMap<String, ArgumentValue>,
     /// `from shutil import rmtree` makes the bare name `rmtree` mean
     /// `shutil.rmtree`. Without this, an entry written against the dotted
     /// name silently fails to match the imported spelling, which is the
@@ -1329,9 +1364,13 @@ impl Walk {
         let mut args: Vec<String> = Vec::new();
         let mut unread_args = std::collections::HashSet::new();
         let mut keyword_args = std::collections::HashSet::new();
+        let mut indexed_values = std::collections::HashMap::new();
         if let Some(r) = receiver {
             if !r.readable {
                 unread_args.insert(args.len());
+            }
+            if let Some(reference) = r.indexed {
+                indexed_values.insert(args.len(), reference);
             }
             args.push(r.text);
         }
@@ -1343,6 +1382,9 @@ impl Walk {
             if !value.readable {
                 unread_args.insert(args.len());
             }
+            if let Some(reference) = value.indexed {
+                indexed_values.insert(args.len(), reference);
+            }
             args.push(value.text);
         }
         // Keyword arguments carry their name, since position says nothing
@@ -1353,6 +1395,9 @@ impl Walk {
                     let value = argument_value(&k.value, &self.assigned);
                     if !value.readable {
                         unread_args.insert(args.len());
+                    }
+                    if let Some(reference) = value.indexed {
+                        indexed_values.insert(args.len(), reference);
                     }
                     keyword_args.insert(args.len());
                     args.push(format!("{name}={}", value.text));
@@ -1399,6 +1444,9 @@ impl Walk {
             cmd.receiver_origin =
                 self.receiver_origins.get(&call_key(node)).cloned().unwrap_or(crate::syntax::ValueOrigin::Unknown);
         }
+        if let Some(references) = self.out.indexed_values.last_mut() {
+            *references = indexed_values;
+        }
     }
 }
 
@@ -1410,12 +1458,13 @@ impl<'a> Visitor<'a> for Walk {
             // plain sight one line earlier, and not reading it makes a
             // knowable path unknowable.
             ast::Stmt::Assign(assign) => {
-                if let Some(v) = literal(&assign.value, &self.assigned) {
-                    if !v.contains('$') {
-                        for t in &assign.targets {
-                            if let ast::Expr::Name(n) = t {
-                                self.assigned.insert(n.id.to_string(), v.clone());
-                            }
+                let value = argument_value(&assign.value, &self.assigned);
+                for t in &assign.targets {
+                    if let ast::Expr::Name(n) = t {
+                        if (value.readable && !value.text.contains('$')) || value.indexed.is_some() {
+                            self.assigned.insert(n.id.to_string(), value.clone());
+                        } else {
+                            self.assigned.remove(n.id.as_str());
                         }
                     }
                 }
@@ -1771,5 +1820,63 @@ mod tests {
         let scan = parse("from a.b import c as d\nd('x')").expect("parses");
         assert!(scan.commands.iter().any(|c| c.head == "python:a.b.c"));
         assert!(!scan.constructs.iter().any(|n| n == "rebound_name"));
+    }
+
+    #[test]
+    fn a_static_dotted_subscript_is_recorded_structurally() {
+        let scan = parse("open(sys.argv[1], 'w')").expect("parses");
+        let reference = scan.indexed_values[0].get(&0).expect("the first call argument has a reference");
+        assert_eq!(reference.name, "sys.argv");
+        assert_eq!(reference.index, 1);
+        assert!(scan.commands[0].unread_args.contains(&0));
+
+        let unrelated = parse("open(other.values[2], 'w')").expect("parses");
+        let reference = unrelated.indexed_values[0]
+            .get(&0)
+            .expect("the scanner records structure without deciding which name matters");
+        assert_eq!(reference.name, "other.values");
+        assert_eq!(reference.index, 2);
+    }
+
+    #[test]
+    fn plain_name_assignments_preserve_an_indexed_reference() {
+        let scan = parse("p = sys.argv[2]\nq = p\nopen(q, 'w')").expect("parses");
+        let reference = scan.indexed_values[0].get(&0).expect("the assigned reference reached the call");
+        assert_eq!(reference.name, "sys.argv");
+        assert_eq!(reference.index, 2);
+        assert_eq!(scan.commands[0].args[0], MARKER);
+        assert!(scan.commands[0].unread_args.contains(&0));
+    }
+
+    #[test]
+    fn a_dynamic_reassignment_discards_an_indexed_reference() {
+        let scan = parse("p = sys.argv[1]\np = compute()\nopen(p, 'w')").expect("parses");
+        let open = scan
+            .commands
+            .iter()
+            .position(|command| command.head == "python:open")
+            .expect("open call was scanned");
+        assert!(scan.indexed_values[open].is_empty());
+        assert!(scan.commands[open].unread_args.contains(&0));
+    }
+
+    #[test]
+    fn unsupported_index_or_value_shapes_carry_no_reference() {
+        for source in [
+            "open(sys.argv[i], 'w')",
+            "open(sys.argv[-1], 'w')",
+            "open(sys.argv[1:], 'w')",
+            "open(sys.argv[18446744073709551616], 'w')",
+            "open(sys.argv[1] + '/child', 'w')",
+            "open(f'{sys.argv[1]}/child', 'w')",
+        ] {
+            let scan = parse(source).expect(source);
+            assert!(
+                scan.indexed_values[0].is_empty(),
+                "unsupported shape acquired a reference: {source}: {:?}",
+                scan.indexed_values[0]
+            );
+            assert!(scan.commands[0].unread_args.contains(&0), "{source}: argument became readable");
+        }
     }
 }

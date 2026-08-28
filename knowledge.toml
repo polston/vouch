@@ -76,7 +76,7 @@
 # origin claims.
 # 11 (2026-08-27): `[[program]]` gained structured `subcommand_paths` for
 # exact nested operation recognition.
-version = 11
+version = 12
 
 # ============================================================================
 # FROM YOUR EXISTING POLICY — these are rules your current tool already applies
@@ -764,6 +764,9 @@ match = ["python", "python3", "py"]
 wraps = "after_flag"
 wrap_flags = ["-c"]
 wrap_lang = "python"
+snippet_args = [
+  { name = "sys.argv", source_at = 0, trailing_from = 1 },
+]
 case_sensitive_flags = true
 # `python --help` on this machine (3.12). Unlike the POSIX shells above,
 # python's `-c` genuinely CONSUMES its value (`-c cmd`, "terminates option

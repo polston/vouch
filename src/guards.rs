@@ -111,6 +111,20 @@ pub struct Rule {
     pub always: bool,
 }
 
+/// One indexed argument vector a parsed snippet receives from its enclosing
+/// program invocation.
+#[derive(Debug, Deserialize, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SnippetArgs {
+    /// Dotted expression the language scanner reports structurally.
+    pub name: String,
+    /// Index occupied by the syntax that selected the snippet, when exposed.
+    #[serde(default)]
+    pub source_at: Option<usize>,
+    /// Index occupied by the first outer argument after the snippet source.
+    pub trailing_from: usize,
+}
+
 /// One `[[program]]` entry: what a program IS and DOES. `knowledge.toml`
 /// ships these for programs vouch describes out of the box;
 /// `my-knowledge.toml` adds the operator's own, laid over the shipped set by
@@ -188,6 +202,14 @@ pub struct Program {
     /// `"start_process"`).
     #[serde(default)]
     pub wrap_lang: String,
+    /// Indexed argument vectors a parsed snippet receives from this program's
+    /// own invocation. The scanner reports only structure; this knowledge
+    /// claim connects that structure to the enclosing program's arguments.
+    ///
+    /// `None` means this entry is silent. `Some([])` explicitly retracts an
+    /// overlaid claim; a non-empty list replaces it whole.
+    #[serde(default)]
+    pub snippet_args: Option<Vec<SnippetArgs>>,
     /// How this program spells flags. cmd.exe uses `/s`, not `-s`; without this
     /// its flags read as paths and its paths read as flags, so both the guard
     /// rules and the written-path list come out wrong.
@@ -2051,8 +2073,14 @@ fn runs_file_in(prog: &Program, args: &[String]) -> bool {
             crate::flags::Class::NotFlag => {
                 // A lone `-` is the standard-input spelling in every shell
                 // this key describes, never a filename — `evaluates_input`
-                // owns that shape and already answers for it.
+                // owns that shape and already answers for it. When this same
+                // entry declares a snippet argument layout, everything after
+                // the explicit source belongs to that trailing vector rather
+                // than becoming the script-file operand.
                 if raw == "-" {
+                    if prog.snippet_args.as_ref().is_some_and(|declarations| !declarations.is_empty()) {
+                        return false;
+                    }
                     continue;
                 }
                 if want == Some(operand) {
@@ -2226,6 +2254,7 @@ pub fn carries_expansion(text: &str) -> bool {
 fn holds_input(
     cmd: &Cmd,
     args_complete: bool,
+    args_from_input: bool,
     lang: &str,
     attached: &[&crate::syntax::Heredoc],
     consumption: &[Option<(&Program, &str)>],
@@ -2247,7 +2276,11 @@ fn holds_input(
     if !args_complete {
         return false;
     }
-    if !cmd.args.is_empty() && !(cmd.args.len() == 1 && cmd.args[0] == "-") {
+    let declared_trailing = entry.snippet_args.as_ref().is_some_and(|declarations| !declarations.is_empty());
+    let explicit_source = cmd.args.first().is_some_and(|arg| arg == "-");
+    let accepted_source = cmd.args.is_empty()
+        || (explicit_source && (cmd.args.len() == 1 || (declared_trailing && !args_from_input)));
+    if !accepted_source {
         return false;
     }
     // Rule 2: the delivered body must reach the consumer VERBATIM. A quoted
@@ -2896,11 +2929,25 @@ enum Payload {
     /// No declared wrap flag appears in these arguments at all — this
     /// invocation genuinely wraps nothing.
     Absent,
-    /// The payload, already unquoted the way the interpreter receives it.
-    Found(String),
+    /// The payload, the declared spelling that selected it, and every raw
+    /// outer token after it. Keeping these together makes this locator the
+    /// sole authority for both snippet extraction and snippet-argument joins.
+    Found(LocatedSnippet),
     /// The entry declares a payload and the walk could not locate it. The
     /// string is the detail line the prompt carries.
     Unlocated(String),
+}
+
+/// One after-flag snippet and the enclosing argument context it exposes.
+struct LocatedSnippet {
+    /// Snippet text, already unquoted the way the interpreter receives it.
+    source: String,
+    /// The declared flag spelling, such as `-c`, which the interpreter exposes
+    /// as the snippet source when a `snippet_args` claim maps it.
+    source_spelling: String,
+    /// Raw outer arguments after the snippet token. Resolution stays in the
+    /// engine, so quotes and variable spellings are deliberately preserved.
+    trailing: Vec<String>,
 }
 
 /// The abbreviation policy for a wrapper entry's own flag vocabulary
@@ -3055,7 +3102,7 @@ fn declares(list: &[String], flag: &str, case_sensitive: bool) -> bool {
 /// hole this closes.
 pub fn after_flag_snippet(prog: &Program, args: &[String]) -> Option<String> {
     match locate_after_flag(prog, args) {
-        Payload::Found(s) => Some(s),
+        Payload::Found(found) => Some(found.source),
         Payload::Absent | Payload::Unlocated(_) => None,
     }
 }
@@ -3086,7 +3133,13 @@ fn locate_after_flag(prog: &Program, args: &[String]) -> Payload {
         }
         for f in &prog.wrap_flags {
             match crate::flags::spells(f, raw, &vocab) {
-                crate::flags::Spell::Yes(Some(v)) => return Payload::Found(crate::paths::unquote_snippet(&v)),
+                crate::flags::Spell::Yes(Some(v)) => {
+                    return Payload::Found(LocatedSnippet {
+                        source: crate::paths::unquote_snippet(&v),
+                        source_spelling: f.clone(),
+                        trailing: args[i + 1..].to_vec(),
+                    });
+                }
                 crate::flags::Spell::Yes(None) => return payload_after(prog, args, i, f),
                 crate::flags::Spell::RefusedAbbrev { declared } => {
                     return Payload::Unlocated(format!(
@@ -3098,7 +3151,13 @@ fn locate_after_flag(prog: &Program, args: &[String]) -> Payload {
                 crate::flags::Spell::No => {}
             }
             match cluster_value(prog, f, raw) {
-                Some(Some(v)) => return Payload::Found(crate::paths::unquote_snippet(&v)),
+                Some(Some(v)) => {
+                    return Payload::Found(LocatedSnippet {
+                        source: crate::paths::unquote_snippet(&v),
+                        source_spelling: f.clone(),
+                        trailing: args[i + 1..].to_vec(),
+                    });
+                }
                 Some(None) => return payload_after(prog, args, i, f),
                 None => {}
             }
@@ -3126,9 +3185,17 @@ fn payload_after(prog: &Program, args: &[String], i: usize, flag: &str) -> Paylo
     }
     if prog.wrap_join == Some(true) {
         let joined: Vec<String> = rest.iter().map(|t| crate::paths::unquote_snippet(t)).collect();
-        return Payload::Found(joined.join(" "));
+        return Payload::Found(LocatedSnippet {
+            source: joined.join(" "),
+            source_spelling: flag.to_string(),
+            trailing: Vec::new(),
+        });
     }
-    Payload::Found(crate::paths::unquote_snippet(&rest[0]))
+    Payload::Found(LocatedSnippet {
+        source: crate::paths::unquote_snippet(&rest[0]),
+        source_spelling: flag.to_string(),
+        trailing: rest[1..].to_vec(),
+    })
 }
 
 /// What the `start_process` list locator found — the same three answers
@@ -3524,6 +3591,7 @@ fn scan_snippet(lang: &str, src: &str, srcs: &mut Vec<(String, String)>) -> Resu
             heredocs: s.heredocs,
             input_source: s.input_source,
             args_complete: s.args_complete,
+            indexed_values: s.indexed_values,
             order: s.order,
             parsed: true,
         })
@@ -3545,8 +3613,61 @@ struct SnippetScan {
     heredocs: Vec<crate::syntax::Heredoc>,
     input_source: Vec<crate::syntax::InputSource>,
     args_complete: Vec<bool>,
+    indexed_values: Vec<std::collections::HashMap<usize, crate::syntax::IndexedValueRef>>,
     order: Vec<crate::syntax::Order>,
     parsed: bool,
+}
+
+/// Connect scanner-reported indexed references to raw enclosing arguments
+/// only when the program's knowledge entry declares that exact relationship.
+/// The scanner remains context-free and the engine remains the sole resolver
+/// of quotes, same-line assignments, and environment values.
+fn join_snippet_args(
+    prog: &Program,
+    scan: &mut SnippetScan,
+    source_spelling: Option<&str>,
+    trailing: &[String],
+    args_complete: bool,
+    args_from_input: bool,
+) {
+    if !args_complete || args_from_input {
+        return;
+    }
+    let Some(declarations) = prog.snippet_args.as_deref() else {
+        return;
+    };
+    for (cmd_index, references) in scan.indexed_values.iter().enumerate() {
+        let Some(cmd) = scan.cmds.get_mut(cmd_index) else {
+            continue;
+        };
+        for (&arg_index, reference) in references {
+            let Some(declaration) = declarations.iter().find(|declared| declared.name == reference.name) else {
+                continue;
+            };
+            let value = if declaration.source_at == Some(reference.index) {
+                source_spelling
+            } else if reference.index >= declaration.trailing_from {
+                trailing.get(reference.index - declaration.trailing_from).map(String::as_str)
+            } else {
+                None
+            };
+            let Some(value) = value else {
+                continue;
+            };
+            let Some(argument) = cmd.args.get_mut(arg_index) else {
+                continue;
+            };
+            if cmd.keyword_args.contains(&arg_index) {
+                let Some((name, _)) = argument.split_once('=') else {
+                    continue;
+                };
+                *argument = format!("{name}={value}");
+            } else {
+                *argument = value.to_string();
+            }
+            cmd.unread_args.remove(&arg_index);
+        }
+    }
 }
 
 /// Runs `scan_snippet` for one wrap site and reads back what it decided:
@@ -3977,14 +4098,22 @@ pub fn expand_wrappers_forking(
                     // The snippet is in a DIFFERENT language, so it must be
                     // scanned by that language's scanner or it is invisible.
                     "after_flag" => match locate_after_flag(prog, &cmd.args) {
-                        Payload::Found(inner_src) => {
-                            let (scan, lang) = scan_wrap_snippet(
+                        Payload::Found(found) => {
+                            let (mut scan, lang) = scan_wrap_snippet(
                                 &cmd.head,
                                 &prog.wrap_lang,
-                                &inner_src,
+                                &found.source,
                                 &mut out.srcs,
                                 &mut out.failures,
                                 &mut out.constructs,
+                            );
+                            join_snippet_args(
+                                prog,
+                                &mut scan,
+                                Some(&found.source_spelling),
+                                &found.trailing,
+                                own_args_complete,
+                                from_input,
                             );
                             next_lang = lang;
                             scan
@@ -4167,12 +4296,23 @@ pub fn expand_wrappers_forking(
                 attached.iter().map(|h| heredoc_feeds(kb, cmd, h)).collect();
             for (nth, heredoc) in attached.iter().enumerate() {
                 if let Some((entry, entry_lang)) = consumption[nth] {
+                    let held = own_source == crate::syntax::InputSource::Heredoc(heredoc.id)
+                        && holds_input(
+                            cmd,
+                            own_args_complete,
+                            from_input,
+                            lang,
+                            &attached,
+                            &consumption,
+                            nth,
+                            entry,
+                        );
                     // Shares `scan_wrap_snippet` with the wrap arms above: an
                     // empty or unregistered `entry_lang` raises
                     // `unreadable_language` there, same as they do, so the
                     // language actually scanned is read back here too rather
                     // than re-derived.
-                    let (scan, consumed_lang) = scan_wrap_snippet(
+                    let (mut scan, consumed_lang) = scan_wrap_snippet(
                         &cmd.head,
                         &entry_lang,
                         &heredoc.body,
@@ -4198,10 +4338,21 @@ pub fn expand_wrappers_forking(
                     // schemes only ever coincided by accident (no preceding
                     // sibling); an id never has to coincide, because it is not
                     // a position in either list (M2.127).
-                    if own_source == crate::syntax::InputSource::Heredoc(heredoc.id)
-                        && holds_input(cmd, own_args_complete, lang, &attached, &consumption, nth, entry)
-                    {
+                    if held {
                         out.holds[self_idx] = true;
+                        let (source_spelling, trailing) = if cmd.args.first().is_some_and(|arg| arg == "-") {
+                            (Some("-"), &cmd.args[1..])
+                        } else {
+                            (None, &[][..])
+                        };
+                        join_snippet_args(
+                            entry,
+                            &mut scan,
+                            source_spelling,
+                            trailing,
+                            own_args_complete,
+                            from_input,
+                        );
                     }
                     if !scan.cmds.is_empty() {
                         let child_scope = out.scope_parents.len() + 1;

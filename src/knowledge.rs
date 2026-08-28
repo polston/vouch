@@ -384,7 +384,7 @@ fn scope_of(languages: &[String]) -> HashSet<String> {
 /// `apply_patch` path-envelope format take it to 9. Value-origin producer and
 /// receiver claims (`produces`, `receiver_from`) take it to 10. Structured
 /// nested recognition paths (`subcommand_paths`) take it to 11.
-pub const KNOWLEDGE_SCHEMA_VERSION: u32 = 11;
+pub const KNOWLEDGE_SCHEMA_VERSION: u32 = 12;
 
 /// Semantic checks `deny_unknown_fields` cannot express: a `takes` value
 /// outside the closed set, a `run_dir_flags` entry that is not also in
@@ -717,6 +717,43 @@ pub(crate) fn validate(kb: &Knowledge) -> Result<(), String> {
             }
         }
         validate_wrap_lang_for(prog)?;
+        if let Some(declarations) = &prog.snippet_args {
+            if !declarations.is_empty() && crate::syntax::scanner_for(&prog.wrap_lang).is_none() {
+                return Err(format!(
+                    "[[program]] {:?}: snippet_args requires a scanner-backed wrap_lang, got {:?}",
+                    prog.match_names, prog.wrap_lang
+                ));
+            }
+            let mut names = HashSet::new();
+            for declaration in declarations {
+                if declaration.name.is_empty()
+                    || !declaration.name.split('.').all(is_parameter_name)
+                {
+                    return Err(format!(
+                        "[[program]] {:?}: snippet_args name {:?} is not a dotted identifier",
+                        prog.match_names, declaration.name
+                    ));
+                }
+                if !names.insert(declaration.name.as_str()) {
+                    return Err(format!(
+                        "[[program]] {:?}: snippet_args has duplicate name {:?}",
+                        prog.match_names, declaration.name
+                    ));
+                }
+                if declaration
+                    .source_at
+                    .is_some_and(|source_at| source_at >= declaration.trailing_from)
+                {
+                    return Err(format!(
+                        "[[program]] {:?}: snippet_args {:?} source_at {:?} collides with the trailing vector beginning at {}",
+                        prog.match_names,
+                        declaration.name,
+                        declaration.source_at,
+                        declaration.trailing_from
+                    ));
+                }
+            }
+        }
         // `writes_only_with_file_mode = true` needs a "mode" position to
         // test — this entry's own `arg_names` must name one. One-directional
         // on purpose: an entry may name "mode" in `arg_names` with no
@@ -1559,6 +1596,9 @@ fn overlay(base: &mut Program, mine: &Program) {
     }
     if !mine.wrap_lang.is_empty() {
         base.wrap_lang = mine.wrap_lang.clone();
+    }
+    if mine.snippet_args.is_some() {
+        base.snippet_args = mine.snippet_args.clone();
     }
     if !mine.flag_prefix.is_empty() {
         base.flag_prefix = mine.flag_prefix.clone();

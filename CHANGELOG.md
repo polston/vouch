@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.10.0 (2026-08-28)
+
+
+### Features
+
+* add retractable snippet_args knowledge declarations for indexed snippet argument vectors
+* resolve static Python sys.argv indices from inline and explicit standard input interpreter arguments
+
+
+### Bug Fixes
+
+* discard indexed snippet references after dynamic reassignment
+
 ## 0.9.0 (2026-08-28)
 
 

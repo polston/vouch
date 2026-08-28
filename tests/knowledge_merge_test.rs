@@ -732,6 +732,13 @@ fn overlay_is_exhaustive_over_every_program_field() {
         case_sensitive_flags: Some(true),
         wrap_flags: vec!["--wrap".to_string()],
         wrap_lang: "python".to_string(),
+        // `snippet_args` follows the Option-list pattern: absence preserves,
+        // empty retracts, and nonempty replaces (M2.107, schema v12).
+        snippet_args: Some(vec![vouch::guards::SnippetArgs {
+            name: "payload.items".to_string(),
+            source_at: Some(0),
+            trailing_from: 1,
+        }]),
         flag_prefix: vec!["/".to_string()],
         evaluates_input: "always".to_string(),
         // `runs_file` and `runs_file_flags` follow the `value_options`
@@ -896,6 +903,18 @@ fn overlay_is_exhaustive_over_every_program_field() {
         "wrap_flags did not arrive"
     );
     assert_eq!(p.wrap_lang, "python", "wrap_lang did not arrive");
+    assert_eq!(
+        p.snippet_args.as_ref().map(|args| args.as_slice()),
+        Some(
+            [vouch::guards::SnippetArgs {
+                name: "payload.items".to_string(),
+                source_at: Some(0),
+                trailing_from: 1,
+            }]
+            .as_slice()
+        ),
+        "snippet_args did not arrive"
+    );
     assert_eq!(
         p.flag_prefix,
         vec!["/".to_string()],

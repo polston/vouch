@@ -1892,6 +1892,15 @@ fn judged(src: &str, head: &str) -> bool {
 #[test]
 fn the_judgement_holds_a_delivered_scanned_body() {
     assert!(judged("python - <<'EOF'\nprint(1)\nEOF\n", "python"), "quoted, bare consumer");
+    let shipped = vouch::guards::load(include_str!("../knowledge.toml")).expect("shipped knowledge parses");
+    assert!(
+        judged_with(
+            &shipped,
+            "python - C:/work/held.txt <<'EOF'\nprint(1)\nEOF\n",
+            "python",
+        ),
+        "a declared trailing snippet argument does not replace the explicit stdin source"
+    );
     assert!(judged("python - <<EOF\nprint(1)\nEOF\n", "python"), "unquoted, expansion-free");
     assert!(judged("bash <<'EOF'\nls -la\nEOF\n", "bash"), "shell consumer");
     assert!(

@@ -313,6 +313,16 @@
             "type": "string"
           }
         },
+        "snippet_args": {
+          "description": "Indexed argument vectors a parsed snippet receives from this program's\nown invocation. The scanner reports only structure; this knowledge\nclaim connects that structure to the enclosing program's arguments.\n\n`None` means this entry is silent. `Some([])` explicitly retracts an\noverlaid claim; a non-empty list replaces it whole.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/SnippetArgs"
+          }
+        },
         "standalone_flags": {
           "description": "Flags this entry vouches for ALONE: a run whose every argument is one\nof these (whole-token, unquoted view, the entry's case rule) is a\nstandalone run — covered by the entry, and read as evaluating no\nstandard input. The claim per flag: given only listed flags, the\nprogram performs the flag's own action and stops. Verified by\nrunning each flag, per name and case — each alone and once all\ntogether — before it is written.",
           "type": "array",
@@ -521,6 +531,37 @@
       "additionalProperties": false,
       "required": [
         "guard"
+      ]
+    },
+    "SnippetArgs": {
+      "description": "One indexed argument vector a parsed snippet receives from its enclosing\nprogram invocation.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Dotted expression the language scanner reports structurally.",
+          "type": "string"
+        },
+        "source_at": {
+          "description": "Index occupied by the syntax that selected the snippet, when exposed.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
+        "trailing_from": {
+          "description": "Index occupied by the first outer argument after the snippet source.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "trailing_from"
       ]
     },
     "SubWrite": {

@@ -355,6 +355,139 @@ fn writes_only_with_file_mode_arg_names_and_wrap_join_load_and_round_trip() {
     assert_eq!(prog.wrap_join, Some(true), "wrap_join did not round-trip");
 }
 
+// --- snippet_args (spec 2026-08-27 python-snippet-argv, Task 1) -----------
+
+#[test]
+fn snippet_args_loads_and_round_trips() {
+    let good = scratch(
+        "good_snippet_args.toml",
+        &format!(
+            "version = {}\n[[program]]\nmatch = [\"interpreter\"]\nwraps = \"after_flag\"\n\
+             wrap_flags = [\"-c\"]\nwrap_lang = \"python\"\n\
+             snippet_args = [{{ name = \"sys.argv\", source_at = 0, trailing_from = 1 }}]\n",
+            v()
+        ),
+    );
+    let loaded = load_files(&good, Path::new(ABSENT));
+    assert!(loaded.gaps.is_empty(), "a valid snippet_args file was rejected: {:?}", loaded.gaps);
+    let args = loaded.kb.program[0].snippet_args.as_ref().expect("snippet_args did not load");
+    assert_eq!(args.len(), 1);
+    assert_eq!(args[0].name, "sys.argv");
+    assert_eq!(args[0].source_at, Some(0));
+    assert_eq!(args[0].trailing_from, 1);
+}
+
+#[test]
+fn malformed_duplicate_or_colliding_snippet_args_fail_the_whole_file() {
+    for (tag, declaration, expected) in [
+        (
+            "malformed",
+            "snippet_args = [{ name = \"sys..argv\", source_at = 0, trailing_from = 1 }]",
+            "sys..argv",
+        ),
+        (
+            "duplicate",
+            "snippet_args = [{ name = \"sys.argv\", source_at = 0, trailing_from = 1 }, { name = \"sys.argv\", trailing_from = 1 }]",
+            "duplicate",
+        ),
+        (
+            "collision",
+            "snippet_args = [{ name = \"sys.argv\", source_at = 1, trailing_from = 1 }]",
+            "source_at",
+        ),
+    ] {
+        let bad = scratch(
+            &format!("bad_snippet_args_{tag}.toml"),
+            &format!(
+                "version = {}\n[[program]]\nmatch = [\"interpreter\"]\nwraps = \"after_flag\"\n\
+                 wrap_flags = [\"-c\"]\nwrap_lang = \"python\"\n{declaration}\n",
+                v()
+            ),
+        );
+        let loaded = load_files(&bad, Path::new(ABSENT));
+        assert!(loaded.kb.program.is_empty(), "invalid {tag} snippet_args still loaded");
+        assert_eq!(loaded.gaps.len(), 1, "invalid {tag} snippet_args did not produce one gap");
+        assert!(
+            loaded.gaps[0].why.contains("snippet_args") && loaded.gaps[0].why.contains(expected),
+            "the {tag} rejection did not name the field and cause: {:?}",
+            loaded.gaps
+        );
+    }
+}
+
+#[test]
+fn snippet_args_requires_a_scanner_backed_snippet_language() {
+    let bad = scratch(
+        "bad_snippet_args_opaque.toml",
+        &format!(
+            "version = {}\n[[program]]\nmatch = [\"interpreter\"]\nwraps = \"after_flag\"\n\
+             wrap_flags = [\"-c\"]\nwrap_lang = \"opaque\"\n\
+             snippet_args = [{{ name = \"sys.argv\", source_at = 0, trailing_from = 1 }}]\n",
+            v()
+        ),
+    );
+    let loaded = load_files(&bad, Path::new(ABSENT));
+    assert!(loaded.kb.program.is_empty(), "snippet_args on opaque code still loaded");
+    assert!(
+        loaded.gaps[0].why.contains("snippet_args") && loaded.gaps[0].why.contains("scanner"),
+        "the rejection did not name the missing scanner: {:?}",
+        loaded.gaps
+    );
+}
+
+#[test]
+fn an_explicit_empty_snippet_args_list_retracts_the_shipped_claim() {
+    let base = scratch(
+        "base_snippet_args.toml",
+        &format!(
+            "version = {}\n[[program]]\nmatch = [\"interpreter\"]\nwraps = \"after_flag\"\n\
+             wrap_flags = [\"-c\"]\nwrap_lang = \"python\"\n\
+             snippet_args = [{{ name = \"sys.argv\", source_at = 0, trailing_from = 1 }}]\n",
+            v()
+        ),
+    );
+    let mine = scratch(
+        "mine_retracts_snippet_args.toml",
+        &format!("version = {}\n[[program]]\nmatch = [\"interpreter\"]\nsnippet_args = []\n", v()),
+    );
+    let loaded = load_files(&base, &mine);
+    assert!(loaded.gaps.is_empty(), "an explicit retraction was rejected: {:?}", loaded.gaps);
+    assert_eq!(loaded.kb.program.len(), 1);
+    assert_eq!(loaded.kb.program[0].snippet_args, Some(Vec::new()));
+}
+
+#[test]
+fn a_nonempty_snippet_args_list_replaces_the_shipped_claim() {
+    let base = scratch(
+        "base_snippet_args_for_replacement.toml",
+        &format!(
+            "version = {}\n[[program]]\nmatch = [\"interpreter\"]\nwraps = \"after_flag\"\n\
+             wrap_flags = [\"-c\"]\nwrap_lang = \"python\"\n\
+             snippet_args = [{{ name = \"sys.argv\", source_at = 0, trailing_from = 1 }}]\n",
+            v()
+        ),
+    );
+    let mine = scratch(
+        "mine_replaces_snippet_args.toml",
+        &format!(
+            "version = {}\n[[program]]\nmatch = [\"interpreter\"]\n\
+             wrap_lang = \"python\"\n\
+             snippet_args = [{{ name = \"payload.items\", trailing_from = 2 }}]\n",
+            v()
+        ),
+    );
+    let loaded = load_files(&base, &mine);
+    assert!(loaded.gaps.is_empty(), "a nonempty replacement was rejected: {:?}", loaded.gaps);
+    let declarations = loaded.kb.program[0]
+        .snippet_args
+        .as_ref()
+        .expect("the replacement disappeared");
+    assert_eq!(declarations.len(), 1);
+    assert_eq!(declarations[0].name, "payload.items");
+    assert_eq!(declarations[0].source_at, None);
+    assert_eq!(declarations[0].trailing_from, 2);
+}
+
 #[test]
 fn writes_only_with_file_mode_without_a_mode_name_fails_the_whole_file() {
     let bad = scratch(
