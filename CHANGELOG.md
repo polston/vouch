@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.14.0 (2026-08-28)
+
+
+### Features
+
+* vouch-landing ends as a consumer, installing the verified released pair and updating the plugin instead of leaving a dev build live
+* vouch-update distinguishes a same-version dev build from the release archive by byte-comparing against a present clone's build
+
 ## 0.13.0 (2026-08-28)
 
 

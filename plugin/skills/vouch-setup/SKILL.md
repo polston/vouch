@@ -196,16 +196,19 @@ not this phase — this phase provisions.
    banner. This is the semantic check, and it comes after the integrity check,
    not instead of it.
 
-**Dev machine with a clone.** In one shell invocation, run
+**From-source machine.** In one shell invocation, run
 `cargo build --release && scripts/install-binaries.sh && scripts/install-knowledge.sh`.
 This gives source builds the same paired binary-and-knowledge layout as a
 release. Skills arrive via the
 plugin (already present if the operator reached this skill through
-`/vouch:setup`) or via `scripts/install-skill.sh` from the clone. **One
-delivery route per machine**: the plugin cache is version-keyed and updated by
-hand, so a machine using both routes can hold two texts of the same skill under
-two names. Plugin route for a machine that consumes vouch, `install-skill.sh`
-for a machine that develops it — not both.
+`/vouch:setup`) or via `scripts/install-skill.sh` from the clone. **Released
+artifacts are the primary install on every machine, the development machine
+included** (operator decision 2026-08-28): a dev build proves the install
+path and may run mid-development, but the machine settles on the release.
+**One skill route at a time**: the plugin cache is version-keyed and updated
+by hand, so holding plugin skills and `install-skill.sh` copies together
+means two texts of the same skill under two names — use the plugin route
+unless unreleased skills must load.
 
 **Hook wiring.** Generate one merged document per host. These are the
 operator's save, not this skill's write (hard rule 4, and the harness's own

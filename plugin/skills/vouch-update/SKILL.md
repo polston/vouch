@@ -14,10 +14,11 @@ operator accept.
 Checking without moving anything is `vouch-status` — the survey and
 comparison below, alone, with no proposal at the end.
 
-One delivery route per machine. A machine that develops vouch updates from its
-clone (`cargo build --release && scripts/install-binaries.sh &&
-scripts/install-knowledge.sh`) — if a clone built this install, say so and
-stop rather than overwriting a dev build with a release.
+Released artifacts are the primary install on every machine, the development
+machine included. A dev build may be live mid-development (`cargo build
+--release && scripts/install-binaries.sh && scripts/install-knowledge.sh`);
+an installed version NEWER than the latest release is how that shows up here,
+and hard rule 5 reports it and stops rather than silently downgrading.
 
 ## Hard rules
 
@@ -64,7 +65,15 @@ stop rather than overwriting a dev build with a release.
 
 ### 2. Compare and propose
 
-- Installed equals latest: say so and stop. Nothing to do is a result.
+- Installed equals latest: say so and stop — with the limit named out loud:
+  version equality cannot tell a dev build from the release archive, because
+  a dev build compiled after the release version bump carries the released
+  number. When a vouch clone is present, compare the installed binary
+  byte-for-byte against the clone's own `target/release` build: identical
+  bytes mean the install IS the dev build, and replacing it with the
+  verified release archive at the same version is a legitimate explicit
+  choice, not a downgrade — a landing that put a dev pair live mid-branch
+  takes exactly that path.
 - Installed older: propose the update in one line — `vouch X.Y.Z →
   vouch A.B.C, released <date>` — and wait for the operator's accept.
 - Installed newer: hard rule 5. Report both versions and stop.
@@ -112,9 +121,9 @@ temp directory):
 
 ## Common mistakes
 
-- Updating the binary from a release while the machine actually runs a dev
-  build installed from a clone (hard rule 5 catches the version shape; the
-  clone check in the opening catches the rest).
+- Reading version equality as proof the release is installed. A dev build
+  can carry the released number; the byte-compare against a present clone's
+  own build in step 2 is what tells them apart.
 - Unpacking before the checksum verifies, "just to look".
 - Reading the host's settings or hooks file to "check the wiring" — this
   skill has no reason to open either, and the wiring is not its business.

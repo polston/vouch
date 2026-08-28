@@ -160,7 +160,7 @@ Run from the vouch checkout root; every path below is relative to it.
      one, then review the public publish pull request and exact-land its scanned
      head when published files changed;
    - what follows those landings: mirror verification, public tag and release
-     build, paired live reinstall, changed-skill reinstall, live probes, state
+     build, released-pair install, plugin update, live probes, state
      docs, and branch teardown;
    - the final target state: versions aligned here and in the mirror, published
      archives verified, live binaries and knowledge matching, and no leftover
@@ -272,27 +272,35 @@ Run from the vouch checkout root; every path below is relative to it.
       or the version pull request release-please opened here has not been
       merged yet, in which case merge it and publish again before tagging.
 
-5. **Landing turn, same session.** The new binary HARD-REFUSES the old config
-   and knowledge spellings (whole file → the gate recognises nothing and fails
-   closed, every command asks), so the migrations MUST ride with the reinstall:
-   1. **Rebuild and reinstall in ONE shell invocation — never two tool calls.**
-      Derive the shared main checkout root first — this runs against the main
-      checkout, not the branch's own worktree — then chain everything through
-      it in the same invocation:
+5. **Landing turn, same session — it ends as a consumer (operator decision
+   2026-08-28, M2.204).** The machine's primary install is the verified
+   RELEASE, never a dev build. The new binary HARD-REFUSES the old config and
+   knowledge spellings (whole file → the gate recognises nothing and fails
+   closed, every command asks), so the migrations MUST ride with whichever
+   install moves the binary:
+   1. **First WAIT for the tag's release workflow to succeed — nothing
+      earlier in this landing has waited for it** (watch the run, then
+      confirm `gh release view <tag>` lists the three platform archives plus
+      `SHA256SUMS`; a tag alone has no assets yet). Then install the released
+      pair by running the released `vouch-update` procedure — survey, one-line proposal,
+      `SHA256SUMS` verified before unpacking, binaries and knowledge
+      together, backup, its own probes. The dev build still compiles and its
+      install path is still proven every gate run (`cargo build --release`
+      plus the install-script shell suites); a dev pair may go live
+      MID-branch when an unreleased behavior must be probed against the real
+      config — chained in ONE shell invocation, never two tool calls:
       `root="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")" && cd "$root" && cargo build --release && bash scripts/install-binaries.sh && bash scripts/install-knowledge.sh --force`
-      Learned the hard way 2026-08-10: between a rebuilt binary and a
-      reinstalled knowledge file the gate is DEAD — the new binary refuses the
-      old file, so it recognises nothing and asks about every command,
-      including the very command that repairs it, and the operator gets a
-      wall-of-banner prompt for a later install call.
-      Neither order avoids it (the old binary equally refuses the new file's
-      unknown keys), so the only fix is to leave no gated tool call in the
-      window. Chain them.
-   2a. `scripts/install-skill.sh --force` **whenever the branch touched
-      `plugin/skills/`** — the installed copy is what agents actually read, so a
-      corrected skill left uninstalled keeps handing out the old, false claim.
-      Check with `git diff <fork>..HEAD --name-only -- plugin/skills/`; do not assume
-      the branch left them alone.
+      (learned 2026-08-10: between a rebuilt binary and a reinstalled
+      knowledge file the gate is DEAD — the new binary refuses the old file
+      and asks about everything, the repair command included; neither order
+      avoids it, so leave no gated tool call in the window) — but the landing
+      then supersedes it with the released pair before it ends.
+   2a. **Skills arrive with the plugin, never as user-scope copies:**
+      `claude plugin marketplace update vouch && claude plugin update vouch`,
+      then note that a restart loads them. Do not run
+      `scripts/install-skill.sh` here — it recreates the user-scope
+      duplicates this machine deliberately removed; it remains the tested
+      path only for a machine that must load unreleased skills.
    3. Migrate the operator's live files IF they still use an old spelling (back
       each up first, then validate no old spelling remains): `config.toml`
       `[bash]`/`[powershell]` → `[lang.*]`; `my-knowledge.toml`
@@ -364,8 +372,8 @@ claim, a warning that would have saved the turn you just spent — edit this fil
 in the same turn and say one line that you did. Do not work around it silently:
 the next session reads this file, not that conversation. (Global rule: skills
 are living procedures.) Three steps here exist only because of that: the
-sweep-before-review rule, the skill reinstall, and chaining the rebuild with
-the knowledge install.
+sweep-before-review rule, the plugin-update step, and chaining any dev
+rebuild with the knowledge install.
 
 ## Common mistakes
 
@@ -382,7 +390,8 @@ the knowledge install.
   `scripts/land-private-release.sh --land` is its only exact-object path.
 - Treating the docs sweep as a landing chore. It is a plan task that runs
   before the final review; this skill refuses to start without its report.
-- Reinstalling the knowledge but not the skills when the branch changed both.
+- Updating the gate but not the plugin, or the reverse, when a release lands
+  — the released pair and the released procedures move in step.
 - Trusting that a doc is true because a task "did documentation". The parts of
   this repo that never drift are the ones with a test asserting doc against
   code; the parts that drift are the ones guarded by attention.

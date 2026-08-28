@@ -213,6 +213,10 @@ cp vouch.example.toml ~/.config/vouch/config.toml
 scripts/install-skill.sh
 ```
 
+Even on a development machine this path proves and tests the build; the
+released artifacts remain the primary install (see the delivery-route note
+below).
+
 That copy matters: with no `config.toml` at all, nothing has been allowed, so
 every command asks and every prompt carries a banner saying why. The example
 file is a working starting point — the binary's own message points at it.
@@ -299,13 +303,15 @@ Add `--shadow` to register vouch beside a gate you
 are still running: it evaluates and journals every call in full and emits no
 decision, so you can measure what it would have done before it does anything.
 
-### One delivery route per machine
+### Releases are the primary install everywhere
 
-Use the plugin route on a machine that *consumes* vouch, and
-`scripts/install-skill.sh` on a machine that *develops* it. Not both. The
-plugin cache is version-keyed and updates only when someone runs the update
-command, so a machine on both routes can end up holding two different texts of
-the same skill under two different names.
+Every machine — the one that develops vouch included — runs the released
+plugin and the released binaries as its primary install; a dev build proves
+the install path and may run mid-development, but the machine settles on the
+release. Keep one skill route at a time: the plugin cache is version-keyed,
+so holding plugin skills and `scripts/install-skill.sh` copies together means
+two different texts of the same skill under two different names. Use
+`install-skill.sh` only where unreleased skills must load.
 
 ### Releases
 
