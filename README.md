@@ -161,8 +161,10 @@ own recorded session history against a candidate config so you can see what
 would actually fire before accepting anything, and writes nothing without an
 explicit accept per change.
 
-The plugin carries the skills and the `/vouch:setup`, `/vouch:update`, and
-`/vouch:status` commands. It deliberately
+The plugin carries the consumer skills — machine setup, status, update, and
+program trust — and the `/vouch:setup`, `/vouch:update`, and `/vouch:status`
+commands; the development repository's own working procedures stay behind in
+its tree. It deliberately
 does not carry the hooks: the live gate must not move when a plugin cache
 refreshes, and hook registration is a human save whatever ships.
 

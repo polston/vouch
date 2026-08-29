@@ -31,5 +31,6 @@ scripts/githooks/pre-push  text eol=lf
 # worktree and re-checked from `master`.
 knowledge.toml       text eol=lf
 plugin/skills/**/*.md text eol=lf
+.claude/skills/**/*.md text eol=lf
 plugin/**/*.py        text eol=lf
 plugin/commands/*.md  text eol=lf
