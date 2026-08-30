@@ -177,7 +177,6 @@ fn decision_dump(var: &str) -> Option<Vec<(String, String)>> {
 fn main() {
     let rows = common::rows_for_measurement();
     let kb = common::shipped_kb();
-    let bash = vouch::syntax::scanner_for("bash").expect("bash scanner exists");
 
     let mut parsed_bash_rows = 0usize;
     let mut python_snippets = 0usize;
@@ -190,24 +189,12 @@ fn main() {
     let mut totals = ArgvCounts::default();
 
     for (row_index, row) in rows.iter().enumerate() {
-        let Ok(scan) = bash.scan(&row.cmd) else {
+        let Some(snippets) = common::python_snippets(&kb, &row.cmd) else {
             continue;
         };
         parsed_bash_rows += 1;
-        let expanded = vouch::guards::expand_wrappers_with_sources(
-            &kb,
-            &scan.commands,
-            &scan.heredocs,
-            &scan.input_source,
-            &scan.args_complete,
-            "bash",
-            &|_| 4,
-        );
         let mut row_found = false;
-        for (language, source) in expanded.srcs {
-            if language != "python" {
-                continue;
-            }
+        for source in snippets {
             python_snippets += 1;
             match count_source(&source) {
                 Ok(counts) => {

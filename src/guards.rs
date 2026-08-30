@@ -391,18 +391,34 @@ pub struct Program {
     /// lay.
     #[serde(default)]
     pub arg_names: Vec<String>,
-    /// This program's own parameters that it INVOKES as functions — what
-    /// they name runs, and vouch cannot see what that is, so this entry's
-    /// other claims (pure read, no writes) hold only for a call that uses
-    /// NONE of them (task 2b, M2.86: `json.load(f, object_hook=whatever)`
-    /// hands `object_hook` a function json.load calls itself; the scanner
-    /// never emits an event for a callable passed by reference, so the
-    /// read-only claim would otherwise be falsifiable). A positional
-    /// callback slot must ALSO be named in `arg_names`, at its real
-    /// position, so the existing keyword fold maps both spellings onto one
-    /// check; a keyword-only one is legitimately absent from `arg_names`.
-    /// Every name uses the shared ASCII parameter grammar: a letter or `_`
-    /// first, then letters, digits, or `_`.
+    /// This program's own parameters that it INVOKES as functions. An
+    /// occupant carrying no callable mark — a subscript, a call result, a
+    /// starred argument, or a `**` unpack that could be filling one — is
+    /// unread and could still be a function at runtime, so it asks through
+    /// the generic `callback_argument` construct. A marked occupant is
+    /// judged instead: a literal lambda (`CallableArg::Inline`) raises
+    /// neither construct, since its body was already scanned where it
+    /// appears; a resolved reference (`CallableArg::Named`) is judged as
+    /// its own call, with no arguments and unknown order
+    /// (`by_reference_invocations`) — vouch sees THAT the reference exists,
+    /// not what this program itself will pass it, so the outcome is
+    /// whatever that reference's own entry produces; and a reference vouch
+    /// could not NAME at all, or one whose entry carries a claim that call
+    /// cannot evaluate without arguments, asks through `callable_argument`
+    /// (`unresolved_callback_argument`). Because the real invocation is
+    /// never observed directly, this entry's own general claims (pure
+    /// read, no writes) say nothing about what a marked occupant does —
+    /// that occupant is judged independently, through whichever path above
+    /// applies, rather than inherited from this entry (task 2b, M2.86 and
+    /// M2.89: `json.load(f, object_hook=whatever)` hands `object_hook` a
+    /// function `json.load` calls itself, with arguments the scanner never
+    /// sees, while `map(str, xs)` hands `map` a harmless, fully-described
+    /// reference and allows). A positional callback slot must ALSO be
+    /// named in `arg_names`, at its real position, so the existing keyword
+    /// fold maps both spellings onto one check; a keyword-only one is
+    /// legitimately absent from `arg_names`. Every name uses the shared
+    /// ASCII parameter grammar: a letter or `_` first, then letters,
+    /// digits, or `_`.
     ///
     /// Non-empty replaces on merge, like `arg_names`.
     #[serde(default)]
@@ -2094,26 +2110,71 @@ fn runs_file_in(prog: &Program, args: &[String]) -> bool {
     false
 }
 
-/// Whether `cmd` matches an entry declaring `callback_args` AND actually
-/// occupies one of those declared slots — the entry's other claims (no
-/// writes, no rules) hold only when this is false; when it is true, the
-/// call hands the described function something it will invoke, and that
-/// something never appears as its own scanned event (task 2b, M2.86).
+/// Whether `cmd` matches an entry declaring `callback_args` AND hands one of
+/// those declared slots something vouch has not already judged some other
+/// way — the entry's other claims (no writes, no rules) hold only when this
+/// is false; when it is true, the call hands the described function
+/// something it will invoke, and that something never appears as its own
+/// scanned event (task 2b, M2.86).
+///
+/// A slot resolved to a `CallableArg` (M2.89) — `Named`, `Inline`, or
+/// `Unresolved` alike — is excluded from every rule below, not because it is
+/// known safe but because it is already judged specifically: `Named`
+/// through `by_reference_invocations`, `Unresolved` through
+/// `unresolved_callback_argument`, and `Inline` through the calls its own
+/// lambda body already emitted where it was scanned. Spec
+/// §5.2 requires the two to be mutually exclusive PER SLOT — this generic
+/// construct and that specific judgement are one slot's two outcomes, never
+/// two competing asks for the same occupant. Testing for absence from
+/// `effective.callable` / `cmd.callable_args` is the one check that reads
+/// all three variants the same way, since folding tags the raw index the
+/// same regardless of which variant occupies it.
 ///
 /// Checked three ways, any one of which trips it:
 ///   1. a slot named in `callback_args` is ALSO named in `arg_names` (a
-///      positional callback), and the keyword-folded call occupies that
+///      positional callback), the keyword-folded call occupies that
 ///      position — folding first means `f(object_hook=g)` and a
-///      hypothetical positional spelling are read identically.
+///      hypothetical positional spelling are read identically — AND that
+///      folded occupant is a position the scanner could not read at all
+///      (`effective.unread`) and was NOT resolved to a callable reference of
+///      any kind (`effective.callable`, M2.92). Occupancy alone used to be
+///      enough, which meant `re.sub('a', 'b', s)` asked about a function on
+///      the strength of a replacement STRING sitting in the slot `repl`
+///      names — `'b'` occupies the position but is never a callable, and
+///      narrowing to unread-and-not-callable fixed that without reopening
+///      the earlier hazard this same rule once had: an unread occupant —
+///      `cbs[0]`, a subscript; `d["cb"]`, likewise; `*rest`, a starred
+///      spread — still trips this, because a subscript or a call result can
+///      evaluate to a function exactly as easily as `os.remove` can, and
+///      treating "unmarked" as "not a callable" for a position the scanner
+///      never read at all would be absence of evidence serving as evidence
+///      of absence — precisely the inversion CLAUDE.md §1 and §6.3 exist to
+///      prevent. What changed is narrower than that: a position the scanner
+///      DID mark as a callable reference (M2.89, any variant) is no longer
+///      ALSO counted here, because that position already has its own
+///      specific judgement elsewhere (see above). `effective.unread` and
+///      `effective.callable` are both FOLDED, for the same reason: a
+///      keyword and a positional spelling of the same slot must read
+///      identically.
 ///   2. a callback slot has no positional form at all (legitimately absent
 ///      from `arg_names` — most of json.load's callback parameters are
 ///      keyword-only), so it never reaches `effective_args`'s output; an
-///      unfolded `name=value` token in the RAW call is checked directly.
+///      unfolded `name=value` token in the RAW call is checked directly,
+///      and requires that same raw index to be marked unread
+///      (`cmd.unread_args`) and NOT marked callable (`cmd.callable_args`) —
+///      the raw index space, not the folded one rule 1 reads (getting the
+///      two backwards is the M2.95(b) hazard). A plain string keyword
+///      value — read, and read as not callable — still does not trip this.
 ///   3. a nameless keyword-unpacking marker (`**opts`) is present ANYWHERE
 ///      in the RAW call — `f(**opts)` alone, with no other argument at all,
 ///      is ordinary Python and could be carrying any keyword the call never
 ///      names, including a declared slot, so this cannot be scoped to a
-///      position the way rule 1 is.
+///      position the way rule 1 is, and — unlike rules 1 and 2 — it is not
+///      narrowed to a marked callable either: an unpack's contents are
+///      never individually scanned, so there is no per-key mark to read,
+///      and treating the absence of one as "not a callable" would infer
+///      absence from silence, the exact defect class CLAUDE.md §6.3 exists
+///      to prevent.
 ///
 ///      Round 1 of this fix tried to scope it to "past every position
 ///      `arg_names` accounts for" (a marker at position 0 read as "the
@@ -2144,24 +2205,32 @@ pub fn callback_argument_used(kb: &Knowledge, cmd: &Cmd) -> bool {
         // `eff_position_occupied`, not a bare `.is_some()` (task 2b fix
         // round 4): a slot the call never addressed at all can still show
         // up occupying `eff` if a LATER position was folded, which must
-        // not read as "this callback slot was used."
-        if callback_arg_positions(prog, effective.base_offset)
-            .iter()
-            .any(|&p| eff_position_occupied(&effective.values, &effective.padding, p))
-        {
+        // not read as "this callback slot was used." `effective.callable`
+        // and `effective.unread` are both the FOLDED position space
+        // (M2.92) — read alongside `eff_position_occupied`, not against
+        // `cmd.callable_args`/`cmd.unread_args`'s raw indices, which is
+        // what rule 2 below reads instead. An unread-and-not-callable
+        // occupant trips this exactly like the old callable-or-unread test
+        // did for an unread one: vouch cannot say a function is absent from
+        // a position it never read. A position already marked callable
+        // (M2.89, any `CallableArg` variant) does NOT trip this — spec
+        // §5.2's per-slot exclusivity: that position already has its own
+        // specific judgement elsewhere (see the doc comment above).
+        if callback_arg_positions(prog, effective.base_offset).iter().any(|&p| {
+            eff_position_occupied(&effective.values, &effective.padding, p)
+                && effective.unread.contains(&p)
+                && !effective.callable.contains(&p)
+        }) {
             return true;
         }
-        if cmd
-            .args
-            .iter()
-            .enumerate()
-            .any(|(i, a)| {
-                cmd.keyword_args.contains(&i)
-                    && a.split_once('=').is_some_and(|(name, _)| {
-                        prog.callback_args.iter().any(|c| c == name)
-                    })
-            })
-        {
+        if cmd.args.iter().enumerate().any(|(i, a)| {
+            cmd.keyword_args.contains(&i)
+                && cmd.unread_args.contains(&i)
+                && !cmd.callable_args.contains_key(&i)
+                && a.split_once('=').is_some_and(|(name, _)| {
+                    prog.callback_args.iter().any(|c| c == name)
+                })
+        }) {
             return true;
         }
         if has_unpack_arg(cmd) {
@@ -2169,6 +2238,386 @@ pub fn callback_argument_used(kb: &Knowledge, cmd: &Cmd) -> bool {
         }
     }
     false
+}
+
+/// One resolved callable argument, judged as its own invocation (M2.89).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ByReference {
+    /// The referenced head, already prefixed (`python:os.remove`).
+    pub head: String,
+    /// The synthetic command judged for it: same head, no arguments, no
+    /// receiver claim of its own beyond what the reference carried. It
+    /// joins no ordered pass — see `by_reference_invocations`'s own doc
+    /// comment.
+    pub cmd: Cmd,
+    /// Set when the matched entry — receiver-gated against the reference's
+    /// own origin, the same way the slot check above it is (task 4 review
+    /// I2) — carries a claim this argument-less invocation cannot evaluate:
+    /// a rule with conditions that need arguments, an unmodeled head, a
+    /// directory move, a wrap, a run-file, evaluated input, or a write
+    /// through an already-open handle (task 4 review Q1/C2/C3). Names the
+    /// specific claim so the prompt can say what it is, rather than a fixed
+    /// sentence that was true for only one of these.
+    pub unevaluable: Option<String>,
+    /// True only when `unevaluable` is the rule-with-conditions claim — the
+    /// one case where a guard genuinely sits on the entry and only its
+    /// conditions could not be evaluated without arguments. Every other
+    /// `unevaluable` claim (an unmodeled head, a directory move, a wrap, a
+    /// run-file, evaluated input, a handle write) names something that is
+    /// not a guard at all, so `construct_reason`'s "guards still apply"
+    /// closing line would assert a guard that does not exist (task 4 review
+    /// I4). Meaningless when `unevaluable` is `None`.
+    pub unevaluable_guard_backed: bool,
+}
+
+/// Whether raw argument `raw_idx` of `cmd` is a POSITIONAL token, and if so,
+/// which folded position `effective_args` would place it at.
+///
+/// Reproduces `effective_args`'s own first pass — push every non-keyword,
+/// non-unpack-marker argument into `eff` in source order — while tracking
+/// which push corresponds to `raw_idx`, since `effective_args` returns the
+/// folded array but not this mapping. Deliberately does NOT take a `base`
+/// offset: `eff`'s indexing already begins at a method call's own receiver
+/// (pushed like any other non-keyword argument), and `base` exists only to
+/// translate `arg_names`' own position numbering into that same space — it
+/// is never an offset on the raw push order itself. A keyword argument, or
+/// one absent from this fold, returns `None`.
+fn positional_fold_position(cmd: &Cmd, raw_idx: usize) -> Option<usize> {
+    if cmd.keyword_args.contains(&raw_idx) {
+        return None;
+    }
+    let mut pos = 0;
+    for (i, a) in cmd.args.iter().enumerate() {
+        if cmd.keyword_args.contains(&i) {
+            continue;
+        }
+        if a == crate::python::UNPACK_MARKER && cmd.unread_args.contains(&i) {
+            continue;
+        }
+        if i == raw_idx {
+            return Some(pos);
+        }
+        pos += 1;
+    }
+    None
+}
+
+/// Whether raw argument `raw_idx` of `cmd` occupies a slot `prog` declares
+/// in its own `callback_args` — the SAME two rules `callback_argument_used`
+/// checks (its own doc comment covers both in full), read per-argument
+/// instead of as one whole-command boolean:
+///
+///   1. positional (or keyword-folded onto a positional slot named in both
+///      `callback_args` and `arg_names`): fold `raw_idx` via
+///      `positional_fold_position` and test the result against
+///      `callback_arg_positions`.
+///   2. keyword with no positional form in `arg_names` at all (legitimately
+///      absent — most of a callback parameter's keyword-only spellings):
+///      the raw token's own name, checked directly against
+///      `prog.callback_args`. This also (harmlessly) matches a keyword
+///      whose name IS in `arg_names`, which rule 1 would already have
+///      caught via folding — `callback_argument_used` accepts the same
+///      overlap because it only ever needs `true` once.
+///
+/// Rule 3 (`has_unpack_arg`, a nameless `**opts` that could be carrying a
+/// declared slot invisibly) has nothing to contribute here: an unpack's
+/// contents are never individually scanned, so there is no per-key
+/// `CallableArg` mark hiding inside it for this function to report. That
+/// possibility is what keeps `callback_argument_used` — a different
+/// construct, `callback_argument`, for a different pass — asking about the
+/// OUTER call's own claims; it is orthogonal to judging a MARKED reference
+/// by itself.
+fn in_declared_callback_slot(prog: &Program, cmd: &Cmd, raw_idx: usize) -> bool {
+    if prog.callback_args.is_empty() {
+        return false;
+    }
+    if cmd.keyword_args.contains(&raw_idx) {
+        return cmd.args[raw_idx]
+            .split_once('=')
+            .is_some_and(|(name, _)| prog.callback_args.iter().any(|c| c == name));
+    }
+    let effective = effective_args(prog, cmd);
+    let declared = callback_arg_positions(prog, effective.base_offset);
+    positional_fold_position(cmd, raw_idx).is_some_and(|pos| declared.contains(&pos))
+}
+
+/// Every claim kind spec §5.2 enumerates for a matched entry, judged for a
+/// by-reference call with no arguments. One variant per kind so
+/// `claim_kind_unevaluable`'s `match` has no catch-all arm: adding a KIND
+/// here without a matching arm fails to compile, which is what stops this
+/// enumeration from silently going stale relative to itself (task 4 review
+/// round 2, Finding A).
+///
+/// That is narrower than it first reads (task 4 review round 3, Finding 2).
+/// It does NOT mean a new field on `Program` fails to compile here — nothing
+/// ties `Program`'s field set to this enum's variant set, so adding a field
+/// compiles cleanly whether or not a `ClaimKind` variant exists for it yet.
+/// The guarantee is one step removed: once someone adds the variant (and a
+/// `CLAIM_KINDS` entry, and a `claim_kind_unevaluable` arm) for a new
+/// `Program` field, the compiler refuses to let that arm be forgotten
+/// afterward — starting the chain is still a human's job; only closing a
+/// chain already started is the compiler's. Making the first step
+/// compiler-enforced too would need a proc macro deriving `ClaimKind` from
+/// `Program`'s own field names, which is a bigger change than adding a field
+/// is meant to be.
+///
+/// `RunsFile` merges `runs_file` and `runs_file_flags`, the one pair the
+/// original chain already read together as a single claim.
+#[derive(Clone, Copy)]
+enum ClaimKind {
+    Rule,
+    ChangesDir,
+    Wraps,
+    RunsFile,
+    EvaluatesInput,
+    WritesViaHandle,
+    ArgsFromInput,
+    HereWrite,
+    SubWrite,
+    Writes,
+    RemoteDest,
+    RebindsNameFlags,
+}
+
+/// Priority order for `claim_kind_unevaluable`: the first six preserve the
+/// exact order the original if/else-if chain checked them in (task 4 review
+/// round 1); the six after close the gaps task 4 review round 2's Finding A
+/// found — five kinds the chain never mentioned at all
+/// (`args_from_input`, `here_write`, `sub_write`, `remote_dest`,
+/// `rebinds_name_flags`), each independently provable via a scratch overlay
+/// entry naming only that one field, plus `writes` named explicitly so the
+/// match stays exhaustive. Order among the six new kinds is not
+/// decision-bearing: `ArgsFromInput` is the only one of them that ever
+/// returns `Some`, so it cannot tie against a sibling new kind on the same
+/// entry.
+const CLAIM_KINDS: [ClaimKind; 12] = [
+    ClaimKind::Rule,
+    ClaimKind::ChangesDir,
+    ClaimKind::Wraps,
+    ClaimKind::RunsFile,
+    ClaimKind::EvaluatesInput,
+    ClaimKind::WritesViaHandle,
+    ClaimKind::ArgsFromInput,
+    ClaimKind::HereWrite,
+    ClaimKind::SubWrite,
+    ClaimKind::Writes,
+    ClaimKind::RemoteDest,
+    ClaimKind::RebindsNameFlags,
+];
+
+/// One claim kind's judgement for a matched entry, given a by-reference call
+/// with no arguments: `Some((reason, guard_backed))` when the kind cannot be
+/// evaluated from a call this bare, `None` when it is either genuinely inert
+/// here or produces its judgement somewhere else (documented per arm below).
+fn claim_kind_unevaluable(kind: ClaimKind, p: &Program) -> Option<(String, bool)> {
+    match kind {
+        ClaimKind::Rule => {
+            if p.rule.iter().any(|r| !r.always) {
+                Some((
+                    "a rule on this entry needs arguments this invocation does not have"
+                        .to_string(),
+                    true,
+                ))
+            } else {
+                None
+            }
+        }
+        ClaimKind::ChangesDir => {
+            if p.changes_dir.as_deref().is_some_and(|d| d != "no") {
+                Some((
+                    "this entry moves the shell's working directory, and a by-reference call \
+                     cannot be placed in the cd timeline"
+                        .to_string(),
+                    false,
+                ))
+            } else {
+                None
+            }
+        }
+        ClaimKind::Wraps => {
+            if !p.wraps.is_empty() {
+                Some((
+                    "this entry runs another command or snippet vouch cannot see from a call \
+                     with no arguments"
+                        .to_string(),
+                    false,
+                ))
+            } else {
+                None
+            }
+        }
+        ClaimKind::RunsFile => {
+            if !p.runs_file.is_empty() || !p.runs_file_flags.is_empty() {
+                Some(("this entry runs a file vouch has not read".to_string(), false))
+            } else {
+                None
+            }
+        }
+        ClaimKind::EvaluatesInput => {
+            if !p.evaluates_input.is_empty() {
+                Some((
+                    "this entry runs text vouch cannot see from a call with no arguments"
+                        .to_string(),
+                    false,
+                ))
+            } else {
+                None
+            }
+        }
+        ClaimKind::WritesViaHandle => {
+            if p.writes_via_handle.is_some() {
+                Some((
+                    "this entry writes through an already-open file handle vouch cannot verify \
+                     without the real call"
+                        .to_string(),
+                    false,
+                ))
+            } else {
+                None
+            }
+        }
+        // Verified against every real invocation of `args_from_input`
+        // (engine.rs 1d4): there, this claim only speaks when paired with a
+        // write/rule/wrap claim an appended token could change, because the
+        // recorded command already carries a real, if partial, argument
+        // list — `xargs echo` stays quiet because nothing about `echo`
+        // depends on what arrives later. A by-reference call has no partial
+        // list to fall back on; the record is not thinner, it is absent.
+        // Gating this the same way would leave a bare `args_from_input =
+        // true` entry (no other claim) allowed by reference, which is
+        // exactly the shape task 4 review round 2's Finding A proved with a
+        // scratch probe entry — so this arm asks unconditionally on the
+        // claim alone.
+        ClaimKind::ArgsFromInput => {
+            if p.args_from_input {
+                Some((
+                    "this entry appends arguments it reads from a channel the call itself never \
+                     names, and a call with no arguments cannot say what those would be"
+                        .to_string(),
+                    false,
+                ))
+            } else {
+                None
+            }
+        }
+        // `here_write` and `sub_write` are write claims, not this function's
+        // to judge, on the same footing as the plain `writes` field just
+        // below: their by-reference-safe destination (an unresolved
+        // `python::MARKER` when a call this bare cannot rule the claim out)
+        // is produced by `written_paths_in`, verified by reading its call
+        // site (engine.rs Step 5.2) — which re-runs the `[[write.scope]]`
+        // check over that output. Routing them through this function's
+        // `callable_argument` text instead would skip that scope check
+        // entirely, the exact regression class task 4 review C5 already
+        // fixed once for plain `writes`.
+        ClaimKind::HereWrite | ClaimKind::SubWrite | ClaimKind::Writes => None,
+        // Verified against its one real call site (engine.rs 1d1, reading
+        // `entry_for_cmd(..).remote_dest`): `remote_dest` only ever filters
+        // an ALREADY-RESOLVED concrete path — `host:path` versus a local
+        // file with a colon in its name — at the point a write target is
+        // placed. A by-reference write resolves through `python::MARKER`
+        // (this file's `written_paths_in`), which no `is_remote_spec` check
+        // ever matches, so `remote_dest` has nothing to contribute to a
+        // call this function ever judges.
+        ClaimKind::RemoteDest => None,
+        // Verified against its one call site (`rebinds_a_name`, called only
+        // from engine.rs's 1d3 pass over `all_cmds`): isolation (spec §5.4)
+        // never appends the synthetic by-reference command to that vector,
+        // so this field cannot be reached from a by-reference call through
+        // that pass. It is also vacuous even if it somehow were: the
+        // synthetic command's `args` is always empty by construction, and
+        // `rebinds_a_name` matches only against `cmd.args`.
+        ClaimKind::RebindsNameFlags => None,
+    }
+}
+
+/// The invocations a command makes by REFERENCE: each resolved callable
+/// argument that occupies a slot the matched entry declares in
+/// `callback_args`, judged as a call with no arguments and unknown order.
+///
+/// A marked argument is only ever judged as an invocation when it occupies
+/// a DECLARED slot (`CallableArg`'s own doc comment) — without that
+/// declaration vouch has no basis for saying a marked reference runs at
+/// all. `datetime.datetime.now(timezone.utc)` marks `timezone.utc` (a bare
+/// attribute) as a reference; judging it as an invocation would falsely
+/// assert `now()` calls it (spec §5.2). `CallableArg::Inline` is already
+/// scanned and judged where its body was emitted, and contributes nothing
+/// of its own here; `CallableArg::Unresolved` raises its own construct
+/// through `unresolved_callback_argument`, never a synthetic invocation —
+/// there is no head to judge.
+///
+/// No arguments is the honest record — `map` will supply them from a list
+/// vouch never sees. A write claim therefore resolves to an unnamed
+/// destination (pass 1c's own unresolved-value handling, once judged) and a
+/// claim this call cannot evaluate — a conditional rule, an unmodeled head,
+/// a directory move, a wrap, a run-file, evaluated input, or a write
+/// through an already-open handle — is named on `ByReference::unevaluable`
+/// rather than quietly finding nothing (spec §5.2, task 4 review Q1/C2/C3).
+pub fn by_reference_invocations(kb: &Knowledge, cmd: &Cmd) -> Vec<ByReference> {
+    // Sorted by the argument's own position (task 4 review I1):
+    // `cmd.callable_args` is a `HashMap`, so returning it in iteration
+    // order would make which invocation wins a tied `worst` reason slot
+    // depend on hash order rather than on the command.
+    let mut indexed: Vec<(usize, &crate::syntax::CallableArg)> =
+        cmd.callable_args.iter().map(|(&i, a)| (i, a)).collect();
+    indexed.sort_by_key(|(i, _)| *i);
+    let mut out = Vec::new();
+    for (raw_idx, arg) in indexed {
+        let crate::syntax::CallableArg::Named { head, receiver } = arg else { continue };
+        let in_slot = entries_for_cmd(kb, cmd, "python")
+            .into_iter()
+            .any(|prog| in_declared_callback_slot(prog, cmd, raw_idx));
+        if !in_slot {
+            continue;
+        }
+        let full = format!("python:{head}");
+        let synthetic =
+            Cmd { head: full.clone(), receiver_origin: receiver.clone(), by_reference: true, ..Default::default() };
+        // Receiver-gated (task 4 review I2): the same entry set the
+        // reference itself would be judged against, not every same-named
+        // entry regardless of what produced the receiver — `entries_for`
+        // alone never applies `receiver_gate_holds`.
+        let entries: Vec<&Program> = entries_for_cmd(kb, &synthetic, "python").collect();
+        // `(reason, guard_backed)` — only the rule-with-conditions arm sets
+        // `guard_backed`, since it is the only one of the twelve naming an
+        // actual guard on the entry rather than a claim with no guard
+        // behind it (task 4 review I4; `ByReference::unevaluable_guard_backed`).
+        let found: Option<(String, bool)> = if entries.is_empty() {
+            // C3: an unmodeled reference never reaches the ordinary
+            // per-command unmodeled check — `by.cmd` is never appended to
+            // `all_cmds` (isolation, spec §5.4) — so silence here would be
+            // a silent allow of an unknown program (CLAUDE.md §1).
+            Some((format!("vouch has no description of {full}"), false))
+        } else {
+            entries
+                .iter()
+                .find_map(|p| CLAIM_KINDS.iter().find_map(|k| claim_kind_unevaluable(*k, p)))
+        };
+        let (unevaluable, unevaluable_guard_backed) = match found {
+            Some((reason, guard_backed)) => (Some(reason), guard_backed),
+            None => (None, false),
+        };
+        out.push(ByReference {
+            head: full,
+            cmd: synthetic,
+            unevaluable,
+            unevaluable_guard_backed,
+        });
+    }
+    out
+}
+
+/// Whether `cmd` hands over a callable-shaped reference vouch could not
+/// resolve (`CallableArg::Unresolved`) in a slot the matched entry declares
+/// in `callback_args` — the `Unresolved` twin of `by_reference_invocations`,
+/// gated by the SAME `in_declared_callback_slot` rule (M2.89 Ruling A): an
+/// unnameable reference outside a declared slot is no more an invocation
+/// than a named one is.
+pub fn unresolved_callback_argument(kb: &Knowledge, cmd: &Cmd) -> bool {
+    cmd.callable_args.iter().any(|(&raw_idx, arg)| {
+        matches!(arg, crate::syntax::CallableArg::Unresolved)
+            && entries_for_cmd(kb, cmd, "python").into_iter().any(|prog| in_declared_callback_slot(prog, cmd, raw_idx))
+    })
 }
 
 /// Whether a heredoc's body actually reaches the command it is attached to,
@@ -3362,9 +3811,11 @@ fn after_exec_commands(prog: &Program, args: &[String]) -> (Vec<Cmd>, Vec<String
                 args: rest_args.to_vec(),
                 unread_args: Default::default(),
                 keyword_args: Default::default(),
+                callable_args: Default::default(),
                 chain: None,
                 prefix_assigns: vec![],
                 receiver_origin: crate::syntax::ValueOrigin::Unknown,
+                by_reference: false,
             }),
             None => unlocated.push(format!(
                 "`{a}` is followed straight by its terminator, so vouch cannot tell what it \
@@ -4031,6 +4482,7 @@ pub fn expand_wrappers_forking(
                                     args: cmd.args[at + 1..].to_vec(),
                                     unread_args: Default::default(),
                                     keyword_args: Default::default(),
+                                    callable_args: Default::default(),
                                     chain: None,
                                     // The env words this wrapper set for the
                                     // command it runs are that command's own
@@ -4038,6 +4490,7 @@ pub fn expand_wrappers_forking(
                                     // `FOO=1 prog` bind the same name.
                                     prefix_assigns: walk.assigns,
                                     receiver_origin: crate::syntax::ValueOrigin::Unknown,
+                                    by_reference: false,
                                 }],
                                 args_complete: vec![own_args_complete],
                                 ..SnippetScan::default()
@@ -4200,9 +4653,11 @@ pub fn expand_wrappers_forking(
                                         args,
                                         unread_args: Default::default(),
                                         keyword_args: Default::default(),
+                                        callable_args: Default::default(),
                                         chain: None,
                                         prefix_assigns: vec![],
                                         receiver_origin: crate::syntax::ValueOrigin::Unknown,
+                                        by_reference: false,
                                     }],
                                     args_complete: vec![own_args_complete],
                                     ..SnippetScan::default()
@@ -4809,6 +5264,10 @@ pub struct EffectiveArgs {
     pub values: Vec<String>,
     pub padding: HashSet<usize>,
     pub unread: HashSet<usize>,
+    /// Folded positions holding a structurally observed callable reference.
+    /// Folded, so a keyword and a positional spelling of the same slot read
+    /// identically — the same reason `unread` is folded.
+    pub callable: HashSet<usize>,
     pub base_offset: usize,
 }
 
@@ -4825,17 +5284,24 @@ pub fn effective_args(prog: &Program, cmd: &Cmd) -> EffectiveArgs {
             values: cmd.args.clone(),
             padding: HashSet::new(),
             unread: cmd.unread_args.clone(),
+            callable: cmd.callable_args.keys().copied().collect(),
             base_offset: base,
         };
     }
     let mut eff: Vec<String> = Vec::new();
     let mut unread: HashSet<usize> = HashSet::new();
-    let mut folded: Vec<(usize, String, bool)> = Vec::new();
+    let mut callable: HashSet<usize> = HashSet::new();
+    let mut folded: Vec<(usize, String, bool, bool)> = Vec::new();
     for (i, a) in cmd.args.iter().enumerate() {
         if cmd.keyword_args.contains(&i) {
             if let Some((name, value)) = a.split_once('=') {
                 if let Some(p) = prog.arg_names.iter().position(|n| n == name) {
-                    folded.push((base + p, value.to_string(), cmd.unread_args.contains(&i)));
+                    folded.push((
+                        base + p,
+                        value.to_string(),
+                        cmd.unread_args.contains(&i),
+                        cmd.callable_args.contains_key(&i),
+                    ));
                 }
             }
             continue;
@@ -4849,6 +5315,9 @@ pub fn effective_args(prog: &Program, cmd: &Cmd) -> EffectiveArgs {
         if cmd.unread_args.contains(&i) {
             unread.insert(eff.len());
         }
+        if cmd.callable_args.contains_key(&i) {
+            callable.insert(eff.len());
+        }
         eff.push(a.clone());
     }
     // Positions filled in claimed order, not source order: python places no
@@ -4859,7 +5328,7 @@ pub fn effective_args(prog: &Program, cmd: &Cmd) -> EffectiveArgs {
     // runs) is unaffected either way.
     folded.sort_by_key(|(pos, ..)| *pos);
     let mut padding: HashSet<usize> = HashSet::new();
-    for (pos, value, value_unread) in folded {
+    for (pos, value, value_unread, value_callable) in folded {
         while eff.len() < pos {
             padding.insert(eff.len());
             eff.push(PADDING_MARKER.to_string()); // never addressed at all — see its own doc comment
@@ -4868,6 +5337,9 @@ pub fn effective_args(prog: &Program, cmd: &Cmd) -> EffectiveArgs {
             if value_unread {
                 unread.insert(pos);
             }
+            if value_callable {
+                callable.insert(pos);
+            }
             eff.push(value); // first occupant wins
         }
     }
@@ -4875,6 +5347,7 @@ pub fn effective_args(prog: &Program, cmd: &Cmd) -> EffectiveArgs {
         values: eff,
         padding,
         unread,
+        callable,
         base_offset: base,
     }
 }
@@ -4999,16 +5472,49 @@ pub fn written_paths_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> WriteTargets {
         if here_write_applies(prog, cmd, lang, &non_flags_paths) {
             out.run_dir_dest = true;
             continue;
+        } else if !prog.here_write.is_empty() && cmd.by_reference {
+            // A by-reference call can never SATISFY a conditional
+            // `here_write` entry's `when_flags`/`subcommand`/`operands` gate
+            // — every one of those reads `cmd`/`non_flags_paths`, which are
+            // empty by construction for the synthetic probe — so
+            // `here_write_applies` above is deterministically false for any
+            // conditional entry, not merely inapplicable to this call. An
+            // unconditional entry (empty `when_flags`, no `subcommand`, no
+            // `operands` or `operands = 0`) is already caught by the branch
+            // above; this is only the conditional case, reported unresolved
+            // rather than silently found to write nothing (task 4 review
+            // round 2, Finding B). Gated on `cmd.by_reference`, not
+            // `eff.is_empty()` — a genuinely bare REAL command (`sort` typed
+            // with no arguments) also has an empty `eff` and must stay
+            // silent here, unaffected by this fix (task 4 review round 3,
+            // CRITICAL).
+            push_write_target(&mut out, crate::python::MARKER);
+            continue;
         }
         match prog.writes.as_str() {
             "last_arg" => {
                 if let Some(last) = non_flags_paths.last() {
                     push_write_target(&mut out, last);
+                } else if cmd.by_reference {
+                    // A by-reference invocation, judged with no arguments
+                    // (task 4 review C4), still claims a write here; report
+                    // it as unresolved rather than silently finding nothing.
+                    // An ordinary real invocation given only flags
+                    // (`touch --help`) or genuinely bare (`sort` typed with
+                    // no arguments) has `by_reference == false` and stays
+                    // silent, exactly as before this fix (task 4 review
+                    // round 3, CRITICAL: `eff.is_empty()` could not tell the
+                    // two cases apart).
+                    push_write_target(&mut out, crate::python::MARKER);
                 }
             }
             "all_args" => {
-                for a in &non_flags_paths {
-                    push_write_target(&mut out, a);
+                if !non_flags_paths.is_empty() {
+                    for a in &non_flags_paths {
+                        push_write_target(&mut out, a);
+                    }
+                } else if cmd.by_reference {
+                    push_write_target(&mut out, crate::python::MARKER);
                 }
             }
             // "named"       — the flag's value, with a positional fallback
@@ -5081,7 +5587,22 @@ pub fn written_paths_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> WriteTargets {
                     };
                     if let Some(p) = pick {
                         push_write_target(&mut out, p);
+                        found = true;
                     }
+                }
+                // A by-reference call finds neither a flag's value nor a
+                // positional fallback — `found` stays false and this arm
+                // falls silent, exactly like `last_arg` and `all_args`
+                // before their own fix (task 4 review round 2, Finding B).
+                // Gated on `cmd.by_reference`, not `eff.is_empty()` or
+                // `!found` alone: an ordinary real invocation that simply
+                // omits its write flag (`tar -tf a.tar`, `"flags_only"`, no
+                // positional fallback ever runs) — or is typed genuinely
+                // bare (`sort` with no arguments) — has `by_reference ==
+                // false` and must stay silent, unaffected by this fix (task
+                // 4 review round 3, CRITICAL).
+                if !found && cmd.by_reference {
+                    push_write_target(&mut out, crate::python::MARKER);
                 }
             }
             "of_prefix" => {
@@ -5089,6 +5610,15 @@ pub fn written_paths_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> WriteTargets {
                     if let Some(v) = a.strip_prefix("of=") {
                         push_write_target(&mut out, v);
                     }
+                }
+                // An empty `eff` never enters the loop above, so a
+                // by-reference call finds nothing here either — gated on
+                // `cmd.by_reference`, not `eff.is_empty()` (task 4 review
+                // round 2, Finding B; round 3, CRITICAL) — same precedent as
+                // `last_arg`/`all_args`. A genuinely bare real `dd` also has
+                // an empty `eff` and must stay silent.
+                if cmd.by_reference {
+                    push_write_target(&mut out, crate::python::MARKER);
                 }
             }
             // `writes = "arg_<N>"` names ONE numbered positional argument as
@@ -5232,6 +5762,25 @@ pub fn written_paths_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> WriteTargets {
                         }
                     }
                 }
+            } else if cmd.by_reference {
+                // `resolve_verb` reads `cmd.args`, empty by construction for
+                // a by-reference call — `Verb::None`, so `sub_idx` is
+                // `None` and the whole scoped-destination block above is
+                // skipped with no judgement at all today, a silent allow of
+                // a program that DOES declare a subcommand-scoped write
+                // (task 4 review round 2, Finding B). Gated on
+                // `cmd.by_reference`, not `eff.is_empty()` or merely
+                // `sub_idx.is_none()`: an ordinary real command that is
+                // simply flags-only (`git -C /path`) or genuinely bare
+                // (`git` typed with no arguments at all) also resolves
+                // `Verb::None`, has `by_reference == false`, and must keep
+                // behaving exactly as before this fix — vouch does not know
+                // this program's verb from a real, present argument list
+                // either, but that is the ordinary "no subcommand
+                // recognised" case, not this one (task 4 review round 3,
+                // CRITICAL: `eff.is_empty()` flipped bare `git` from allow
+                // to ask because it cannot distinguish the two).
+                push_write_target(&mut out, crate::python::MARKER);
             }
         }
     }

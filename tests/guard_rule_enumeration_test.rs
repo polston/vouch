@@ -54,9 +54,11 @@ fn firing_cmd(head: &str, rule: &Rule) -> Cmd {
         args,
         unread_args: Default::default(),
         keyword_args: Default::default(),
+        callable_args: Default::default(),
         chain: None,
         prefix_assigns: vec![],
         receiver_origin: vouch::syntax::ValueOrigin::Unknown,
+        by_reference: false,
     }
 }
 
@@ -66,9 +68,11 @@ fn bare(head: &str) -> Cmd {
         args: Vec::new(),
         unread_args: Default::default(),
         keyword_args: Default::default(),
+        callable_args: Default::default(),
         chain: None,
         prefix_assigns: vec![],
         receiver_origin: vouch::syntax::ValueOrigin::Unknown,
+        by_reference: false,
     }
 }
 

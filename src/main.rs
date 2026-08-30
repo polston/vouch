@@ -1041,9 +1041,11 @@ fn main() {
                     args: subs.clone(),
                     unread_args: Default::default(),
                     keyword_args: Default::default(),
+                    callable_args: Default::default(),
                     chain: None,
                     prefix_assigns: vec![],
                     receiver_origin: vouch::syntax::ValueOrigin::Unknown,
+                    by_reference: false,
                 };
                 let claimed = if subs.is_empty() {
                     program.clone()
@@ -1067,9 +1069,11 @@ fn main() {
                         args: flags_typed.clone(),
                         unread_args: Default::default(),
                         keyword_args: Default::default(),
+                        callable_args: Default::default(),
                         chain: None,
                         prefix_assigns: vec![],
                         receiver_origin: vouch::syntax::ValueOrigin::Unknown,
+                        by_reference: false,
                     };
                     vouch::guards::recognises(&loaded.kb, &flag_probe, "bash", true)
                         && (subs.is_empty()

@@ -250,9 +250,22 @@ wrap_ambiguous = "ask"
 # A wrap arm located a snippet in a language vouch has no scanner for (see
 # the earlier unreadable-language explanation for the full scope).
 unreadable_language = "ask"
-# This call occupies a declared callback slot — the value handed there runs
-# when the described function invokes it, and vouch cannot see what that is.
+# A declared callback slot holds an occupant vouch could not read and that
+# carries no callable mark — a subscript, a call result, a starred argument —
+# or a `**` unpack that could be filling one. Any of them could still be a
+# function at runtime, and what it would do is unseen. A marked callable
+# occupant (a name or a literal lambda) never asks here: it is judged on its
+# own terms instead, and setting callable_argument below to allow does not
+# silence every marked occupant — see its own comment for what it actually
+# covers.
 callback_argument = "ask"
+# A callable was handed over by reference into a declared callback slot, and
+# vouch either could not resolve which callable it names, or resolved it to
+# an entry carrying a claim the argument-less by-reference call cannot
+# evaluate: a conditional rule, a directory move, a wrap, a run-file,
+# evaluated input, a write through an already-open handle, or appended
+# arguments from a channel the call never names.
+callable_argument = "ask"
 # This calls a name the snippet itself rebound (assignment, def, class, …),
 # so vouch will not read it as the name's original meaning.
 rebound_name = "ask"

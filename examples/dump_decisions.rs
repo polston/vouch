@@ -15,11 +15,33 @@
 //! directory rather than the package root, and the conventional dump patterns in
 //! `.gitignore` only cover `tests/fixtures/`, so a relative path can put
 //! corpus-derived output at an untracked-but-unignored place inside the tree.
+//!
+//! `VOUCH_DUMP_CONFIG` selects which config the rows are judged under. Unset
+//! (or `"standing"`) dumps `realistic_config()`, the operator's default.
+//! `"callback_argument_allow"` dumps the same config with
+//! `lang.python.constructs.callback_argument` set to `allow` — the second
+//! config a decision-behaviour replay must also cover (task 4 review round
+//! 3), since a change that only ever gets exercised under the construct's ask
+//! default could hide a compensating move that only shows up once it is
+//! allowed. Any other value is refused rather than silently read as the
+//! default, so a typo in the variable produces an error, not a wrong dump.
 
 #[path = "../tests/common/mod.rs"]
 mod common;
 
 fn main() {
     let rows = common::rows_for_measurement();
-    common::dump_every_row_under(common::realistic_config(), &rows);
+    let cfg = match std::env::var("VOUCH_DUMP_CONFIG").ok().as_deref() {
+        None | Some("standing") => common::realistic_config(),
+        Some("callback_argument_allow") => common::realistic_config_with_construct(
+            "python",
+            "callback_argument",
+            vouch::config::Action::Allow,
+        ),
+        Some(other) => panic!(
+            "VOUCH_DUMP_CONFIG={other:?} is not recognised (expected unset, \
+             \"standing\", or \"callback_argument_allow\")"
+        ),
+    };
+    common::dump_every_row_under(cfg, &rows);
 }

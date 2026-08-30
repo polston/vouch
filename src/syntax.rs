@@ -20,6 +20,13 @@ pub struct Cmd {
     /// positional syntax. Out of band because a positional string may
     /// legally contain the identical `name=value` text.
     pub keyword_args: std::collections::HashSet<usize>,
+    /// Argument positions the scanner structurally observed holding a
+    /// reference to something callable, and what each names when it could be
+    /// resolved. Out of band for the same reason as `unread_args` and
+    /// `keyword_args`: a literal argument may legally equal any spelling this
+    /// could otherwise be recovered from, and M2.78 is the scar that made
+    /// that a rule rather than a preference.
+    pub callable_args: std::collections::HashMap<usize, CallableArg>,
     /// This command's position in an `&&`/`||` and-or chain, `None` when it
     /// is not part of one — a plain `;`/newline-separated statement, or the
     /// sole member of a trivial one-pipeline "chain" with no `&&`/`||` link
@@ -33,6 +40,17 @@ pub struct Cmd {
     /// commands and scanners that do not track values leave this `Unknown`;
     /// knowledge must never infer a receiver claim from missing metadata.
     pub receiver_origin: ValueOrigin,
+    /// True only for the synthetic zero-argument command
+    /// `by_reference_invocations` builds to judge a python callable passed
+    /// by reference (M2.89). This is the one genuine discriminator between
+    /// that synthetic probe and an ordinary real command that happens to
+    /// have no arguments at all — a bare `sort`, `find`, or `git` — because
+    /// both have an empty `args`, and argument-count emptiness cannot tell
+    /// them apart (task 4 review round 3, CRITICAL: the earlier
+    /// `eff.is_empty()` gate in `written_paths_in` flipped bare real
+    /// commands from allow to ask). Every scanner-built and CLI-probe `Cmd`
+    /// leaves this `false`.
+    pub by_reference: bool,
 }
 
 /// A scanner's language-neutral account of where a runtime value came from.
@@ -55,6 +73,46 @@ pub enum ValueOrigin {
         receiver: Option<Box<ValueOrigin>>,
         arguments: CallArguments,
     },
+}
+
+/// What one argument position holds when the scanner structurally observed a
+/// reference to something callable there.
+///
+/// Python cannot distinguish a function reference from any other object
+/// reference syntactically — `os.remove` and `timezone.utc` are both
+/// attribute nodes — so this says "a reference, not a value computed here",
+/// which is the honest predicate. A slot that turns out to hold an object
+/// rather than a function is settled in knowledge, never by teaching the
+/// scanner to guess at types (spec §3.3, §6.2).
+///
+/// This also marks ordinary DATA arguments passed by bare name —
+/// `json.loads(s, ...)` marks `s` as `Named{head: "s"}`, because any
+/// un-poisoned bare name genuinely IS a reference to whatever it holds, and
+/// the scanner has no way to tell "the reader passed a callback" from "the
+/// reader passed a variable" without knowing the callee. What keeps this
+/// harmless: a marked argument is only ever judged AS an invocation when it
+/// occupies a position the knowledge declares in `callback_args` — an
+/// ordinary data parameter never does, so the mark sits there unread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallableArg {
+    /// Resolved to a name knowledge can be written against. The receiver
+    /// origin travels with it so a method-shaped head is gated exactly as
+    /// M2.87 gates every other receiver claim.
+    Named { head: String, receiver: ValueOrigin },
+    /// A lambda literal written at the call site. Its body is already
+    /// emitted as ordinary calls, so a second account would prompt twice for
+    /// one operation. This is the only route to `Inline` — a bare name that
+    /// merely happens to be bound to a `def` or a lambda elsewhere in the
+    /// snippet is `Unresolved`, not `Inline`: the scanner has not scanned
+    /// that body in place, and cannot prove the reference is unambiguous.
+    Inline,
+    /// Callable-shaped, and the scanner could not say what it names: a
+    /// rebound name, a parameter, a call result bound to a name, or a bare
+    /// reference to a name this snippet binds to a `def` or a lambda
+    /// somewhere else (poisoned exactly as any other reassignment would be,
+    /// so vouch has neither resolved nor scanned what will actually be
+    /// called).
+    Unresolved,
 }
 
 /// Argument-shape facts needed to qualify a producer claim.
@@ -333,9 +391,11 @@ impl Scan {
             args,
             unread_args: Default::default(),
             keyword_args: Default::default(),
+            callable_args: Default::default(),
             chain,
             prefix_assigns,
             receiver_origin: ValueOrigin::Unknown,
+            by_reference: false,
         });
         self.order.push(order);
         self.input_source.push(input_source);

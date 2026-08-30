@@ -284,9 +284,11 @@ pub fn cmd(head: &str, args: &[&str]) -> vouch::syntax::Cmd {
         args: args.iter().map(|s| s.to_string()).collect(),
         unread_args: Default::default(),
         keyword_args: Default::default(),
+        callable_args: Default::default(),
         chain: None,
         prefix_assigns: vec![],
         receiver_origin: vouch::syntax::ValueOrigin::Unknown,
+        by_reference: false,
     }
 }
 
@@ -677,6 +679,44 @@ pub fn require_repo_pinning() {
 pub fn rows_for_measurement() -> Vec<Row> {
     require_repo_pinning();
     real_or_exit()
+}
+
+/// The Python snippets located inside one shell command.
+///
+/// The same locator `count_python_argv_shapes.rs` already proved: the bash
+/// scanner finds the command, `expand_wrappers_with_sources` walks its
+/// wrappers, and every `(language, source)` pair it hands back where the
+/// language is `"python"` is a located snippet. Shared here rather than
+/// written a second time, so a later locator fix reaches every consumer.
+///
+/// `kb` is a caller-held parameter rather than loaded inside: a measurement
+/// calls this once per corpus row, and `shipped_kb()` re-reads and re-parses
+/// `knowledge.toml` from disk every time it runs — fine once, wasteful
+/// thousands of times over.
+///
+/// `None` when `cmd` does not parse as bash; `Some` (possibly empty) when it
+/// does, holding every snippet found regardless of whether it later parses as
+/// Python.
+pub fn python_snippets(kb: &vouch::guards::Knowledge, cmd: &str) -> Option<Vec<String>> {
+    let bash = vouch::syntax::scanner_for("bash").expect("bash scanner exists");
+    let scan = bash.scan(cmd).ok()?;
+    let expanded = vouch::guards::expand_wrappers_with_sources(
+        kb,
+        &scan.commands,
+        &scan.heredocs,
+        &scan.input_source,
+        &scan.args_complete,
+        "bash",
+        &|_| 4,
+    );
+    Some(
+        expanded
+            .srcs
+            .into_iter()
+            .filter(|(language, _)| language == "python")
+            .map(|(_, source)| source)
+            .collect(),
+    )
 }
 
 /// One command through the whole decide pipeline at a stated working

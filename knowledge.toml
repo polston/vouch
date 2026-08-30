@@ -984,12 +984,17 @@ arg_names = ["path", "mode"]
 # cannot be established with confidence, or when it is simply too rare to be
 # worth a claim. Those are different reasons and the exclusion notes below
 # say which applies, so a later pass never reads "absent" as "unsafe".
-# The higher-order builtins
-# (map, filter, sorted, min, max, two-arg iter) are deliberately ABSENT: they
-# invoke a callable the caller supplies, and a callable passed by reference
-# is never judged (M2.89) — do not add them here. help and breakpoint are
-# absent because each can start something (a pager; a hook-selected
-# callable). compile and __import__ are absent and unmodeled on purpose.
+#
+# The higher-order builtins that take a callable — map, filter, sorted, min,
+# max — are absent from THIS block, not from the file: each now has its own
+# entry below declaring which parameter is invoked by reference
+# (`callback_args`), a claim this flat match-only block has no field to
+# carry. any/all/sum take no callable at all and were never part of that
+# group; they stay listed here. Two-arg `iter(callable, sentinel)` remains
+# genuinely unmodeled — nothing here has verified its real signature. help
+# and breakpoint are absent because each can start something (a pager; a
+# hook-selected callable). compile and __import__ are absent and unmodeled
+# on purpose.
 #
 # set, type, hash and exit share spelling with existing bare shell entries
 # on purpose — they are genuine python builtins, not forgotten prefixes;
@@ -1006,6 +1011,43 @@ match = [
   "python:bin", "python:format", "python:hash", "python:input",
   "python:exit", "python:quit",
 ]
+
+# The higher-order builtins the group above fenced off. M2.86 excluded these
+# because a callable handed to them was invisible; M2.89 records the
+# reference and M2.92 asks only when one is really there, so each can now be
+# described as what it is — pure-read, given that the parameter it invokes
+# is declared.
+#
+# `key` is KEYWORD-ONLY in sorted/min/max, so it is not in `arg_names`:
+# naming it there would claim a positional slot no spelling can reach — the
+# reference is still found, through the keyword rule
+# (guards::in_declared_callback_slot, rule 2), which needs no positional name
+# at all. `map` and `filter` take their function POSITIONALLY-ONLY, so those
+# two do declare it.
+[[program]]
+match = ["python:sorted"]
+callback_args = ["key"]
+
+[[program]]
+match = ["python:min", "python:max"]
+callback_args = ["key"]
+
+[[program]]
+match = ["python:map"]
+arg_names = ["function"]
+callback_args = ["function"]
+
+[[program]]
+match = ["python:filter"]
+arg_names = ["function", "iterable"]
+callback_args = ["function"]
+
+# `functools.reduce` is absent because this pass did not audit it, not
+# because it resists description: its function parameter is positional-only
+# exactly as `map`'s is, so the same `callback_args` entry would be
+# expressible and would let a referenced callable be judged. Unmodeled is
+# the conservative state — it keeps asking — and ROADMAP.md M2.208 holds the
+# open choice between auditing it in and leaving it out.
 
 # Module-qualified reads, chosen singly — json.load READS from a handle,
 # json.dump WRITES through one (group D below); yaml.safe_load parses with
@@ -1230,12 +1272,21 @@ match = [
 # datetime.now(tz) is NOT a plain clock read like its siblings above: when
 # tz is given, CPython calls tz.fromutc(...) — verified live with a tzinfo
 # subclass whose fromutc prints a marker, which fired. tz is accepted
-# positionally (verified live too), so it needs both fields, in its own
+# positionally (verified live too), so arg_names still names it, in its own
 # entry — the siblings above take no such argument at all.
+#
+# `tz` is a tzinfo OBJECT whose METHODS now() calls, never a function it
+# invokes itself, so it carries no callback_args (§3: an entry is a claim
+# that must be true, and callback_args asserts invocation, not method use).
+# It is not writes_via_handle either — that key asserts a write through an
+# already-opened file object with a destination judged at open; tz is not a
+# file handle and its methods are not confined to writing. No existing key
+# states "an object is handed over so its own methods run," so the claim is
+# removed outright rather than approximated under either one. Recorded as
+# ROADMAP.md M2.207, not approximated by a false claim here.
 [[program]]
 match = ["python:datetime.datetime.now"]
 arg_names = ["tz"]
-callback_args = ["tz"]
 
 # Hash objects are built from in-memory bytes; hashing itself performs no I/O.
 [[program]]

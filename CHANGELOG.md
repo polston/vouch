@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.15.0 (2026-08-30)
+
+
+### Features
+
+* a function vouch already describes, handed to a call like sorted through its key argument, is now judged and allowed instead of asking about a function it could not see
+* a new lang.python.constructs.callable_argument setting controls the prompt for a by-reference callable vouch could not resolve or fully evaluate
+* handing a destructive function to another function is now judged as what it does
+* sorted, min, max, map and filter are now recognized, so a real callable handed to their key or function argument is judged instead of the whole call going unmodeled
+
+
+### Bug Fixes
+
+* datetime.now with a timezone no longer prompts about a function it never calls
+* passing a plain replacement string to re.sub no longer prompts about a function
+
 ## 0.14.0 (2026-08-28)
 
 

@@ -556,9 +556,11 @@ fn cmd(head: &str, args: &[&str]) -> vouch::syntax::Cmd {
         args: args.iter().map(|s| s.to_string()).collect(),
         unread_args: Default::default(),
         keyword_args: Default::default(),
+        callable_args: Default::default(),
         chain: None,
         prefix_assigns: vec![],
         receiver_origin: vouch::syntax::ValueOrigin::Unknown,
+        by_reference: false,
     }
 }
 
@@ -1053,7 +1055,39 @@ callback_args = ["opener"]
         &kb,
         &py_cmd(r#"open("$**")"#)
     ));
+    // A subscript is neither a plain literal (so it is `unread`) nor
+    // `Name`/`Attribute`/`Lambda` (so `argument_callable`, src/python.rs,
+    // never marks it `CallableArg` at all) — the genuine "occupied, unread,
+    // not callable" shape rule 1 exists for, unchanged by finding 1.
     assert!(vouch::guards::callback_argument_used(
+        &kb,
+        &py_cmd(r#"open("x", opener=handlers[0])"#)
+    ));
+}
+
+/// Finding 1 (task-final-review, spec §5.2 per-slot exclusivity): a bare
+/// `Name` reference is ALSO `unread` (it is not literal text vouch can
+/// read as a string, same as the subscript above), so before this fix it
+/// tripped rule 1 on the strength of occupancy alone — on top of whatever
+/// `by_reference_invocations` (M2.89) already said about the same `value`
+/// reference. `callable_ref` (src/python.rs:649) resolves a never-rebound
+/// bare name straight through to `CallableArg::Named` — the same path
+/// `len`, `int`, and `os.path.basename` take — so `value` here is judged
+/// specifically (by reference; unevaluable, since no `python:value` entry
+/// describes it) rather than generically, and `callback_argument_used`
+/// must no longer also fire for this slot.
+#[test]
+fn a_callable_marked_occupant_is_excluded_here_and_judged_by_reference_instead() {
+    let kb = vouch::guards::load(
+        r#"
+[[program]]
+match = ["python:open"]
+arg_names = ["file", "mode", "buffering", "encoding", "errors", "newline", "closefd", "opener"]
+callback_args = ["opener"]
+"#,
+    )
+    .expect("parses");
+    assert!(!vouch::guards::callback_argument_used(
         &kb,
         &py_cmd(r#"open("x", opener=value)"#)
     ));

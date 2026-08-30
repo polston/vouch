@@ -72,7 +72,14 @@ pub const KNOWN_CONSTRUCTS: &[&str] = &[
     "wrap_depth_exceeded",
     "wrap_unlocated",
     "wrap_ambiguous",
+    // `callback_argument` fires because a DESCRIBED function will invoke
+    // what it was handed (`callback_argument_used`, declaration-driven).
+    // `callable_argument` fires because vouch SAW a callable handed over
+    // and could not resolve it or fully judge the entry it names
+    // (`by_reference_invocations`'s `rule_unevaluable`, or
+    // `unresolved_callback_argument` — observation-driven, M2.89).
     "callback_argument",
+    "callable_argument",
     "rebound_name",
     "unreadable_language",
     "unread_verb",
@@ -344,7 +351,22 @@ struct Flow {
     poisoned: std::collections::HashSet<String>,
     receiver_origins: HashMap<CallKey, crate::syntax::ValueOrigin>,
     call_heads: HashMap<CallKey, CallableRef>,
+    /// Per-call argument callables, keyed by the call's stable source range
+    /// so traversal order cannot pair facts incorrectly. Positional entries
+    /// are indexed into `node.arguments.args`; keyword entries are keyed by
+    /// name. `Walk::call` maps both into its own argument index space rather
+    /// than this pass duplicating that computation — one place decides what
+    /// index an argument has.
+    call_arg_callables: HashMap<CallKey, ArgCallables>,
     call_results: HashMap<CallKey, crate::syntax::ValueOrigin>,
+}
+
+/// Argument callables observed on one call, indexed the way the AST
+/// presents them rather than the way `Walk` will later number them.
+#[derive(Default, Clone)]
+struct ArgCallables {
+    positional: HashMap<usize, crate::syntax::CallableArg>,
+    keyword: HashMap<String, crate::syntax::CallableArg>,
 }
 
 /// Execution order facts for effects whose meaning lives in knowledge.
@@ -645,6 +667,38 @@ impl Flow {
                     head: format!(".{}", attribute.attr),
                     receiver: Some(self.origin(&attribute.value)),
                 })
+            }
+            _ => None,
+        }
+    }
+
+    /// The structural answer for one argument expression (spec §3.3).
+    /// `None` means "a value computed here", which is every literal, call
+    /// result, subscript, f-string and arithmetic form.
+    ///
+    /// A bare name or attribute reference is `Named` only when
+    /// `callable_ref` genuinely resolves it (an alias, an import, or an
+    /// unpoisoned bare name whose binding is unambiguous). Anything
+    /// `callable_ref` could not resolve — including a name this snippet
+    /// binds to a `def` or a lambda somewhere else, which poisons it exactly
+    /// the same way a reassignment would — falls through to `Unresolved`.
+    /// vouch has neither scanned nor resolved what will actually be called
+    /// through such a reference, so it must keep asking rather than treat
+    /// the def/lambda body as already accounted for; only a literal lambda
+    /// written at the call site (`Expr::Lambda`) is scanned in place and
+    /// earns `Inline`.
+    fn argument_callable(&self, e: &ast::Expr) -> Option<crate::syntax::CallableArg> {
+        use crate::syntax::CallableArg;
+        match e {
+            ast::Expr::Lambda(_) => Some(CallableArg::Inline),
+            ast::Expr::Name(_) | ast::Expr::Attribute(_) => {
+                if let Some(r) = self.callable_ref(e) {
+                    return Some(CallableArg::Named {
+                        head: r.head,
+                        receiver: r.receiver.unwrap_or_default(),
+                    });
+                }
+                Some(CallableArg::Unresolved)
             }
             _ => None,
         }
@@ -1159,6 +1213,20 @@ impl<'a> Visitor<'a> for Flow {
             if let Some(alias) = alias {
                 self.call_heads.insert(key, alias);
             }
+            let mut found = ArgCallables::default();
+            for (i, a) in call.arguments.args.iter().enumerate() {
+                if let Some(c) = self.argument_callable(a) {
+                    found.positional.insert(i, c);
+                }
+            }
+            for k in call.arguments.keywords.iter() {
+                if let (Some(name), Some(c)) = (&k.arg, self.argument_callable(&k.value)) {
+                    found.keyword.insert(name.to_string(), c);
+                }
+            }
+            if !found.positional.is_empty() || !found.keyword.is_empty() {
+                self.call_arg_callables.insert(call_key(call), found);
+            }
             let result = if head == UNNAMEABLE {
                 crate::syntax::ValueOrigin::Unknown
             } else {
@@ -1246,6 +1314,10 @@ struct Walk {
     /// Assigned callable aliases whose true heads override rebound-name
     /// refusal for exactly the call nodes proven to use them.
     call_heads: HashMap<CallKey, CallableRef>,
+    /// Per-call argument callables computed by `Flow`, keyed the same way as
+    /// `call_heads`. `Walk::call` maps these into its own argument index
+    /// space — the position `args.len()` is at when each is pushed.
+    call_arg_callables: HashMap<CallKey, ArgCallables>,
     /// Syntax-only execution order, computed independently and keyed by the
     /// call's stable source range. Missing means unordered, never sequential.
     call_orders: HashMap<CallKey, Order>,
@@ -1365,6 +1437,8 @@ impl Walk {
         let mut unread_args = std::collections::HashSet::new();
         let mut keyword_args = std::collections::HashSet::new();
         let mut indexed_values = std::collections::HashMap::new();
+        let found = self.call_arg_callables.get(&call_key(node)).cloned().unwrap_or_default();
+        let mut callable_args = std::collections::HashMap::new();
         if let Some(r) = receiver {
             if !r.readable {
                 unread_args.insert(args.len());
@@ -1374,7 +1448,7 @@ impl Walk {
             }
             args.push(r.text);
         }
-        for a in node.arguments.args.iter() {
+        for (i, a) in node.arguments.args.iter().enumerate() {
             // An argument vouch cannot resolve still has to OCCUPY its
             // position, or `os.rename(compute(), "C:/x")` shifts and the
             // destination is read as the source.
@@ -1384,6 +1458,9 @@ impl Walk {
             }
             if let Some(reference) = value.indexed {
                 indexed_values.insert(args.len(), reference);
+            }
+            if let Some(c) = found.positional.get(&i) {
+                callable_args.insert(args.len(), c.clone());
             }
             args.push(value.text);
         }
@@ -1400,6 +1477,9 @@ impl Walk {
                         indexed_values.insert(args.len(), reference);
                     }
                     keyword_args.insert(args.len());
+                    if let Some(c) = found.keyword.get(name.as_str()) {
+                        callable_args.insert(args.len(), c.clone());
+                    }
                     args.push(format!("{name}={}", value.text));
                 }
                 // `**opts` — a nameless keyword-unpacking argument. There is
@@ -1441,6 +1521,7 @@ impl Walk {
         if let Some(cmd) = self.out.commands.last_mut() {
             cmd.unread_args = unread_args;
             cmd.keyword_args = keyword_args;
+            cmd.callable_args = callable_args;
             cmd.receiver_origin =
                 self.receiver_origins.get(&call_key(node)).cloned().unwrap_or(crate::syntax::ValueOrigin::Unknown);
         }
@@ -1669,6 +1750,7 @@ pub fn parse(src: &str) -> Result<Scan, String> {
         poisoned: binder.bound,
         receiver_origins: flow.receiver_origins,
         call_heads: flow.call_heads,
+        call_arg_callables: flow.call_arg_callables,
         call_orders: execution_order.calls,
         ..Walk::default()
     };

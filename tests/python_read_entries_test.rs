@@ -1,7 +1,8 @@
 //! The pure-read python vocabulary (M2.86): every shipped read-only
 //! `python:` entry is proven to recognise a call synthesized from its own
-//! name, unknown siblings still ask, and the excluded higher-order builtins
-//! are pinned to ask (spec 2026-08-09, review finding 1 / M2.89).
+//! name, unknown siblings still ask, and the higher-order builtins that
+//! invoke a caller-supplied callable stay pinned to ask whether or not the
+//! builtin itself has an entry (spec 2026-08-09, review finding 1 / M2.89).
 
 use vouch::config::load;
 use vouch::engine::decide_command_in;
@@ -131,13 +132,13 @@ fn every_read_only_python_entry_recognises_its_own_call() {
 }
 
 #[test]
-fn every_declared_callback_slot_trips_the_construct() {
+fn every_declared_callback_slot_asks_for_an_unreadable_occupant() {
     // The read-side mirror of `guard_rule_enumeration_test.rs` (M2.9's
     // principle): a declared `callback_args` slot that does not actually
     // trip would sit dead and unnoticed, exactly the M2.52 hazard the
     // validation comment warns about. For each shipped entry carrying
     // `callback_args`, occupy EACH declared slot and assert Ask naming
-    // `callback_argument` specifically — not just any Ask.
+    // the callback machinery specifically — not just any Ask.
     //
     // Task 2b fix round 4 widened this: earlier it probed with a single
     // bare positional ('k') regardless of the entry, which worked while
@@ -150,8 +151,22 @@ fn every_declared_callback_slot_trips_the_construct() {
     // declaration itself was live. Every declared position up to and
     // including the slot under test is now filled with a value that
     // resolves INSIDE `allow_paths`, so the write pass never has anything
-    // to object to and `callback_argument` is the only thing that can
-    // still be asking.
+    // to object to.
+    //
+    // Finding 1 (task-final-review, spec §5.2 per-slot exclusivity): the
+    // probe used to be `len`, a described pure-read reference — but a slot
+    // the scanner resolves to a `CallableArg` (`len` is a bare name, so it
+    // resolves to `Named`) is now judged specifically, by
+    // `by_reference_invocations`, and is excluded from this generic
+    // construct so the two never double-fire on the same slot (that
+    // exclusion is what this fix round added; see the companion test
+    // below for the clean-reference half). `len` therefore no longer
+    // proves this construct is live — it now allows. The probe here is
+    // `other[0]`, a subscript: `python.rs`'s `argument_callable` does not
+    // resolve subscripts to any `CallableArg` at all (spec §3.3, "a value
+    // computed here"), so the slot is recorded only as unread — the exact
+    // shape this generic construct still exists to catch, and the one the
+    // specific by-reference judgement never sees.
     let guards_off = cfg_with_delete_recursive_off();
     let kb = vouch::guards::in_effect();
     let mut checked = 0;
@@ -165,7 +180,7 @@ fn every_declared_callback_slot_trips_the_construct() {
                 // position at index 0 resolves cleanly).
                 let n_positional = p.arg_names.iter().position(|n| n == slot).map(|i| i + 1).unwrap_or(1);
                 let positionals = vec!["'C:/work/x'"; n_positional].join(", ");
-                let args_text = format!("{positionals}, {slot}=g");
+                let args_text = format!("{positionals}, {slot}=other[0]");
                 let snippet = if let Some((root, _)) = bare.split_once('.') {
                     format!("import {root}; {bare}({args_text})")
                 } else {
@@ -174,6 +189,9 @@ fn every_declared_callback_slot_trips_the_construct() {
                 let cmd = format!("python -c \"{snippet}\"");
                 match decide_with(&guards_off, &cmd) {
                     Decision::Ask(r) => {
+                        // A subscript is not a callable reference (see the
+                        // comment above), so the generic `callback_argument`
+                        // claim is the only thing left to fire.
                         assert!(
                             r.contains("callback_argument"),
                             "{name}/{slot}: reason does not name callback_argument: {r}"
@@ -185,6 +203,48 @@ fn every_declared_callback_slot_trips_the_construct() {
                         checked += 1;
                     }
                     other => panic!("{name}/{slot}: expected Ask for {cmd}, got {other:?}"),
+                }
+            }
+        }
+    }
+    assert!(checked > 0, "no callback_args slots found — the declarations did not ship");
+}
+
+#[test]
+fn every_declared_callback_slot_allows_a_cleanly_resolving_reference() {
+    // Finding 1 (task-final-review, spec §5.2 per-slot exclusivity): a slot
+    // the scanner resolves to a NAMED callable reference is judged
+    // specifically — by `by_reference_invocations` — and is excluded from
+    // the generic `callback_argument` construct the sibling test above
+    // proves is still live for an unreadable occupant. `len` is a shipped,
+    // described, pure-read entry (`python:len`), so handing it by reference
+    // resolves cleanly: no `callable_argument` (nothing unevaluable about
+    // the reference), and — after this fix — no `callback_argument` either
+    // (the slot is no longer double-judged). Every declared slot across
+    // every shipped `callback_args` entry now allows when filled this way,
+    // attributable entirely to `python:len`'s own described claim — this is
+    // the loosening named in the review finding (e.g. `sorted(xs,
+    // key=len)`), proven here for every declared slot rather than only the
+    // named examples.
+    let guards_off = cfg_with_delete_recursive_off();
+    let kb = vouch::guards::in_effect();
+    let mut checked = 0;
+    for p in kb.program.iter().filter(|p| !p.callback_args.is_empty()) {
+        for name in p.match_names.iter().filter(|n| n.starts_with("python:")) {
+            let bare = name.strip_prefix("python:").expect("python: prefix");
+            for slot in &p.callback_args {
+                let n_positional = p.arg_names.iter().position(|n| n == slot).map(|i| i + 1).unwrap_or(1);
+                let positionals = vec!["'C:/work/x'"; n_positional].join(", ");
+                let args_text = format!("{positionals}, {slot}=len");
+                let snippet = if let Some((root, _)) = bare.split_once('.') {
+                    format!("import {root}; {bare}({args_text})")
+                } else {
+                    format!("{bare}({args_text})")
+                };
+                let cmd = format!("python -c \"{snippet}\"");
+                match decide_with(&guards_off, &cmd) {
+                    Decision::Allow(_) => checked += 1,
+                    other => panic!("{name}/{slot}: expected Allow for {cmd}, got {other:?}"),
                 }
             }
         }
@@ -249,20 +309,31 @@ fn a_bare_unpack_alone_trips_every_callback_entry() {
 /// Review finding 1 / M2.89: these builtins invoke a callable the caller
 /// supplies — map's own positional argument, sorted's/min's/max's `key=`,
 /// filter's own positional argument, iter's two-argument form, list.sort's
-/// own `key=`, re.subn's `repl` — and a callable passed by reference is
-/// never emitted as its own event, so the caller-supplied function runs
-/// unseen. They must NEVER be in the pure-read set. If one of these turns
-/// Allow, someone re-added it; see the exclude-list comment on the
-/// pure-read vocabulary's group header in knowledge.toml and roadmap item
-/// M2.89 before touching this.
+/// own `key=`, re.subn's `repl`. `map`, `sorted`, `min`, `max`, and `filter`
+/// are shipped `python:` entries with a `callback_args` declaration, so a
+/// call occupying that slot is now judged as its own by-reference
+/// invocation (M2.89) rather than just left unread. All eight commands
+/// below still ask, but not for one shared reason: the referenced callable
+/// is itself undescribed (`callable_argument`, e.g. a bare local name like
+/// `f`, or an attribute on a module that was never imported), or described
+/// with a claim a zero-argument synthetic call cannot evaluate — a `wraps`
+/// claim (`callable_argument`, e.g. `os.system`) or a `writes` claim with no
+/// argument to resolve a destination from (`unresolved_path`, e.g.
+/// `os.remove`). `iter`'s two-argument form, `list.sort`, and `re.subn`
+/// carry no entry at all and ask on plain `unmodeled_command`, unrelated to
+/// callable-by-reference judging. They must NEVER turn Allow. If one of
+/// these turns Allow, someone either re-added a builtin to the flat
+/// pure-read block or changed how a referenced callable's claim is judged;
+/// see the exclude-list comment on the pure-read vocabulary's group header
+/// in knowledge.toml and roadmap item M2.89 before touching this.
 ///
-/// Fix round 1: `.sort` and `re.subn` are documented as excluded for this
-/// same reason in two OTHER places in knowledge.toml — `.sort` in group C's
-/// "considered and left out" census list (list.sort(key=...) calls key once
-/// per element), and `re.subn` beside the shipped `re.sub` entry (it shares
-/// re.sub's signature, including the callable-or-string `repl` at position
-/// 1, and was never given the same `callback_args` declaration). Neither
-/// was pinned before this fix round.
+/// Fix round 1: `.sort` and `re.subn` are documented as excluded for the
+/// same invoked-callable reason in two OTHER places in knowledge.toml —
+/// `.sort` in group C's "considered and left out" census list
+/// (list.sort(key=...) calls key once per element), and `re.subn` beside
+/// the shipped `re.sub` entry (it shares re.sub's signature, including the
+/// callable-or-string `repl` at position 1, and was never given the same
+/// `callback_args` declaration). Neither was pinned before this fix round.
 #[test]
 fn the_higher_order_builtins_stay_asking() {
     for cmd in [
@@ -322,9 +393,20 @@ fn the_reported_probe_now_asks() {
     // function handed to a callback slot by reference. Before this fix
     // round it reported only `python:json.loads` as unmodeled — `os.remove`
     // never appeared in the emitted calls at all, so the read-only claim on
-    // `json.loads` was falsifiable.
+    // `json.loads` was falsifiable. The synthetic zero-arg probe of
+    // `os.remove` resolves to a write-target claim it cannot evaluate
+    // (`unresolved_path`, Step 5.2) rather than the `callable_argument`
+    // construct — naming `os.remove` directly is a more precise proof that
+    // it no longer vanishes from evaluation than the generic
+    // `callback_argument` reason this test used to check for.
+    // Pin both halves: the construct AND the name. `os.remove` alone would
+    // also pass on an unmodeled_command reason naming os.remove, which is
+    // the exact regression this test exists to catch.
     match decide(r#"python -c "import json, os; json.loads(s, parse_int=os.remove)""#) {
-        Decision::Ask(r) => assert!(r.contains("callback_argument"), "got: {r}"),
+        Decision::Ask(r) => assert!(
+            r.contains("unresolved_path") && r.contains("os.remove"),
+            "got: {r}"
+        ),
         other => panic!("expected Ask, got {other:?}"),
     }
 }
@@ -350,18 +432,36 @@ fn nameless_keyword_unpacking_into_a_callback_entry_fails_closed() {
 }
 
 #[test]
-fn defaultdicts_positional_callback_trips_and_the_bare_call_allows() {
+fn defaultdicts_callable_factory_resolves_by_reference_and_the_bare_call_allows() {
     // Design point 4.4: default_factory is positional-only in real Python
     // (verified live: `defaultdict(default_factory=x)` does not set the
     // factory at all, it inserts a literal dict entry named
     // "default_factory" — the callback risk is the POSITIONAL spelling).
+    //
+    // Finding 1 (task-final-review, spec §5.2 per-slot exclusivity): `list`
+    // is a shipped, described, pure-read entry (`python:list`, in the
+    // curated builtin set), so handing it by reference to the declared
+    // `default_factory` slot resolves cleanly — no `callable_argument` (the
+    // specific by-reference judgement finds nothing unevaluable) and, after
+    // this fix, no `callback_argument` (the generic construct) either, since
+    // a slot the scanner resolves to a callable reference is now excluded
+    // from it. The call allows, attributable to `python:list`'s own
+    // described claim.
     match decide(r#"python -c "import collections; collections.defaultdict(list)""#) {
-        Decision::Ask(r) => assert!(r.contains("callback_argument"), "got: {r}"),
-        other => panic!("expected Ask, got {other:?}"),
+        Decision::Allow(_) => {}
+        other => panic!("expected Allow, got {other:?}"),
     }
     match decide(r#"python -c "import collections; collections.defaultdict()""#) {
         Decision::Allow(_) => {}
         other => panic!("expected Allow, got {other:?}"),
+    }
+    // The declared slot is still live: an occupant the scanner cannot
+    // resolve to a callable reference at all (a subscript — see
+    // `every_declared_callback_slot_asks_for_an_unreadable_occupant`'s
+    // comment) still trips the generic construct.
+    match decide(r#"python -c "import collections; collections.defaultdict(other[0])""#) {
+        Decision::Ask(r) => assert!(r.contains("callback_argument"), "got: {r}"),
+        other => panic!("expected Ask, got {other:?}"),
     }
 }
 
@@ -567,6 +667,15 @@ fn known_data_producers_enable_curated_methods() {
 
 #[test]
 fn a_callback_customized_producer_withholds_data_provenance() {
+    // `callback_argument` is explicitly allowed here, so it is not the
+    // reason this still asks. `object_hook` is a declared `callback_args`
+    // slot on `json.loads`, and `custom` is a bare, unnameable reference —
+    // vouch has no entry describing `python:custom` at all, so
+    // `callable_argument` (unset, default Ask) is the backstop that fires
+    // instead. That is a stricter, more specific claim than the generic
+    // `callback_argument` reason this test used to check for, and it is not
+    // subject to the deferral in `by_reference_invocations`' "no
+    // description" arm because the two constructs are not tied here.
     let config = load(
         "version = 1\n[lang.bash]\ndefault = \"allow\"\n[lang.bash.constructs]\nunmodeled_command = \"allow\"\n\
          [lang.python]\ndefault = \"allow\"\n[lang.python.constructs]\nunmodeled_command = \"ask\"\ncallback_argument = \"allow\"\n\
@@ -577,7 +686,10 @@ fn a_callback_customized_producer_withholds_data_provenance() {
         &config,
         r#"python -c "import json; json.loads('{}', object_hook=custom).get('name')""#,
     ) {
-        Decision::Ask(reason) => assert!(reason.contains("unmodeled_command"), "{reason}"),
+        Decision::Ask(reason) => assert!(
+            reason.contains("callable_argument") && reason.contains("python:custom"),
+            "{reason}"
+        ),
         other => panic!("callback-customized result must not mint data, got {other:?}"),
     }
 }

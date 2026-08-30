@@ -906,9 +906,11 @@ fn a_run_dir_flags_only_entry_loads_and_merges_over_the_shipped_value_options() 
         args: vec!["-C".into(), "/x".into(), "status".into()],
         unread_args: Default::default(),
         keyword_args: Default::default(),
+        callable_args: Default::default(),
         chain: None,
         prefix_assigns: vec![],
         receiver_origin: vouch::syntax::ValueOrigin::Unknown,
+        by_reference: false,
     };
     assert!(
         matches!(

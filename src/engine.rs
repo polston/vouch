@@ -86,6 +86,7 @@ fn describe(name: &str) -> &'static str {
         "wrap_depth_exceeded" => "this nests one wrapper inside another more times than vouch will follow, so the layers past the limit were never scanned",
         "dynamic_call" => "this calls something whose name vouch could not resolve — a variable, or the result of another expression — so it cannot tell what actually runs",
         "callback_argument" => "this hands a function to a call that will invoke it, and vouch cannot see what that function does",
+        "callable_argument" => "a callable was handed over and vouch could not resolve it or fully judge what it does",
         "rebound_name" => "this uses a name whose meaning the line itself changed — a snippet rebinding it, or an assignment to a variable the shell reads when it looks a program name up — so vouch will not read it as the name's original meaning",
         "args_from_input" => "this runs a command whose arguments are read from standard input or from a file, so what that command acts on is not stated anywhere on the line",
         "wrap_unlocated" => "this program is described as running another command, and vouch could not find the command it was told to expect — so whatever runs inside the wrapper was never read",
@@ -1395,16 +1396,292 @@ fn judge_once(
         );
     }
 
-    // 1d2. A call that occupies a declared `callback_args` slot: the value
-    // handed there runs when the described function invokes it, and that
-    // never shows up as its own scanned event (task 2b, M2.86 fix round —
-    // `json.loads(s, parse_int=g)` hands `g` to `json.loads`, which calls it
-    // directly; the scanner has no event for a callable passed by
-    // reference). Keyed on the OCCURRENCE's own language (`all_langs[i]`),
+    // 1d2b and 1d2c run BEFORE 1d2 in source, though their step numbers sort
+    // after it — the step numbers are the spec's own structure (brief §5)
+    // and stay as they are named there. Source order is decision-bearing
+    // here: `callback_argument_used` (1d2, below) and `by_reference_invocations`
+    // /`unresolved_callback_argument` (1d2b/1d2c) can both be true of the SAME
+    // command — the same "callable-shaped occupant of a declared callback
+    // slot" condition drives both — and `worst`'s tie-break is strict `>`
+    // (first writer keeps a tied rank). Running the generic 1d2 first let it
+    // claim the tied Ask slot with its one-size sentence before 1d2b/1d2c's
+    // more specific, per-reference reason ever ran, silently discarding the
+    // better reason every time the two tied (task 4 review C1). Running the
+    // specific loops first fixes that without touching the tie-break rule
+    // itself, which other callers still rely on.
+
+    // 1d2b. Invocations a command makes BY REFERENCE (M2.89): a resolved
+    // callable argument that occupies a slot the matched entry declares in
+    // `callback_args`, judged as its own call — no arguments, and no place
+    // in any ordered pass. `map(shutil.rmtree, dirs)` never scans as a call
+    // to `shutil.rmtree` at all; `by_reference_invocations` builds the
+    // synthetic command this loop judges, gated the same way 1d2 is (spec
+    // §5.2, Ruling A).
+    //
+    // Isolation (spec §5.4, the brief's Step 5 point 4): the synthetic
+    // command is judged from a LOCAL vector and never appended to
+    // `all_cmds`, so it contributes nothing to `all_langs`' ordering, the cd
+    // walk, or run-place resolution. A referenced mover's destination is
+    // unknowable — vouch cannot say whether, when, or how often the
+    // reference runs — so it must not mint a directory the process may never
+    // have had. That unprovable place is represented by a dummy
+    // `CdState::Unknown`, the same enum the real cd walk already carries a
+    // cause in, resolved through the same `place_of`/`unproven_cause`/
+    // `resolve_guard_action` a real command's place would be.
+    for (i, c) in all_cmds.iter().enumerate() {
+        let clang = all_langs.get(i).map(String::as_str).unwrap_or(lang);
+        for by in crate::guards::by_reference_invocations(kb, c) {
+            let state = CdState::Unknown(
+                "this call is made by reference — vouch does not know whether, when, or how \
+                 often it runs"
+                    .to_string(),
+            );
+
+            // Step 5.1: the same guard evaluation the ordinary path runs,
+            // reproduced for this one synthetic command — `check_in` plus
+            // the same per-hit `resolve_guard_action`/`unread_verb` split
+            // the real guard pass above uses, and the same top-rank-with-
+            // ties reasoning (a place-scoped restrict override can still
+            // apply to an unprovable place — `resolve_guard_action`'s own
+            // `Place::Unproven` arm says so).
+            let mut by_resolved: Vec<(crate::guards::Hit, Action, Option<String>)> = Vec::new();
+            for hit in crate::guards::check_in(kb, &by.cmd, "python") {
+                let (a, overrode) = if hit.unread_verb.is_some() {
+                    let (a, _) = construct_action_for(cfg, clang, "unread_verb");
+                    (a, None)
+                } else {
+                    resolve_guard_action(
+                        cfg,
+                        &hit.guard,
+                        &place_of(&state, here_home),
+                        unproven_cause(&state),
+                        here_home,
+                        project_root,
+                    )
+                };
+                if let (Action::Allow, Some(s)) = (a, &overrode) {
+                    remember(&mut grants, format!("allowed by {s}"));
+                }
+                by_resolved.push((hit, a, overrode));
+            }
+            if let Some(top) = by_resolved.iter().map(|(_, a, _)| *a).max_by_key(|a| rank(*a)) {
+                let (hit, _, overrode) = by_resolved.iter().find(|(_, a, _)| *a == top).unwrap();
+                let mut reason = if let Some(token) = &hit.unread_verb {
+                    let (_, key) = construct_action_for(cfg, clang, "unread_verb");
+                    format!(
+                        "{}\n  vouch could not determine the command's verb at token {:?}",
+                        construct_reason(clang, &key),
+                        token
+                    )
+                } else {
+                    guard_reason(hit, top, overrode.as_deref())
+                };
+                reason.push_str(&format!("\n  by reference: {}", by.head));
+                let mut named: Vec<&str> = vec![hit.guard.as_str()];
+                for (h, a, o) in &by_resolved {
+                    let (Some(s), true) = (o, *a == top) else {
+                        continue;
+                    };
+                    if named.contains(&h.guard.as_str()) {
+                        continue;
+                    }
+                    named.push(h.guard.as_str());
+                    reason.push_str(&format!(
+                        "\n  this line also trips {} (guard), and a place rule decided that too\n  \
+                         setting: {s}",
+                        h.guard
+                    ));
+                }
+                if worst.as_ref().map_or(true, |(w, _)| rank(top) > rank(*w)) {
+                    worst = Some((top, reason));
+                }
+            }
+
+            // Step 5.2: the same write-target resolution — an unfilled
+            // `writes` position must report an unresolved destination,
+            // never no write at all. `by.cmd` carries no arguments, so
+            // `written_paths_in`'s `arg_N`/`last_arg`/`all_args` arms can
+            // only ever produce `python::MARKER` (a value vouch cannot
+            // name) or nothing at all (a mode-gated write with no mode to
+            // say "yes, writing" — `open` handed over bare stays a read).
+            // There is no concrete path to test with `place()`, which is
+            // exactly the shape pass 1c's own unresolved-VALUE branch (the
+            // `targets` loop's `resolved.contains('$')` arm above) already
+            // answers for a real command: a `[[write.scope]]` restriction
+            // on the referenced program still governs an unresolved
+            // destination, so `scope_for` is checked here the same way —
+            // this used to skip straight to the generic construct action,
+            // which let a by-reference write bypass a configured scope
+            // entirely (task 4 review C5), and a comment here once claimed
+            // scope is never checked for this case, which was false (M3).
+            let wt = crate::guards::written_paths_in(kb, &by.cmd, "python");
+            if !wt.paths.is_empty() || wt.run_dir_dest || !wt.unknowable.is_empty() {
+                let (declared, setting) = match cfg.named_construct_action(clang, "unresolved_path")
+                {
+                    Some(a) => (a, format!("lang.{clang}.constructs.unresolved_path")),
+                    None => (cfg.write.default, "write.default".to_string()),
+                };
+                let scope_by: By = Some((
+                    crate::guards::base_name(&by.cmd.head),
+                    crate::guards::verb_of_in(kb, &by.cmd, "python"),
+                    crate::guards::then_of_in(kb, &by.cmd, "python"),
+                ));
+                let cause = "no arguments to resolve a destination from";
+                let (a, reason) = match scope_for(&cfg.write.scope, &scope_by) {
+                    Some(ScopeFor::Rule(rule)) => {
+                        let stricter = rank(declared) > rank(Action::Ask);
+                        (
+                            if stricter { declared } else { Action::Ask },
+                            scope_unprovable(
+                                rule,
+                                cause,
+                                Some(&by.head),
+                                stricter.then_some((setting.as_str(), declared)),
+                            ),
+                        )
+                    }
+                    Some(ScopeFor::Unprovable(rule, verb_cause)) => {
+                        let stricter = rank(declared) > rank(Action::Ask);
+                        (
+                            if stricter { declared } else { Action::Ask },
+                            scope_unprovable(
+                                rule,
+                                &format!("{verb_cause}; {cause}"),
+                                Some(&by.head),
+                                stricter.then_some((setting.as_str(), declared)),
+                            ),
+                        )
+                    }
+                    None => (
+                        declared,
+                        format!(
+                            "{}\n  by reference: {} ({cause})",
+                            construct_reason(clang, "unresolved_path"),
+                            by.head
+                        ),
+                    ),
+                };
+                if worst.as_ref().map_or(true, |(w, _)| rank(a) > rank(*w)) {
+                    worst = Some((a, reason));
+                }
+            }
+
+            // Step 5.3: a claim on the matched entry this argument-less
+            // invocation cannot evaluate — raise `callable_argument` naming
+            // the head and what the claim is, rather than quietly failing
+            // to match (spec §5.2, task 4 review C2/C3). Only the
+            // rule-with-conditions claim is an actual guard vouch could not
+            // finish evaluating; every other claim (an unmodeled head, a
+            // directory move, a wrap, a run-file, evaluated input, a handle
+            // write) names something with no guard behind it at all, so the
+            // shared `construct_reason` closing line — "guards still apply"
+            // — would assert a guard that is not there (task 4 review I4).
+            //
+            // This always raises its own reason, including at a tie with
+            // 1d2's `callback_argument`. Fix round 1 deferred to 1d2's
+            // generic reason on a tie whenever this claim was the "no
+            // description at all" case, on the theory the two reasons were
+            // equally uninformative. That theory was false (fix round 2,
+            // Finding C): this reason always ends with `by reference:
+            // {head}` — the resolved reference itself, the single most
+            // useful word in the prompt — and 1d2's own reason never names
+            // any head at all. A difference in configured rank still
+            // decides which reason wins on its own merits; removing the
+            // deferral only changes which of two TIED reasons gets
+            // reported, and the one that names the head is strictly the
+            // more informative of the two.
+            if let Some(claim) = &by.unevaluable {
+                let (a, key) = construct_action_for(cfg, clang, "callable_argument");
+                if a == Action::Allow {
+                    remember(&mut grants, construct_grant(clang, &key));
+                }
+                let closing = if by.unevaluable_guard_backed {
+                    "guards still apply — allowing this does not allow what a command does"
+                        .to_string()
+                } else {
+                    "this is not a guard — the entry names something vouch cannot see from a \
+                     call with no arguments, and there is no separate guard behind it to still \
+                     apply"
+                        .to_string()
+                };
+                let reason = format!(
+                    "vouch stopped on: {key}\n  \
+                     what that means: {}\n  \
+                     to allow this permanently, set lang.{clang}.constructs.{key} = \"allow\"\n  \
+                     that setting applies to EVERY command using this, from now on\n  \
+                     {closing}\n  \
+                     by reference: {} ({claim})",
+                    describe(&key),
+                    by.head
+                );
+                if worst.as_ref().map_or(true, |(w, _)| rank(a) > rank(*w)) {
+                    worst = Some((a, reason));
+                }
+            }
+        }
+    }
+
+    // 1d2c. A callable-shaped reference vouch could not resolve
+    // (`CallableArg::Unresolved`) in a slot the matched entry declares in
+    // `callback_args` — the `Unresolved` twin of 1d2b, gated the same way
+    // (M2.89 Ruling A): an unnameable reference outside a declared slot is
+    // no more an invocation than a named one is.
+    //
+    // This loop always raises its own reason, including at a tie with
+    // 1d2's `callback_argument`. Fix round 1 deferred to 1d2's generic
+    // reason on a tie, on the theory this loop's claim ("could not tell
+    // what it names") carried no more information than 1d2's own generic
+    // reason ("cannot see what that function does"). That theory was false
+    // (fix round 2, Finding C): 1d2's reason presupposes vouch knows what
+    // was handed over and only can't see its effects, while this loop's
+    // claim is that vouch could not even resolve what was handed over —
+    // a materially different and more specific fact. The deferral also
+    // made `an_unresolvable_callable_raises_the_construct` permanently red
+    // for the wrong recorded reason (it blamed `map` being unmodeled, but
+    // the tie-deferral would have kept masking `callable_argument` even
+    // once `map` is described, since the default config ties both
+    // constructs' ranks) — that test's own doc comment is corrected
+    // alongside this fix. A difference in configured rank still decides
+    // which reason wins on its own merits; removing the deferral only
+    // changes which of two TIED reasons gets reported.
+    for (i, c) in all_cmds.iter().enumerate() {
+        if !crate::guards::unresolved_callback_argument(kb, c) {
+            continue;
+        }
+        let clang = all_langs.get(i).map(String::as_str).unwrap_or(lang);
+        let (a, key) = construct_action_for(cfg, clang, "callable_argument");
+        if a == Action::Allow {
+            remember(&mut grants, construct_grant(clang, &key));
+        }
+        if worst.as_ref().map_or(true, |(w, _)| rank(a) > rank(*w)) {
+            worst = Some((
+                a,
+                format!(
+                    "{}\n  a callable was handed over and vouch could not tell what it names",
+                    construct_reason(clang, &key)
+                ),
+            ));
+        }
+    }
+
+    // 1d2. A call that occupies a declared `callback_args` slot with an
+    // occupant that carries no callable mark and vouch could not read — a
+    // subscript, a call result, a starred argument, any of which could
+    // still be a function at runtime — or a `**` unpack that could be
+    // filling one (task 2b, M2.86 fix round). A slot resolved to a
+    // `CallableArg` (M2.89: `Named`, `Inline`, or `Unresolved`) is excluded
+    // here and judged specifically by 1d2b/1d2c above instead — spec
+    // §5.2's per-slot exclusivity: this generic construct and that specific
+    // judgement are one slot's two outcomes, never two competing asks for
+    // the same occupant (see `callback_argument_used`'s own doc comment).
+    // Keyed on the OCCURRENCE's own language (`all_langs[i]`),
     // never the host language — the parse-failure loop below is the pattern
     // this copies; §1d's `evaluated_input` loop above keys on the host
     // language instead, which is a recorded defect (M2.79) this loop must
     // not repeat.
+    //
+    // Runs AFTER 1d2b/1d2c on purpose (task 4 review C1) — see the comment
+    // above 1d2b for why source order differs from the step numbers.
     for (i, c) in all_cmds.iter().enumerate() {
         if !crate::guards::callback_argument_used(kb, c) {
             continue;

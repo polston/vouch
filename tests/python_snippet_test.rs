@@ -667,18 +667,33 @@ fn an_unresolvable_keyword_value_still_occupies_its_slot_alongside_a_trailing_un
 // round all three allowed unconditionally.
 #[test]
 fn shutil_copytree_calling_a_reference_through_ignore_asks() {
+    // `os.remove`'s synthetic zero-arg probe resolves to a write-target
+    // claim it cannot evaluate (`unresolved_path`, Step 5.2) — naming
+    // `os.remove` directly proves the reference was followed at all, which
+    // the generic `callback_argument` reason this test used to check for
+    // does not.
+    // Pin both halves: the construct AND the name. `os.remove` alone would
+    // also pass on an unmodeled_command reason naming os.remove, which is
+    // the exact regression this test exists to catch.
     let c = cfg("unmodeled_command = \"allow\"");
     match decide(&c, r#"python -c "import shutil, os; shutil.copytree('C:/work/a', 'C:/work/b', ignore=os.remove)""#) {
-        Decision::Ask(r) => assert!(r.contains("callback_argument"), "got: {r}"),
+        Decision::Ask(r) => assert!(
+            r.contains("unresolved_path") && r.contains("os.remove"),
+            "got: {r}"
+        ),
         other => panic!("expected Ask, got {other:?}"),
     }
 }
 
 #[test]
 fn shutil_move_calling_a_reference_through_copy_function_asks() {
+    // `os.system` wraps another command, which `by_reference_invocations`
+    // reports as an informative `callable_argument` claim naming `os.system`
+    // directly — a more precise proof that the reference was followed than
+    // the generic `callback_argument` reason this test used to check for.
     let c = cfg("unmodeled_command = \"allow\"");
     match decide(&c, r#"python -c "import shutil, os; shutil.move('C:/work/a', 'C:/work/b', copy_function=os.system)""#) {
-        Decision::Ask(r) => assert!(r.contains("callback_argument"), "got: {r}"),
+        Decision::Ask(r) => assert!(r.contains("callable_argument") && r.contains("os.system"), "got: {r}"),
         other => panic!("expected Ask, got {other:?}"),
     }
 }

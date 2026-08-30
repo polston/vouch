@@ -66,9 +66,11 @@ fn a_cli_is_not_one_operation() {
         args: args.iter().map(|s| s.to_string()).collect(),
         unread_args: Default::default(),
         keyword_args: Default::default(),
+        callable_args: Default::default(),
         chain: None,
         prefix_assigns: vec![],
         receiver_origin: vouch::syntax::ValueOrigin::Unknown,
+        by_reference: false,
     };
 
     // Hand-built probes, so the argument record is complete and closed by
@@ -93,9 +95,11 @@ fn an_entry_with_no_subcommands_covers_the_whole_program() {
             args: vec!["-la".into()],
             unread_args: Default::default(),
             keyword_args: Default::default(),
+            callable_args: Default::default(),
             chain: None,
             prefix_assigns: vec![],
             receiver_origin: vouch::syntax::ValueOrigin::Unknown,
+            by_reference: false,
         },
         "bash",
         true

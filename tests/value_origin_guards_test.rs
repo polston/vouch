@@ -28,6 +28,19 @@ fn command(origin: ValueOrigin) -> Cmd {
             "payload".to_string(),
             "$callback".to_string(),
         ],
+        // Finding 1 (task-final-review, spec §5.2 per-slot exclusivity): a
+        // slot the scanner resolved to a `CallableArg` is now excluded from
+        // `callback_argument_used` — it is judged specifically elsewhere
+        // (`by_reference_invocations`/`unresolved_callback_argument`), never
+        // by this generic construct too. `$callback` stands for a genuine
+        // occupant vouch could not read as literal text and did NOT resolve
+        // to a callable reference — the shape the generic construct still
+        // exists for — marked the same way the real python scanner marks an
+        // unread token, at the same raw index as `cmd.args`. This is what
+        // this test's `callback_argument_used` assertions exercise; the
+        // receiver gate above (`receiver_gate_holds`) is what still makes
+        // `unknown` return false regardless of this mark.
+        unread_args: std::collections::HashSet::from([2]),
         receiver_origin: origin,
         ..Cmd::default()
     }
