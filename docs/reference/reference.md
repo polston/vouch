@@ -14,7 +14,7 @@ setting must never become permission.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `guards` | map of string to Action | (none) | What commands DO, written as `[guards]`. Shared across every language: a guard fires the same way whichever scanner recognised the command that tripped it. Every key must be one of vouch's known guard names (`confidential_output`, `delete_recursive`, `grant_execute`, `history_rewrite`, `publish_outward`, `process_control`, `privilege_escalation`, `disk_or_system`, `in_place_edit`, `local_state_write`, `remote_execution`); an unset guard always resolves to `ask`. |
+| `guards` | map of string to Action | (none) | What commands DO, written as `[guards]`. Shared across every language: a guard fires the same way whichever scanner recognised the command that tripped it. Every key must be one of vouch's known guard names (`bypass_enforcement`, `confidential_output`, `delete_recursive`, `grant_execute`, `history_rewrite`, `publish_outward`, `process_control`, `privilege_escalation`, `disk_or_system`, `in_place_edit`, `local_state_write`, `remote_execution`); an unset guard always resolves to `ask`. |
 | `lang` | map of string to LangConfig | (none) | Every language section, written as `[lang.<name>]` — `bash`, `powershell`, and `python` ship with vouch. One map, so a new scanner needs no new key here. |
 | `protected` | ProtectedSection | (none) | `[protected]`: paths no `allow_paths` entry can ever open. |
 | `run` | RunSection | (none) | `[run]`: run-place zones, executable-place program trust, and place-scoped guard overrides. |

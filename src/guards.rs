@@ -17,6 +17,7 @@ use serde::Deserialize;
 use std::collections::HashSet;
 
 pub const KNOWN_GUARDS: &[&str] = &[
+    "bypass_enforcement",
     "confidential_output",
     "delete_recursive",
     "grant_execute",

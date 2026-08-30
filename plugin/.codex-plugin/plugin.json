@@ -1,6 +1,6 @@
 {
   "name": "vouch",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "description": "Skills for installing and operating the vouch allow-list permission gate with Codex and Claude Code; vouch-setup provisions from evidence, vouch-status reports installed versus released versions, and vouch-update moves the gate on an explicit accept.",
   "author": {
     "name": "vouch"

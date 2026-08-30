@@ -5,7 +5,7 @@
   "type": "object",
   "properties": {
     "guards": {
-      "description": "What commands DO, written as `[guards]`. Shared across every\nlanguage: a guard fires the same way whichever scanner recognised the\ncommand that tripped it. Every key must be one of vouch's known guard\nnames (`confidential_output`, `delete_recursive`, `grant_execute`,\n`history_rewrite`,\n`publish_outward`, `process_control`, `privilege_escalation`,\n`disk_or_system`, `in_place_edit`, `local_state_write`,\n`remote_execution`); an unset guard always resolves to `ask`.",
+      "description": "What commands DO, written as `[guards]`. Shared across every\nlanguage: a guard fires the same way whichever scanner recognised the\ncommand that tripped it. Every key must be one of vouch's known guard\nnames (`bypass_enforcement`, `confidential_output`, `delete_recursive`,\n`grant_execute`, `history_rewrite`,\n`publish_outward`, `process_control`, `privilege_escalation`,\n`disk_or_system`, `in_place_edit`, `local_state_write`,\n`remote_execution`); an unset guard always resolves to `ask`.",
       "type": "object",
       "additionalProperties": {
         "$ref": "#/$defs/Action"

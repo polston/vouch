@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.16.0 (2026-08-30)
+
+
+### Features
+
+* a new guard, bypass_enforcement, asks when a command instructs a tool to skip its own configured checks
+* git --no-verify on commit, push, merge, rebase and am now asks under that guard, while the -n spellings meaning dry-run or no-stat continue to allow
+
 ## 0.15.0 (2026-08-30)
 
 

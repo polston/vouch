@@ -109,6 +109,30 @@ source = "declared: 'force push not allowed'"
 subcommand_in = ["push"]
 any_flag = ["--force", "--force-with-lease", "-f"]
 
+# Skipping the hooks. Two rules rather than one because `-n` is a different
+# option per verb, and matching it everywhere would be a false claim: for
+# `commit` and `am` it IS `--no-verify`, but for `push` it is `--dry-run` and
+# for `merge` and `rebase` it is `--no-stat`. Read from `git <verb> -h` on git
+# 2.50.1, which is also where the word "bypass" comes from — git's own help
+# for `commit -n` reads "bypass pre-commit and commit-msg hooks".
+#
+# This is the one flag no hook can ever see, because it is the flag that stops
+# hooks running. Verified in a throwaway repository: with a failing pre-commit
+# and pre-push installed, the plain forms are refused and the `--no-verify`
+# forms do not run the hook at all and complete. A gate above git is the only
+# place the flag is visible, which is why the claim lives here.
+[[program.rule]]
+guard = "bypass_enforcement"
+source = "declared: 'skipping the commit hooks needs review'"
+subcommand_in = ["commit", "am"]
+any_flag = ["--no-verify", "-n"]
+
+[[program.rule]]
+guard = "bypass_enforcement"
+source = "declared: 'skipping the hooks needs review'"
+subcommand_in = ["push", "merge", "rebase"]
+any_flag = ["--no-verify"]
+
 # Destinations that depend on the subcommand. `git status` writes nothing;
 # these three verbs (four rules below — clone alone has two, one per
 # positional count) create a directory. `init` and `worktree add` are always
