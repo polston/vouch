@@ -8,12 +8,35 @@
 //!
 //! Standing realistic config: `/tmp/**` inside `write.allow_paths`, `/etc`
 //! outside.
+//!
+//! Paths are drive-qualified on Windows, same reasoning as
+//! `cd_candidate_consumers_test.rs`: a rooted, drive-less `/tmp/...`
+//! resolves against the deciding PROCESS's current drive (`src/paths.rs`'s
+//! `resolve_links`, the filesystem half of write-target judging), and on a
+//! runner whose workspace lives on `D:` the resolved `D:/tmp/...` sits
+//! outside the realistic allow list (`C:/tmp/**` is listed, other drives
+//! are not) — the engine then asks correctly and the platform-naive leg
+//! fails by runner luck rather than by the shape under test (M2.230).
+//! Run-place-only judging (recognition, guard overrides) never calls
+//! `resolve_links` — only the write walk does — which is why every path
+//! here still gets the same textual treatment: it is cheap, uniform, and
+//! never wrong to apply.
 
 #[path = "common/mod.rs"]
 mod common;
 
 fn cfg() -> vouch::config::Config {
     common::realistic_config()
+}
+
+/// Drive-qualify one rooted, drive-less fixture path for Windows. Every
+/// literal path in this file is spelled with a leading `/`, so prefixing the
+/// realistic allow list's own drive is the whole fix; a RELATIVE destination
+/// (`cd sub`, `cd ..`) is left untouched because it composes against an
+/// already-mapped base and `t()` would corrupt it (`format!("C:{p}")` on a
+/// bare `"a"` is not a path at all).
+fn t(p: &str) -> String {
+    if cfg!(windows) { format!("C:{p}") } else { p.to_string() }
 }
 
 fn assert_absent(path: &str) {
@@ -31,11 +54,16 @@ fn an_uncertified_mover_contributes_its_failure_branch() {
     // ask half must aim at a target proven ABSENT, or the §4.4 refinement
     // would legitimately discharge the failure branch on a machine where it
     // exists (Task 4 review, IMPORTANT 4).
-    let (v, r) = common::decision_at(&cfg(), "cd /tmp/proj/sub; echo x > f.txt", "/tmp/proj");
+    let (v, r) = common::decision_at(
+        &cfg(),
+        &format!("cd {}; echo x > f.txt", t("/tmp/proj/sub")),
+        &t("/tmp/proj"),
+    );
     assert_eq!(v, "allow", "{r}");
-    let absent = "/tmp/vouch-cd-cand-absent-fixture";
-    assert_absent(absent);
-    let (v2, r2) = common::decision_at(&cfg(), &format!("cd {absent}; echo x > f.txt"), "/etc");
+    let absent = t("/tmp/vouch-cd-cand-absent-fixture");
+    assert_absent(&absent);
+    let (v2, r2) =
+        common::decision_at(&cfg(), &format!("cd {absent}; echo x > f.txt"), &t("/etc"));
     assert_eq!(v2, "ask", "{r2}");
     assert!(r2.contains("/etc"), "the ask names the escaping candidate: {r2}");
 }
@@ -45,8 +73,11 @@ fn an_or_group_reader_reached_through_and_refutes_nothing() {
     // Task 4 review, CRITICAL 1: in `cd /etc || true && write` the writer's
     // execution proves only that the OR-GROUP succeeded — satisfiable by
     // the cd succeeding — so the cd's moved branch survives and escapes.
-    let (v, _) =
-        common::decision_at(&cfg(), "cd /etc || true && cp /tmp/s f.txt", "/tmp/proj");
+    let (v, _) = common::decision_at(
+        &cfg(),
+        &format!("cd {} || true && cp /tmp/s f.txt", t("/etc")),
+        &t("/tmp/proj"),
+    );
     assert_eq!(v, "ask");
 }
 
@@ -56,8 +87,12 @@ fn the_or_branch_entry_member_is_never_certified() {
     // c's execution does not prove b ran, so a's moved branch survives.
     let (v, _) = common::decision_at(
         &cfg(),
-        "cd /etc || cd /tmp/vouch-absent-b && cp /tmp/s f.txt",
-        "/tmp/proj",
+        &format!(
+            "cd {} || cd {} && cp /tmp/s f.txt",
+            t("/etc"),
+            t("/tmp/vouch-absent-b")
+        ),
+        &t("/tmp/proj"),
     );
     assert_eq!(v, "ask");
 }
@@ -70,8 +105,12 @@ fn a_conditional_and_member_keeps_run_doubt_whatever_exists() {
     // survives as a candidate and escapes.
     let (v, _) = common::decision_at(
         &cfg(),
-        "cd /etc/vouch-no-such-dir && cd /tmp; cp /tmp/s f.txt",
-        "/etc",
+        &format!(
+            "cd {} && cd {}; cp /tmp/s f.txt",
+            t("/etc/vouch-no-such-dir"),
+            t("/tmp")
+        ),
+        &t("/etc"),
     );
     assert_eq!(v, "ask");
 }
@@ -79,7 +118,11 @@ fn a_conditional_and_member_keeps_run_doubt_whatever_exists() {
 #[test]
 fn a_certified_mover_keeps_its_singleton() {
     // cd A && write: the write running proves the cd succeeded.
-    let (v, r) = common::decision_at(&cfg(), "cd /tmp/proj && echo x > f.txt", "/etc");
+    let (v, r) = common::decision_at(
+        &cfg(),
+        &format!("cd {} && echo x > f.txt", t("/tmp/proj")),
+        &t("/etc"),
+    );
     assert_eq!(v, "allow", "{r}");
 }
 
@@ -87,9 +130,17 @@ fn a_certified_mover_keeps_its_singleton() {
 fn an_or_tail_writer_is_judged_at_the_refuted_state() {
     // cd A || write: the write runs only when the cd failed — the base is
     // the previous directory exactly, never A.
-    let (v, r) = common::decision_at(&cfg(), "cd /etc || echo x > f.txt", "/tmp/proj");
+    let (v, r) = common::decision_at(
+        &cfg(),
+        &format!("cd {} || echo x > f.txt", t("/etc")),
+        &t("/tmp/proj"),
+    );
     assert_eq!(v, "allow", "{r}");
-    let (v2, _) = common::decision_at(&cfg(), "cd /tmp/proj || echo x > f.txt", "/etc");
+    let (v2, _) = common::decision_at(
+        &cfg(),
+        &format!("cd {} || echo x > f.txt", t("/tmp/proj")),
+        &t("/etc"),
+    );
     assert_eq!(v2, "ask");
 }
 
@@ -99,14 +150,14 @@ fn only_the_immediate_member_is_refuted() {
     // its last reached member — B never survives, A might have run.
     let (v, r) = common::decision_at(
         &cfg(),
-        "cd /tmp/proj/a && cd /etc || echo x > f.txt",
-        "/tmp/proj",
+        &format!("cd {} && cd {} || echo x > f.txt", t("/tmp/proj/a"), t("/etc")),
+        &t("/tmp/proj"),
     );
     assert_eq!(v, "allow", "{r}"); // {/tmp/proj, /tmp/proj/a} both allowed
     let (v2, _) = common::decision_at(
         &cfg(),
-        "cd /etc && cd /tmp/proj || echo x > f.txt",
-        "/tmp/proj",
+        &format!("cd {} && cd {} || echo x > f.txt", t("/etc"), t("/tmp/proj")),
+        &t("/tmp/proj"),
     );
     assert_eq!(v2, "ask"); // /etc is a surviving candidate and escapes
 }
@@ -117,14 +168,14 @@ fn or_chain_after_semicolon_unions_every_branch() {
     // neither: {A, B, previous}.
     let (v, r) = common::decision_at(
         &cfg(),
-        "cd /tmp/proj/a || cd /tmp/proj/b; echo x > f.txt",
-        "/tmp/proj",
+        &format!("cd {} || cd {}; echo x > f.txt", t("/tmp/proj/a"), t("/tmp/proj/b")),
+        &t("/tmp/proj"),
     );
     assert_eq!(v, "allow", "{r}");
     let (v2, _) = common::decision_at(
         &cfg(),
-        "cd /tmp/proj/a || cd /etc; echo x > f.txt",
-        "/tmp/proj",
+        &format!("cd {} || cd {}; echo x > f.txt", t("/tmp/proj/a"), t("/etc")),
+        &t("/tmp/proj"),
     );
     assert_eq!(v2, "ask");
 }
@@ -133,7 +184,11 @@ fn or_chain_after_semicolon_unions_every_branch() {
 fn a_negated_mover_is_neither_certified_nor_refuted() {
     // ! cd A && write: the write runs when the cd FAILED — a certified-A
     // singleton would be the wrong-file allow. {A, previous} is honest.
-    let (v, _) = common::decision_at(&cfg(), "! cd /etc && echo x > f.txt", "/tmp/proj");
+    let (v, _) = common::decision_at(
+        &cfg(),
+        &format!("! cd {} && echo x > f.txt", t("/etc")),
+        &t("/tmp/proj"),
+    );
     assert_eq!(v, "ask");
 }
 
@@ -142,7 +197,7 @@ fn the_cap_collapses_to_unknown_not_to_a_guess() {
     let (v, r) = common::decision_at(
         &cfg(),
         "cd a; cd b; cd c; cd d; echo x > f.txt",
-        "/tmp/proj",
+        &t("/tmp/proj"),
     );
     assert_eq!(v, "ask", "{r}");
     assert!(r.contains("unresolved_path"), "{r}");
@@ -178,7 +233,11 @@ fn an_existing_target_discharges_the_failure_branch() {
 fn a_visible_cdpath_assignment_unresolves_a_relative_destination() {
     // Proven live on v0.16.0 as a wrong-base ALLOW (spec §4.2): the shell
     // lands in /x/sub while vouch composed <cwd>/sub.
-    let (v, _) = common::decision_at(&cfg(), "CDPATH=/x cd sub && echo x > f.txt", "/tmp/proj");
+    let (v, _) = common::decision_at(
+        &cfg(),
+        "CDPATH=/x cd sub && echo x > f.txt",
+        &t("/tmp/proj"),
+    );
     assert_eq!(v, "ask");
 }
 
@@ -190,14 +249,14 @@ fn an_if_body_mover_becomes_a_candidate_after_fi() {
     // the allowed tree composes to an allow; an escaping branch end asks.
     let (v, r) = common::decision_at(
         &cfg(),
-        "if true; then cd /tmp/proj/sub; fi; echo x > f.txt",
-        "/tmp/proj",
+        &format!("if true; then cd {}; fi; echo x > f.txt", t("/tmp/proj/sub")),
+        &t("/tmp/proj"),
     );
     assert_eq!(v, "allow", "{r}");
     let (v2, _) = common::decision_at(
         &cfg(),
-        "if true; then cd /etc; fi; echo x > f.txt",
-        "/tmp/proj",
+        &format!("if true; then cd {}; fi; echo x > f.txt", t("/etc")),
+        &t("/tmp/proj"),
     );
     assert_eq!(v2, "ask");
 }
@@ -206,7 +265,11 @@ fn an_if_body_mover_becomes_a_candidate_after_fi() {
 fn a_then_body_writer_is_certified_at_the_conditions_end_state() {
     // The then-branch running proves the condition list succeeded, so the
     // writer's base is the condition's certified end — a singleton.
-    let (v, r) = common::decision_at(&cfg(), "if cd /tmp/proj; then echo x > f.txt; fi", "/etc");
+    let (v, r) = common::decision_at(
+        &cfg(),
+        &format!("if cd {}; then echo x > f.txt; fi", t("/tmp/proj")),
+        &t("/etc"),
+    );
     assert_eq!(v, "allow", "{r}");
 }
 
@@ -214,7 +277,11 @@ fn a_then_body_writer_is_certified_at_the_conditions_end_state() {
 fn a_condition_mover_reaches_past_fi_as_a_candidate() {
     // The condition ran when the if-statement did; its success is unknown
     // to a later chainless reader, so {moved, unmoved} survives past fi.
-    let (v, _) = common::decision_at(&cfg(), "if cd /etc; then :; fi; echo x > f.txt", "/tmp/proj");
+    let (v, _) = common::decision_at(
+        &cfg(),
+        &format!("if cd {}; then :; fi; echo x > f.txt", t("/etc")),
+        &t("/tmp/proj"),
+    );
     assert_eq!(v, "ask");
 }
 
@@ -222,11 +289,17 @@ fn a_condition_mover_reaches_past_fi_as_a_candidate() {
 fn a_loop_condition_mover_poisons_the_body_and_after() {
     // Iteration carry: the condition's mover runs every pass, so neither
     // the body nor anything after the loop has a knowable base.
-    let (v, _) =
-        common::decision_at(&cfg(), "while cd ..; do echo x > f.txt; done", "/tmp/proj/deep");
+    let (v, _) = common::decision_at(
+        &cfg(),
+        "while cd ..; do echo x > f.txt; done",
+        &t("/tmp/proj/deep"),
+    );
     assert_eq!(v, "ask");
-    let (v2, _) =
-        common::decision_at(&cfg(), "while cd ..; do :; done; echo x > f.txt", "/tmp/proj/deep");
+    let (v2, _) = common::decision_at(
+        &cfg(),
+        "while cd ..; do :; done; echo x > f.txt",
+        &t("/tmp/proj/deep"),
+    );
     assert_eq!(v2, "ask");
 }
 
@@ -234,8 +307,8 @@ fn a_loop_condition_mover_poisons_the_body_and_after() {
 fn a_moverless_loop_body_writer_is_anchored() {
     let (v, r) = common::decision_at(
         &cfg(),
-        "cd /tmp/proj && for f in a b; do echo x > f.txt; done",
-        "/etc",
+        &format!("cd {} && for f in a b; do echo x > f.txt; done", t("/tmp/proj")),
+        &t("/etc"),
     );
     assert_eq!(v, "allow", "{r}");
 }
@@ -243,10 +316,17 @@ fn a_moverless_loop_body_writer_is_anchored() {
 #[test]
 fn a_last_pipeline_member_mover_is_a_candidate_not_contained() {
     // zsh runs the last member in the parent (spec §3.3): {moved, unmoved}.
-    let (v, _) = common::decision_at(&cfg(), "true | cd /etc; echo x > f.txt", "/tmp/proj");
+    let (v, _) = common::decision_at(
+        &cfg(),
+        &format!("true | cd {}; echo x > f.txt", t("/etc")),
+        &t("/tmp/proj"),
+    );
     assert_eq!(v, "ask");
-    let (v2, r2) =
-        common::decision_at(&cfg(), "true | cd /tmp/proj/sub; echo x > f.txt", "/tmp/proj");
+    let (v2, r2) = common::decision_at(
+        &cfg(),
+        &format!("true | cd {}; echo x > f.txt", t("/tmp/proj/sub")),
+        &t("/tmp/proj"),
+    );
     assert_eq!(v2, "allow", "{r2}");
 }
 
@@ -255,12 +335,16 @@ fn an_async_list_member_mover_is_a_candidate() {
     // zsh backgrounds only the last pipeline; the earlier member's cd may
     // move the parent — and when both branches stay inside the allowed
     // tree, the union composes to an allow.
-    let (v, _) = common::decision_at(&cfg(), "cd /etc && sleep 1 & echo x > f.txt", "/tmp/proj");
+    let (v, _) = common::decision_at(
+        &cfg(),
+        &format!("cd {} && sleep 1 & echo x > f.txt", t("/etc")),
+        &t("/tmp/proj"),
+    );
     assert_eq!(v, "ask");
     let (v2, r2) = common::decision_at(
         &cfg(),
-        "cd /tmp/proj/sub && sleep 1 & echo x > f.txt",
-        "/tmp/proj",
+        &format!("cd {} && sleep 1 & echo x > f.txt", t("/tmp/proj/sub")),
+        &t("/tmp/proj"),
     );
     assert_eq!(v2, "allow", "{r2}");
 }
@@ -270,10 +354,17 @@ fn a_brace_groups_end_composes_with_its_anchors_certainty() {
     // A reached brace group always runs; a chainless later reader still
     // holds {end, unmoved}, and with both inside the allowed tree that is
     // an allow — the Task 3 blanket Unknown asked here.
-    let (v, r) =
-        common::decision_at(&cfg(), "{ cd /tmp/proj/sub; }; echo x > f.txt", "/tmp/proj");
+    let (v, r) = common::decision_at(
+        &cfg(),
+        &format!("{{ cd {}; }}; echo x > f.txt", t("/tmp/proj/sub")),
+        &t("/tmp/proj"),
+    );
     assert_eq!(v, "allow", "{r}");
-    let (v2, _) = common::decision_at(&cfg(), "{ cd /etc; }; echo x > f.txt", "/tmp/proj");
+    let (v2, _) = common::decision_at(
+        &cfg(),
+        &format!("{{ cd {}; }}; echo x > f.txt", t("/etc")),
+        &t("/tmp/proj"),
+    );
     assert_eq!(v2, "ask");
 }
 
@@ -284,12 +375,12 @@ fn a_negated_condition_is_never_certified_by_its_then_branch() {
     // Certifying X here was the inverted-status wrong-file allow: with X
     // inside the allowed area and the caller outside it, the write went
     // through against a directory the shell provably left alone.
-    let absent = "/tmp/vouch-absent-negcond";
-    assert_absent(absent);
+    let absent = t("/tmp/vouch-absent-negcond");
+    assert_absent(&absent);
     let (v, _) = common::decision_at(
         &cfg(),
         &format!("if ! cd {absent}; then echo x > f.txt; fi"),
-        "/etc",
+        &t("/etc"),
     );
     assert_eq!(v, "ask", "the caller's own /etc branch must survive");
 }
@@ -301,8 +392,8 @@ fn an_elif_condition_is_not_certified_by_the_statement_running() {
     // branches. With the elif's mover escaping, the union asks.
     let (v, _) = common::decision_at(
         &cfg(),
-        "if false; then :; elif cd /etc; then :; fi && echo x > f.txt",
-        "/tmp/proj",
+        &format!("if false; then :; elif cd {}; then :; fi && echo x > f.txt", t("/etc")),
+        &t("/tmp/proj"),
     );
     assert_eq!(v, "ask");
 }
@@ -315,8 +406,8 @@ fn a_rescued_condition_mover_keeps_its_failure_branch() {
     // own directory escapes.
     let (v, _) = common::decision_at(
         &cfg(),
-        "if cd /tmp/proj || true; then echo x > f.txt; fi",
-        "/etc",
+        &format!("if cd {} || true; then echo x > f.txt; fi", t("/tmp/proj")),
+        &t("/etc"),
     );
     assert_eq!(v, "ask");
 }
@@ -328,14 +419,17 @@ fn an_elif_body_is_gated_by_its_own_condition() {
     // with the first condition made that mover invisible.
     let (v, _) = common::decision_at(
         &cfg(),
-        "if false; then :; elif cd /etc; then echo x > f.txt; fi",
-        "/tmp/proj",
+        &format!("if false; then :; elif cd {}; then echo x > f.txt; fi", t("/etc")),
+        &t("/tmp/proj"),
     );
     assert_eq!(v, "ask");
     let (v2, _) = common::decision_at(
         &cfg(),
-        "if false; then :; elif cd /etc && false; then :; else echo x > f.txt; fi",
-        "/tmp/proj",
+        &format!(
+            "if false; then :; elif cd {} && false; then :; else echo x > f.txt; fi",
+            t("/etc")
+        ),
+        &t("/tmp/proj"),
     );
     assert_eq!(v2, "ask", "the else body inherits the elif condition's moved branch");
 }
@@ -347,8 +441,8 @@ fn a_body_anchors_moved_branch_survives_refutation() {
     // write runs inside the moved directory.
     let (v, _) = common::decision_at(
         &cfg(),
-        "true && { cd /etc; false; } || echo x > f.txt",
-        "/tmp/proj",
+        &format!("true && {{ cd {}; false; }} || echo x > f.txt", t("/etc")),
+        &t("/tmp/proj"),
     );
     assert_eq!(v, "ask");
 }
@@ -361,14 +455,14 @@ fn a_compound_rescuer_still_unions_the_condition_mover() {
     // the cd.
     let (v, _) = common::decision_at(
         &cfg(),
-        "if cd /tmp/proj || { true; }; then echo x > f.txt; fi",
-        "/etc",
+        &format!("if cd {} || {{ true; }}; then echo x > f.txt; fi", t("/tmp/proj")),
+        &t("/etc"),
     );
     assert_eq!(v, "ask");
     let (v2, _) = common::decision_at(
         &cfg(),
-        "if cd /tmp/proj || ( true ); then echo x > f.txt; fi",
-        "/etc",
+        &format!("if cd {} || ( true ); then echo x > f.txt; fi", t("/tmp/proj")),
+        &t("/etc"),
     );
     assert_eq!(v2, "ask");
 }
@@ -381,14 +475,14 @@ fn only_the_final_statement_of_a_condition_list_is_certified() {
     // first cd fails and `cd ssl` succeeds from /etc.
     let (v, _) = common::decision_at(
         &cfg(),
-        "if cd /tmp/vouch-absent-seq; cd ssl; then echo x > f.txt; fi",
-        "/etc",
+        &format!("if cd {}; cd ssl; then echo x > f.txt; fi", t("/tmp/vouch-absent-seq")),
+        &t("/etc"),
     );
     assert_eq!(v, "ask");
     let (v2, _) = common::decision_at(
         &cfg(),
-        "if cd /tmp/vouch-absent-seq; true; then echo x > f.txt; fi",
-        "/etc",
+        &format!("if cd {}; true; then echo x > f.txt; fi", t("/tmp/vouch-absent-seq")),
+        &t("/etc"),
     );
     assert_eq!(v2, "ask");
 }
@@ -400,23 +494,31 @@ fn a_failed_leading_run_never_outranks_the_rescuing_or_tail() {
     // ranking a leading member final certified the mover whose failure is
     // exactly what let the list survive. All six spellings land the write
     // at the caller's own /etc in real bash and zsh.
+    let proj = t("/tmp/proj");
+    let proj2 = t("/tmp/proj2");
+    let etc = t("/etc");
     for cmd in [
-        "if cd /tmp/proj && false || true; then echo x > f.txt; fi",
-        "if cd /tmp/proj && ls || true; then echo x > f.txt; fi",
-        "if ls && cd /tmp/proj || true; then echo x > f.txt; fi",
-        "if ls && cd /tmp/proj || cd /tmp/proj2; then echo x > f.txt; fi",
-        "if ls && ls && cd /tmp/proj || true; then echo x > f.txt; fi",
-        "if ls && cd /tmp/proj || true && ls; then echo x > f.txt; fi",
+        format!("if cd {proj} && false || true; then echo x > f.txt; fi"),
+        format!("if cd {proj} && ls || true; then echo x > f.txt; fi"),
+        format!("if ls && cd {proj} || true; then echo x > f.txt; fi"),
+        format!("if ls && cd {proj} || cd {proj2}; then echo x > f.txt; fi"),
+        format!("if ls && ls && cd {proj} || true; then echo x > f.txt; fi"),
+        format!("if ls && cd {proj} || true && ls; then echo x > f.txt; fi"),
     ] {
-        let (v, r) = common::decision_at(&cfg(), cmd, "/etc");
+        let (v, r) = common::decision_at(&cfg(), &cmd, &etc);
         assert_eq!(v, "ask", "{cmd}: {r}");
     }
     // The genuinely-certified trailing mover keeps its singleton: success
-    // proves the cd after the rescue ran and succeeded.
+    // proves the cd after the rescue ran and succeeded. /private/tmp has no
+    // Windows-side allow-list twin (only C:/tmp/** is listed), so this leg
+    // needs its own mapped literal rather than the generic t(): a distinct
+    // subdirectory under the umbrella C:/tmp/** entry, still textually
+    // apart from proj's C:/tmp/proj.
+    let private_tmp = if cfg!(windows) { "C:/tmp/other-allowed" } else { "/private/tmp" };
     let (v, r) = common::decision_at(
         &cfg(),
-        "if cd /tmp/proj || true && cd /private/tmp; then echo x > f.txt; fi",
-        "/etc",
+        &format!("if cd {proj} || true && cd {private_tmp}; then echo x > f.txt; fi"),
+        &etc,
     );
     assert_eq!(v, "allow", "{r}");
 }
@@ -425,7 +527,7 @@ fn a_failed_leading_run_never_outranks_the_rescuing_or_tail() {
 
 #[test]
 fn a_stack_rotate_names_the_stack_not_a_subshell() {
-    let (v, r) = common::decision_at(&cfg(), "pushd +1; echo x > f.txt", "/tmp/proj");
+    let (v, r) = common::decision_at(&cfg(), "pushd +1; echo x > f.txt", &t("/tmp/proj"));
     assert_eq!(v, "ask");
     assert!(r.contains("directory stack"), "{r}");
     assert!(!r.contains("subshell"), "the old catch-all list is gone: {r}");
@@ -435,8 +537,11 @@ fn a_stack_rotate_names_the_stack_not_a_subshell() {
 fn an_unanchored_writer_names_its_own_position() {
     // M2.37: the WRITE's position is the unprovable thing — no directory
     // change anywhere on the line is at fault, and the wording says so.
-    let (v, r) =
-        common::decision_at(&cfg(), "cd /tmp/proj; f() { echo x > f.txt; }", "/tmp/proj");
+    let (v, r) = common::decision_at(
+        &cfg(),
+        &format!("cd {}; f() {{ echo x > f.txt; }}", t("/tmp/proj")),
+        &t("/tmp/proj"),
+    );
     assert_eq!(v, "ask");
     assert!(r.contains("position"), "{r}");
     assert!(!r.contains("cannot order"), "no cd is the cause here: {r}");
@@ -444,8 +549,11 @@ fn an_unanchored_writer_names_its_own_position() {
 
 #[test]
 fn a_loop_mover_names_iteration_carry() {
-    let (v, r) =
-        common::decision_at(&cfg(), "while cd ..; do echo x > f.txt; done", "/tmp/proj/deep");
+    let (v, r) = common::decision_at(
+        &cfg(),
+        "while cd ..; do echo x > f.txt; done",
+        &t("/tmp/proj/deep"),
+    );
     assert_eq!(v, "ask");
     assert!(r.contains("loop"), "{r}");
 }
@@ -454,7 +562,7 @@ fn a_loop_mover_names_iteration_carry() {
 fn an_unresolvable_mover_destination_keeps_its_precise_cause() {
     // The pre-existing per-site sentence, untouched by the cause split —
     // the UNREAD_DEST_CD strings are pinned verbatim in bash_writes_test.
-    let (v, r) = common::decision_at(&cfg(), "cd \"$D\"; echo x > f.txt", "/tmp/proj");
+    let (v, r) = common::decision_at(&cfg(), "cd \"$D\"; echo x > f.txt", &t("/tmp/proj"));
     assert_eq!(v, "ask");
     assert!(r.contains("somewhere vouch cannot resolve"), "{r}");
 }
@@ -464,15 +572,21 @@ fn the_new_causes_are_pinned_verbatim() {
     // M2.48's standard, applied to the causes this branch minted: pinned
     // as full sentences so a future edit cannot quietly reword one while
     // the census still buckets by the engine's own constants.
-    let (v, r) =
-        common::decision_at(&cfg(), "while cd ..; do echo x > f.txt; done", "/tmp/proj/deep");
+    let (v, r) = common::decision_at(
+        &cfg(),
+        "while cd ..; do echo x > f.txt; done",
+        &t("/tmp/proj/deep"),
+    );
     assert_eq!(v, "ask");
     assert!(r.contains(vouch::engine::LOOP_CD), "{r}");
-    let (v2, r2) =
-        common::decision_at(&cfg(), "cd /tmp/proj; f() { echo x > f.txt; }", "/tmp/proj");
+    let (v2, r2) = common::decision_at(
+        &cfg(),
+        &format!("cd {}; f() {{ echo x > f.txt; }}", t("/tmp/proj")),
+        &t("/tmp/proj"),
+    );
     assert_eq!(v2, "ask");
     assert!(r2.contains(vouch::engine::UNPLACED_POS_CD), "{r2}");
-    let (v3, r3) = common::decision_at(&cfg(), "pushd +1; echo x > f.txt", "/tmp/proj");
+    let (v3, r3) = common::decision_at(&cfg(), "pushd +1; echo x > f.txt", &t("/tmp/proj"));
     assert_eq!(v3, "ask");
     assert!(r3.contains(vouch::engine::STACK_CD), "{r3}");
 }
@@ -484,13 +598,32 @@ fn a_run_certain_certifiable_anchor_composes_as_an_ordinary_mover() {
     // reader — its run-certainty is the movers' own always-runs notion —
     // and its composed `plain_end` keeps every inner failure branch §4.4
     // does not discharge (landing review, finding 1).
-    let (v, r) = common::decision_at(&cfg(), "{ cd /tmp; }; cp /tmp/s f.txt", "/etc");
+    //
+    // Legs 1, 2 and 5 expect "allow", which requires the §4.4 discharge to
+    // fire and prove the anchor's `cd /tmp` succeeded — so /tmp must exist
+    // on the deciding machine. Unconditionally creating it is a no-op on
+    // unix (already exists) and the one thing that makes this test's
+    // outcome independent of what the runner happens to have on disk.
+    let tmp = t("/tmp");
+    std::fs::create_dir_all(&tmp).expect("create tmp for the §4.4 discharge");
+    let etc = t("/etc");
+    let (v, r) =
+        common::decision_at(&cfg(), &format!("{{ cd {tmp}; }}; cp /tmp/s f.txt"), &etc);
     assert_eq!(v, "allow", "a chainless brace anchor is an ordinary mover: {r}");
-    let (v2, r2) = common::decision_at(&cfg(), "if cd /tmp; then :; fi; cp /tmp/s f.txt", "/etc");
+    let (v2, r2) = common::decision_at(
+        &cfg(),
+        &format!("if cd {tmp}; then :; fi; cp /tmp/s f.txt"),
+        &etc,
+    );
     assert_eq!(v2, "allow", "the whole if-statement composes its condition's end: {r2}");
-    let (v3, _) = common::decision_at(&cfg(), "false && { cd /tmp; }; cp /tmp/s f.txt", "/etc");
+    let (v3, _) = common::decision_at(
+        &cfg(),
+        &format!("false && {{ cd {tmp}; }}; cp /tmp/s f.txt"),
+        &etc,
+    );
     assert_eq!(v3, "ask", "a later chain member's anchor is not run-certain");
-    let (v4, _) = common::decision_at(&cfg(), "! { cd /tmp; }; cp /tmp/s f.txt", "/etc");
+    let (v4, _) =
+        common::decision_at(&cfg(), &format!("! {{ cd {tmp}; }}; cp /tmp/s f.txt"), &etc);
     assert_eq!(v4, "ask", "a negated head never composes as certain");
     // The contested position (landing delta review, finding 2): an or-tail
     // reader after the run-certain anchor. The `cp` runs only when the
@@ -498,8 +631,11 @@ fn a_run_certain_certifiable_anchor_composes_as_an_ordinary_mover() {
     // licensed by §4.4's existing-target premise, the same accepted
     // residue the plain `cd /tmp && true || write` spelling already ships.
     // This pin makes the coupling loud: narrow §4.4 and this leg goes red.
-    let (v5, r5) =
-        common::decision_at(&cfg(), "{ cd /tmp; } && true || cp /tmp/s f.txt", "/etc");
+    let (v5, r5) = common::decision_at(
+        &cfg(),
+        &format!("{{ cd {tmp}; }} && true || cp /tmp/s f.txt"),
+        &etc,
+    );
     assert_eq!(v5, "allow", "the anchor inherits the walk's §4.4 residue: {r5}");
 }
 
@@ -510,8 +646,17 @@ fn a_condition_lists_success_end_is_never_broader_than_its_plain_end() {
     // under "given the list succeeded" exactly as it does unconditionally.
     // Without the mirror, this shape's then-body started at a STRICT
     // superset of the same scope's plain_end (landing review, finding 2).
-    let (v, r) =
-        common::decision_at(&cfg(), "if cd /tmp; true; then cp /tmp/s f.txt; fi", "/etc");
+    //
+    // Every leg here expects "allow" through the same §4.4 discharge as
+    // the anchor test above, so /tmp must exist at decision time.
+    let tmp = t("/tmp");
+    std::fs::create_dir_all(&tmp).expect("create tmp for the §4.4 discharge");
+    let etc = t("/etc");
+    let (v, r) = common::decision_at(
+        &cfg(),
+        &format!("if cd {tmp}; true; then cp /tmp/s f.txt; fi"),
+        &etc,
+    );
     assert_eq!(v, "allow", "{r}");
     // The mirror's reach (landing delta review, finding 2): an or-rescued
     // condition list and an or-rescued anchor both discharge the same way,
@@ -519,12 +664,15 @@ fn a_condition_lists_success_end_is_never_broader_than_its_plain_end() {
     // are the only thing holding them.
     let (v2, r2) = common::decision_at(
         &cfg(),
-        "if { cd /tmp; } || true; then cp /tmp/s f.txt; fi",
-        "/etc",
+        &format!("if {{ cd {tmp}; }} || true; then cp /tmp/s f.txt; fi"),
+        &etc,
     );
     assert_eq!(v2, "allow", "an or-rescued anchor discharges on the §4.4 premise: {r2}");
-    let (v3, r3) =
-        common::decision_at(&cfg(), "if cd /tmp || true; then echo x > f.txt; fi", "/etc");
+    let (v3, r3) = common::decision_at(
+        &cfg(),
+        &format!("if cd {tmp} || true; then echo x > f.txt; fi"),
+        &etc,
+    );
     assert_eq!(v3, "allow", "an or-rescued run-certain mover discharges the same way: {r3}");
 }
 
@@ -534,9 +682,19 @@ fn the_outermost_process_boundary_decides_containment() {
     // pipeline (first member, a process boundary) brace row notwithstanding,
     // while `cat | { cd A; }` is the last-member case and reaches the parent
     // as a candidate. Both legs in one test so neither can drift alone.
-    let (v, _) = common::decision_at(&cfg(), "{ cd /etc; } | cat; cp /tmp/s f.txt", "/tmp/proj");
+    let etc = t("/etc");
+    let proj = t("/tmp/proj");
+    let (v, _) = common::decision_at(
+        &cfg(),
+        &format!("{{ cd {etc}; }} | cat; cp /tmp/s f.txt"),
+        &proj,
+    );
     assert_eq!(v, "allow", "a boundary-contained mover never reaches the parent");
-    let (v2, r2) = common::decision_at(&cfg(), "cat | { cd /etc; }; cp /tmp/s f.txt", "/tmp/proj");
+    let (v2, r2) = common::decision_at(
+        &cfg(),
+        &format!("cat | {{ cd {etc}; }}; cp /tmp/s f.txt"),
+        &proj,
+    );
     assert_eq!(v2, "ask", "the last pipeline member may move the parent: {r2}");
 }
 
@@ -546,16 +704,19 @@ fn a_certified_final_member_survives_an_earlier_or_boundary() {
     // and succeeded — B replaces, A keeps its failure branch. The
     // and_run_from carry across `&&` after a `||` is what makes this work,
     // and nothing else pins that carry through success_end's virtual reader.
+    let etc = t("/etc");
+    let tmp = t("/tmp");
+    let proj = t("/tmp/proj");
     let (v, r) = common::decision_at(
         &cfg(),
-        "if cd /etc || true && cd /tmp; then cp /tmp/s f.txt; fi",
-        "/tmp/proj",
+        &format!("if cd {etc} || true && cd {tmp}; then cp /tmp/s f.txt; fi"),
+        &proj,
     );
     assert_eq!(v, "allow", "the certified final member is the whole answer: {r}");
     let (v2, _) = common::decision_at(
         &cfg(),
-        "if cd /tmp && cd /etc || true; then cp /tmp/s f.txt; fi",
-        "/tmp/proj",
+        &format!("if cd {tmp} && cd {etc} || true; then cp /tmp/s f.txt; fi"),
+        &proj,
     );
     assert_eq!(v2, "ask", "an or-tail final member certifies nothing before the entry");
 }
@@ -565,16 +726,18 @@ fn a_condition_inside_a_loop_body_recovers_from_the_poisoned_start() {
     // The loop body starts Unknown (iteration carry), and a certifiable
     // condition list inside it composes an ABSOLUTE mover back to a known
     // base — the Poison start must not be a permanent floor.
+    let tmp = t("/tmp");
+    let etc = t("/etc");
     let (v, r) = common::decision_at(
         &cfg(),
-        "for i in 1; do if cd /tmp; then cp /tmp/s f.txt; fi; done",
-        "/etc",
+        &format!("for i in 1; do if cd {tmp}; then cp /tmp/s f.txt; fi; done"),
+        &etc,
     );
     assert_eq!(v, "allow", "{r}");
     let (v2, _) = common::decision_at(
         &cfg(),
-        "for i in 1; do cp /tmp/s f.txt; cd /tmp; done",
-        "/etc",
+        &format!("for i in 1; do cp /tmp/s f.txt; cd {tmp}; done"),
+        &etc,
     );
     assert_eq!(v2, "ask", "a position BEFORE the loop's first mover stays unknown");
 }
@@ -584,16 +747,18 @@ fn sibling_case_branches_are_mutually_exclusive() {
     // Each branch body anchors at the `case` itself, so one branch's mover
     // never enters a sibling branch's base — while both still reach the
     // parent as candidates after `esac`.
+    let etc = t("/etc");
+    let proj = t("/tmp/proj");
     let (v, r) = common::decision_at(
         &cfg(),
-        "case x in a) cd /etc;; x) cp /tmp/s f.txt;; esac",
-        "/tmp/proj",
+        &format!("case x in a) cd {etc};; x) cp /tmp/s f.txt;; esac"),
+        &proj,
     );
     assert_eq!(v, "allow", "a sibling branch's mover is not in this branch's base: {r}");
     let (v2, _) = common::decision_at(
         &cfg(),
-        "case x in x) cd /etc;; esac; cp /tmp/s f.txt",
-        "/tmp/proj",
+        &format!("case x in x) cd {etc};; esac; cp /tmp/s f.txt"),
+        &proj,
     );
     assert_eq!(v2, "ask", "after esac the branch outcome is a candidate");
 }
