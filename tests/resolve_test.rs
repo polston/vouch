@@ -293,7 +293,9 @@ fn a_set_location_dash_path_target_still_resolves() {
     // unchanged — pinning here so `Set-Location -Path C:/x` keeps resolving
     // exactly like `Set-Location C:/x` rather than silently regressing to
     // "unresolved".
-    match decide_ps(r#"Set-Location -Path C:/x; Set-Content -Path y.txt -Value h"#) {
+    // && per design 2026-08-30 §4.2 — named-parameter grammar is the
+    // subject, so the mover is certified.
+    match decide_ps(r#"Set-Location -Path C:/x && Set-Content -Path y.txt -Value h"#) {
         Decision::Ask(r) => assert!(r.contains("C:/x/y.txt"), "{r}"),
         other => panic!("expected Ask, got {other:?}"),
     }
@@ -385,7 +387,9 @@ fn the_cd_target_decides_whether_a_relative_write_is_allowed() {
 #[test]
 fn a_program_that_writes_by_flag_uses_the_cd_target_too() {
     // The fix belongs to path resolution, not to redirects specifically.
-    match decide("cd /c/Windows/System32; curl -o y.dll https://example.com/a") {
+    // && per design 2026-08-30 §4.2 — flag-value composition is the subject,
+    // so the mover is certified.
+    match decide("cd /c/Windows/System32 && curl -o y.dll https://example.com/a") {
         Decision::Ask(r) => assert!(r.contains("C:/Windows/System32/y.dll"), "{r}"),
         other => panic!("expected Ask, got {other:?}"),
     }

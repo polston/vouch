@@ -21,7 +21,20 @@ fn an_or_branch_is_unordered_from_the_or_on() {
 }
 
 #[test]
-fn subshell_pipeline_background_and_compound_bodies_are_unordered() {
+fn subshell_pipeline_background_and_compound_bodies_are_locally_sequenced() {
+    // Renamed and re-pinned for the cd-scope-and-candidates plan's Task 2
+    // (docs/specs/2026-08-30-cd-scope-and-candidate-design.md §3.1/§3.3): a
+    // construct's own body now gets its own `ScanScope` and sequences
+    // internally with a FRESH LOCAL `Order::Seq` counter, rather than being
+    // pinned `Order::Unordered` as before this task. `cd` is still the
+    // first (and only) command in each of these bodies, so it reads
+    // `Seq(0)` — locally provable, just no longer comparable to positions
+    // outside its own scope. `engine::collect_expanded` bridges that: it
+    // still presents `Unordered` for any command whose `cmd_scope` isn't
+    // `Some(0)`, so today's DECISION behavior is unchanged (see
+    // `unorderable_cds_fail_closed` in bash_writes_test.rs) until Task 3
+    // teaches the engine to read the scope table for real and removes the
+    // bridge.
     for src in [
         "(cd /x); echo hi",
         "cd /x | cat",
@@ -35,7 +48,7 @@ fn subshell_pipeline_background_and_compound_bodies_are_unordered() {
             .zip(vouch::shell::Bash.scan(src).unwrap().commands)
             .find(|(_, c)| c.head == "cd")
             .map(|(o, _)| o.clone());
-        assert_eq!(cd, Some(Order::Unordered), "cd not unordered in: {src}");
+        assert_eq!(cd, Some(Order::Seq(0)), "cd not locally sequenced in: {src}");
     }
 }
 
@@ -43,8 +56,19 @@ fn subshell_pipeline_background_and_compound_bodies_are_unordered() {
 fn redirects_carry_their_commands_order() {
     let (_, ro) = orders("echo x > f.txt && cd /y");
     assert_eq!(ro, vec![Order::Seq(0)]);
+    // Re-pinned for the cd-scope-and-candidates plan's Task 2: a subshell
+    // body now sequences internally with a fresh LOCAL `Order::Seq` rather
+    // than being pinned `Order::Unordered` — the redirect still carries its
+    // own command's order, which is now the local one.
     let (_, ro) = orders("(echo x > f.txt)");
-    assert_eq!(ro, vec![Order::Unordered]);
+    assert_eq!(ro, vec![Order::Seq(0)]);
+    // Review finding IMPORTANT 2, M2.221: the redirect's scope must
+    // be carried alongside its order, or a value-only order comparison at the
+    // engine boundary cannot tell this LOCAL `Seq(0)` apart from a top-level
+    // `Seq(0)` on the same line. Scope 0 is the top level; the subshell body
+    // is the first allocated child scope, so its own redirect reads scope 1.
+    let s = vouch::shell::Bash.scan("(echo x > f.txt)").expect("scans");
+    assert_eq!(s.redirect_scope, vec![Some(1)]);
 }
 
 #[test]

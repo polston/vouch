@@ -207,10 +207,51 @@ fn relative_cds_compose() {
     assert!(matches!(at("cd C:/work && cd sub && echo x > f.txt", "C:/elsewhere"), Decision::Allow(_)));
 }
 #[test]
+fn a_subshell_cd_composes_the_outer_write_at_the_callers_base() {
+    // Was the first shape of `unorderable_cds_fail_closed` below, moved out
+    // by the scope weaving (design §3.2): a subshell is a process boundary,
+    // so its cd cannot move the parent and the outer relative write now
+    // COMPOSES at the caller's cwd instead of being unplaceable. The verdict
+    // here is still ask — C:/elsewhere is outside the allowed area — but for
+    // the resolved out-of-area reason, not the unorderable one, and the same
+    // write from an allowed cwd goes through.
+    match at("(cd C:/work); echo x > f.txt", "C:/elsewhere") {
+        Decision::Ask(r) => assert!(
+            r.contains("outside every allowed area"),
+            "composed base should resolve and ask as out-of-area: {r}"
+        ),
+        d => panic!("not asked: {d:?}"),
+    }
+    assert!(matches!(
+        at("(cd C:/elsewhere); echo x > f.txt", "C:/work"),
+        Decision::Allow(_)
+    ));
+}
+
+#[test]
+fn an_or_tail_write_is_judged_at_the_refuted_base() {
+    // Was the first shape of `unorderable_cds_fail_closed` below, moved out
+    // by candidate bases (design 2026-08-30 §4.2): the or-tail write runs
+    // only when the cd FAILED, so its base is the previous directory
+    // exactly — resolved, not unorderable. The verdict from a disallowed
+    // cwd is still ask, now for the out-of-area reason naming that cwd's
+    // own composed path; from an allowed cwd it goes through.
+    match at("cd C:/work || echo x > f.txt", "C:/elsewhere") {
+        Decision::Ask(r) => assert!(
+            r.contains("C:/elsewhere/f.txt"),
+            "refuted base should resolve at the caller's cwd: {r}"
+        ),
+        d => panic!("not asked: {d:?}"),
+    }
+    assert!(matches!(
+        at("cd C:/elsewhere || echo x > f.txt", "C:/work"),
+        Decision::Allow(_)
+    ));
+}
+
+#[test]
 fn unorderable_cds_fail_closed() {
     for cmd in [
-        "(cd C:/work); echo x > f.txt",
-        "cd C:/work || echo x > f.txt",
         "pushd C:/work && popd && echo x > f.txt",
         "cd C:/work && cd - && echo x > f.txt",
     ] {
@@ -223,11 +264,13 @@ fn unorderable_cds_fail_closed() {
                 // Reworded (Task 8, spec §5 rule 5 / M2.37 caution): names no
                 // program. Pinned verbatim so a future edit cannot quietly
                 // reintroduce one.
+                // Reworded by Task 7 (M2.48): the old catch-all list named five
+                // things, none of which happened in these shapes. Both go
+                // through a destination vouch cannot read - a bare pop from
+                // the stack, and a dash that reaches the sentence as an
+                // undeclared option (rule 4), not as OLDPWD.
                 assert!(
-                    r.contains(
-                        "a directory change vouch cannot order (a subshell, ||, pipeline, \
-                         background job, or a directory stack vouch cannot see)"
-                    ),
+                    r.contains("a directory-change destination vouch cannot read"),
                     "wrong explanation for {cmd}: {r}"
                 );
             }
@@ -235,6 +278,122 @@ fn unorderable_cds_fail_closed() {
         }
     }
 }
+#[test]
+fn scope_local_redirect_orders_do_not_collide_with_top_level_orders() {
+    // Review finding CRITICAL 1, M2.221. `scan.redirect_order`
+    // carries each redirect's RAW, scope-local sequence number. A compound
+    // body's own counter restarts at `Seq(0)` for its first redirect, which
+    // is byte-for-byte the same value as the FIRST top-level command on the
+    // line — here, `cd C:/elsewhere`. Matching that raw value against the
+    // (Task-2-bridged) command-order list by naive equality let the
+    // collision attribute the body's write to the `cd`'s own base — the
+    // directory the shell was in BEFORE the `cd` ran, still inside
+    // `allow_paths` — instead of `C:/elsewhere`, which the shell actually
+    // moved to and which is not. Every shape below reaches that identical
+    // collision through a different compound construct; each must still ask
+    // once the shell has left the allowed area, never silently allow at the
+    // wrong (earlier) directory.
+    for cmd in [
+        "cd C:/elsewhere; (echo x > rel.txt)",
+        "cd C:/elsewhere; { echo x > rel.txt; }",
+        "cd C:/elsewhere; if true; then echo x > rel.txt; fi",
+        "cd C:/elsewhere; for i in 1; do echo x > rel.txt; done",
+        "cd C:/elsewhere; while false; do echo x > rel.txt; done",
+        "cd C:/elsewhere; case a in a) echo x > rel.txt;; esac",
+        "cd C:/elsewhere; coproc { echo x > rel.txt; }",
+        "cd C:/elsewhere; { echo x > rel.txt; } &",
+        "cd C:/elsewhere; cat <(echo x > rel.txt)",
+        "cd C:/elsewhere && (echo x > rel.txt)",
+        "cd C:/elsewhere && cat <(echo x > rel.txt)",
+    ] {
+        match at(cmd, "C:/work/proj") {
+            Decision::Ask(_) => {}
+            d => panic!("{cmd}: should ask (shell left the allowed area) but got {d:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_wrapped_snippets_cd_before_a_compound_body_does_not_collide_across_scopes() {
+    // The wrapper-expansion recursion (`go()` in src/guards.rs) hands a
+    // wrapped snippet's own `SnippetScan` one level deeper than the shape
+    // `scope_local_redirect_orders_do_not_collide_with_top_level_orders`
+    // above pins at the outer boundary — and the same collision reached
+    // there too, through the WRITE-CLAIM channel: a compound body's own
+    // `Seq` counter restarts at `Seq(0)`, byte-for-byte the same as the
+    // snippet's own top-level first command (`cd C:/elsewhere`), so a naive
+    // by-value reading placed the body's `cp` destination at a base the
+    // `cd` had not yet left — still inside `allow_paths` — instead of
+    // refusing to place it at all. Both compound-body shapes must ask: the
+    // body's position relative to the `cd` is genuinely unprovable until
+    // the walk consumes scopes for real (Task 3).
+    for cmd in [
+        r#"bash -c 'cd C:/elsewhere; (cp x rel.txt)'"#,
+        r#"bash -c 'cd C:/elsewhere; { cp x rel.txt; }'"#,
+    ] {
+        match at(cmd, "C:/work/proj") {
+            Decision::Ask(_) => {}
+            d => panic!("{cmd}: should ask (the body's base is unprovable after the cd) but got {d:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_heredoc_fed_snippets_cd_before_a_compound_body_does_not_collide_across_scopes() {
+    // Same collision as above, reached through the heredoc locator's own
+    // recursion site rather than the parsed-wrapper arm the previous test
+    // covers — `bash` here reads its script from the attached here-document,
+    // not from a `-c` argument, so it exercises the second, independently
+    // folded call to `go()`.
+    match at("bash <<'EOF'\ncd C:/elsewhere\n(cp x rel.txt)\nEOF\n", "C:/work/proj") {
+        Decision::Ask(_) => {}
+        d => panic!("should ask (the body's base is unprovable after the cd) but got {d:?}"),
+    }
+}
+
+#[test]
+fn a_wrapped_snippets_top_level_cd_and_write_still_compose() {
+    // The over-fold guard: when the `cd` and the write are BOTH on the
+    // snippet's own top level (no compound body between them), the fold
+    // must not touch them — `cmd_scope` proves both top-level, so their
+    // real scanner-reported order survives and the `cd` composes into the
+    // write's base. The REASON is the discriminator: composed, the base
+    // RESOLVES to C:/elsewhere and asks because that is outside every
+    // allowed area; over-folded, the base would be unresolvable and the
+    // ask would name the unresolved path instead.
+    // Certified with && (design 2026-08-30 §4.2): an uncertified `;` mover
+    // now contributes its failure branch, and this test is about the FOLD,
+    // not chain semantics — the candidate suite covers those.
+    match at(r#"bash -c 'cd C:/elsewhere && cp x rel.txt'"#, "C:/work/proj") {
+        Decision::Ask(r) => assert!(
+            r.contains("outside every allowed area"),
+            "composed base should resolve and ask as out-of-area, got: {r}"
+        ),
+        d => panic!("should ask (composed base C:/elsewhere is outside the allowed area) but got {d:?}"),
+    }
+    // The blunt half of the same guard, immune to reason rewording: an
+    // inner top-level cd INTO the allowed area composes into an ALLOW —
+    // an over-folded order could only produce an ask here.
+    assert!(matches!(
+        at(r#"bash -c 'cd C:/work/proj/sub && cp x rel.txt'"#, "C:/work/proj"),
+        Decision::Allow(_)
+    ));
+}
+
+#[test]
+fn a_compound_body_write_with_no_mover_keeps_its_wrapper_base() {
+    // The fold must not blanket-ask every body write: with NO directory
+    // change anywhere in the snippet, an unordered body position still has
+    // exactly one possible base — the wrapper's own run place — so a
+    // relative destination there resolves and stays governed by the write
+    // rules (allowed here, inside C:/work/**). Only a mover the body cannot
+    // be ordered against makes the base unprovable.
+    match at(r#"bash -c '(cp x rel.txt)'"#, "C:/work/proj") {
+        Decision::Allow(_) => {}
+        d => panic!("no mover in the snippet: the body write resolves at the wrapper's base and is allowed, got {d:?}"),
+    }
+}
+
 #[test]
 fn cd_with_only_option_shaped_arguments_fails_closed() {
     // `cd -1` is not a flag bash recognises for `cd`; bash errors and stays in
@@ -246,7 +405,9 @@ fn cd_with_only_option_shaped_arguments_fails_closed() {
     match at("cd -1 && echo x > f.txt", "C:/elsewhere") {
         Decision::Ask(r) => {
             assert!(r.contains("unresolved_path"), "{r}");
-            assert!(r.contains("a directory change vouch cannot order"), "{r}");
+            // Reworded by Task 7 (M2.48): the cause names what actually
+            // happened at this site, not the old catch-all list.
+            assert!(r.contains("a directory-change destination vouch cannot read"), "{r}");
         }
         d => panic!("expected ask, got {d:?}"),
     }
@@ -262,7 +423,9 @@ fn pushd_with_an_option_never_takes_the_directory_argument() {
     match at("pushd -n C:/work && echo x > f.txt", "C:/elsewhere") {
         Decision::Ask(r) => {
             assert!(r.contains("unresolved_path"), "{r}");
-            assert!(r.contains("a directory change vouch cannot order"), "{r}");
+            // Reworded by Task 7 (M2.48): the cause names what actually
+            // happened at this site, not the old catch-all list.
+            assert!(r.contains("a directory-change destination vouch cannot read"), "{r}");
         }
         d => panic!("expected ask, got {d:?}"),
     }
@@ -342,7 +505,10 @@ allow_paths = ["C:/work/**"]
     let inside = vouch::engine::decide_command_at(
         &cfg,
         "bash",
-        r#"powershell -Command "sl C:/work; Copy-Item source.txt probe.txt""#,
+        // && rather than ; — design 2026-08-30 §4.2: an uncertified mover
+        // contributes its failure branch; this test is about the snippet
+        // LANGUAGE lookup, so it certifies the mover.
+        r#"powershell -Command "sl C:/work && Copy-Item source.txt probe.txt""#,
         Some(HOME),
         None,
         Some("C:/elsewhere"),
@@ -498,7 +664,9 @@ fn a_quoted_dash_is_the_previous_directory_not_a_directory_named_dash() {
     match at(r#"cd "-" && echo x > f.txt"#, "C:/work") {
         Decision::Ask(r) => {
             assert!(r.contains("unresolved_path"), "{r}");
-            assert!(r.contains("a directory change vouch cannot order"), "{r}");
+            // Reworded by Task 7 (M2.48): the cause names what actually
+            // happened at this site, not the old catch-all list.
+            assert!(r.contains("a directory-change destination vouch cannot read"), "{r}");
         }
         d => panic!("expected ask, got {d:?}"),
     }
@@ -511,7 +679,9 @@ fn the_stack_rotate_form_names_no_directory() {
     match at("pushd +1 && echo x > f.txt", "C:/work") {
         Decision::Ask(r) => {
             assert!(r.contains("unresolved_path"), "{r}");
-            assert!(r.contains("a directory change vouch cannot order"), "{r}");
+            // Reworded by Task 7 (M2.48): the cause names what actually
+            // happened at this site, not the old catch-all list.
+            assert!(r.contains("a directory stack this command line cannot see"), "{r}");
         }
         d => panic!("expected ask, got {d:?}"),
     }
@@ -537,7 +707,9 @@ fn a_quoted_directory_still_composes_and_a_quoted_flag_is_still_a_flag() {
     match at(r#"cd "-P" "C:/work" && echo x > f.txt"#, "C:/elsewhere") {
         Decision::Ask(r) => {
             assert!(r.contains("unresolved_path"), "{r}");
-            assert!(r.contains("a directory change vouch cannot order"), "{r}");
+            // Reworded by Task 7 (M2.48): the cause names what actually
+            // happened at this site, not the old catch-all list.
+            assert!(r.contains("a directory-change destination vouch cannot read"), "{r}");
         }
         d => panic!("expected ask, got {d:?}"),
     }
@@ -684,7 +856,8 @@ allow_paths = ["C:/work/**"]
     fn cd_path_resolves_on_a_powershell_line() {
         // Rule 1: `-Path` is a declared dest-dir flag on the powershell
         // `cd`/`set-location` entry, so its value IS the destination.
-        assert_destination("ps", "cd -Path C:/elsewhere; \"x\" > probe.txt", "C:/elsewhere/probe.txt");
+        // && per design 2026-08-30 §4.2 — this test binds the flag VALUE.
+        assert_destination("ps", "cd -Path C:/elsewhere && \"x\" > probe.txt", "C:/elsewhere/probe.txt");
     }
 
     #[test]
@@ -693,7 +866,9 @@ allow_paths = ["C:/work/**"]
         // documents and does the home move; PowerShell 5.1 is probed to
         // stay put (a no-op), so a base that depends on which PowerShell
         // runs is not one vouch can state.
-        assert_destination("bash", "cd; echo hi > probe.txt", "<home>/probe.txt");
+        // && per design 2026-08-30 §4.2 — this test is about the bare-cd
+        // home fallback, so the mover is certified.
+        assert_destination("bash", "cd && echo hi > probe.txt", "<home>/probe.txt");
         assert_asks("ps", "cd; \"x\" > probe.txt");
     }
 
@@ -718,7 +893,9 @@ allow_paths = ["C:/work/**"]
         // destination, and the write rule judges the REAL composed path
         // (here, outside the allowed area) rather than asking about an
         // unresolved one.
-        assert_destination("ps", "Set-Location -pa C:/x; \"y\" > probe.txt", "C:/x/probe.txt");
+        // && per design 2026-08-30 §4.2 — abbreviation resolution is the
+        // subject here.
+        assert_destination("ps", "Set-Location -pa C:/x && \"y\" > probe.txt", "C:/x/probe.txt");
     }
 
     #[test]
@@ -777,7 +954,9 @@ allow_paths = ["C:/work/**"]
         // The positive control: an ordinary directory behind `-Path` is
         // untouched by the amendment above — it still binds and moves.
         assert!(matches!(
-            decide("ps", "Set-Location -Path C:/work; \"x\" > probe.txt"),
+            // && per design 2026-08-30 §4.2 — the positive flag-value
+            // control needs the certified singleton.
+            decide("ps", "Set-Location -Path C:/work && \"x\" > probe.txt"),
             Decision::Allow(_)
         ));
     }
@@ -821,7 +1000,8 @@ allow_paths = ["C:/work/**"]
     fn bash_plain_home_compose_is_unchanged() {
         // The control for the rule above: plain `~/x` home expansion is
         // untouched — only the NON-plain `~`-forms became unknown.
-        assert_destination("bash", "cd ~/x; echo hi > probe.txt", "<home>/x/probe.txt");
+        // && per design 2026-08-30 §4.2 — plain-`~` expansion is the subject.
+        assert_destination("bash", "cd ~/x && echo hi > probe.txt", "<home>/x/probe.txt");
     }
 
     #[test]

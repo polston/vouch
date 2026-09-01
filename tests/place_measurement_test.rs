@@ -18,12 +18,14 @@ mod common;
 /// something it is not. Structural, so no corpus and no skip.
 ///
 /// The counted unit is a command POSITION whose run place is Unknown, never a
-/// directory change: a single unplaceable one marks every position in the line
-/// Unknown (`CdTimeline.unplaceable`), which is why `cd a || cd b; echo x`
-/// counts 3 and not 1 — the count is "positions a restrict-shaped place rule
-/// would treat as possibly-inside", which is exactly the noise being sized.
-/// Reading it as "lines containing an unplaceable cd" would make the reported
-/// figure look ~3x too large and invite a "fix" that measured nothing.
+/// directory change. A genuinely unplaceable change still marks its whole
+/// scope, but the or-fallback shape now resolves positionally under
+/// candidate bases (design 2026-08-30 §4.2), so `cd a || cd b; echo x`
+/// counts 1 — the echo, whose surviving candidates are plural — while the
+/// movers' own positions and the refuted branch resolve. The count is
+/// "positions a restrict-shaped place rule would treat as possibly-inside",
+/// which is exactly the noise being sized; reading it as "lines containing
+/// an unplaceable cd" would invite a "fix" that measured nothing.
 ///
 /// The two zeroes are the other half of the claim: no cwd is supplied here, so
 /// a line with no directory change at all is NoDirectory (0, not Unknown), and
@@ -32,10 +34,14 @@ mod common;
 #[test]
 fn the_unknown_run_place_count_is_per_command_position() {
     use vouch::engine::count_unknown_run_place_commands as count;
+    // Since candidate bases (design 2026-08-30 §4.2) the or-fallback shape
+    // no longer poisons the whole line: the movers' own positions and the
+    // refuted branch resolve, and only the position where several
+    // candidates survive counts as unknown at this boundary.
     assert_eq!(
         count("bash", "cd a || cd b; echo x"),
-        3,
-        "one unplaceable directory change marks every position in the line"
+        1,
+        "only the position with several surviving candidates is unknown"
     );
     assert_eq!(count("bash", "echo x"), 0, "no directory change is NoDirectory, not Unknown");
     assert_eq!(count("bash", "cd C:/x && echo hi"), 0, "an ordered, resolvable cd is placeable");

@@ -42,11 +42,15 @@ unread_verb = "ask"
 # still contains a variable vouch could not resolve". Since the run-dir-flag
 # work (2026-07-31) it also covers: the directory a command runs in is not
 # provable (a run-dir flag like `git -C` given twice, with no value, or with
-# a value that does not resolve; a `cd` inside a subshell, `||` branch or
-# `popd` whose target vouch cannot follow) — and separately, "vouch cannot
-# tell WHICH ARGUMENT is the destination" when an undescribed flag sits
-# after the subcommand. The off-switch got broader along with the class of
-# thing it covers; this is still the one setting for all of it.
+# a value that does not resolve) — and separately, "vouch cannot tell WHICH
+# ARGUMENT is the destination" when an undescribed flag sits after the
+# subcommand. Since the cd-scope-and-candidate work (2026-08-31), a `cd`
+# inside a subshell or an `||`/`&&` fallback chain is judged over every
+# directory it could leave the shell in rather than asking outright; this
+# setting still covers a `popd`/`dirs` stack rotation, a loop-sourced `cd`,
+# and any destination vouch genuinely cannot read. The off-switch got
+# broader along with the class of thing it covers; this is still the one
+# setting for all of it.
 unresolved_path = "ask"
 
 # vouch has no description of what this program does.

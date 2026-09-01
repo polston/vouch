@@ -162,6 +162,10 @@ pub struct ChainPos {
     pub id: u32,
     pub idx: u32,
     pub and_run_from: u32,
+    /// True when this member's pipeline is prefixed with `!` — its exit
+    /// status is inverted, so its success is neither certifiable nor
+    /// refutable from a later command's execution.
+    pub negated: bool,
 }
 
 /// What supplies a command's standard input.
@@ -277,6 +281,59 @@ pub enum Order {
     Unordered,
 }
 
+/// Whether entering a scope crosses a process boundary.
+///
+/// A subshell, a command substitution, or a wrapped snippet handed to
+/// another interpreter starts a new process — nothing it does to the
+/// shell's own state (a `cd`, an exported variable) is visible once it
+/// exits. A brace group or the body of an `if`/`for`/`while` runs in the
+/// SAME process as its parent, so a `cd` inside one does move the parent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeKind {
+    ProcessBoundary,
+    SameProcess,
+}
+
+/// WHICH same-process construct a scope is — the row of the design's §3.3
+/// table that decides how a mover-carrying body reaches its parent: a brace
+/// group or an if-condition always runs when reached, a branch body or a
+/// pipeline's last member may not have run, and a loop's condition or body
+/// carries its movers across iterations no anchor can bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeClass {
+    Brace,
+    CondList,
+    /// An `elif` condition list: unlike the FIRST condition, it runs only
+    /// when every earlier condition failed, so nothing about the statement
+    /// running proves it ran.
+    ElifCond,
+    ThenBody,
+    BranchBody,
+    LoopCond,
+    LoopBody,
+    PipeTail,
+    AsyncMember,
+}
+
+/// One scope the walk entered — a subshell, a wrapped snippet, or any other
+/// construct whose contents run in their own execution context (design doc
+/// §3.1). Scope 0 is the top level of the scan and has no entry of its own;
+/// every other scope is identified by its position in `Scan::scan_scopes`
+/// plus one (`scan_scopes[0]` is scope 1, `scan_scopes[1]` is scope 2, …).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanScope {
+    /// Enclosing scan scope (0 = top level, which has no entry of its own).
+    pub parent: usize,
+    pub kind: ScopeKind,
+    /// The §3.3 construct row, for `SameProcess` scopes; `None` for process
+    /// boundaries, whose movers never reach the parent whatever they are.
+    pub class: Option<ScopeClass>,
+    /// The construct's own position within its parent scope.
+    pub anchor_order: Order,
+    /// The construct's own chain membership within its parent scope.
+    pub anchor_chain: Option<ChainPos>,
+}
+
 /// What a scanner found.
 #[derive(Debug, Default, Clone)]
 pub struct Scan {
@@ -347,6 +404,17 @@ pub struct Scan {
     /// `commands`; each map keys a command's argument index. Empty means the
     /// scanner reported no connectable structure for that command.
     pub indexed_values: Vec<std::collections::HashMap<usize, IndexedValueRef>>,
+    /// Scopes the walk entered — subshells, wrapped snippets, and similar
+    /// constructs (§3.1 design doc). Allocated parent-before-child; scope 0
+    /// is the top level and has no entry of its own here.
+    pub scan_scopes: Vec<ScanScope>,
+    /// Which scope each command (parallel to `commands`) ran in. `None` =
+    /// "no scanner said which scope" — readers treat absence as
+    /// unplaceable, never as scope 0 (0 is a real scope and not a
+    /// fail-closed default; same solution as `ExecutionSite::scanner_order`).
+    pub cmd_scope: Vec<Option<usize>>,
+    /// Parallel to `redirect_targets`, same `None` semantics.
+    pub redirect_scope: Vec<Option<usize>>,
     /// The next `HeredocId` `alloc_heredoc_id` hands out. Private: nothing
     /// outside this `impl` block has a reason to read the counter itself,
     /// only to ask for a fresh id or to merge one scan's range into
@@ -381,6 +449,7 @@ impl Scan {
         args_complete: bool,
         chain: Option<ChainPos>,
         prefix_assigns: Vec<String>,
+        scope: Option<usize>,
     ) {
         if head.is_empty() {
             return;
@@ -401,6 +470,7 @@ impl Scan {
         self.input_source.push(input_source);
         self.args_complete.push(args_complete);
         self.indexed_values.push(Default::default());
+        self.cmd_scope.push(scope);
     }
 
     /// Merge a nested scan (a script block, a subshell) into this one.
@@ -447,6 +517,35 @@ impl Scan {
             .filter_map(|c| c.chain.map(|cp| cp.id))
             .max()
             .map_or(0, |m| m + 1);
+        // `other`'s scope ids (1..) are its own fresh numbering, same as
+        // `chain_id_offset` above — shift every one of them past whatever
+        // `self` has already handed out. A `parent` of 0 inside `other`
+        // names ITS OWN top level, which is really "wherever this absorbed
+        // scan was embedded" — a fact `absorb` cannot know (it sees only the
+        // two scans, not the construct that nested one inside the other) —
+        // so it stays 0 rather than being re-parented onto a scope that
+        // might not be the true anchor. Anchoring that correctly is later
+        // work (design doc §3.1); this keeps the placeholder rather than
+        // guessing.
+        let scope_offset = self.scan_scopes.len();
+        self.scan_scopes
+            .extend(other.scan_scopes.into_iter().map(|s| ScanScope {
+                parent: if s.parent == 0 { 0 } else { s.parent + scope_offset },
+                anchor_chain: s.anchor_chain.map(|mut cp| {
+                    cp.id += chain_id_offset;
+                    cp
+                }),
+                ..s
+            }));
+        let restamp_scope = |s: Option<usize>| match s {
+            Some(0) => Some(0),
+            Some(k) => Some(k + scope_offset),
+            None => None,
+        };
+        self.cmd_scope
+            .extend(other.cmd_scope.into_iter().map(restamp_scope));
+        self.redirect_scope
+            .extend(other.redirect_scope.into_iter().map(restamp_scope));
         for c in other.constructs {
             self.note(&c);
         }

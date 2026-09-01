@@ -27,6 +27,21 @@ const OUTSIDE: &str = "C:/outside/of/every/allowed/tree";
 /// Inside common::realistic_config's write section (`C:/tmp/**`).
 const INSIDE: &str = "C:/tmp";
 
+/// Inside the allowed tree but proven absent at test time. The §4.4
+/// existing-target refinement reads the live filesystem, so an
+/// ask-expecting uncertified-mover shape must aim at a directory that does
+/// not exist — on a machine where the target exists the same shape
+/// legitimately allows (Task 4 review, IMPORTANT 4). Certified `&&` arms
+/// keep plain INSIDE: certification is existence-independent.
+const INSIDE_ABSENT: &str = "C:/tmp/vouch-absent-m2130";
+
+fn assert_inside_absent() {
+    assert!(
+        !std::path::Path::new(INSIDE_ABSENT).exists(),
+        "precondition: {INSIDE_ABSENT} must not exist on the deciding machine"
+    );
+}
+
 use vouch::config::Action;
 
 // ============================================================================
@@ -908,7 +923,8 @@ fn m2_130_and_chain_write_after_cd_stays_allow() {
 #[test]
 fn m2_130_semicolon_after_cd_does_not_imply_success() {
     let cfg = common::realistic_config();
-    assert_verdict(&cfg, OUTSIDE, &format!("ls && cd {INSIDE}; echo x > f"), "ask", None);
+    assert_inside_absent();
+    assert_verdict(&cfg, OUTSIDE, &format!("ls && cd {INSIDE_ABSENT}; echo x > f"), "ask", None);
 }
 
 /// An unconditional mover AFTER a conditional one does not launder it: the
@@ -918,10 +934,11 @@ fn m2_130_semicolon_after_cd_does_not_imply_success() {
 #[test]
 fn m2_130_unconditional_mover_does_not_launder_a_conditional_one() {
     let cfg = common::realistic_config();
+    assert_inside_absent();
     assert_verdict(
         &cfg,
         OUTSIDE,
-        &format!("ls && cd {INSIDE}; cd sub; echo x > f"),
+        &format!("ls && cd {INSIDE_ABSENT}; cd sub; echo x > f"),
         "ask",
         None,
     );
@@ -933,11 +950,25 @@ fn m2_130_unconditional_mover_does_not_launder_a_conditional_one() {
 /// verifier, which measured the over-reach as a false ask.
 #[test]
 fn m2_130_an_absolute_mover_clears_an_earlier_conditional_one() {
+    // Rewritten by candidate bases (design 2026-08-30 §4.2): an UNCERTIFIED
+    // absolute mover no longer clears earlier uncertainty — its own failure
+    // branch survives, so the union still holds an OUTSIDE candidate and
+    // asks. Certifying the final mover restores the singleton: a certified
+    // absolute replaces the whole set, which is the clearing this test
+    // used to pin, now with the certification §4.2 requires for it.
     let cfg = common::realistic_config();
+    assert_inside_absent();
     assert_verdict(
         &cfg,
         OUTSIDE,
-        &format!("ls && cd {OUTSIDE}/other; cd {INSIDE}; echo x > f"),
+        &format!("ls && cd {OUTSIDE}/other; cd {INSIDE_ABSENT}; echo x > f"),
+        "ask",
+        None,
+    );
+    assert_verdict(
+        &cfg,
+        OUTSIDE,
+        &format!("ls && cd {OUTSIDE}/other; cd {INSIDE} && echo x > f"),
         "allow",
         None,
     );
@@ -968,16 +999,27 @@ fn m2_130_or_chain_write_runs_only_on_cd_failure() {
 /// Unconditional mover — stays allow (today-pinned shape, bash_writes_test.rs:782).
 #[test]
 fn m2_130_unconditional_cd_then_write_stays_allow() {
+    // Rewritten by candidate bases (design 2026-08-30 §4.2, M2.44): running
+    // proves nothing about success, so the `;` form now carries its failure
+    // branch — the write may land at the OUTSIDE cwd — and asks naming it,
+    // while the `&&` form's certification keeps the singleton allow this
+    // test used to pin for both.
     let cfg = common::realistic_config();
-    assert_verdict(&cfg, OUTSIDE, &format!("cd {INSIDE}; echo x > f"), "allow", None);
+    assert_inside_absent();
+    assert_verdict(&cfg, OUTSIDE, &format!("cd {INSIDE_ABSENT}; echo x > f"), "ask", None);
+    assert_verdict(&cfg, OUTSIDE, &format!("cd {INSIDE} && echo x > f"), "allow", None);
 }
 
 /// The PowerShell twin of the semicolon-after-`cd` split, once §3.4.2 lands.
 #[test]
 fn m2_130_powershell_and_twin_of_semicolon_split() {
+    // Both arms use the absent target: the PowerShell scanner does not
+    // chain-certify `&&`, so the `&&` arm's ask also rests on the target
+    // not existing (Task 4 review, IMPORTANT 4).
     let cfg = common::realistic_config();
-    let semicolon = format!(r#"powershell -Command "Set-Location {INSIDE}; echo x > f""#);
-    let and_and = format!(r#"powershell -Command "Set-Location {INSIDE} && echo x > f""#);
+    assert_inside_absent();
+    let semicolon = format!(r#"powershell -Command "Set-Location {INSIDE_ABSENT}; echo x > f""#);
+    let and_and = format!(r#"powershell -Command "Set-Location {INSIDE_ABSENT} && echo x > f""#);
     assert_pair(&cfg, OUTSIDE, &semicolon, &and_and, "ask", None);
 }
 

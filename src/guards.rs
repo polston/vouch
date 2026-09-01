@@ -4045,18 +4045,25 @@ fn scan_snippet(lang: &str, src: &str, srcs: &mut Vec<(String, String)>) -> Resu
             args_complete: s.args_complete,
             indexed_values: s.indexed_values,
             order: s.order,
+            scan_scopes: s.scan_scopes,
+            cmd_scope: s.cmd_scope,
+            redirect_scope: s.redirect_scope,
             parsed: true,
         })
         .map_err(|e| (lang.to_string(), e))
 }
 
 /// What one snippet scan hands back to the wrapper walk: the commands it
-/// found, plus the three per-command facts the walk has to carry across the
-/// snippet boundary — the here-document records, and the two parallel arrays.
+/// found, plus the per-command facts the walk has to carry across the
+/// snippet boundary — the here-document records, and the Scan-parallel
+/// arrays a nested command's judgement still needs (including the scope
+/// channel, carried unchanged: this is a fresh 1:1 copy from the inner
+/// scan, not a merge with another scan, so nothing here needs offsetting
+/// the way `Scan::absorb` offsets).
 ///
 /// Every OTHER field of the inner scan is deliberately dropped here (the outer
 /// text's own constructs, redirects and orders answer for the line), which is
-/// exactly why these four have to be named: a Scan-parallel array that is not
+/// exactly why these have to be named: a Scan-parallel array that is not
 /// in this struct does not survive the boundary, and the judgement that reads
 /// it downstream would silently see nothing for every nested occurrence.
 #[derive(Default)]
@@ -4067,7 +4074,51 @@ struct SnippetScan {
     args_complete: Vec<bool>,
     indexed_values: Vec<std::collections::HashMap<usize, crate::syntax::IndexedValueRef>>,
     order: Vec<crate::syntax::Order>,
+    cmd_scope: Vec<Option<usize>>,
+    // The scope channel's unread half: `fold_inner_order` reads `cmd_scope`
+    // to flatten inner orders fail-closed, while these two have no reader
+    // until snippet scope translation exists — the inner-scan counterpart of
+    // `collect_expanded`'s scope table, which the appended-redirect fix
+    // (M2.225) needs. Kept plumbed because a Scan-parallel array absent from
+    // this struct does not survive the boundary (see the struct doc above).
+    #[allow(dead_code)]
+    scan_scopes: Vec<crate::syntax::ScanScope>,
+    #[allow(dead_code)]
+    redirect_scope: Vec<Option<usize>>,
     parsed: bool,
+}
+
+/// Fold an inner snippet scan's raw, unfolded per-command `order` down to
+/// what a scope-blind wrapper recursion may safely compare against its
+/// siblings — the same fold `collect_expanded` (src/engine.rs) performs at
+/// the outer-scan boundary, applied one wrapper level deeper, where it was
+/// missing. Entry `i`'s own scanner-reported order survives only
+/// when `cmd_scope[i]` proves it sits at THIS scan's own top level
+/// (`Some(Some(0))`); every other entry — a command inside a subshell or
+/// brace-group body, or one whose scope vouch could not prove at all —
+/// folds to `Order::Unordered`. Fail-closed: an absent or `None` scope
+/// entry also folds to `Unordered`; there is no None-as-top-level arm.
+/// Without this, a body command's scope-local `Seq` collides with the
+/// inner top level's own numbering and a `cd -> write` pair can look
+/// ordered when it is not.
+///
+/// This fold is the INNER-scan boundary, and it outlived the outer one:
+/// the engine now translates the outer scan's scanner scopes into real
+/// engine scopes (`collect_expanded`'s scope table), but a parsed
+/// snippet's own `scan_scopes` still flatten into the one engine scope
+/// this recursion allocates per snippet, so a compound body one wrapper
+/// level down keeps folding to `Unordered` here — fail-closed — until
+/// snippet scope translation exists.
+fn fold_inner_order(scan: &SnippetScan) -> Vec<crate::syntax::Order> {
+    (0..scan.cmds.len())
+        .map(|i| {
+            if matches!(scan.cmd_scope.get(i), Some(Some(0))) {
+                scan.order.get(i).cloned().unwrap_or(crate::syntax::Order::Unordered)
+            } else {
+                crate::syntax::Order::Unordered
+            }
+        })
+        .collect()
 }
 
 /// Connect scanner-reported indexed references to raw enclosing arguments
@@ -4699,6 +4750,13 @@ pub fn expand_wrappers_forking(
                     _ => SnippetScan::default(),
                 };
                 if !inner.cmds.is_empty() {
+                    // Bound here, outside the branch, so the `Vec` outlives
+                    // the `go()` call below — a fold produced inside the
+                    // `if inner.parsed` arm would be dropped at the end of
+                    // that arm while still borrowed. Only the parsed arm
+                    // reads it; the other arm skips the work.
+                    let folded_inner_order =
+                        if inner.parsed { fold_inner_order(&inner) } else { Vec::new() };
                     let (inner_scope, inner_orders, inherited_inner_order, inner_run_dir) =
                         if inner.parsed {
                             let child_scope = out.scope_parents.len() + 1;
@@ -4707,7 +4765,7 @@ pub fn expand_wrappers_forking(
                             // place. Reapplying that inherited directory to
                             // every command inside the child would erase a
                             // process-local directory change after it ran.
-                            (child_scope, inner.order.as_slice(), None, None)
+                            (child_scope, folded_inner_order.as_slice(), None, None)
                         } else {
                             (scope, &[][..], own_order.as_ref(), pass_down)
                         };
@@ -4813,6 +4871,11 @@ pub fn expand_wrappers_forking(
                     if !scan.cmds.is_empty() {
                         let child_scope = out.scope_parents.len() + 1;
                         out.scope_parents.push(self_idx);
+                        // Folded the same way as the parsed-wrapper arm
+                        // above: the heredoc-fed scan's raw order is
+                        // scope-blind, so only its own top-level entries
+                        // may be compared by the recursion below.
+                        let folded_scan_order = fold_inner_order(&scan);
                         go(
                             kb,
                             &scan.cmds,
@@ -4821,7 +4884,7 @@ pub fn expand_wrappers_forking(
                             &scan.args_complete,
                             &consumed_lang,
                             child_scope,
-                            &scan.order,
+                            &folded_scan_order,
                             None,
                             depth + 1,
                             caps,

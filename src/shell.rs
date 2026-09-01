@@ -488,31 +488,74 @@ pub fn parse(cmd: &str) -> Result<Parsed, String> {
     // an inner `if a && b; then …` chain can never collide with an outer one.
     let mut chain_counter = 0u32;
     for cc in &program.complete_commands {
-        walk_compound_list(cc, &mut out, &mut counter, false, &mut chain_counter);
+        walk_compound_list(cc, &mut out, &mut counter, false, &mut chain_counter, 0);
     }
     Ok(out)
 }
 
-/// `counter` is the running top-level sequence position; it only ever
+/// The position/chain claim a construct makes about ITSELF within its parent
+/// scope, converted to an `Order` — `Unordered` unconditionally when the
+/// caller says this position cannot be trusted, otherwise the next value off
+/// `counter`. Shared by every site that needs to capture a construct's own
+/// anchor before descending into a scope that sequences with a fresh local
+/// counter (design doc §3.1).
+fn own_order(counter: &mut u32, unordered: bool) -> Order {
+    if unordered {
+        Order::Unordered
+    } else {
+        let n = *counter;
+        *counter += 1;
+        Order::Seq(n)
+    }
+}
+
+/// Push a new `ScanScope` and return its id — 1-based, since scope 0 is the
+/// top level and has no entry of its own in `scan_scopes` (see the type's
+/// own doc).
+fn alloc_scope(
+    out: &mut Parsed,
+    parent: usize,
+    kind: crate::syntax::ScopeKind,
+    class: Option<crate::syntax::ScopeClass>,
+    anchor_order: Order,
+    anchor_chain: Option<crate::syntax::ChainPos>,
+) -> usize {
+    out.scan_scopes.push(crate::syntax::ScanScope {
+        parent,
+        kind,
+        class,
+        anchor_order,
+        anchor_chain,
+    });
+    out.scan_scopes.len()
+}
+
+/// `counter` is the running sequence position within `scope`; it only ever
 /// advances on a path that is provably `Seq` (see `walk_simple`). `unordered`
 /// is the accumulated "can this position even be trusted" state coming down
 /// from the caller — once true it stays true for everything underneath, but
 /// it resets to whatever the caller passed at the start of each new
 /// list/chain, so a later `;`-separated item is not permanently poisoned by
 /// an earlier `||` or subshell.
+///
+/// A `&`-terminated item is passed to `walk_and_or_list` as `async_list`
+/// rather than folded into `unordered`: only that list's LAST pipeline is a
+/// genuine process boundary (design doc §3.3) — earlier members still get a
+/// locally-provable position, which OR-ing into `unordered` would destroy.
 fn walk_compound_list(
     list: &ast::CompoundList,
     out: &mut Parsed,
     counter: &mut u32,
     unordered: bool,
     chain_counter: &mut u32,
+    scope: usize,
 ) {
     for item in &list.0 {
         let async_item = matches!(item.1, ast::SeparatorOperator::Async);
         if async_item {
             out.note("background");
         }
-        walk_and_or_list(&item.0, out, counter, unordered || async_item, chain_counter);
+        walk_and_or_list(&item.0, out, counter, unordered, chain_counter, scope, async_item);
     }
 }
 
@@ -523,20 +566,49 @@ fn walk_compound_list(
 /// `&&`/`||` link. A list with no link at all (`list.additional` empty) is
 /// not a chain; every command inside gets `chain: None`, per `Cmd.chain`'s
 /// own doc.
+///
+/// `scope` is where every member of this list lands absent its own boundary.
+/// `async_list` is true when the CALLER (`walk_compound_list`, from this
+/// item's own separator) has already decided this whole list is the target of
+/// a trailing `&` — only its LAST pipeline member is a genuine process
+/// boundary; earlier members still run, just uncertified to finish before the
+/// shell moves on, so they get their own `SameProcess` scope rather than
+/// folding into the boundary (spec §3.3).
 fn walk_and_or_list(
     list: &ast::AndOrList,
     out: &mut Parsed,
     counter: &mut u32,
     base_unordered: bool,
     chain_counter: &mut u32,
+    scope: usize,
+    async_list: bool,
 ) {
     let mut unordered = base_unordered;
-    let id = if list.additional.is_empty() {
+    // A linkless list is not a chain — except when its sole pipeline is
+    // NEGATED: the `!` bit has to survive somewhere, because a certified
+    // walk that cannot see it would read `if ! cd X; then …` as proof the
+    // cd succeeded — the inverted-status wrong-file allow (design §3.1; the
+    // Task 2 round-0 deferred minor, load-bearing since body candidates).
+    // A one-member chain certifies and refutes nothing by construction
+    // (both predicates need m.idx < c.idx), so the id is inert otherwise.
+    let id = if list.additional.is_empty() && !list.first.bang {
         None
     } else {
         let id = *chain_counter;
         *chain_counter += 1;
         Some(id)
+    };
+    let n_members = 1 + list.additional.len() as u32;
+    // Meaningful only when `async_list` is true: the last member is the
+    // genuine process boundary, every earlier one stays `SameProcess`.
+    let boundary_for = |idx: u32| -> Option<crate::syntax::ScopeKind> {
+        if !async_list {
+            None
+        } else if idx + 1 == n_members {
+            Some(crate::syntax::ScopeKind::ProcessBoundary)
+        } else {
+            Some(crate::syntax::ScopeKind::SameProcess)
+        }
     };
     let mut idx = 0u32;
     // The earliest member reachable from the CURRENT member by walking
@@ -546,8 +618,13 @@ fn walk_and_or_list(
     // `||` (§`ChainPos` doc: nothing before an `||` is certified by it
     // running).
     let mut and_run_from = 0u32;
-    let first_pos = id.map(|id| crate::syntax::ChainPos { id, idx, and_run_from });
-    walk_pipeline(&list.first, out, counter, unordered, first_pos, chain_counter);
+    let first_pos = id.map(|id| crate::syntax::ChainPos {
+        id,
+        idx,
+        and_run_from,
+        negated: list.first.bang,
+    });
+    walk_pipeline(&list.first, out, counter, unordered, first_pos, chain_counter, scope, boundary_for(idx));
     idx += 1;
     for ao in &list.additional {
         match ao {
@@ -557,18 +634,25 @@ fn walk_and_or_list(
             ast::AndOr::Or(p) => {
                 unordered = true;
                 and_run_from = idx;
-                let pos = id.map(|id| crate::syntax::ChainPos { id, idx, and_run_from });
-                walk_pipeline(p, out, counter, unordered, pos, chain_counter);
+                let pos = id.map(|id| crate::syntax::ChainPos { id, idx, and_run_from, negated: p.bang });
+                walk_pipeline(p, out, counter, unordered, pos, chain_counter, scope, boundary_for(idx));
             }
             ast::AndOr::And(p) => {
-                let pos = id.map(|id| crate::syntax::ChainPos { id, idx, and_run_from });
-                walk_pipeline(p, out, counter, unordered, pos, chain_counter);
+                let pos = id.map(|id| crate::syntax::ChainPos { id, idx, and_run_from, negated: p.bang });
+                walk_pipeline(p, out, counter, unordered, pos, chain_counter, scope, boundary_for(idx));
             }
         }
         idx += 1;
     }
 }
 
+/// `scope` is where this pipeline's own members land absent any wrapper this
+/// call allocates. `async_boundary` is `Some(kind)` when the caller has
+/// already decided THIS pipeline is the target of a trailing `&` (only
+/// `walk_and_or_list` ever passes it) — handling it here, before the
+/// multi-member split below, means a one-member backgrounded pipeline still
+/// gets the scope the background itself requires, even though a one-member
+/// pipeline that is NOT backgrounded allocates nothing at all.
 fn walk_pipeline(
     p: &ast::Pipeline,
     out: &mut Parsed,
@@ -576,18 +660,50 @@ fn walk_pipeline(
     base_unordered: bool,
     chain: Option<crate::syntax::ChainPos>,
     chain_counter: &mut u32,
+    scope: usize,
+    async_boundary: Option<crate::syntax::ScopeKind>,
 ) {
+    if let Some(kind) = async_boundary {
+        let anchor = own_order(counter, base_unordered);
+        let class = match kind {
+            crate::syntax::ScopeKind::SameProcess => Some(crate::syntax::ScopeClass::AsyncMember),
+            crate::syntax::ScopeKind::ProcessBoundary => None,
+        };
+        let wrapper = alloc_scope(out, scope, kind, class, anchor, chain);
+        let mut local_counter = 0u32;
+        walk_pipeline(p, out, &mut local_counter, false, chain, chain_counter, wrapper, None);
+        return;
+    }
     // A pipeline runs its members concurrently; with more than one member
-    // there is no single provable "this ran, then that ran". A one-member
-    // pipeline is just a command wearing pipeline syntax and keeps whatever
-    // order it already had.
-    let unordered = base_unordered || p.seq.len() > 1;
-    for (i, cmd) in p.seq.iter().enumerate() {
-        // Only members AFTER the first read the pipe; the first member's own
-        // standard input is whatever the pipeline as a whole was given.
-        // Every piped stage shares the SAME `chain` value — they are one
-        // chain member, not several (`ChainPos` doc).
-        walk_command(cmd, out, counter, unordered, i > 0, chain, chain_counter);
+    // there is no single provable "this ran, then that ran" — each member
+    // gets its own scope (last = `SameProcess`, the rest = `ProcessBoundary`,
+    // spec §3.3), sequenced locally. A one-member pipeline is just a command
+    // wearing pipeline syntax and keeps whatever order and scope it already
+    // had — it allocates nothing of its own.
+    if p.seq.len() > 1 {
+        let anchor = own_order(counter, base_unordered);
+        let last = p.seq.len() - 1;
+        for (i, cmd) in p.seq.iter().enumerate() {
+            let (kind, class) = if i == last {
+                (
+                    crate::syntax::ScopeKind::SameProcess,
+                    Some(crate::syntax::ScopeClass::PipeTail),
+                )
+            } else {
+                (crate::syntax::ScopeKind::ProcessBoundary, None)
+            };
+            let member_scope = alloc_scope(out, scope, kind, class, anchor.clone(), chain);
+            let mut local_counter = 0u32;
+            // Only members AFTER the first read the pipe; the first member's
+            // own standard input is whatever the pipeline as a whole was
+            // given. Every piped stage shares the SAME `chain` value — they
+            // are one chain member, not several (`ChainPos` doc).
+            walk_command(cmd, out, &mut local_counter, false, i > 0, chain, chain_counter, member_scope);
+        }
+    } else {
+        for (i, cmd) in p.seq.iter().enumerate() {
+            walk_command(cmd, out, counter, base_unordered, i > 0, chain, chain_counter, scope);
+        }
     }
 }
 
@@ -599,24 +715,34 @@ fn walk_command(
     pipe_input: bool,
     chain: Option<crate::syntax::ChainPos>,
     chain_counter: &mut u32,
+    scope: usize,
 ) {
     match cmd {
         ast::Command::Simple(sc) => {
-            walk_simple(sc, out, counter, unordered, pipe_input, chain, chain_counter)
+            walk_simple(sc, out, counter, unordered, pipe_input, chain, chain_counter, scope)
         }
         ast::Command::Compound(cc, redirects) => {
-            // Every compound body is unprovable inside, unconditionally —
-            // see `walk_compound`. Its own trailing redirects are attached to
-            // that same opaque construct, so they get the same treatment.
-            let range = walk_compound(cc, out, chain_counter);
+            // The construct's own position in ITS enclosing scope, captured
+            // here before descending — the body's own scope(s) anchor at this
+            // value (`walk_compound`), and this is the only place it is known:
+            // a compound command has no prefix/suffix argument walk the way a
+            // simple command does, so there is nothing to compute it before.
+            let anchor_order = own_order(counter, unordered);
+            let scoping = BodyScoping::Fresh { parent: scope, anchor_order, anchor_chain: chain };
+            let range = walk_compound(cc, out, chain_counter, scoping);
             let mut own_stdin: Option<crate::syntax::InputSource> = None;
             if let Some(list) = redirects {
                 for r in &list.0 {
                     // A compound body has no landing `Cmd` of its own to tie
                     // a heredoc capture to — `None` keeps the construct note.
                     // The LAST descriptor-0 redirect decides, same fold as a
-                    // simple command's own.
-                    if let Some(claimed) = walk_redirect(r, out, Order::Unordered, None, chain_counter) {
+                    // simple command's own. The redirect belongs to the scope
+                    // CONTAINING the compound, not the body's own fresh scope —
+                    // `for f in 1; do cd /a; done > rel.txt` writes `rel.txt`
+                    // from the PARENT's position, never the loop body's.
+                    if let Some(claimed) =
+                        walk_redirect(r, out, Order::Unordered, None, chain_counter, scope, chain)
+                    {
                         own_stdin = Some(claimed);
                     }
                 }
@@ -635,25 +761,21 @@ fn walk_command(
             // A definition's body can never know its future caller's standard
             // input, so the blanking is unconditional — but it blanks the same
             // positions the compound arm does, leaving any command that
-            // resolved a source of its OWN untouched.
-            let range = walk_compound(&f.body.0, out, chain_counter);
+            // resolved a source of its OWN untouched. It is not a body/process
+            // boundary of its own — `Passthrough` walks it straight into the
+            // scope the definition itself sits in, unchanged from today.
+            let range = walk_compound(&f.body.0, out, chain_counter, BodyScoping::Passthrough { scope });
             blank_inherited_input(out, range);
         }
         ast::Command::ExtendedTest(_, redirects) => {
             if let Some(list) = redirects {
                 for r in &list.0 {
-                    let order = if unordered {
-                        Order::Unordered
-                    } else {
-                        let n = *counter;
-                        *counter += 1;
-                        Order::Seq(n)
-                    };
+                    let order = own_order(counter, unordered);
                     // An extended-test expression has no landing `Cmd` of its
                     // own either — same `None` as the compound-body arm above.
                     // It pushes no commands, so whatever its redirects claim
                     // about standard input has no occurrence to belong to.
-                    walk_redirect(r, out, order, None, chain_counter);
+                    walk_redirect(r, out, order, None, chain_counter, scope, chain);
                 }
             }
         }
@@ -682,12 +804,65 @@ fn blank_inherited_input(out: &mut Parsed, range: std::ops::Range<usize>) {
     }
 }
 
+/// How a compound command's own BODY relates to the scope table — the two
+/// cases `walk_compound` has to serve from ONE shared per-variant dispatcher.
+///
+/// `Fresh` is the ordinary case: the compound command sits at some position
+/// in an outer scope and its body gets a brand new `ScanScope` (kind decided
+/// per variant), sequenced with a fresh local counter starting at 0. Calling
+/// `.enter()` more than once allocates a DISTINCT scope each time, all
+/// sharing the same cloned anchor — needed for a construct like `IfClause`
+/// whose condition and branch are two separate scopes anchored at the same
+/// `if`.
+///
+/// `Passthrough` is a function body: nothing about defining it is a
+/// process/body boundary of its own — only calling it later is — so it walks
+/// straight into the caller's existing scope, unchanged from before this
+/// scope table existed, with every command inside still `Order::Unordered`.
+enum BodyScoping {
+    Fresh {
+        parent: usize,
+        anchor_order: Order,
+        anchor_chain: Option<crate::syntax::ChainPos>,
+    },
+    Passthrough {
+        scope: usize,
+    },
+}
+
+impl BodyScoping {
+    fn enter(
+        &self,
+        out: &mut Parsed,
+        kind: crate::syntax::ScopeKind,
+        class: Option<crate::syntax::ScopeClass>,
+    ) -> usize {
+        match self {
+            BodyScoping::Fresh { parent, anchor_order, anchor_chain } => {
+                alloc_scope(out, *parent, kind, class, anchor_order.clone(), *anchor_chain)
+            }
+            BodyScoping::Passthrough { scope } => *scope,
+        }
+    }
+
+    /// Whether commands entering a body under this scoping stay
+    /// `Order::Unordered` (`Passthrough` — a function body's contents are
+    /// exactly as unprovable as they always were; only its future CALL site
+    /// has a position) or get a fresh local `Seq` counter (`Fresh`).
+    fn children_unordered(&self) -> bool {
+        matches!(self, BodyScoping::Passthrough { .. })
+    }
+}
+
 /// Every compound body — subshells, loops, if/case branches, brace groups,
-/// coprocesses, function bodies — is unprovable as to whether or when it
-/// actually runs relative to the surrounding sequence, so everything found
-/// inside is `Order::Unordered`, regardless of where the compound command
-/// itself sits. The counter below is never advanced: nothing walked from
-/// here is ever tagged `Seq`.
+/// coprocesses — gets its own `ScanScope` (kind per spec §3.3) anchored at
+/// the construct's own claimed position in its enclosing scope (`scoping`,
+/// captured by the caller before descending), and is sequenced internally
+/// with a FRESH local counter starting at 0 rather than pinned
+/// `Order::Unordered`. A function body is the one exception: `scoping` is
+/// `BodyScoping::Passthrough` for it, which allocates nothing and leaves
+/// every command inside `Order::Unordered`, same as before this scope table
+/// existed.
 ///
 /// Returns the range of command positions the body pushed, so the caller can
 /// fix up their input source once it knows what the compound itself supplies —
@@ -697,42 +872,63 @@ fn walk_compound(
     cc: &ast::CompoundCommand,
     out: &mut Parsed,
     chain_counter: &mut u32,
+    scoping: BodyScoping,
 ) -> std::ops::Range<usize> {
     let start = out.commands.len();
-    let mut counter = 0u32;
+    let unordered = scoping.children_unordered();
     match cc {
         ast::CompoundCommand::BraceGroup(bg) => {
-            walk_compound_list(&bg.list, out, &mut counter, true, chain_counter)
+            let s = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::Brace));
+            let mut counter = 0u32;
+            walk_compound_list(&bg.list, out, &mut counter, unordered, chain_counter, s);
         }
-        ast::CompoundCommand::Subshell(s) => {
+        ast::CompoundCommand::Subshell(sub) => {
             out.note("subshell");
-            walk_compound_list(&s.list, out, &mut counter, true, chain_counter);
+            let s = scoping.enter(out, crate::syntax::ScopeKind::ProcessBoundary, None);
+            let mut counter = 0u32;
+            walk_compound_list(&sub.list, out, &mut counter, unordered, chain_counter, s);
         }
         ast::CompoundCommand::ForClause(f) => {
-            walk_compound_list(&f.body.list, out, &mut counter, true, chain_counter)
+            let s = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::LoopBody));
+            let mut counter = 0u32;
+            walk_compound_list(&f.body.list, out, &mut counter, unordered, chain_counter, s);
         }
         ast::CompoundCommand::CaseClause(c) => {
             for item in &c.cases {
                 if let Some(body) = &item.cmd {
-                    walk_compound_list(body, out, &mut counter, true, chain_counter);
+                    let s = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::BranchBody));
+                    let mut counter = 0u32;
+                    walk_compound_list(body, out, &mut counter, unordered, chain_counter, s);
                 }
             }
         }
         ast::CompoundCommand::IfClause(i) => {
-            walk_compound_list(&i.condition, out, &mut counter, true, chain_counter);
-            walk_compound_list(&i.then, out, &mut counter, true, chain_counter);
+            let cond_scope = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::CondList));
+            let mut cond_counter = 0u32;
+            walk_compound_list(&i.condition, out, &mut cond_counter, unordered, chain_counter, cond_scope);
+            let then_scope = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::ThenBody));
+            let mut then_counter = 0u32;
+            walk_compound_list(&i.then, out, &mut then_counter, unordered, chain_counter, then_scope);
             if let Some(elses) = &i.elses {
                 for e in elses {
                     if let Some(cond) = &e.condition {
-                        walk_compound_list(cond, out, &mut counter, true, chain_counter);
+                        let s = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::ElifCond));
+                        let mut counter = 0u32;
+                        walk_compound_list(cond, out, &mut counter, unordered, chain_counter, s);
                     }
-                    walk_compound_list(&e.body, out, &mut counter, true, chain_counter);
+                    let s = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::BranchBody));
+                    let mut counter = 0u32;
+                    walk_compound_list(&e.body, out, &mut counter, unordered, chain_counter, s);
                 }
             }
         }
         ast::CompoundCommand::WhileClause(w) | ast::CompoundCommand::UntilClause(w) => {
-            walk_compound_list(&w.0, out, &mut counter, true, chain_counter);
-            walk_compound_list(&w.1.list, out, &mut counter, true, chain_counter);
+            let cond_scope = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::LoopCond));
+            let mut cond_counter = 0u32;
+            walk_compound_list(&w.0, out, &mut cond_counter, unordered, chain_counter, cond_scope);
+            let body_scope = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::LoopBody));
+            let mut body_counter = 0u32;
+            walk_compound_list(&w.1.list, out, &mut body_counter, unordered, chain_counter, body_scope);
         }
         ast::CompoundCommand::Coprocess(c) => {
             out.note("background");
@@ -743,7 +939,9 @@ fn walk_compound(
             // nothing above pushed a command (`note` records a construct), so
             // it is already the right lower bound. The body is not itself an
             // and-or chain member — `chain: None`.
-            walk_command(&c.body, out, &mut counter, true, false, None, chain_counter);
+            let s = scoping.enter(out, crate::syntax::ScopeKind::ProcessBoundary, None);
+            let mut counter = 0u32;
+            walk_command(&c.body, out, &mut counter, unordered, false, None, chain_counter, s);
             blank_inherited_input(out, start..out.commands.len());
         }
         ast::CompoundCommand::Arithmetic(_) | ast::CompoundCommand::ArithmeticForClause(_) => {}
@@ -763,6 +961,7 @@ fn walk_simple(
     pipe_input: bool,
     chain: Option<crate::syntax::ChainPos>,
     chain_counter: &mut u32,
+    scope: usize,
 ) {
     let mut cmd = Cmd::default();
     cmd.chain = chain;
@@ -825,10 +1024,10 @@ fn walk_simple(
         Order::Unordered
     };
     if let Some(prefix) = &sc.prefix {
-        walk_items(&prefix.0, out, &mut cmd, false, order.clone(), &mut landing, chain_counter);
+        walk_items(&prefix.0, out, &mut cmd, false, order.clone(), &mut landing, chain_counter, scope);
     }
     if let Some(suffix) = &sc.suffix {
-        walk_items(&suffix.0, out, &mut cmd, true, order.clone(), &mut landing, chain_counter);
+        walk_items(&suffix.0, out, &mut cmd, true, order.clone(), &mut landing, chain_counter, scope);
     }
     if !cmd.head.is_empty() {
         // `landing.stdin` already carries the correct, final
@@ -856,6 +1055,7 @@ fn walk_simple(
             landing.args_complete,
             cmd.chain,
             cmd.prefix_assigns.clone(),
+            Some(scope),
         );
         // Stamp and flush: the index this command actually landed at. The
         // heredoc's own identity (`h.id`) was already stamped at capture —
@@ -927,6 +1127,7 @@ fn walk_items(
     order: Order,
     landing: &mut Landing,
     chain_counter: &mut u32,
+    scope: usize,
 ) {
     for item in items {
         match item {
@@ -934,7 +1135,9 @@ fn walk_items(
                 // A here-document is captured only when a command will land to
                 // consume it; otherwise it keeps the construct note.
                 let records = (!cmd.head.is_empty()).then_some(&mut landing.pending);
-                if let Some(claimed) = walk_redirect(r, out, order.clone(), records, chain_counter) {
+                if let Some(claimed) =
+                    walk_redirect(r, out, order.clone(), records, chain_counter, scope, cmd.chain)
+                {
                     // The LAST redirect resolving to descriptor 0 wins, which is
                     // the shell's own rule.
                     landing.stdin = Some(claimed);
@@ -948,8 +1151,21 @@ fn walk_items(
                 // argument list is NOT a faithful record of what will be passed,
                 // and anything reading those tokens has to know that.
                 landing.args_complete = false;
+                // The substitution's inner commands run in their OWN forked
+                // process, whichever argument or redirect position spells it —
+                // anchored at the ENCLOSING command's own pre-captured position,
+                // never at the substitution's own (there isn't one: it is not a
+                // pipeline/chain member of its own).
+                let sub_scope = alloc_scope(
+                    out,
+                    scope,
+                    crate::syntax::ScopeKind::ProcessBoundary,
+                    None,
+                    order.clone(),
+                    cmd.chain,
+                );
                 let mut counter = 0u32;
-                walk_compound_list(&s.list, out, &mut counter, true, chain_counter);
+                walk_compound_list(&s.list, out, &mut counter, false, chain_counter, sub_scope);
             }
             // A command substitution runs a command in a subshell, whether it
             // appears as an argument or on the right of an assignment. Both count.
@@ -1083,6 +1299,8 @@ fn walk_redirect(
     order: Order,
     pending: Option<&mut Vec<PendingHeredoc>>,
     chain_counter: &mut u32,
+    scope: usize,
+    chain: Option<crate::syntax::ChainPos>,
 ) -> Option<crate::syntax::InputSource> {
     use crate::syntax::InputSource;
     let mut claims_stdin = None;
@@ -1136,12 +1354,27 @@ fn walk_redirect(
                         }
                         out.redirect_targets.push(unescape_unquoted(&w.value));
                         out.redirect_order.push(order);
+                        out.redirect_scope.push(Some(scope));
                     }
                 }
                 ast::IoFileRedirectTarget::ProcessSubstitution(_, s) => {
                     out.note("subshell");
+                    // Same anchoring as the argument-position spelling in
+                    // `walk_items`: the substitution's inner commands run in
+                    // their OWN forked process, anchored at the ENCLOSING
+                    // command's own pre-captured position, never at the
+                    // redirect's own (a redirect is not a pipeline/chain
+                    // member of its own).
+                    let sub_scope = alloc_scope(
+                        out,
+                        scope,
+                        crate::syntax::ScopeKind::ProcessBoundary,
+                        None,
+                        order.clone(),
+                        chain,
+                    );
                     let mut counter = 0u32;
-                    walk_compound_list(&s.list, out, &mut counter, true, chain_counter);
+                    walk_compound_list(&s.list, out, &mut counter, false, chain_counter, sub_scope);
                 }
                 // `>&word` duplicates a descriptor only when the word IS a
                 // descriptor — a number, or `-` for close. With a NAME there
@@ -1161,6 +1394,7 @@ fn walk_redirect(
                         }
                         out.redirect_targets.push(v);
                         out.redirect_order.push(order);
+                        out.redirect_scope.push(Some(scope));
                     }
                 }
                 ast::IoFileRedirectTarget::Fd(_) => {}
@@ -1222,6 +1456,7 @@ fn walk_redirect(
             }
             out.redirect_targets.push(unescape_unquoted(&w.value));
             out.redirect_order.push(order);
+            out.redirect_scope.push(Some(scope));
         }
     }
     claims_stdin

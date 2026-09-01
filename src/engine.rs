@@ -629,9 +629,9 @@ fn judge_once(
     let caps = |l: &str| cfg.lang(l).and_then(|lc| lc.wrap_depth).unwrap_or(4);
     let Expanded {
         cmds: all_cmds,
-        orders: all_orders,
         execution_sites: all_execution_sites,
         scope_parents,
+        scope_table,
         langs: all_langs,
         holds_input: all_holds_input,
         args_from_input: all_args_from_input,
@@ -703,6 +703,7 @@ fn judge_once(
         &all_inherited,
         &resolve,
         home,
+        assigned.contains_key("CDPATH"),
         &start,
     );
 
@@ -725,7 +726,7 @@ fn judge_once(
     // registered scanner with no entries for it yet still has SOMETHING
     // looking at protected names inside its snippets.
     if let Some(home) = home {
-        for (_plang, psrc, _) in &snippets {
+        for (_plang, psrc, _, _) in &snippets {
             if let Some(hit) = mentions_protected(cfg, home, project_root, psrc) {
                 let reason = format!(
                     "{PROTECTED_FILE_LINE}\n  {hit}\n  \
@@ -750,7 +751,7 @@ fn judge_once(
     // `lang.python.constructs.dynamic_call`, not bash's (spec's
     // shared-vocabulary paragraph, "on every path").
     let mut snippet_constructs: Vec<(String, String)> = Vec::new();
-    for (plang, psrc, porder) in &snippets {
+    for (plang, psrc, porder, pscope) in &snippets {
         // A language the registry has no scanner for `continue`s here —
         // recorded divergence from the route path, which asks explicitly
         // instead (`route::decide_snippet`'s `unreadable_language`). This
@@ -774,9 +775,19 @@ fn judge_once(
             // command runs — the snippet has no position of its own, so it
             // takes the wrapper's (spec §3.5). Giving these `Unordered`
             // instead would make every wrapped write unresolvable even when
-            // the wrapper's own place in the sequence is plain.
+            // the wrapper's own place in the sequence is plain. `redirect_scope`
+            // has to extend in the same step, by the same reasoning: an
+            // injected redirect's scope IS the wrapper's own `cmd_scope`
+            // entry, never the inner re-scan's own local numbering (that
+            // numbering means nothing outside the inner snippet's own scan).
+            // Leaving this channel short of `redirect_order`/`redirect_targets`
+            // was review finding IMPORTANT 2 — every consumer that walks the
+            // three arrays in lockstep by index silently read past the end of
+            // this one for every wrapper-injected redirect.
             scan.redirect_order
                 .extend(std::iter::repeat(porder.clone()).take(inner.redirect_targets.len()));
+            scan.redirect_scope
+                .extend(std::iter::repeat(*pscope).take(inner.redirect_targets.len()));
             scan.redirect_targets.extend(inner.redirect_targets);
             for c in inner.constructs {
                 snippet_constructs.push((plang.clone(), c));
@@ -922,30 +933,81 @@ fn judge_once(
         // that log through the shell, whoever the program is. Their producing
         // program is `None`.
         for (i, t) in scan.redirect_targets.iter().enumerate() {
+            // A redirect hangs off a command, and once bodies sequence
+            // locally a sequence number recurs in every scope — so the owner
+            // is found by the pair the two provably share: the redirect's
+            // recorded (scope, order), matched against each expanded
+            // command's execution site. Scanner scope ids map through
+            // `scope_table`; a wrapper-injected redirect carries its
+            // wrapper's own scanner entry and so finds the wrapper's site.
+            // An absent scope, an untranslatable scope, or an unordered
+            // position finds no owner and resolves as unplaceable — the
+            // fail-closed direction. Only sites holding a scanner-reported
+            // position may own a redirect: a synthesized occurrence's
+            // inherited order is attribution, not an event.
+            let eng_scope = scan
+                .redirect_scope
+                .get(i)
+                .copied()
+                .flatten()
+                .and_then(|ss| scope_table.get(ss).copied());
             let order = scan
                 .redirect_order
                 .get(i)
                 .cloned()
                 .unwrap_or(crate::syntax::Order::Unordered);
-            // A redirect hangs off a command, and its chain position is that
-            // command's. This list is not command-parallel, so the owner is
-            // found by the one thing they provably share: their SEQUENCE
-            // position. Every stage of one pipeline carries the same chain
-            // position, so which stage is found does not matter; a redirect
-            // whose position is unprovable finds nothing and folds only an
-            // unconditional mover, which is the fail-closed direction.
-            let owner = all_orders.iter().position(|o| *o == order);
+            // A Seq order is unique per scope, so first-match wins. An
+            // UNORDERED redirect order still names its owner when exactly
+            // one scanner-reported site in the scope shares it — an or-tail
+            // writer, whose chain facts then place it (design §4.2) — and
+            // stays unowned when several could, which is the fail-closed
+            // direction.
+            let owner = eng_scope.and_then(|scope| {
+                let mut matches = all_execution_sites.iter().enumerate().filter(|(_, site)| {
+                    site.scope == scope && site.scanner_order && site.order == order
+                });
+                match (matches.next(), matches.next()) {
+                    (Some((index, _)), None) => Some(index),
+                    (Some((index, _)), Some(_)) => {
+                        matches!(order, crate::syntax::Order::Seq(_)).then_some(index)
+                    }
+                    _ => None,
+                }
+            });
             let redirect_base = owner
-                .map(|index| timeline.base_at(index, &all_cmds))
-                .unwrap_or_else(|| timeline.root_base_at(&order, None));
-            match place(&resolve(t), &redirect_base) {
-                Placed::At(p) => targets.push((p, None, None)),
-                Placed::Nowhere(cause) => unplaced.push(Unplaced {
-                    generic: where_it_lands(lang, &cause, Some(t)),
-                    cause,
-                    what: Some(t.clone()),
-                    by: None,
-                }),
+                .map(|index| timeline.base_set_at(index, &all_cmds))
+                .unwrap_or_else(|| match eng_scope {
+                    Some(scope) => timeline.scope_base_at(scope, &order),
+                    None => BaseSet::of(CdState::Unknown(UNPLACED_POS_CD.to_string())),
+                });
+            // One pushed target per CANDIDATE (design §4.3): the existing
+            // worst-wins fold over targets then gives ask-if-any-escapes and
+            // allow-only-if-all for free, and the ask names the escaping
+            // candidate because that candidate's own composed path is what
+            // was pushed. An Unknown member is always a singleton (the set
+            // constructor absorbs), so the Nowhere arm never truncates a
+            // sibling; an absolute target composes identically from every
+            // member and is pushed once via the dedup.
+            let resolved = resolve(t);
+            let mut pushed: Vec<String> = Vec::new();
+            for member in &redirect_base.states {
+                match place(&resolved, member) {
+                    Placed::At(p) => {
+                        if !pushed.contains(&p) {
+                            pushed.push(p.clone());
+                            targets.push((p, None, None));
+                        }
+                    }
+                    Placed::Nowhere(cause) => {
+                        unplaced.push(Unplaced {
+                            generic: where_it_lands(lang, &cause, Some(t)),
+                            cause,
+                            what: Some(t.clone()),
+                            by: None,
+                        });
+                        break;
+                    }
+                }
             }
         }
 
@@ -999,7 +1061,7 @@ fn judge_once(
                 });
             }
 
-            let here = timeline.base_at(i, &all_cmds);
+            let here_set = timeline.base_set_at(i, &all_cmds);
             let paths: Vec<String> = wt.paths.iter().map(|p| resolve(p)).collect();
             // A run-dir flag only has to resolve when something depends on
             // it. `git -C a -C b status` writes nothing, and a read must
@@ -1007,34 +1069,66 @@ fn judge_once(
             let needs_base = wt.run_dir_dest
                 || paths.iter().any(|p| is_relative(p) || drive_relative(p).is_some());
             // The run-dir resolution itself is `run_dir_place`, shared with the
-            // guard and recognition passes so one command has ONE run place.
-            // The `needs_base` gate stays here and only here: it is a WRITE
-            // concern (`git -C a -C b status` writes nothing, and a read must
-            // never gain a standing prompt), whereas a place rule asks where
-            // every command runs whether it writes or not.
-            let (base, provenance) = if !needs_base {
-                (here.clone(), None)
+            // guard and recognition passes so one command has ONE run place
+            // per candidate. The `needs_base` gate stays here and only here:
+            // it is a WRITE concern (`git -C a -C b status` writes nothing,
+            // and a read must never gain a standing prompt), whereas a place
+            // rule asks where every command runs whether it writes or not. A
+            // relative run-dir flag value composes against every candidate
+            // (design §4.3); the provenance sentence is built from a
+            // singleton and is dropped otherwise, since it narrates ONE
+            // directory.
+            let (base_set, provenance) = if !needs_base {
+                (here_set.clone(), None)
             } else {
-                run_dir_place(kb, c, clang, &here, inherited_at(&all_inherited, i), &resolve)
+                let mut states = Vec::with_capacity(here_set.states.len());
+                let mut prov = None;
+                for member in &here_set.states {
+                    let (state, p) = run_dir_place(
+                        kb,
+                        c,
+                        clang,
+                        member,
+                        inherited_at(&all_inherited, i),
+                        &resolve,
+                    );
+                    states.push(state);
+                    prov = p;
+                }
+                let set = BaseSet::from_states(states);
+                let provenance =
+                    if here_set.states.len() == 1 && set.states.len() == 1 { prov } else { None };
+                (set, provenance)
             };
 
             if wt.run_dir_dest {
                 // The destination IS the directory the command runs in —
-                // there is no path in the command to fall back on.
-                match &base {
-                    CdState::Known(d) => targets.push((d.clone(), provenance.clone(), by.clone())),
-                    CdState::Unknown(cause) => unplaced.push(Unplaced {
-                        generic: where_it_lands(lang, cause, None),
-                        cause: cause.clone(),
-                        what: None,
-                        by: by.clone(),
-                    }),
-                    CdState::NoDirectory => unplaced.push(Unplaced {
-                        generic: where_it_lands(lang, NO_CWD, None),
-                        cause: NO_CWD.to_string(),
-                        what: None,
-                        by: by.clone(),
-                    }),
+                // there is no path in the command to fall back on. One
+                // pushed target per Known candidate (design §4.3): the
+                // worst-wins fold downstream then allows only when every
+                // candidate is allowed, and the ask names the escaping one.
+                let mut pushed: Vec<String> = Vec::new();
+                for member in &base_set.states {
+                    match member {
+                        CdState::Known(d) => {
+                            if !pushed.contains(d) {
+                                pushed.push(d.clone());
+                                targets.push((d.clone(), provenance.clone(), by.clone()));
+                            }
+                        }
+                        CdState::Unknown(cause) => unplaced.push(Unplaced {
+                            generic: where_it_lands(lang, cause, None),
+                            cause: cause.clone(),
+                            what: None,
+                            by: by.clone(),
+                        }),
+                        CdState::NoDirectory => unplaced.push(Unplaced {
+                            generic: where_it_lands(lang, NO_CWD, None),
+                            cause: NO_CWD.to_string(),
+                            what: None,
+                            by: by.clone(),
+                        }),
+                    }
                 }
             }
             // Whether THIS program's destination can be on another machine.
@@ -1048,18 +1142,39 @@ fn judge_once(
                 if remote_ok && is_remote_spec(&p) {
                     continue;
                 }
-                match place(&p, &base) {
-                    Placed::At(t) => targets.push((
-                        t,
-                        if is_relative(&p) { provenance.clone() } else { None },
-                        by.clone(),
-                    )),
-                    Placed::Nowhere(cause) => unplaced.push(Unplaced {
-                        generic: where_it_lands(lang, &cause, Some(&p)),
-                        cause,
-                        what: Some(p.clone()),
-                        by: by.clone(),
-                    }),
+                // Per candidate, deduplicated in both directions — an
+                // absolute path composes identically from every member and
+                // is pushed once, and one path's identical unplaceable
+                // cause is reported once. EVERY member is judged: an early
+                // member's Nowhere must never skip a later member's real
+                // composed target, or a deny under that target is lost
+                // (Task 5 review, F1).
+                let mut pushed: Vec<String> = Vec::new();
+                let mut unplaced_causes: Vec<String> = Vec::new();
+                for member in &base_set.states {
+                    match place(&p, member) {
+                        Placed::At(t) => {
+                            if !pushed.contains(&t) {
+                                pushed.push(t.clone());
+                                targets.push((
+                                    t,
+                                    if is_relative(&p) { provenance.clone() } else { None },
+                                    by.clone(),
+                                ));
+                            }
+                        }
+                        Placed::Nowhere(cause) => {
+                            if !unplaced_causes.contains(&cause) {
+                                unplaced_causes.push(cause.clone());
+                                unplaced.push(Unplaced {
+                                    generic: where_it_lands(lang, &cause, Some(&p)),
+                                    cause,
+                                    what: Some(p.clone()),
+                                    by: by.clone(),
+                                });
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2363,18 +2478,19 @@ fn judge_once(
 /// per-command lookup is by the same index into each of them.
 struct Expanded {
     cmds: Vec<crate::shell::Cmd>,
-    /// Parallel to `cmds`: the outer scanner order used by redirects and
-    /// other caller-attributed facts. Parsed children deliberately retain
-    /// their wrapper's outer position here; their own order lives only in
-    /// `execution_sites` below.
-    orders: Vec<crate::syntax::Order>,
     /// Parallel to `cmds`: the parsed execution scope, the order used for
     /// attribution inside it, and whether that order came from the scanner
     /// for this exact occurrence rather than a synthesising wrapper.
     execution_sites: Vec<ExpandedExecutionSite>,
-    /// Parent command index for scopes 1..N, after rebasing each one-command
-    /// wrapper expansion into this complete expanded line.
-    scope_parents: Vec<usize>,
+    /// Where each engine scope 1..N is anchored, after rebasing scanner
+    /// scopes and each one-command wrapper expansion into this complete
+    /// expanded line. Scope ids are `Vec` position plus one.
+    scope_parents: Vec<ScopeParent>,
+    /// Scanner scope id -> engine scope id for THIS scan's `scan_scopes`
+    /// (index 0 is the top level, mapped to engine scope 0). Read wherever a
+    /// scanner-recorded scope id (`cmd_scope`, `redirect_scope`) has to name
+    /// an engine scope after expansion inserted its own scopes around them.
+    scope_table: Vec<usize>,
     /// The language each expanded command is written in: the host `lang` for a
     /// top-level command or one unwrapped from the SAME syntax (`sudo`, `find
     /// -exec`), or the snippet's own language when the wrap crosses into a
@@ -2403,8 +2519,12 @@ struct Expanded {
     args_complete: Vec<bool>,
     /// The wrapped snippets themselves — whole scripts vouch has no parser for
     /// at the outer level but can still scan for redirects and protected-path
-    /// mentions (§1b in `decide_command_from`).
-    snippets: Vec<(String, String, crate::syntax::Order)>,
+    /// mentions (§1b in `decide_command_from`). The 4th element is the
+    /// wrapper command's OWN `cmd_scope` entry — a redirect nested inside the
+    /// snippet has no position of its own, so it takes the wrapper's, on the
+    /// redirect_scope channel exactly as it already takes the wrapper's order
+    /// (review finding IMPORTANT 2, M2.221).
+    snippets: Vec<(String, String, crate::syntax::Order, Option<usize>)>,
     /// The language whose wrapper-nesting cap was reached while expanding
     /// THIS line, if any — first hit across every top-level command wins,
     /// since vouch decides once per command (M2.55). `None` means every
@@ -2435,6 +2555,44 @@ struct ExpandedExecutionSite {
     scanner_order: bool,
 }
 
+/// Where one engine scope is anchored — what its starting directory derives
+/// from (design doc §3.2).
+///
+/// A wrapped snippet's scope hangs off the COMMAND that ran it: the snippet
+/// starts wherever that command runs, run-dir flag included. A scanner scope
+/// (a compound body, a pipeline member) hangs off a POSITION in its parent
+/// scope: the construct's own order and chain there, whose composed base is
+/// the body's starting directory, and whose `kind` says whether the body's
+/// own movers can reach back into the parent.
+#[derive(Debug, Clone, PartialEq)]
+enum ScopeParent {
+    /// Anchored at an expanded command index (a wrapped snippet).
+    AtCommand(usize),
+    /// Anchored at an order within a parent scope (a scanner scope).
+    AtOrder {
+        parent_scope: usize,
+        order: crate::syntax::Order,
+        chain: Option<crate::syntax::ChainPos>,
+        kind: crate::syntax::ScopeKind,
+        /// The §3.3 construct row, deciding how this scope's movers reach
+        /// the parent and where its own start comes from.
+        class: Option<crate::syntax::ScopeClass>,
+    },
+}
+
+/// How a mover-tainted same-process body reaches its parent's timeline
+/// (design §3.3): a loop's movers carry across iterations no anchor can
+/// bound, so they poison from the anchor; every other tainted body
+/// contributes its END as a candidate — certifiable through the anchor
+/// chain when the construct always runs once reached (a brace group, an
+/// if-condition), never certifiable when the body itself may not have run
+/// (a branch body, a pipeline's last member, a pre-`&` list member).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum BodyTreatment {
+    Poison,
+    Candidate { certifiable: bool },
+}
+
 /// Wrapper expansion, one top-level command at a time: for each
 /// `scan.commands[i]`, expand wrappers, rebase child scope ids and parent
 /// indices, then retain either the parsed child's local order or the outer
@@ -2450,7 +2608,6 @@ fn collect_expanded(
 ) -> Expanded {
     let mut out = Expanded {
         cmds: Vec::new(),
-        orders: Vec::new(),
         execution_sites: Vec::new(),
         scope_parents: Vec::new(),
         langs: Vec::new(),
@@ -2462,14 +2619,42 @@ fn collect_expanded(
         parse_failures: Vec::new(),
         constructs: Vec::new(),
         inherited_run_dir: Vec::new(),
+        scope_table: vec![0],
     };
+    // Scanner scopes first, parent-before-child (the walk allocates them in
+    // that order), so every engine scope a wrapper expansion adds below sits
+    // after them and a scanner scope's parent is already in the table when
+    // its own entry is built.
+    for ss in &scan.scan_scopes {
+        let engine_scope = out.scope_parents.len() + 1;
+        out.scope_parents.push(ScopeParent::AtOrder {
+            parent_scope: out.scope_table.get(ss.parent).copied().unwrap_or(0),
+            order: ss.anchor_order.clone(),
+            chain: ss.anchor_chain,
+            kind: ss.kind,
+            class: ss.class,
+        });
+        out.scope_table.push(engine_scope);
+    }
     for (i, c) in scan.commands.iter().enumerate() {
-        // A missing order is not a provable one (§1).
-        let order = scan
-            .order
-            .get(i)
-            .cloned()
-            .unwrap_or(crate::syntax::Order::Unordered);
+        // The engine scope this command's scanner scope maps to. An absent
+        // or unknown channel entry is NOT scope 0 — 0 is a real scope, not a
+        // fail-closed default — so it reads as "unplaceable": the command
+        // lands in scope 0 with an `Unordered` order, which is exactly what
+        // every consumer already treats as an unprovable position.
+        let (outer_scope, order) = match scan.cmd_scope.get(i).copied().flatten() {
+            Some(ss) => match out.scope_table.get(ss).copied() {
+                Some(engine_scope) => (
+                    engine_scope,
+                    scan.order
+                        .get(i)
+                        .cloned()
+                        .unwrap_or(crate::syntax::Order::Unordered),
+                ),
+                None => (0, crate::syntax::Order::Unordered),
+            },
+            None => (0, crate::syntax::Order::Unordered),
+        };
         // `expand_wrappers_with_sources` is called with a ONE-command slice
         // (`std::slice::from_ref(c)`), so any heredoc attached to `c` has to
         // have its `cmd_index` remapped from its position in the FULL
@@ -2510,7 +2695,8 @@ fn collect_expanded(
         let scope_offset = out.scope_parents.len();
         let execution_sites = ex.execution_sites;
         for parent in ex.scope_parents {
-            out.scope_parents.push(command_offset + parent);
+            out.scope_parents
+                .push(ScopeParent::AtCommand(command_offset + parent));
         }
         // Zipped rather than indexed, one more strand than before: the walk
         // builds these arrays in lockstep, and a zip that runs short stops
@@ -2527,14 +2713,17 @@ fn collect_expanded(
             .zip(ex.args_complete)
             .enumerate()
         {
+            // The expansion walk's own scope ids are relative to this one
+            // command's expansion: its 0 is "wherever the wrapper command
+            // itself sits" — the command's scanner scope, mapped above — and
+            // its children rebase past every engine scope already allocated.
             let scope = if site.scope == 0 {
-                0
+                outer_scope
             } else {
                 scope_offset + site.scope
             };
             let effective_order = site.local_order.unwrap_or_else(|| order.clone());
             out.cmds.push(ec);
-            out.orders.push(order.clone());
             out.execution_sites.push(ExpandedExecutionSite {
                 scope,
                 order: effective_order,
@@ -2546,8 +2735,15 @@ fn collect_expanded(
             out.args_from_input.push(efrom_input);
             out.args_complete.push(ecomplete);
         }
+        // The wrapper command `c` (index `i`) is the redirect's owner once a
+        // nested snippet's own redirects are folded onto it below — carry
+        // ITS `cmd_scope` entry alongside its order so that fold can extend
+        // `redirect_scope` in step with `redirect_order`/`redirect_targets`
+        // instead of leaving it short (review finding IMPORTANT 2).
+        let wrapper_scope = scan.cmd_scope.get(i).copied().flatten();
         for (plang, psrc) in ex.srcs {
-            out.snippets.push((plang, psrc, order.clone()));
+            out.snippets
+                .push((plang, psrc, order.clone(), wrapper_scope));
         }
         out.parse_failures.extend(ex.parse_failures);
         out.constructs.extend(ex.constructs);
@@ -2563,12 +2759,13 @@ fn collect_expanded(
 
 /// Diagnostic for measurements (spec 2026-08-06 §Measurement plan): how many
 /// command positions in this line have an Unknown run place — a directory
-/// change the walk cannot order or resolve. Structural: no cwd is supplied,
-/// so a bare relative line counts 0 (NoDirectory, not Unknown). NOTE: a
-/// single unplaceable directory change marks EVERY position Unknown
-/// (`CdTimeline.unplaceable`), so `cd a || cd b; echo x` counts 3 — the
-/// count is "positions a restrict-shaped place rule would treat as
-/// possibly-inside", which is exactly the noise being sized.
+/// change the walk cannot order or resolve, or a position where several
+/// candidate directories survive (which this scalar boundary classifies
+/// Unknown rather than averaging over — design 2026-08-30 §4.3). Structural:
+/// no cwd is supplied, so a bare relative line counts 0 (NoDirectory, not
+/// Unknown). A genuinely unplaceable change still marks its whole scope, but
+/// the or-fallback and body shapes now resolve positionally, so
+/// `cd a || cd b; echo x` counts 1 — the echo, whose candidates are plural.
 pub fn count_unknown_run_place_commands(lang: &str, src: &str) -> usize {
     let scanner = match crate::syntax::scanner_for(lang) {
         Some(s) => s,
@@ -2625,6 +2822,7 @@ pub fn count_unknown_run_place_commands(lang: &str, src: &str) -> usize {
         &inherited_run_dir,
         &resolve,
         None,
+        assigned.contains_key("CDPATH"),
         &start,
     );
     (0..all_cmds.len())
@@ -2743,6 +2941,7 @@ pub fn measure_program_locations(
         &inherited_run_dir,
         &resolve,
         Some(home),
+        assigned.contains_key("CDPATH"),
         &start,
     );
     let trust = ProgramTrustRules::of(cfg, home, project_root);
@@ -2811,19 +3010,52 @@ pub fn measure_program_locations(
 /// placed in the sequence. Its position has to be provable, not merely
 /// present: something that may not run, may run concurrently, or may run in a
 /// child process leaves every later write unresolvable.
-const UNPLACEABLE_CD: &str =
-    "a directory change vouch cannot order (a subshell, ||, pipeline, background job, or a directory stack vouch cannot see)";
+pub const UNPLACEABLE_CD: &str =
+    "a directory change vouch cannot order (a mover with no provable position)";
+
+/// The defensive arms' own cause (spec §5's last bucket): an internal
+/// record — a site, a timeline, a start — was missing where one belongs.
+/// Fail-closed, and named apart from the mover case so neither hides the
+/// other.
+pub const LOOKUP_GAP_CD: &str =
+    "a directory state vouch could not look up (an internal record was missing)";
+
+/// The stack kinds' own cause (spec §5): a bare swap or a rotate names a
+/// SLOT in the directory stack, never a path this command line states.
+pub const STACK_CD: &str =
+    "a directory stack this command line cannot see (a bare swap or rotate names a stack slot, not a path)";
+
+/// A destination that is on the line but not readable: an unresolved token,
+/// zero or several candidate operands, an unstated-destination program, or
+/// an undeclared option that may consume the next token (spec §5).
+pub const UNREAD_DEST_CD: &str = "a directory-change destination vouch cannot read";
+
+/// Iteration carry (spec §5): a loop whose condition or body moves the
+/// shell does it again every pass, so no anchor bounds where later
+/// positions run.
+pub const LOOP_CD: &str =
+    "a loop that changes directory (its condition or body moves the shell, and iteration carry has no bound)";
+
+/// The M2.37 half (spec §5): nothing is wrong with any directory change —
+/// this command's OWN position in the line is what vouch cannot place.
+pub const UNPLACED_POS_CD: &str =
+    "a position vouch cannot place in the line's order (a function body that may run at any later point, an or-branch tail it cannot pin, or a record with no position)";
+
+/// The cause when a position's candidate-base set outgrew the bound
+/// (design §4.1): a line with that many surviving directory branches is
+/// judged exactly where it was before candidate bases existed — as
+/// unresolvable.
+pub const TOO_MANY_BASES: &str = "more possible directories than vouch tracks";
+
+/// The cause a consumer that needs ONE directory gives when the position
+/// has several possible ones — the Task 4 boundary shim's collapse; the
+/// set-aware merges (design §4.3) replace it consumer by consumer.
+const PLURAL_BASES: &str = "more than one possible directory for this position";
 
 /// The cause when the caller supplied no working directory at all and the
 /// destination is the run directory itself, so there is no path to fall back
 /// on. The hook always supplies one; `decide_command_in` does not.
 const NO_CWD: &str = "vouch was given no working directory to resolve against";
-
-/// Why a base is unknown when a conditional directory change sits before the
-/// command: the change ran only if what preceded it succeeded, and this
-/// command running does not say that it did (M2.130).
-const CONDITIONAL_CD: &str =
-    "a directory change earlier on this line ran only if the command before it succeeded, and this command running does not prove that it did";
 
 /// Why a drive-relative destination could not be placed: it names the current
 /// directory ON a named drive, and vouch either does not know where the line
@@ -3712,19 +3944,183 @@ fn resolve_guard_action(
     (won, Some(sentence))
 }
 
+/// A bounded, deduplicated set of possible directory states for one
+/// position (design §4.1). A singleton behaves exactly as the old scalar
+/// did, so the decision diff is only where sets genuinely arise. CAP is 4;
+/// exceeding it collapses to one Unknown naming the bound; an Unknown
+/// member absorbs the whole set with its own cause — "one of these three,
+/// or somewhere I cannot name" is not a set.
+#[derive(Debug, Clone, PartialEq)]
+struct BaseSet {
+    states: Vec<CdState>,
+}
+
+const BASE_SET_CAP: usize = 4;
+
+impl BaseSet {
+    fn of(state: CdState) -> BaseSet {
+        BaseSet { states: vec![state] }
+    }
+
+    fn from_states(states: Vec<CdState>) -> BaseSet {
+        if let Some(u) = states.iter().find(|s| matches!(s, CdState::Unknown(_))) {
+            return BaseSet::of(u.clone());
+        }
+        let mut out: Vec<CdState> = Vec::new();
+        for s in states {
+            if !out.contains(&s) {
+                out.push(s);
+            }
+        }
+        if out.is_empty() {
+            return BaseSet::of(CdState::Unknown(LOOKUP_GAP_CD.to_string()));
+        }
+        if out.len() > BASE_SET_CAP {
+            return BaseSet::of(CdState::Unknown(TOO_MANY_BASES.to_string()));
+        }
+        BaseSet { states: out }
+    }
+
+    fn union(a: &BaseSet, b: &BaseSet) -> BaseSet {
+        BaseSet::from_states(a.states.iter().chain(&b.states).cloned().collect())
+    }
+
+    /// The Task 4 boundary shim: a consumer that needs ONE directory gets
+    /// the singleton's member, else an Unknown — replaced by the real
+    /// per-member merges (design §4.3) consumer by consumer in Task 5.
+    fn collapse(&self) -> CdState {
+        match self.states.as_slice() {
+            [one] => one.clone(),
+            _ => CdState::Unknown(PLURAL_BASES.to_string()),
+        }
+    }
+}
+
+/// Does this command's execution prove the mover ran AND SUCCEEDED? Only
+/// genuine `&&`-run membership does: same chain, at or after the reader's
+/// own certified run start, before the reader. `folds_into`'s
+/// unconditional arm (no chain / index zero) certifies RUNNING, which
+/// proves nothing about success — composing `cd A; write` at A on that
+/// arm was M2.44's wrong-file allow, the exact thing candidate bases
+/// close. A negated member's exit status is inverted, so its success is
+/// never certifiable (design §3.1).
+fn certifies(
+    mover: Option<&crate::syntax::ChainPos>,
+    cmd: Option<&crate::syntax::ChainPos>,
+) -> bool {
+    match (mover, cmd) {
+        // A nonzero `and_run_from` marks an or-branch entry: the member AT
+        // that index ran only if everything before the `||` failed, so the
+        // reader's execution proves the GROUP succeeded — satisfiable
+        // without that member running at all (`a || b && c`: `c` proves
+        // nothing about `b`). Only members STRICTLY after the entry, or any
+        // member of an unbroken leading `&&` run, are proven to have run
+        // and succeeded (Task 4 review, CRITICAL 2).
+        (Some(m), Some(c)) => {
+            !m.negated
+                && c.id == m.id
+                && m.idx < c.idx
+                && (c.and_run_from == 0 || m.idx > c.and_run_from)
+        }
+        _ => false,
+    }
+}
+
+/// Does this command's execution prove the mover FAILED? True only for the
+/// IMMEDIATELY preceding member of the `&&`-run whose failure this
+/// or-tail command's execution implies — earlier members of that run
+/// contribute {moved, unmoved}, because either of them failing also
+/// explains the fall-through (design §4.2). NOT `folds_into` with the
+/// answer flipped: its unconditional arm means "always runs", which
+/// proves nothing about success or failure. A negated member is neither
+/// certified nor refuted.
+fn refutes(
+    mover: Option<&crate::syntax::ChainPos>,
+    cmd: Option<&crate::syntax::ChainPos>,
+) -> bool {
+    match (mover, cmd) {
+        // Only the OR-BRANCH ENTRY member itself (`c.idx == c.and_run_from`)
+        // proves the immediately preceding member failed. A reader further
+        // down the chain reached through `&&` proves only that the or-group
+        // succeeded — satisfiable by the left member succeeding, in which
+        // case the "refuted" mover in fact ran and moved (`cd /etc || true
+        // && write`; Task 4 review, CRITICAL 1).
+        (Some(m), Some(c)) => {
+            !m.negated && c.id == m.id && c.idx == c.and_run_from && m.idx + 1 == c.idx
+        }
+        _ => false,
+    }
+}
+
+/// What one timeline event knows about its mover's destination — enough to
+/// compose against any candidate base at READ time. Stored per event
+/// rather than composed at build time because certification is
+/// reader-relative: `cd a && cd b && write` composes b against a's
+/// singleton for the writer that certifies both, while a reader after a
+/// `;` composes the same events as unions.
+enum EventDest {
+    Real {
+        kind: crate::guards::DirChangeKind,
+        args: Vec<String>,
+        cands: Result<Vec<String>, Option<String>>,
+        lang: String,
+        head: String,
+        /// An unread argument position, or a same-line CDPATH binding over
+        /// a relative destination (design §4.2) — the destination is not
+        /// derivable whatever the base.
+        unreadable: bool,
+    },
+    /// A mover-tainted same-process body's anchor (design §3.2/§3.3): the
+    /// child scope whose end state this event contributes, under its
+    /// class's treatment.
+    BodyAnchor { scope: usize, treatment: BodyTreatment },
+}
+
+struct TimelineEvent {
+    n: u32,
+    chain: Option<crate::syntax::ChainPos>,
+    dest: EventDest,
+    /// Whether this mover provably RUNS — it carries no chain, or it is
+    /// its chain's first member (folds_into's always-runs notion). A later
+    /// `&&` member is sequence-anchored yet runs only if its predecessor
+    /// succeeded, and an or-tail member only if the run before it failed —
+    /// neither is run-certain. The existing-target refinement (design
+    /// §4.4) may discharge FAILURE doubt, never run doubt, so it reads
+    /// this bit.
+    run_certain: bool,
+}
+
 /// The directory changes in one command line, each at its position.
 struct CdTimeline {
-    /// The state AFTER each ordered directory change, by sequence position,
-    /// with the MOVER's own chain position — which is what decides whether a
-    /// later command's execution implies the move happened (M2.130) — and
-    /// whether that change STANDS ON ITS OWN: an absolute destination
-    /// composes against nothing, so it ends any uncertainty an earlier
-    /// conditional change left behind.
-    events: Vec<(u32, CdState, Option<crate::syntax::ChainPos>, bool)>,
+    /// One event per ordered directory change (and per mover-tainted
+    /// same-process child anchor), by sequence position, carrying the
+    /// mover's own chain position — what decides whether a later command's
+    /// execution certifies or refutes the move (M2.130, design §4.2) — and
+    /// its composable destination.
+    events: Vec<TimelineEvent>,
     /// A directory change whose position is not provable. One of these makes
     /// every relative destination in the line unresolvable, wherever it sits:
     /// the change may have run before it, after it, or not at all.
     unplaceable: bool,
+    /// What a zero-argument bash `cd` falls back to, captured once so
+    /// read-time composition needs no extra plumbing.
+    home: Option<String>,
+    /// Each and-or chain's own STATEMENT position in this scope — the Seq of
+    /// its earliest ordered member. What places an or-tail (chain-carrying,
+    /// order-unprovable) mover or reader relative to the rest of the scope:
+    /// within its chain the predicates decide by index, and against other
+    /// statements the chain's own position does (design §4.2).
+    chain_first: std::collections::HashMap<u32, u32>,
+    /// The scope's FINAL member — the last statement's last chain member,
+    /// by (statement position, chain index), tracked over every in-scope
+    /// command AND every same-process body anchor, movers or not. A
+    /// condition list's exit status is exactly this member's, so success
+    /// certifies only what a virtual reader sitting just after it would
+    /// certify (Task 6 re-review: the one predicate that replaces the
+    /// grown union-trigger whitelist). `None` when any member's position
+    /// could not be placed — then success proves nothing placeable and the
+    /// success walk unions everything.
+    final_member: Option<(u32, Option<crate::syntax::ChainPos>)>,
 }
 
 /// One independent directory timeline per parsed execution scope.
@@ -3734,23 +4130,38 @@ struct CdTimeline {
 /// directory changes without leaking them back to its parent or siblings.
 struct ScopedCdTimelines {
     timelines: Vec<CdTimeline>,
-    starts: Vec<CdState>,
+    starts: Vec<BaseSet>,
     sites: Vec<ExpandedExecutionSite>,
 }
 
 impl ScopedCdTimelines {
+    /// The Task 4 shim spelling: candidate sets collapse to one state at
+    /// this boundary (singleton -> its member, several -> Unknown), so
+    /// every consumer not yet set-aware stays fail-closed. Task 5 moves
+    /// them to `base_set_at` one by one.
     fn base_at(&self, index: usize, cmds: &[crate::shell::Cmd]) -> CdState {
+        self.base_set_at(index, cmds).collapse()
+    }
+
+    fn base_set_at(&self, index: usize, cmds: &[crate::shell::Cmd]) -> BaseSet {
         scoped_base_at_parts(index, cmds, &self.sites, &self.starts, &self.timelines)
     }
 
-    fn root_base_at(
-        &self,
-        order: &crate::syntax::Order,
-        chain: Option<&crate::syntax::ChainPos>,
-    ) -> CdState {
-        match (self.timelines.first(), self.starts.first()) {
-            (Some(timeline), Some(start)) => timeline.base_at(order, chain, start),
-            _ => CdState::Unknown(UNPLACEABLE_CD.to_string()),
+    /// The base for a position known only by scope and order — a redirect
+    /// with no owning execution site. Resolved in ITS OWN scope's timeline,
+    /// never scope 0's: an event-free scope answers with its start (no mover
+    /// anywhere in the scope means the directory never changed, whatever the
+    /// position), and a scope with movers answers Unknown for an unordered
+    /// position. Consulting scope 0 here handed a moved child scope the
+    /// caller's cwd whenever the child's mover was sealed behind a process
+    /// boundary — scope 0 event-free, child moved — which is a wrong base in
+    /// the allow direction (Task 3 review, F1).
+    fn scope_base_at(&self, scope: usize, order: &crate::syntax::Order) -> BaseSet {
+        match (self.timelines.get(scope), self.starts.get(scope)) {
+            (Some(timeline), Some(start)) => {
+                timeline.base_at(order, None, start, &self.timelines)
+            }
+            _ => BaseSet::of(CdState::Unknown(LOOKUP_GAP_CD.to_string())),
         }
     }
 }
@@ -3759,60 +4170,336 @@ fn scoped_base_at_parts(
     index: usize,
     cmds: &[crate::shell::Cmd],
     sites: &[ExpandedExecutionSite],
-    starts: &[CdState],
+    starts: &[BaseSet],
     timelines: &[CdTimeline],
-) -> CdState {
+) -> BaseSet {
     let Some(site) = sites.get(index) else {
-        return CdState::Unknown(UNPLACEABLE_CD.to_string());
+        return BaseSet::of(CdState::Unknown(LOOKUP_GAP_CD.to_string()));
     };
     let Some(timeline) = timelines.get(site.scope) else {
-        return CdState::Unknown(UNPLACEABLE_CD.to_string());
+        return BaseSet::of(CdState::Unknown(LOOKUP_GAP_CD.to_string()));
     };
     let Some(start) = starts.get(site.scope) else {
-        return CdState::Unknown(UNPLACEABLE_CD.to_string());
+        return BaseSet::of(CdState::Unknown(LOOKUP_GAP_CD.to_string()));
     };
     timeline.base_at(
         &site.order,
         cmds.get(index).and_then(|command| command.chain.as_ref()),
         start,
+        timelines,
     )
 }
 
 fn scoped_cd_timelines(
     cmds: &[crate::shell::Cmd],
     sites: &[ExpandedExecutionSite],
-    scope_parents: &[usize],
+    scope_parents: &[ScopeParent],
     langs: &[String],
     inherited_run_dir: &[Option<String>],
     resolve: &dyn Fn(&str) -> String,
     home: Option<&str>,
+    cdpath_bound: bool,
     start: &CdState,
 ) -> ScopedCdTimelines {
     let kb = crate::guards::in_effect();
-    let mut timelines = Vec::with_capacity(scope_parents.len() + 1);
-    let mut starts = Vec::with_capacity(scope_parents.len() + 1);
-    for scope in 0..=scope_parents.len() {
-        let scope_start = if scope == 0 {
-            start.clone()
-        } else {
-            let parent = scope_parents[scope - 1];
-            let parent_base = scoped_base_at_parts(parent, cmds, sites, &starts, &timelines);
-            match (cmds.get(parent), langs.get(parent)) {
-                (Some(command), Some(lang)) => {
-                    run_dir_place(
-                        kb,
-                        command,
-                        lang,
-                        &parent_base,
-                        inherited_at(inherited_run_dir, parent),
-                        resolve,
-                    )
-                    .0
+    let scope_count = scope_parents.len() + 1;
+
+    // Taint pre-pass (design §3.2/§3.3): which scopes contain a directory
+    // mover, before any timeline exists — presence is all part one needs,
+    // because a same-process body's movers reach the parent only as an
+    // Unknown event at the body's anchor, never as a composed end state
+    // (that composition is part two's candidate machinery). A subshell's
+    // movers die with its process, a same-process body's do not, so taint
+    // flows child -> parent across SameProcess edges only. Wrapped snippets
+    // (`AtCommand`) run in another process and never taint.
+    let mut taint = vec![false; scope_count];
+    for (i, c) in cmds.iter().enumerate() {
+        let (Some(site), Some(lang)) = (sites.get(i), langs.get(i).map(String::as_str)) else {
+            continue;
+        };
+        if crate::guards::dir_change_entry_for_cmd(kb, c, lang)
+            .is_some_and(|(k, _)| k != crate::guards::DirChangeKind::No)
+        {
+            if let Some(flag) = taint.get_mut(site.scope) {
+                *flag = true;
+            }
+        }
+    }
+    for scope in (1..scope_count).rev() {
+        if let ScopeParent::AtOrder { parent_scope, kind, .. } = &scope_parents[scope - 1] {
+            if *kind == crate::syntax::ScopeKind::SameProcess && taint[scope] {
+                taint[*parent_scope] = true;
+            }
+        }
+    }
+
+    // What the taint does, positionally, per §3.3's construct row. Every
+    // tainted same-process scope with a provable anchor becomes one event
+    // at that anchor in its parent: a loop's condition or body POISONS from
+    // there (iteration carry has no bound), everything else contributes its
+    // composed END as a candidate — certifiable through the anchor chain
+    // only when the construct always runs once reached (brace group,
+    // if-condition), never when the body itself may not have run (branch
+    // body, pipeline tail, pre-`&` member). A certifiable anchor whose own
+    // position provably runs needs no reader at all: it composes as an
+    // ordinary unconditional mover (§3.3), via the walk's replace arm. A tainted scope with an
+    // unprovable anchor has nowhere to poison from, so its parent keeps the
+    // whole-scope flag. Loop clusters (scopes sharing one anchor with any
+    // loop-classed tainted member) start Unknown — the condition's mover
+    // carries into the body across iterations — while a then-body starts at
+    // its condition's CERTIFIED end (the branch running proves the
+    // condition succeeded) and other branch bodies start at the anchored
+    // base unioned with the condition's plain end, the fail-closed
+    // approximation of the failure-state set until part two bounds it.
+    let mut extra_for: Vec<
+        Vec<(u32, Option<crate::syntax::ChainPos>, usize, BodyTreatment)>,
+    > = vec![Vec::new(); scope_count];
+    // Every child anchor per parent scope — any kind, any taint — for the
+    // final-member scan; an unorderable child anchor is recorded as such by
+    // an Unordered entry, which the scan reads as unplaceable.
+    let mut anchors_for: Vec<Vec<(u32, Option<crate::syntax::ChainPos>)>> =
+        vec![Vec::new(); scope_count];
+    let mut anchors_unplaceable: Vec<bool> = vec![false; scope_count];
+    for sp in scope_parents.iter() {
+        if let ScopeParent::AtOrder { parent_scope, order, chain, .. } = sp {
+            match order {
+                crate::syntax::Order::Seq(n) => {
+                    anchors_for[*parent_scope].push((*n, *chain));
                 }
-                _ => CdState::Unknown(UNPLACEABLE_CD.to_string()),
+                crate::syntax::Order::Unordered => {
+                    anchors_unplaceable[*parent_scope] = true;
+                }
+            }
+        }
+    }
+    let mut force_unplaceable = vec![false; scope_count];
+    let mut start_poisoned = vec![false; scope_count];
+    let mut cond_mate: Vec<Option<usize>> = vec![None; scope_count];
+    let mut prior_conds: Vec<Vec<usize>> = vec![Vec::new(); scope_count];
+    let mut clusters: std::collections::HashMap<(usize, u32), Vec<usize>> =
+        std::collections::HashMap::new();
+    let class_of = |scope: usize| match scope_parents.get(scope.wrapping_sub(1)) {
+        Some(ScopeParent::AtOrder { class, .. }) => *class,
+        _ => None,
+    };
+    let treatment_of = |class: Option<crate::syntax::ScopeClass>| match class {
+        // Certifiable is SAFE for the first condition even though §3.3's
+        // after-fi row speaks of unions: a certified reader replaces with
+        // the condition's PLAIN end, which itself keeps every uncertified
+        // mover's failure branch — there is no shape where the condition
+        // provably moved yet the statement exits 0 without that surviving
+        // in the composed set (Task 6 review's note).
+        Some(
+            crate::syntax::ScopeClass::Brace | crate::syntax::ScopeClass::CondList,
+        ) => BodyTreatment::Candidate { certifiable: true },
+        Some(
+            crate::syntax::ScopeClass::ElifCond
+            | crate::syntax::ScopeClass::ThenBody
+            | crate::syntax::ScopeClass::BranchBody
+            | crate::syntax::ScopeClass::PipeTail
+            | crate::syntax::ScopeClass::AsyncMember,
+        ) => BodyTreatment::Candidate { certifiable: false },
+        Some(
+            crate::syntax::ScopeClass::LoopCond | crate::syntax::ScopeClass::LoopBody,
+        )
+        | None => BodyTreatment::Poison,
+    };
+    for (idx, sp) in scope_parents.iter().enumerate() {
+        let scope = idx + 1;
+        let ScopeParent::AtOrder { parent_scope, order, chain, kind, class } = sp else {
+            continue;
+        };
+        if *kind != crate::syntax::ScopeKind::SameProcess {
+            continue;
+        }
+        match order {
+            crate::syntax::Order::Seq(n) => {
+                clusters.entry((*parent_scope, *n)).or_default().push(scope);
+                if taint[scope] {
+                    extra_for[*parent_scope].push((*n, *chain, scope, treatment_of(*class)));
+                }
+            }
+            crate::syntax::Order::Unordered => {
+                if taint[scope] {
+                    force_unplaceable[*parent_scope] = true;
+                }
+            }
+        }
+    }
+    for members in clusters.values() {
+        // Bodies pair with their OWN gating condition, by allocation
+        // adjacency: the walk allocates cond, then-body, then per elif its
+        // condition and body, then the else body — so a body directly
+        // following a condition-classed scope is gated by exactly that
+        // condition (running proves it succeeded), while a body following
+        // another BODY is the else, gated by every condition having failed
+        // (Task 6 review, BLOCKER 2: pairing everything with the FIRST
+        // condition made an elif's guaranteed mover invisible). An elif
+        // condition, and an else-like body, additionally inherit every
+        // PRIOR condition's movers as failure-branch candidates.
+        let mut last_cond: Option<usize> = None;
+        let mut conds_so_far: Vec<usize> = Vec::new();
+        for s in members {
+            match class_of(*s) {
+                Some(
+                    crate::syntax::ScopeClass::CondList
+                    | crate::syntax::ScopeClass::ElifCond,
+                ) => {
+                    prior_conds[*s] = conds_so_far.clone();
+                    conds_so_far.push(*s);
+                    last_cond = Some(*s);
+                }
+                Some(
+                    crate::syntax::ScopeClass::ThenBody
+                    | crate::syntax::ScopeClass::BranchBody,
+                ) => {
+                    cond_mate[*s] = last_cond.take();
+                    // The mate is the LAST collected condition and is
+                    // consumed as the certified gate, not a prior: a
+                    // then-body's base is its own condition's success end,
+                    // with only the EARLIER conditions' failure branches
+                    // beside it.
+                    prior_conds[*s] = match cond_mate[*s] {
+                        Some(_) => conds_so_far[..conds_so_far.len() - 1].to_vec(),
+                        None => conds_so_far.clone(),
+                    };
+                }
+                _ => {
+                    last_cond = None;
+                }
+            }
+        }
+        let loop_carry = members
+            .iter()
+            .any(|s| taint[*s] && matches!(treatment_of(class_of(*s)), BodyTreatment::Poison));
+        if loop_carry {
+            for s in members {
+                start_poisoned[*s] = true;
+            }
+        }
+    }
+
+    let mut timelines: Vec<CdTimeline> = Vec::with_capacity(scope_count);
+    let mut starts: Vec<BaseSet> = Vec::with_capacity(scope_count);
+    for scope in 0..scope_count {
+        let scope_start = if scope == 0 {
+            BaseSet::of(start.clone())
+        } else if start_poisoned[scope] {
+            BaseSet::of(CdState::Unknown(LOOP_CD.to_string()))
+        } else {
+            match &scope_parents[scope - 1] {
+                // A scanner scope starts wherever its parent's composed base
+                // says the shell was at the construct's own position,
+                // certified through the construct's own chain membership —
+                // the same parent-derived start wrapped snippets get. The
+                // start is a candidate SET recursively (design §4.1). Two
+                // class refinements (§3.3): a THEN body starts at its
+                // condition's certified end — the branch running proves the
+                // condition list succeeded — and any other branch body
+                // starts at the anchored base unioned with the condition's
+                // plain end, since which of the two the shell was in is
+                // exactly what the failed condition leaves open.
+                ScopeParent::AtOrder { parent_scope, order, chain, class, .. } => {
+                    let anchored = match (timelines.get(*parent_scope), starts.get(*parent_scope))
+                    {
+                        (Some(timeline), Some(parent_start)) => {
+                            timeline.base_at(order, chain.as_ref(), parent_start, &timelines)
+                        }
+                        _ => BaseSet::of(CdState::Unknown(LOOKUP_GAP_CD.to_string())),
+                    };
+                    let with_prior_conds = |base: BaseSet| {
+                        let mut set = base;
+                        for cond in &prior_conds[scope] {
+                            if !taint[*cond] {
+                                continue;
+                            }
+                            if let (Some(t), Some(s)) = (timelines.get(*cond), starts.get(*cond))
+                            {
+                                set = BaseSet::union(&set, &t.plain_end(s, &timelines));
+                            }
+                        }
+                        set
+                    };
+                    match class {
+                        // A body directly gated by a condition starts at
+                        // that condition's CERTIFIED end — the body running
+                        // proves its own condition succeeded — plus every
+                        // prior condition's failure-branch candidates.
+                        Some(
+                            crate::syntax::ScopeClass::ThenBody
+                            | crate::syntax::ScopeClass::BranchBody,
+                        ) => match cond_mate[scope] {
+                            Some(cond) if taint[cond] => {
+                                let certified =
+                                    match (timelines.get(cond), starts.get(cond)) {
+                                        (Some(t), Some(s)) => t.success_end(s, &timelines),
+                                        _ => anchored.clone(),
+                                    };
+                                with_prior_conds(certified)
+                            }
+                            // The else-like body (no adjacent condition):
+                            // gated by every condition having failed —
+                            // anchored plus each tainted condition's plain
+                            // end, the fail-closed failure-state
+                            // approximation until part two bounds it.
+                            None => with_prior_conds(anchored),
+                            _ => with_prior_conds(anchored),
+                        },
+                        // An elif condition runs only after every earlier
+                        // condition ran and failed — those movers are
+                        // candidates in its start.
+                        Some(crate::syntax::ScopeClass::ElifCond) => {
+                            with_prior_conds(anchored)
+                        }
+                        _ => anchored,
+                    }
+                }
+                // A wrapped snippet starts wherever its wrapper command
+                // runs — per CANDIDATE (design §4.3): the wrapper's own
+                // run-dir flag composes against every member of its base,
+                // so a relative write inside the snippet is judged under
+                // each candidate instead of one flattened Unknown. The
+                // provenance sentence is a write-pass concern and is
+                // discarded here.
+                ScopeParent::AtCommand(parent) => {
+                    let parent_base =
+                        scoped_base_at_parts(*parent, cmds, sites, &starts, &timelines);
+                    match (cmds.get(*parent), langs.get(*parent)) {
+                        (Some(command), Some(lang)) => BaseSet::from_states(
+                            parent_base
+                                .states
+                                .iter()
+                                .map(|member| {
+                                    run_dir_place(
+                                        kb,
+                                        command,
+                                        lang,
+                                        member,
+                                        inherited_at(inherited_run_dir, *parent),
+                                        resolve,
+                                    )
+                                    .0
+                                })
+                                .collect(),
+                        ),
+                        _ => BaseSet::of(CdState::Unknown(LOOKUP_GAP_CD.to_string())),
+                    }
+                }
             }
         };
-        let timeline = cd_timeline(cmds, sites, scope, langs, resolve, home, &scope_start);
+        let timeline = cd_timeline(
+            cmds,
+            sites,
+            scope,
+            langs,
+            resolve,
+            home,
+            cdpath_bound,
+            &extra_for[scope],
+            &anchors_for[scope],
+            anchors_unplaceable[scope],
+            force_unplaceable[scope],
+        );
         starts.push(scope_start);
         timelines.push(timeline);
     }
@@ -3824,60 +4511,290 @@ fn scoped_cd_timelines(
 }
 
 impl CdTimeline {
-    /// The directory a command at this position runs in. `start` is the state
-    /// the line began in — the caller's directory, its absence, or its being
-    /// unknown — and is what a command before every directory change in the
-    /// line inherits.
+    /// The candidate directories a command at this position may run in.
+    /// `start` is the set the scope began in, and the walk is
+    /// READER-relative (design §4.2): an event this command's execution
+    /// certifies replaces the running set with the composed destination; an
+    /// event it refutes — the immediately preceding member of the failed
+    /// run — contributes nothing; every other event unions {moved, unmoved},
+    /// because the mover may have run and may have failed. The set is
+    /// bounded, deduplicated, and absorbed by any Unknown at every step
+    /// (`BaseSet::from_states`), so a pathological line lands exactly where
+    /// it did before candidate bases existed. The old scalar fold's
+    /// "conditional change poisons until an absolute clears it" behavior is
+    /// subsumed: a certified absolute replaces the whole set; an
+    /// uncertified one keeps its failure branch, which is M2.44's fix.
     fn base_at(
         &self,
         order: &crate::syntax::Order,
         chain: Option<&crate::syntax::ChainPos>,
-        start: &CdState,
-    ) -> CdState {
+        start: &BaseSet,
+        all: &[CdTimeline],
+    ) -> BaseSet {
         if self.unplaceable {
-            return CdState::Unknown(UNPLACEABLE_CD.to_string());
+            return BaseSet::of(CdState::Unknown(UNPLACEABLE_CD.to_string()));
         }
         if self.events.is_empty() {
             return start.clone();
         }
         match order {
-            // EVERY change before this command, not just the last one: each
-            // recorded state already has the earlier changes composed into
-            // it, so one conditional change poisons every state after it —
-            // an unconditional `cd sub` two statements later inherits the
-            // conditional directory and would otherwise hand it on as
-            // certain (found by the task review, reproduced).
-            crate::syntax::Order::Seq(n) => {
-                let mut before = self.events.iter().filter(|(s, ..)| s < n).peekable();
-                if before.peek().is_none() {
-                    return start.clone();
-                }
-                // Uncertainty accumulates and is CLEARED by a later change
-                // that stands on its own. A conditional change poisons every
-                // state after it, because each state has the earlier ones
-                // composed in — but a later ABSOLUTE change composes against
-                // nothing, so wherever the shell had got to stops mattering
-                // (found by the round-2 verifier: without this, `ls && cd d;
-                // cd <absolute>; echo x > f` asked for no reason).
-                let mut uncertain = false;
-                let mut last = start;
-                for (_, st, mover, independent) in before {
-                    if !folds_into(mover.as_ref(), chain) {
-                        uncertain = true;
-                    } else if *independent {
-                        uncertain = false;
+            crate::syntax::Order::Seq(n) => self.walk(chain, start, |event| event.n < *n, all),
+            // The position is not a sequence number — but an or-tail
+            // reader's CHAIN still places it: within its own chain the
+            // certify/refute predicates decide per member, and against
+            // other statements the chain's own statement position does. A
+            // chainless unprovable position stays Unknown.
+            crate::syntax::Order::Unordered => {
+                let Some(c) = chain else {
+                    return BaseSet::of(CdState::Unknown(UNPLACED_POS_CD.to_string()));
+                };
+                let Some(n0) = self.chain_first.get(&c.id).copied() else {
+                    return BaseSet::of(CdState::Unknown(UNPLACED_POS_CD.to_string()));
+                };
+                self.walk(
+                    chain,
+                    start,
+                    |event| match event.chain.as_ref() {
+                        Some(m) if m.id == c.id => m.idx < c.idx,
+                        _ => event.n < n0,
+                    },
+                    all,
+                )
+            }
+        }
+    }
+
+    /// This scope's END as a chainless reader would see it — every event
+    /// walked, unions everywhere the ordinary predicates give them. What a
+    /// tainted body contributes as its candidate outcome.
+    fn plain_end(&self, start: &BaseSet, all: &[CdTimeline]) -> BaseSet {
+        if self.unplaceable {
+            return BaseSet::of(CdState::Unknown(UNPLACEABLE_CD.to_string()));
+        }
+        self.walk(None, start, |_| true, all)
+    }
+
+    /// This scope's end GIVEN THAT IT SUCCEEDED — what a then-branch
+    /// running proves about its condition list (design §3.3): every mover
+    /// provably ran and succeeded, so its destination replaces, except an
+    /// or-branch entry (either alternative may be the one that succeeded —
+    /// union) and a nested body outcome, which success of the list does not
+    /// disambiguate.
+    fn success_end(&self, start: &BaseSet, all: &[CdTimeline]) -> BaseSet {
+        if self.unplaceable {
+            return BaseSet::of(CdState::Unknown(UNPLACEABLE_CD.to_string()));
+        }
+        // The list's exit status is its FINAL member's, so success
+        // certifies exactly what a virtual reader just after that member
+        // would certify: the final statement's completed and-run, nothing
+        // negated, no or-entry, no body outcome, and nothing in any earlier
+        // statement (whose failure the list's success never excludes). One
+        // predicate — the same `certifies` the ordinary walk uses — instead
+        // of the union-trigger whitelist three review rounds each found
+        // another way past (Task 6 re-review, R1/R2).
+        let mut set = start.clone();
+        for event in &self.events {
+            let moved = self.compose(&event.dest, &set, all);
+            let body = matches!(event.dest, EventDest::BodyAnchor { .. });
+            let certified = !body
+                && match (&self.final_member, event.chain.as_ref()) {
+                    (Some((_, Some(fin))), Some(m)) => {
+                        let virtual_reader = crate::syntax::ChainPos {
+                            id: fin.id,
+                            idx: fin.idx + 1,
+                            and_run_from: fin.and_run_from,
+                            negated: false,
+                        };
+                        certifies(Some(m), Some(&virtual_reader))
                     }
-                    last = st;
-                }
-                if uncertain {
-                    CdState::Unknown(CONDITIONAL_CD.to_string())
-                } else {
-                    last.clone()
+                    // A chainless final member certifies only itself.
+                    (Some((fin_n, None)), None) => event.n == *fin_n,
+                    _ => false,
+                };
+            // The walk's own replace arms, mirrored, so "given the list
+            // succeeded" can never compose a BROADER set than the
+            // unconditional `plain_end` over the same events: a
+            // run-certain, un-negated mover whose composed target provably
+            // exists keeps its singleton here exactly as it does there
+            // (§4.4), and a run-certain Brace/CondList anchor composes its
+            // child's plain end the same way (§3.3). The mirror reaches
+            // or-rescued lists too (`if cd /tmp || true; then …`), and it
+            // drops the pre-event state on §4.4's existing-target premise,
+            // the walk's own accepted residue — not unconditionally.
+            let discharged = event.run_certain
+                && !event.chain.as_ref().is_some_and(|m| m.negated)
+                && (matches!(
+                    event.dest,
+                    EventDest::BodyAnchor {
+                        treatment: BodyTreatment::Candidate { certifiable: true },
+                        ..
+                    }
+                ) || surely_moved(&event.dest, &moved));
+            set = if certified || discharged { moved } else { BaseSet::union(&set, &moved) };
+        }
+        set
+    }
+
+    /// The reader-relative composition over every event an inclusion
+    /// predicate admits, in position order (design §4.2): refuted events
+    /// contribute nothing, certified events replace the running set with
+    /// their composed destination, everything else unions {moved, unmoved}.
+    fn walk(
+        &self,
+        chain: Option<&crate::syntax::ChainPos>,
+        start: &BaseSet,
+        include: impl Fn(&TimelineEvent) -> bool,
+        all: &[CdTimeline],
+    ) -> BaseSet {
+        let mut set = start.clone();
+        for event in self.events.iter().filter(|e| include(e)) {
+            let mover = event.chain.as_ref();
+            // A body anchor is NEVER refutable: an or-tail proves the
+            // compound exited nonzero, which says nothing about whether a
+            // mover inside it ran first (`{ cd X; false; } || write` runs
+            // the write INSIDE X; Task 6 review's refutation row). Only a
+            // plain mover's own failure is what refutation establishes.
+            let body_event = matches!(event.dest, EventDest::BodyAnchor { .. });
+            if !body_event && refutes(mover, chain) {
+                continue;
+            }
+            let moved = self.compose(&event.dest, &set, all);
+            // A body that may not have RUN is never certified by the anchor
+            // chain: the chain proves the statement ran, not the branch or
+            // pipeline member inside it (§3.3).
+            if matches!(
+                event.dest,
+                EventDest::BodyAnchor { treatment: BodyTreatment::Candidate { certifiable: false }, .. }
+            ) {
+                set = BaseSet::union(&set, &moved);
+                continue;
+            }
+            // A Brace/CondList anchor that provably RUNS composes as an
+            // ordinary unconditional mover would (§3.3): its `moved` is the
+            // child's plain end, which keeps every inner failure branch
+            // §4.4 does not discharge. The PRE-anchor state is dropped on
+            // the same existing-target premise `surely_moved` already
+            // ships — an or-tail reader after `{ cd /tmp; } && true`
+            // inherits that accepted residue exactly as one after the
+            // plain `cd /tmp && true` does — so this arm is NOT
+            // unconditionally safe: it must never widen to
+            // `certifiable: false` anchors or lose the `run_certain`
+            // guard. A negated head still unions — certification
+            // deliberately refuses inverted status, and a reader chained
+            // through one correlates with the compound FAILING.
+            let certifiable_anchor = matches!(
+                event.dest,
+                EventDest::BodyAnchor { treatment: BodyTreatment::Candidate { certifiable: true }, .. }
+            );
+            set = if certifies(mover, chain) || self.aborting_language(&event.dest) {
+                moved
+            } else if event.run_certain
+                && !mover.is_some_and(|m| m.negated)
+                && (certifiable_anchor || surely_moved(&event.dest, &moved))
+            {
+                // The §4.4 refinement, added on its own decision rule's
+                // terms after the replay measured the failure-branch cost
+                // (182 of the pool's rows, dominated by literal existing
+                // targets): a mover that provably RUNS, is not negated, and
+                // names a destination composing to an existing directory
+                // under every surviving candidate keeps its singleton —
+                // consistent with `paths::resolve_links` deliberately
+                // reading the live filesystem. A nonexistent target keeps
+                // its failure branch, which is exactly where the wrong-file
+                // allow lives; run-doubt (an or-tail member) and inverted
+                // status (negation) are never discharged this way.
+                moved
+            } else {
+                BaseSet::union(&set, &moved)
+            };
+        }
+        set
+    }
+
+    /// Whether this event's language makes a LATER ordered command's own
+    /// execution proof of the mover's success. Bash and PowerShell continue
+    /// past a failed mover, so only an `&&` run certifies (design §4.2). A
+    /// python statement that raises kills everything after it, and the
+    /// scanner's ordered pass only marks provably linear, unguarded calls
+    /// sequential (compound, repeated, exceptional and deferred calls stay
+    /// unordered) — so a later ordered reader running proves the chdir did
+    /// not raise. A language-execution fact, not program knowledge.
+    fn aborting_language(&self, dest: &EventDest) -> bool {
+        matches!(dest, EventDest::Real { lang, .. } if lang == "python")
+    }
+}
+
+/// The existing-target test of §4.4's refinement: a stated, readable
+/// destination whose composition under EVERY surviving candidate is a Known
+/// path naming an existing directory on this machine. Then the mover's
+/// failure branch is discharged — `cd` into a directory that exists
+/// succeeds — while a target that does not resolve keeps both branches.
+/// Two accepted residues, stated rather than hidden: an existing directory
+/// without search permission still fails `cd`, and the metadata read sits
+/// on the decision path the way `paths::resolve_links`' filesystem reads
+/// already do.
+fn surely_moved(dest: &EventDest, moved: &BaseSet) -> bool {
+    let stated_readable = matches!(
+        dest,
+        EventDest::Real { kind: crate::guards::DirChangeKind::Stated, unreadable: false, .. }
+    );
+    stated_readable
+        && moved.states.iter().all(|s| match s {
+            CdState::Known(p) => std::fs::metadata(p).map(|m| m.is_dir()).unwrap_or(false),
+            _ => false,
+        })
+}
+
+impl CdTimeline {
+    /// One event's destination, composed against every member of the
+    /// running set. An unreadable or unstated destination is Unknown
+    /// whatever the base; the body-anchor pseudo-event likewise (the body
+    /// may have moved the shell somewhere this scope's text never states).
+    fn compose(&self, dest: &EventDest, set: &BaseSet, all: &[CdTimeline]) -> BaseSet {
+        match dest {
+            // A loop's movers carry across iterations no anchor can bound.
+            EventDest::BodyAnchor { treatment: BodyTreatment::Poison, .. } => {
+                BaseSet::of(CdState::Unknown(LOOP_CD.to_string()))
+            }
+            // Any other tainted body contributes its END, composed from the
+            // running set — recursive through the scope tree, and
+            // fail-closed Unknown when the child's timeline is not in the
+            // table (only reachable while starts are still being derived,
+            // where the walk's own position filter already excludes every
+            // later-anchored sibling).
+            EventDest::BodyAnchor { scope, treatment: BodyTreatment::Candidate { .. } } => {
+                match all.get(*scope) {
+                    Some(child) => child.plain_end(set, all),
+                    None => BaseSet::of(CdState::Unknown(LOOKUP_GAP_CD.to_string())),
                 }
             }
-            // This command's own position is not provable, so which of the
-            // directory changes had already run when it wrote is not either.
-            crate::syntax::Order::Unordered => CdState::Unknown(UNPLACEABLE_CD.to_string()),
+            EventDest::Real { unreadable: true, .. } => {
+                BaseSet::of(CdState::Unknown(UNREAD_DEST_CD.to_string()))
+            }
+            EventDest::Real { kind, args, cands, lang, head, .. } => BaseSet::from_states(
+                set.states
+                    .iter()
+                    .map(|member| match kind {
+                        crate::guards::DirChangeKind::Unstated => {
+                            CdState::Unknown(UNREAD_DEST_CD.to_string())
+                        }
+                        crate::guards::DirChangeKind::Stack => {
+                            stack_destination(args, cands, member, lang, head)
+                        }
+                        crate::guards::DirChangeKind::Stated => stated_destination(
+                            args,
+                            cands,
+                            member,
+                            lang,
+                            head,
+                            self.home.as_deref(),
+                        ),
+                        crate::guards::DirChangeKind::No => {
+                            unreachable!("dir_change_entry filters this out")
+                        }
+                    })
+                    .collect(),
+            ),
         }
     }
 }
@@ -4174,9 +5091,9 @@ fn destination_from_candidates(
     match cands {
         Ok(c) if c.len() == 1 => classify_destination(&c[0], state, lang),
         Err(Some(flag)) => {
-            CdState::Unknown(format!("{UNPLACEABLE_CD}\n{}", undeclared_option_line(&flag, head)))
+            CdState::Unknown(format!("{UNREAD_DEST_CD}\n{}", undeclared_option_line(&flag, head)))
         }
-        _ => CdState::Unknown(UNPLACEABLE_CD.to_string()),
+        _ => CdState::Unknown(UNREAD_DEST_CD.to_string()),
     }
 }
 
@@ -4208,7 +5125,7 @@ fn stated_destination(
                 None => CdState::Unknown("the home directory is not known".to_string()),
             }
         } else {
-            CdState::Unknown(UNPLACEABLE_CD.to_string())
+            CdState::Unknown(STACK_CD.to_string())
         };
     }
     destination_from_candidates(cands, state, lang, head)
@@ -4231,10 +5148,10 @@ fn stack_destination(
     head: &str,
 ) -> CdState {
     if args.iter().any(|a| is_stack_rotate(a)) {
-        return CdState::Unknown(UNPLACEABLE_CD.to_string());
+        return CdState::Unknown(STACK_CD.to_string());
     }
     if args.is_empty() {
-        return CdState::Unknown(UNPLACEABLE_CD.to_string());
+        return CdState::Unknown(STACK_CD.to_string());
     }
     destination_from_candidates(cands, state, lang, head)
 }
@@ -4254,7 +5171,26 @@ fn cd_timeline(
     langs: &[String],
     resolve: &dyn Fn(&str) -> String,
     home: Option<&str>,
-    start: &CdState,
+    // Whether this line visibly binds CDPATH (prefix or earlier same-line
+    // assignment): a relative, un-dotted destination is then a SEARCH KEY,
+    // not a path — the shell may land somewhere the composed base never
+    // names (design §4.2, proven live as a wrong-base allow).
+    cdpath_bound: bool,
+    // Anchors of this scope's mover-tainted same-process children (design
+    // §3.2/§3.3): each contributes its child's outcome at its own position
+    // under its class's treatment, so positions before it stay resolved.
+    extra: &[(u32, Option<crate::syntax::ChainPos>, usize, BodyTreatment)],
+    // EVERY child anchor of this scope — any kind, tainted or not. Only the
+    // final-member scan reads these: a moverless `{ true; }` or `( true )`
+    // rescuing a condition list contributes no event, yet it is exactly
+    // what decides the list's status (Task 6 re-review, R1's brace arm).
+    all_anchors: &[(u32, Option<crate::syntax::ChainPos>)],
+    // A child anchor whose position could not be placed — the final member
+    // is then unknowable and the success walk unions everything.
+    anchors_unplaceable: bool,
+    // A tainted same-process child whose anchor is unprovable has nowhere to
+    // poison FROM; its parent keeps the whole-scope flag.
+    force_unplaceable: bool,
 ) -> CdTimeline {
     let kb = crate::guards::in_effect();
     // The Program entry travels alongside the kind, from here on: the kind
@@ -4271,8 +5207,88 @@ fn cd_timeline(
         &crate::guards::Program,
         &str,
         String,
+        bool,
     )> = Vec::new();
-    let mut unplaceable = false;
+    let mut unplaceable = force_unplaceable;
+    // Every ordered, chain-carrying command in the scope pins its chain's
+    // STATEMENT position — including non-movers, so `cd X; ls || echo > f`
+    // can place the or-tail chain even though no mover belongs to it.
+    let mut chain_first: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+    for (i, c) in cmds.iter().enumerate() {
+        let (Some(site), Some(ch)) = (sites.get(i), c.chain.as_ref()) else {
+            continue;
+        };
+        if site.scope != scope || !site.scanner_order {
+            continue;
+        }
+        if let crate::syntax::Order::Seq(n) = &site.order {
+            chain_first
+                .entry(ch.id)
+                .and_modify(|m| *m = (*m).min(*n))
+                .or_insert(*n);
+        }
+    }
+    // The scope's FINAL member, over every in-scope command and every
+    // same-process body anchor — movers or not, since a bare `true` at the
+    // end of a condition list is exactly what decides the list's status. A
+    // member whose position cannot be placed keeps the whole answer None,
+    // which makes the success walk union everything: fail-closed.
+    let mut final_member: Option<(u32, Option<crate::syntax::ChainPos>)> = None;
+    let mut final_placeable = !anchors_unplaceable;
+    {
+        let mut consider =
+            |n: u32, chain: Option<&crate::syntax::ChainPos>| {
+                // Every member of one chain ranks at the CHAIN's own
+                // statement position, so the chain index alone orders
+                // within it. Ranking an `&&` member at its own later Seq
+                // let a member of the FAILED leading run outrank the
+                // genuinely-final or-tail — and the virtual reader then
+                // certified the mover whose failure is exactly what let
+                // the list survive (Task 6 re-review round 3).
+                let pos = chain
+                    .and_then(|m| chain_first.get(&m.id).copied())
+                    .unwrap_or(n);
+                let key = (pos, chain.map(|m| m.idx).unwrap_or(0));
+                let better = match &final_member {
+                    Some((bn, bc)) => key > (*bn, bc.as_ref().map(|m| m.idx).unwrap_or(0)),
+                    None => true,
+                };
+                if better {
+                    final_member = Some((pos, chain.copied()));
+                }
+            };
+        for (i, c) in cmds.iter().enumerate() {
+            let Some(site) = sites.get(i) else { continue };
+            if site.scope != scope {
+                continue;
+            }
+            match (&site.order, c.chain.as_ref()) {
+                (crate::syntax::Order::Seq(n), chain) => consider(*n, chain),
+                (crate::syntax::Order::Unordered, Some(ch)) => {
+                    match chain_first.get(&ch.id) {
+                        Some(n0) => consider(*n0, Some(ch)),
+                        None => final_placeable = false,
+                    }
+                }
+                (crate::syntax::Order::Unordered, None) => final_placeable = false,
+            }
+        }
+        for (pn, pchain) in all_anchors {
+            consider(*pn, pchain.as_ref());
+        }
+    }
+    let final_member = if final_placeable { final_member } else { None };
+    // An or-tail mover (chain-carrying, order-unprovable) is an event at its
+    // chain's own statement position rather than whole-scope poison: the
+    // walk's predicates decide per reader whether it moved, failed, or both
+    // (design §4.2). One with no placeable chain keeps the poison.
+    let mut deferred: Vec<(
+        &crate::shell::Cmd,
+        crate::guards::DirChangeKind,
+        &crate::guards::Program,
+        &str,
+        String,
+    )> = Vec::new();
     for (i, c) in cmds.iter().enumerate() {
         let Some(site) = sites.get(i) else {
             unplaceable = true;
@@ -4291,15 +5307,43 @@ fn cd_timeline(
             _ => continue,
         };
         match (&site.order, site.scanner_order) {
-            (crate::syntax::Order::Seq(n), true) => ordered.push((*n, c, kind, prog, lang, head)),
+            (crate::syntax::Order::Seq(n), true) => {
+                // "Provably runs" is folds_into's always-runs notion — no
+                // chain, or the chain's first member. A later `&&` member is
+                // sequence-anchored yet runs only if its predecessor
+                // succeeded, and the §4.4 refinement must never discharge
+                // that RUN doubt (Task 4 review, CRITICAL 3).
+                let always_runs = c.chain.as_ref().map_or(true, |ch| ch.idx == 0);
+                ordered.push((*n, c, kind, prog, lang, head, always_runs))
+            }
+            (crate::syntax::Order::Unordered, true)
+                if c.chain
+                    .as_ref()
+                    .is_some_and(|ch| chain_first.contains_key(&ch.id)) =>
+            {
+                deferred.push((c, kind, prog, lang, head));
+            }
             _ => unplaceable = true,
         }
     }
-    ordered.sort_by_key(|(n, ..)| *n);
+    for (c, kind, prog, lang, head) in deferred {
+        let n = c
+            .chain
+            .as_ref()
+            .and_then(|ch| chain_first.get(&ch.id).copied())
+            .expect("membership checked above");
+        ordered.push((n, c, kind, prog, lang, head, false));
+    }
+    // Position order first; within one statement, chain order — an or-tail
+    // mover shares its chain's statement position with ordered siblings.
+    ordered.sort_by_key(|(n, c, ..)| (*n, c.chain.as_ref().map(|ch| ch.idx).unwrap_or(0)));
 
-    let mut state = start.clone();
-    let mut events: Vec<(u32, CdState, Option<crate::syntax::ChainPos>, bool)> = Vec::new();
-    for (n, c, kind, prog, lang, head) in ordered {
+    // Build stores each mover's COMPOSABLE destination, not a composed
+    // state: certification is reader-relative (design §4.2), so the same
+    // events answer one reader as a certified singleton chain and another
+    // as unions — `base_at` does that walk.
+    let mut events: Vec<TimelineEvent> = Vec::new();
+    for (n, c, kind, prog, lang, head, run_certain) in ordered {
         // Classify the arguments on their RESOLVED text, never the raw
         // token. The scanner keeps the quotes it found, so `cd "-"` arrives
         // as the three characters `"-"`: it is not equal to `-` and it does
@@ -4321,48 +5365,55 @@ fn cd_timeline(
             .filter(|(index, _)| !effective.padding.contains(index))
             .map(|(_, arg)| resolve(arg))
             .collect();
-        // ONE candidate walk per directory change, read by both the
-        // destination derivation and the independence test below — it builds a
-        // merged option list and classifies every token, so running it twice
-        // for one command is work nobody needs.
+        // ONE candidate walk per directory change, stored with the event —
+        // it builds a merged option list and classifies every token, so
+        // running it per read would be work nobody needs.
         let cands = dir_change_candidates(&args, prog);
-        state = if unread_destination {
-            CdState::Unknown(UNPLACEABLE_CD.to_string())
-        } else {
-            match kind {
-                // Changes directory to somewhere never derivable from the
-                // command line — every form is unknown, always.
-                crate::guards::DirChangeKind::Unstated => {
-                    CdState::Unknown(UNPLACEABLE_CD.to_string())
-                }
-                crate::guards::DirChangeKind::Stack => {
-                    stack_destination(&args, &cands, &state, lang, &head)
-                }
-                crate::guards::DirChangeKind::Stated => {
-                    stated_destination(&args, &cands, &state, lang, &head, home)
-                }
-                // Filtered out above: membership requires a kind other than `No`.
-                crate::guards::DirChangeKind::No => {
-                    unreachable!("dir_change_entry filters this out")
-                }
-            }
-        };
-        // Stated absolutely? Read from the same candidate walk the
-        // destination itself came from, never from the composed result — a
-        // composed path and an absolute one that happens to sit under it are
-        // the same text ("C:/workspace" then "C:/workspace/vouch-dev"), and only the walk
-        // knows which was written.
-        let independent = !unread_destination
+        // A visibly-bound CDPATH turns a relative, un-dotted destination
+        // into a search key: the shell consults every CDPATH member before
+        // the current directory, so the composed base can be a place the
+        // shell never went. Dotted and absolute spellings bypass the search
+        // and stay composable.
+        let cdpath_hit = cdpath_bound
+            && kind == crate::guards::DirChangeKind::Stated
             && matches!(
                 &cands,
-                Ok(c) if c.len() == 1
-                    && !is_relative(&c[0])
-                    && drive_relative(&c[0]).is_none()
-                    && !is_unresolvable_token(&c[0], lang)
+                Ok(list) if list.len() == 1
+                    && is_relative(&list[0])
+                    && drive_relative(&list[0]).is_none()
+                    && !list[0].starts_with('.')
             );
-        events.push((n, state.clone(), c.chain.clone(), independent));
+        events.push(TimelineEvent {
+            n,
+            chain: c.chain.clone(),
+            dest: EventDest::Real {
+                kind,
+                args,
+                cands,
+                lang: lang.to_string(),
+                head,
+                unreadable: unread_destination || cdpath_hit,
+            },
+            run_certain,
+        });
     }
-    CdTimeline { events, unplaceable }
+    for (pn, pchain, child, treatment) in extra {
+        events.push(TimelineEvent {
+            n: *pn,
+            chain: *pchain,
+            dest: EventDest::BodyAnchor { scope: *child, treatment: *treatment },
+            // The movers' own always-runs notion, verbatim: no chain, or
+            // the chain's first member. An anchor position that provably
+            // runs is what lets a Brace/CondList body's end compose as an
+            // ordinary unconditional mover's would (§3.3) — the walk's
+            // replace arm reads this bit and unions without it.
+            run_certain: pchain.as_ref().map_or(true, |ch| ch.idx == 0),
+        });
+    }
+    // `base_at`'s walk composes in vector order, so position order (and
+    // chain order within one statement) is the invariant this list carries.
+    events.sort_by_key(|e| (e.n, e.chain.as_ref().map(|ch| ch.idx).unwrap_or(0)));
+    CdTimeline { events, unplaceable, home: home.map(String::from), chain_first, final_member }
 }
 
 /// Does the MOVER's effect fold into this command's base? (M2.130, design

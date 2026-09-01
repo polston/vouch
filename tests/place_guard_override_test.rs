@@ -52,7 +52,13 @@ fn a_stricter_override_applies_on_an_unproven_place_and_names_the_cause() {
             );
             // The M2.58 standard: saying a place is unprovable without saying
             // what made it unprovable leaves the operator no move to make.
-            assert!(r.contains("cannot order"), "the cause, not just the fact: {r}");
+            // Since candidate bases (design 2026-08-30 §4.2) the or-fallback
+            // shape resolves to several candidates, so the cause is the
+            // plural one, not "cannot order".
+            assert!(
+                r.contains("more than one possible directory"),
+                "the cause, not just the fact: {r}"
+            );
         }
         other => panic!("{other:?}"),
     }

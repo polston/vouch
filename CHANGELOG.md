@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.17.0 (2026-09-01)
+
+
+### Features
+
+* a cd inside a subshell, pipeline stage, or backgrounded member is contained in its own child scope, so the rest of the line keeps its provable directory instead of going unplaceable
+* a write behind a fallback or failable cd is judged over every surviving candidate directory - an and-chained success certifies the move, an or-branch fall-through refutes it, and a target that provably exists discharges the failure branch
+* a write inside a brace group or conditional body is judged over the directories that body can actually be in, rather than the top level's walk state
+* an unplaceable directory change asks with its actual cause named - the stack form, the unreadable destination, the loop carry, the unplaced position - instead of one blanket cannot-order sentence
+
+
+### Bug Fixes
+
+* a relative destination after a cd that only moved a subshell or pipeline stage is no longer resolved as if the whole line had moved
+
 ## 0.16.0 (2026-08-30)
 
 

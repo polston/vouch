@@ -458,14 +458,14 @@ pub fn parse(src: &str) -> Result<Parsed, String> {
                 let mut idx = 0u32;
                 let mut and_run_from = 0u32;
                 let mut unordered = false;
-                member_chain[m] = Some(crate::syntax::ChainPos { id, idx, and_run_from });
+                member_chain[m] = Some(crate::syntax::ChainPos { id, idx, and_run_from, negated: false });
                 idx += 1;
                 for k in (m + 1)..=j {
                     if member_join_sep[k] == SEP_OR {
                         unordered = true;
                         and_run_from = idx;
                     }
-                    member_chain[k] = Some(crate::syntax::ChainPos { id, idx, and_run_from });
+                    member_chain[k] = Some(crate::syntax::ChainPos { id, idx, and_run_from, negated: false });
                     member_unordered[k] = member_unordered[k] || unordered;
                     idx += 1;
                 }
@@ -525,6 +525,7 @@ pub fn parse(src: &str) -> Result<Parsed, String> {
                 if !tok.is_empty() && !tok.trim_end_matches(';').eq_ignore_ascii_case("$null") {
                     out.redirect_targets.push(tok);
                     out.redirect_order.push(order.clone());
+                    out.redirect_scope.push(Some(0));
                 }
             }
         }
@@ -621,6 +622,7 @@ pub fn parse(src: &str) -> Result<Parsed, String> {
                     true,
                     chain,
                     vec![],
+                    Some(0),
                 );
             }
             continue;
@@ -660,6 +662,7 @@ pub fn parse(src: &str) -> Result<Parsed, String> {
                 true,
                 chain,
                 vec![],
+                Some(0),
             );
         }
     }

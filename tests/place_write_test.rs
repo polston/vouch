@@ -187,8 +187,12 @@ fn a_scoped_programs_unprovable_target_asks_naming_the_scope_and_the_attempt() {
     // Spec prompt table row "write scope, target unprovable": the ask names
     // the scope rule and what resolution was attempted — NOT the generic
     // unresolved_path text.
+    // The or-fallback shape now RESOLVES to concrete candidates (design
+    // 2026-08-30 §4.3) and gets the concrete outside-scope ask, so the
+    // unprovable-row fixture is a destination genuinely nobody can read: a
+    // variable the line never assigns.
     let cfg = cmd_cfg("[write]\ndefault = \"allow\"\n[[write.scope]]\nprograms = [\"git init\"]\nonly_under = [\"C:/scratch/**\"]");
-    let d = decide_command_at(&cfg, "bash", "cd a || cd b; git init newrepo", Some("C:/Users/dev"), None, Some("C:/work"));
+    let d = decide_command_at(&cfg, "bash", "cd \"$SOMEWHERE\"; git init newrepo", Some("C:/Users/dev"), None, Some("C:/work"));
     match d {
         Decision::Ask(r) => {
             assert!(r.contains("write.scope"), "{r}");
@@ -196,7 +200,10 @@ fn a_scoped_programs_unprovable_target_asks_naming_the_scope_and_the_attempt() {
             // from the generic text — the M2.58 standard: saying a place is
             // unprovable without saying what made it unprovable leaves the
             // operator no move to make.
-            assert!(r.contains("cannot order"), "the cause, not just the fact: {r}");
+            assert!(
+                r.contains("somewhere vouch cannot resolve"),
+                "the cause, not just the fact: {r}"
+            );
             // §5: the setting named must be one that actually turns this
             // prompt off. `unresolved_path` does not — the scope holds it
             // open — so naming it would be the M2.12 defect class.
@@ -253,8 +260,11 @@ fn a_scoped_unprovable_write_denied_by_a_setting_names_that_setting_not_the_scop
     // decided, and the prompt must say so: "take the program out of
     // [[write.scope]]" would not lift a refusal the scope did not make (§5,
     // the M2.12 defect class).
+    // Same unprovable-row fixture swap as above (design 2026-08-30 §4.3):
+    // the or-fallback now resolves concretely, so an unassigned variable is
+    // what genuinely cannot be read.
     let cfg = cmd_cfg("[lang.bash.constructs]\nunresolved_path = \"deny\"\n[write]\ndefault = \"allow\"\n[[write.scope]]\nprograms = [\"git init\"]\nonly_under = [\"C:/scratch/**\"]");
-    let d = decide_command_at(&cfg, "bash", "cd a || cd b; git init newrepo", Some("C:/Users/dev"), None, Some("C:/work"));
+    let d = decide_command_at(&cfg, "bash", "cd \"$SOMEWHERE\"; git init newrepo", Some("C:/Users/dev"), None, Some("C:/work"));
     match d {
         Decision::Deny(r) => {
             assert!(r.contains("lang.bash.constructs.unresolved_path"), "the decider is unnamed: {r}");
