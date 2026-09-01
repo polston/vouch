@@ -7,16 +7,36 @@
 //!
 //! Ask-expecting shapes whose movers are uncertified aim at targets proven
 //! absent, since the §4.4 refinement reads the live filesystem.
+//!
+//! Paths are drive-qualified on Windows: a rooted, drive-less `/tmp/...`
+//! resolves against the PROCESS's current drive, and on a runner whose
+//! workspace lives on `D:` the resolved `D:/tmp/...` sits outside the
+//! realistic allow list (`C:/tmp/**` is listed, other drives are not) —
+//! the engine then asks correctly and the platform-naive allow leg fails
+//! (v0.17.0's first release build; M2.230 records the hazard class).
 
 #[path = "common/mod.rs"]
 mod common;
 
-const ABSENT: &str = "/tmp/vouch-consumers-absent-fixture";
+fn absent() -> &'static str {
+    if cfg!(windows) {
+        "C:/tmp/vouch-consumers-absent-fixture"
+    } else {
+        "/tmp/vouch-consumers-absent-fixture"
+    }
+}
+
+/// The allow-side caller directory: both candidates it produces sit inside
+/// the realistic allow list on every platform.
+fn elsewhere() -> &'static str {
+    if cfg!(windows) { "C:/tmp/proj-elsewhere" } else { "/tmp/proj-elsewhere" }
+}
 
 fn assert_absent() {
     assert!(
-        !std::path::Path::new(ABSENT).exists(),
-        "precondition: {ABSENT} must not exist on the deciding machine"
+        !std::path::Path::new(absent()).exists(),
+        "precondition: {} must not exist on the deciding machine",
+        absent()
     );
 }
 
@@ -28,7 +48,7 @@ fn a_program_write_asks_naming_the_escaping_candidate() {
     assert_absent();
     let (v, r) = common::decision_at(
         &common::realistic_config(),
-        &format!("cd {ABSENT}; cp /tmp/s f.txt"),
+        &format!("cd {}; cp /tmp/s f.txt", absent()),
         "/etc",
     );
     assert_eq!(v, "ask", "{r}");
@@ -36,8 +56,8 @@ fn a_program_write_asks_naming_the_escaping_candidate() {
     // The allow direction: both candidates inside the allowed area.
     let (v2, r2) = common::decision_at(
         &common::realistic_config(),
-        &format!("cd {ABSENT}; cp /tmp/s f.txt"),
-        "/tmp/proj-elsewhere",
+        &format!("cd {}; cp /tmp/s f.txt", absent()),
+        elsewhere(),
     );
     assert_eq!(v2, "allow", "{r2}");
 }
@@ -50,14 +70,14 @@ fn a_here_write_pushes_every_candidate() {
     assert_absent();
     let (v, r) = common::decision_at(
         &common::realistic_config(),
-        &format!("cd {ABSENT}; git init"),
+        &format!("cd {}; git init", absent()),
         "/etc",
     );
     assert_eq!(v, "ask", "{r}");
     let (v2, r2) = common::decision_at(
         &common::realistic_config(),
-        &format!("cd {ABSENT}; git init"),
-        "/tmp/proj-elsewhere",
+        &format!("cd {}; git init", absent()),
+        elsewhere(),
     );
     assert_eq!(v2, "allow", "{r2}");
 }
@@ -168,15 +188,15 @@ fn a_wrapped_snippets_start_carries_every_candidate() {
     assert_absent();
     let (v, r) = common::decision_at(
         &common::realistic_config(),
-        &format!("cd {ABSENT}; bash -c 'echo x > f.txt'"),
+        &format!("cd {}; bash -c 'echo x > f.txt'", absent()),
         "/etc",
     );
     assert_eq!(v, "ask", "{r}");
     assert!(r.contains("etc/f.txt"), "the ask names the escaping candidate's path: {r}");
     let (v2, r2) = common::decision_at(
         &common::realistic_config(),
-        &format!("cd {ABSENT}; bash -c 'echo x > f.txt'"),
-        "/tmp/proj-elsewhere",
+        &format!("cd {}; bash -c 'echo x > f.txt'", absent()),
+        elsewhere(),
     );
     assert_eq!(v2, "allow", "{r2}");
 }
@@ -188,14 +208,14 @@ fn a_relative_run_dir_flag_composes_per_candidate() {
     assert_absent();
     let (v, r) = common::decision_at(
         &common::realistic_config(),
-        &format!("cd {ABSENT}; git -C sub init"),
+        &format!("cd {}; git -C sub init", absent()),
         "/etc",
     );
     assert_eq!(v, "ask", "{r}");
     let (v2, r2) = common::decision_at(
         &common::realistic_config(),
-        &format!("cd {ABSENT}; git -C sub init"),
-        "/tmp/proj-elsewhere",
+        &format!("cd {}; git -C sub init", absent()),
+        elsewhere(),
     );
     assert_eq!(v2, "allow", "{r2}");
 }
