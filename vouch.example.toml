@@ -281,6 +281,10 @@ rebound_name = "ask"
 # apply to whatever runs here; a trust zone removes unknown-program asks and
 # nothing else.
 #
+# It grants, so it needs every directory the command could be running in
+# proven inside one of these trees: one member vouch cannot place, or one
+# that is outside, recognises nothing.
+#
 # Trust-zone wording is a choice, not a safety fact. Where a command runs is
 # a weak guarantee — a build verb executes whatever the project's entry
 # point contains, standing anywhere — so this says "trusted because you
@@ -291,6 +295,12 @@ rebound_name = "ask"
 # recognised, whatever it is — even a program a knowledge entry describes.
 # Strictest wins: when your own entry and your own zone disagree, both
 # statements are yours, and the ask names which one fired.
+#
+# When a line could leave the shell in several directories, the zone applies
+# if ANY of them is under it, and it applies whenever vouch cannot place the
+# command at all — an unplaceable command might be standing in the tree. It
+# stands down only when every directory the command could be in is known and
+# none is under the zone; a set of known directories is not uncertainty.
 # trust_nothing_under = ["D:/downloads/**"]
 
 # program-location trust: recognise a path-spelled shell program only when
@@ -312,6 +322,13 @@ rebound_name = "ask"
 # applies only when vouch can PROVE the command runs in the tree. Doubt
 # always narrows, never widens: an unproven place unlocks nothing, but it
 # also can never be argued out of a stricter override.
+# A stricter entry restricts, so it applies unless vouch can prove the
+# command runs outside it: any possible directory under the tree applies it,
+# and so does a command vouch cannot place. A looser entry grants, so it
+# needs every possible directory proven inside. Both stand down only on
+# proof — the strict one when every candidate is known and outside, the
+# loose one never on uncertainty at all.
+
 # [[run.guards]]
 # under = ["C:/workspace/**"]
 # delete_recursive = "ask"      # stricter here than the global action

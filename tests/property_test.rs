@@ -444,7 +444,16 @@ const PROBES: &[(&str, &str)] = &[
     ("C:/scratch/j", "git init C:/scratch/j/newrepo"),
     // trust zone: the allow, and the missed grant off an unprovable place
     ("C:/scratch/j", "someunknownprogramzz x"),
-    ("C:/scratch/j", "cd a || cd b; someunknownprogramzz x"),
+    // Genuinely unprovable: an unreadable destination leaves a single
+    // Unknown. A plural set of known directories inside the zone is a GRANT
+    // since M2.228, so the old `cd a || cd b` spelling no longer probes a
+    // doubt and left the missed-grant prompt row with no probe at all.
+    ("C:/scratch/j", "cd \"$MYSTERY\"; someunknownprogramzz x"),
+    // The other missed-grant row: every candidate PROVEN, the zone covering
+    // one and not the other. A plain `;` mover is never certified, so this
+    // leaves {D:/other, C:/scratch/j} — the escaping member is what the
+    // prompt has to name, and it is the directory the operator would add.
+    ("C:/scratch/j", "cd D:/other; someunknownprogramzz x"),
     // a redirect beside a scoped program, judged by the wall not the scope
     ("C:/scratch/j", "git init C:/scratch/j/r > C:/Users/dev/notes/log.txt"),
 ];
@@ -462,7 +471,8 @@ const PROMPT_TABLE_COVERAGE: &[(&str, &str)] = &[
     ("ask_paths", "write.ask_paths covers this tree"),
     ("write scope, target outside the trees", "this destination is outside them"),
     ("write scope, target unprovable", "cannot prove this write lands inside them"),
-    ("missed grant", "cannot prove it runs there"),
+    ("missed grant, a candidate unplaceable", "cannot prove it runs there"),
+    ("missed grant, every candidate known", "and a zone recognises a command"),
     ("trust-zone allow", "allowed by run.trust_all_under"),
 ];
 
@@ -599,7 +609,8 @@ fn every_place_scoped_entry_verdict_names_a_setting_that_turns_it_off() {
         // outside it, and at a place vouch cannot name.
         ("scoped_in", "C:/scratch/j", "probe-tool x", "allow"),
         ("scoped_out", "C:/work", "probe-tool x", "ask"),
-        ("scoped_unprovable", "C:/scratch/j", "cd a || cd b; probe-tool x", "ask"),
+        // Genuinely unprovable, same reason as the zone probe above.
+        ("scoped_unprovable", "C:/scratch/j", "cd \"$MYSTERY\"; probe-tool x", "ask"),
     ];
     let mut seen = String::new();
     for (tag, cwd, cmd, want) in runs {

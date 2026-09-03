@@ -728,7 +728,11 @@ fn walk_command(
             // a compound command has no prefix/suffix argument walk the way a
             // simple command does, so there is nothing to compute it before.
             let anchor_order = own_order(counter, unordered);
-            let scoping = BodyScoping::Fresh { parent: scope, anchor_order, anchor_chain: chain };
+            let scoping = BodyScoping::Fresh {
+                parent: scope,
+                anchor_order: anchor_order.clone(),
+                anchor_chain: chain,
+            };
             let range = walk_compound(cc, out, chain_counter, scoping);
             let mut own_stdin: Option<crate::syntax::InputSource> = None;
             if let Some(list) = redirects {
@@ -736,12 +740,30 @@ fn walk_command(
                     // A compound body has no landing `Cmd` of its own to tie
                     // a heredoc capture to — `None` keeps the construct note.
                     // The LAST descriptor-0 redirect decides, same fold as a
-                    // simple command's own. The redirect belongs to the scope
-                    // CONTAINING the compound, not the body's own fresh scope —
-                    // `for f in 1; do cd /a; done > rel.txt` writes `rel.txt`
-                    // from the PARENT's position, never the loop body's.
-                    if let Some(claimed) =
-                        walk_redirect(r, out, Order::Unordered, None, chain_counter, scope, chain)
+                    // simple command's own.
+                    //
+                    // Design 2026-08-30 §3.3, both halves: the redirect is
+                    // opened once, AT THE COMPOUND'S ANCHOR, in the scope
+                    // CONTAINING the compound. The scope is the parent's, not
+                    // the body's fresh one — `for f in 1; do cd /a; done >
+                    // rel.txt` writes `rel.txt` from the PARENT's position,
+                    // never the loop body's. The order is the construct's own
+                    // anchor, which is why it is cloned above rather than
+                    // moved: passing `Order::Unordered` here left the redirect
+                    // owning no site, so it fell back to its scope and
+                    // reported a position vouch could not place, wherever an
+                    // ordered mover shared the line (M2.226). The anchor
+                    // precedes the body, so a mover written INSIDE the
+                    // compound still cannot decide where the redirect lands.
+                    if let Some(claimed) = walk_redirect(
+                        r,
+                        out,
+                        anchor_order.clone(),
+                        None,
+                        chain_counter,
+                        scope,
+                        chain,
+                    )
                     {
                         own_stdin = Some(claimed);
                     }
@@ -1355,6 +1377,7 @@ fn walk_redirect(
                         out.redirect_targets.push(unescape_unquoted(&w.value));
                         out.redirect_order.push(order);
                         out.redirect_scope.push(Some(scope));
+                        out.redirect_chain.push(chain);
                     }
                 }
                 ast::IoFileRedirectTarget::ProcessSubstitution(_, s) => {
@@ -1395,6 +1418,7 @@ fn walk_redirect(
                         out.redirect_targets.push(v);
                         out.redirect_order.push(order);
                         out.redirect_scope.push(Some(scope));
+                        out.redirect_chain.push(chain);
                     }
                 }
                 ast::IoFileRedirectTarget::Fd(_) => {}
@@ -1457,6 +1481,7 @@ fn walk_redirect(
             out.redirect_targets.push(unescape_unquoted(&w.value));
             out.redirect_order.push(order);
             out.redirect_scope.push(Some(scope));
+            out.redirect_chain.push(chain);
         }
     }
     claims_stdin

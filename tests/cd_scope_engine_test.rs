@@ -178,6 +178,83 @@ fn an_unowned_redirect_resolves_in_its_own_scope_not_scope_zero() {
 }
 
 #[test]
+fn a_compound_redirect_is_judged_from_the_compounds_own_position() {
+    // M2.226, and the position half of the 2026-08-30 design §3.3's closing
+    // sentence. The redirect is opened at the CONSTRUCT's anchor in the
+    // parent's scope, so an ordered mover earlier on the line places it
+    // exactly as it places a simple command's redirect. Before the fix the
+    // walk recorded `Order::Unordered` here although it had just computed the
+    // anchor, so the redirect owned no site, fell back to its scope, found
+    // that scope moved, and asked as an unplaceable position.
+    // The mover is `&&`-chained, not `;`-sequenced: only an AND-run certifies
+    // that it ran (`certifies()`), so a sequenced mover contributes
+    // {moved, unmoved} and correctly asks on the unmoved candidate (M2.44).
+    // This test is about the redirect's POSITION, so the mover has to be the
+    // certified spelling or the control asks for an unrelated reason.
+    let proj = t("/tmp/proj");
+    let elsewhere = t("/somewhere/else");
+    let (simple_v, simple_r) =
+        common::decision_at(&cfg(), &format!("cd {proj} && echo x > f.txt"), &elsewhere);
+    assert_eq!(simple_v, "allow", "{simple_r}");
+    for cmd in [
+        format!("cd {proj} && {{ :; }} > f.txt"),
+        format!("cd {proj} && for f in 1; do :; done > f.txt"),
+    ] {
+        let (v, r) = common::decision_at(&cfg(), &cmd, &elsewhere);
+        assert_eq!(v, simple_v, "{cmd}: {r}");
+    }
+}
+
+#[test]
+fn a_compound_redirect_after_an_ordered_mover_is_not_judged_at_the_old_cwd() {
+    // The permissive direction, probed before the fix and found SAFE — kept
+    // as the pin that says so. Written from an allowed cwd into a tree that
+    // is not writable, so if the positionless redirect were resolved at the
+    // scope's start this would allow a write that lands in /etc. It does not:
+    // before the fix it asks naming `unresolved_path`, so M2.226 really is
+    // wrong-cause-only and never a wrong allow.
+    //
+    // What the fix changes is the sentence, not the verdict: anchored at the
+    // compound's own position the write target resolves to /etc/f.txt, and
+    // the ask names the directory the file actually lands in instead of
+    // reporting a position vouch could not place.
+    let (v, r) = common::decision_at(
+        &cfg(),
+        &format!("cd {} ; {{ :; }} > f.txt", t("/etc")),
+        &t("/tmp/proj"),
+    );
+    assert_eq!(v, "ask", "{r}");
+    assert!(
+        r.contains(&t("/etc")),
+        "the ask must name the directory the write actually lands in: {r}"
+    );
+}
+
+#[test]
+fn a_mover_inside_a_compound_never_reaches_that_compounds_redirect() {
+    // The other half of the same sentence, and the reason passing the anchor
+    // is safe rather than merely convenient: the redirect is anchored at the
+    // construct's own position, which PRECEDES the body, so a mover written
+    // inside the body cannot decide where the redirect lands. The write is
+    // judged at the caller's cwd even though the body walks into a tree that
+    // is not writable.
+    let (v, r) = common::decision_at(
+        &cfg(),
+        &format!("{{ cd {} ; }} > f.txt", t("/etc")),
+        &t("/tmp/proj"),
+    );
+    assert_eq!(v, "allow", "{r}");
+    // And the mover still reaches everything AFTER the compound, which is
+    // what makes the brace group a same-process body rather than a boundary.
+    let (v2, r2) = common::decision_at(
+        &cfg(),
+        &format!("{{ cd {} ; }} > f.txt ; echo x > g.txt", t("/etc")),
+        &t("/tmp/proj"),
+    );
+    assert_eq!(v2, "ask", "{r2}");
+}
+
+#[test]
 fn a_synthesized_wrapper_mover_still_poisons_its_scope() {
     // §3.2 preservation, green before and after this task: a mover whose
     // occurrence was synthesized by wrapper expansion (`scanner_order` is
@@ -189,4 +266,38 @@ fn a_synthesized_wrapper_mover_still_poisons_its_scope() {
         &t("/tmp/proj"),
     );
     assert_eq!(v, "ask", "{r}");
+}
+
+#[test]
+fn a_wrapper_injected_redirect_keeps_the_channels_in_lockstep() {
+    // The engine folds a wrapped snippet's own redirects onto the wrapper,
+    // and that fold is the one place outside the scanners that appends to the
+    // four positional redirect channels. It has shortened one twice:
+    // `redirect_scope` (M2.221, IMPORTANT 2) and `redirect_chain` after it,
+    // because a channel added later does not inherit the folds the older ones
+    // already had. `tests/shell_test.rs`'s lockstep test asserts over ONE
+    // scan and cannot see the fold, which is why neither was caught there.
+    //
+    // A `debug_assert` in the fold is what actually holds the invariant; this
+    // drives shapes through it. No verdict differential is asserted, because
+    // none was found: with a wrapper-injected redirect the wrapper is itself
+    // the owning site, so the chainless fallback is not obviously reachable —
+    // the defect is a broken invariant with no demonstrated verdict impact,
+    // and saying that plainly beats a differential that passes either way.
+    let etc = t("/etc");
+    let proj = t("/tmp/proj");
+    for cmd in [
+        format!("cd {etc} && sh -c 'echo hi > rel.txt'"),
+        format!("cd {etc} && true || sh -c 'echo hi > rel.txt' || echo done"),
+        format!("sh -c 'echo a > one.txt; echo b > two.txt' > outer.txt"),
+        format!("( cd {etc}; sh -c 'echo hi > rel.txt' )"),
+        format!("cd {etc} && bash -c 'sh -c \'echo hi > deep.txt\''"),
+    ] {
+        let (v, r) = common::decision_at(&cfg(), &cmd, &proj);
+        assert!(
+            v == "allow" || v == "ask" || v == "deny",
+            "{cmd} reached a decision without tripping the fold's lockstep \
+             assertions: {r}"
+        );
+    }
 }

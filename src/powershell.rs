@@ -526,6 +526,11 @@ pub fn parse(src: &str) -> Result<Parsed, String> {
                     out.redirect_targets.push(tok);
                     out.redirect_order.push(order.clone());
                     out.redirect_scope.push(Some(0));
+                    // The statement's own chain, which this walk already
+                    // computed for the command — a PowerShell redirect is
+                    // always part of the statement it is written on, so the
+                    // two answers are the same one.
+                    out.redirect_chain.push(chain);
                 }
             }
         }

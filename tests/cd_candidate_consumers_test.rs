@@ -82,6 +82,16 @@ fn a_here_write_pushes_every_candidate() {
     assert_eq!(v2, "allow", "{r2}");
 }
 
+/// Drive-qualify a rooted, drive-less fixture path for Windows — the same
+/// helper the sibling cd fixtures use. The zone tests below need it for the
+/// reason the file header already gives: a rooted `/tmp/...` resolves against
+/// the deciding process's current drive, so an allow-expecting leg written
+/// drive-less is green or red by runner geography (M2.230). The header
+/// claimed this file was drive-qualified while these fixtures were not.
+fn t(p: &str) -> String {
+    if cfg!(windows) { format!("C:{p}") } else { p.to_string() }
+}
+
 fn zone_cfg(run_table: &str) -> vouch::config::Config {
     // Built by hand rather than through the realistic config: these tests
     // need `unmodeled_command = "ask"` (so the zone is the only thing that
@@ -97,34 +107,77 @@ default = "allow"
 unmodeled_command = "ask"
 [write]
 default = "ask"
-allow_paths = ["/tmp/**", "/private/tmp/**"]
+allow_paths = ["{tmp}/**", "/private/tmp/**"]
 {run_table}
-"#
+"#,
+        tmp = t("/tmp")
     ))
     .expect("parses")
 }
 
 #[test]
-fn a_trust_zone_grant_requires_a_proven_singleton_inside() {
-    // §4.3 names the target rule (a grant requires EVERY candidate proven
-    // inside); what ships is narrower on the grant side, and this pin
-    // spells it: the run-place consumers collapse any non-singleton to
-    // Unknown, so only a proven SINGLETON inside the zone grants — even a
-    // set whose every member is inside stays refused (M2.228). Every
-    // restriction direction is fail-closed under the collapse. frobnicate
-    // is unmodeled, so the zone is the only thing that can recognise it.
-    let cfg = zone_cfg("[run]\ntrust_all_under = [\"/tmp/zone-proj/**\"]");
-    let (v, r) = common::decision_at(&cfg, "cd /tmp/zone-proj/sub && frobnicate", "/etc");
-    assert_eq!(v, "allow", "a certified singleton inside the zone is recognised: {r}");
+fn a_trust_zone_grant_requires_every_candidate_inside() {
+    // §4.3's grant clause, which M2.228 closes: a grant requires EVERY
+    // candidate proven inside the tree. Before this the run-place consumers
+    // collapsed any non-singleton to Unknown, so a set whose every member was
+    // inside the zone was refused for being plural rather than for escaping
+    // it. frobnicate is unmodeled, so the zone is the only thing that can
+    // recognise it.
+    let zone = t("/tmp/zone-proj");
+    let cfg = zone_cfg(&format!("[run]\ntrust_all_under = [\"{zone}/**\"]"));
     assert!(
-        !std::path::Path::new("/tmp/zone-proj").exists(),
-        "precondition: /tmp/zone-proj must not exist, or the refinement would prove the move"
+        !std::path::Path::new(&zone).exists(),
+        "precondition: {zone} must not exist, or the refinement would prove the move"
     );
-    let (v2, _) = common::decision_at(&cfg, "cd /tmp/zone-proj/sub; frobnicate", "/etc");
-    assert_eq!(v2, "ask", "a candidate set grants nothing");
-    let (v3, _) =
-        common::decision_at(&cfg, "cd /tmp/zone-proj/sub; frobnicate", "/tmp/zone-proj/x");
-    assert_eq!(v3, "ask", "every member inside still grants nothing until M2.228");
+
+    // A certified singleton inside the zone: unchanged, and the control that
+    // says the per-candidate path did not alter the one-member case.
+    let (v, r) = common::decision_at(&cfg, &format!("cd {zone}/sub && frobnicate"), &t("/etc"));
+    assert_eq!(v, "allow", "a certified singleton inside the zone is recognised: {r}");
+
+    // Two candidates, BOTH inside the zone — the moved-to directory and the
+    // one the shell was already in. This is the case M2.228 fixes.
+    let (v2, r2) = common::decision_at(
+        &cfg,
+        &format!("cd {zone}/sub; frobnicate"),
+        &format!("{zone}/x"),
+    );
+    assert_eq!(v2, "allow", "every candidate inside the zone grants: {r2}");
+    assert!(
+        r2.contains("trust_all_under"),
+        "the allow names the zone that granted it: {r2}"
+    );
+
+    // One candidate outside: the uncertified `cd` leaves {moved, unmoved},
+    // and the unmoved member is /etc, which no tree covers. A grant needs
+    // every member, so this still refuses.
+    let (v3, _) = common::decision_at(&cfg, &format!("cd {zone}/sub; frobnicate"), &t("/etc"));
+    assert_eq!(v3, "ask", "one escaping candidate refuses the grant");
+}
+
+#[test]
+fn a_program_location_grant_still_requires_a_singleton() {
+    // §4.3 keeps program location singleton-only on purpose, and M2.228 does
+    // not widen it: resolving one relative head against several candidate
+    // directories would either pick one or claim several programs. A set
+    // refuses the grant exactly as an unproven place does. Pinned because the
+    // per-candidate work sits in the same loop and could take this with it.
+    let zone = t("/tmp/zone-proj");
+    let cfg = zone_cfg(&format!(
+        "[[run.trust_program]]\nunder = [\"{zone}/**\"]\nname_patterns = [\"frobnicate\"]"
+    ));
+    assert!(
+        !std::path::Path::new(&zone).exists(),
+        "precondition: {zone} must not exist"
+    );
+    // Both candidates inside the tree, and still no grant: the rule needs a
+    // proven executable file, which a plural place cannot resolve.
+    let (v, _) = common::decision_at(
+        &cfg,
+        &format!("cd {zone}/sub; ./frobnicate"),
+        &format!("{zone}/x"),
+    );
+    assert_eq!(v, "ask", "a candidate set grants no program-location trust");
 }
 
 #[test]
@@ -160,6 +213,62 @@ fn a_place_scoped_guard_override_tightens_on_any_candidate() {
         "/tmp/proj-elsewhere",
     );
     assert_eq!(v, "ask", "one tightened candidate applies the stricter action: {r}");
+}
+
+#[test]
+fn a_distrust_zone_stands_down_when_every_candidate_is_outside() {
+    // The other half of "a restriction applies if ANY candidate is inside".
+    // Where every candidate is PROVEN outside, the zone covers nothing this
+    // command could be doing and does not hold the line. The collapsed reading
+    // asked here: a plural set became Unproven, and an unproven place takes a
+    // restriction — which said "vouch cannot prove where this runs" about a
+    // line where it has proven every possibility. A set of known directories
+    // is knowledge, not doubt (operator decision 2026-09-03).
+    assert_absent();
+    let cfg = zone_cfg(&format!(
+        "[run]\ntrust_nothing_under = [\"{}/**\"]",
+        t("/tmp/quarantine-zone")
+    ));
+    let (v, r) = common::decision_at(&cfg, &format!("cd {}; ls", absent()), elsewhere());
+    assert_eq!(v, "allow", "every candidate is proven outside the zone: {r}");
+
+    // The fail-closed direction the change must not take with it: a member
+    // vouch cannot place is still a place the zone might cover, so doubt
+    // narrows exactly as it did.
+    let (v2, r2) = common::decision_at(&cfg, "cd \"$SOMEWHERE\"; ls", elsewhere());
+    assert_eq!(v2, "ask", "an unplaceable candidate still applies the zone: {r2}");
+    assert!(
+        r2.contains("trust_nothing_under"),
+        "the ask names the zone that held it: {r2}"
+    );
+}
+
+#[test]
+fn a_place_scoped_guard_override_stands_down_when_every_candidate_is_outside() {
+    // The same clause read the same way one consumer over: a tightening
+    // `[[run.guards]]` entry applies if ANY candidate is inside its trees, so
+    // a set every member of which is proven outside reaches the global action.
+    assert_absent();
+    let cfg = zone_cfg(&format!(
+        "[guards]\ndelete_recursive = \"allow\"\n\
+         [[run.guards]]\nunder = [\"{}/**\"]\ndelete_recursive = \"ask\"\n",
+        t("/tmp/tightened-zone")
+    ));
+    let (v, r) = common::decision_at(&cfg, &format!("cd {}; rm -rf build", absent()), elsewhere());
+    assert_eq!(v, "allow", "no candidate is under the tightened tree: {r}");
+
+    // One candidate inside: unchanged, and the control saying the stand-down
+    // did not reach the case the entry exists for.
+    let (v2, r2) = common::decision_at(
+        &cfg,
+        &format!("cd {}/sub; rm -rf build", t("/tmp/tightened-zone")),
+        elsewhere(),
+    );
+    assert_eq!(v2, "ask", "one tightened candidate still applies the entry: {r2}");
+
+    // And an unplaceable candidate still takes the restriction.
+    let (v3, r3) = common::decision_at(&cfg, "cd \"$SOMEWHERE\"; rm -rf build", elsewhere());
+    assert_eq!(v3, "ask", "an unplaceable candidate still applies the entry: {r3}");
 }
 
 #[test]

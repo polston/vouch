@@ -72,6 +72,91 @@ fn redirects_carry_their_commands_order() {
 }
 
 #[test]
+fn the_four_redirect_channels_stay_in_lockstep() {
+    // M2.229/M2.221. `redirect_targets`, `redirect_order`, `redirect_scope`
+    // and `redirect_chain` are read positionally against each other, so a
+    // push site that extends three of them and not the fourth silently
+    // shortens a channel — which is how the wrapper-injected redirect gap
+    // (M2.221, IMPORTANT 2) reached a review instead of a test. Asserted over
+    // every shape this file exercises rather than over one, because the four
+    // pushes are spread across three arms of `walk_redirect` plus PowerShell.
+    for src in [
+        "echo x > f.txt",
+        "echo x >> f.txt",
+        "echo x >& both.txt",
+        "echo x > a.txt 2> b.txt",
+        "(echo x > f.txt)",
+        "{ :; } > f.txt",
+        "cd /x && for f in 1; do :; done > rel.txt",
+        "cd /x || echo hi > f.txt",
+        "[[ -f a ]] > f.txt",
+        "bash -c 'echo x > inner.txt' > outer.txt",
+        "wc -l < in.txt > out.txt",
+    ] {
+        let s = vouch::shell::Bash.scan(src).expect("scans");
+        let n = s.redirect_targets.len();
+        assert_eq!(s.redirect_order.len(), n, "order channel short for {src:?}");
+        assert_eq!(s.redirect_scope.len(), n, "scope channel short for {src:?}");
+        assert_eq!(s.redirect_chain.len(), n, "chain channel short for {src:?}");
+    }
+    let s = vouch::powershell::PowerShell
+        .scan("Set-Location C:/x; Write-Output hi > f.txt")
+        .expect("scans");
+    let n = s.redirect_targets.len();
+    assert_eq!(s.redirect_order.len(), n);
+    assert_eq!(s.redirect_scope.len(), n);
+    assert_eq!(s.redirect_chain.len(), n);
+}
+
+#[test]
+fn an_or_tail_redirect_carries_its_own_chain() {
+    // M2.229. The chain is what lets the engine place a redirect whose owner
+    // it cannot find — without it an `&&`-proven mover is never certified for
+    // that position. Pinned at the scanner so the channel cannot quietly
+    // start recording `None` for every redirect and still pass the engine
+    // tests by falling back to the same answer for a different reason.
+    let s = vouch::shell::Bash
+        .scan("cd /etc || true && echo x > f.txt")
+        .expect("scans");
+    assert_eq!(s.redirect_targets.len(), 1);
+    assert!(
+        s.redirect_chain[0].is_some(),
+        "a chained redirect records its chain: {:?}",
+        s.redirect_chain
+    );
+    // A lone statement is not a chain member, and says so.
+    let s = vouch::shell::Bash.scan("echo x > f.txt").expect("scans");
+    assert_eq!(s.redirect_chain, vec![None]);
+}
+
+#[test]
+fn a_compound_redirect_carries_the_compounds_own_anchor_order() {
+    // M2.226. The 2026-08-30 design §3.3 says a redirection attached to a
+    // compound is "opened once, at the compound's anchor, in the parent's
+    // scope". The scope half shipped; the position half was recorded
+    // `Order::Unordered` although the walk had just computed the anchor.
+    //
+    // The construct is the first (and only) statement, so its own position in
+    // the parent scope is `Seq(0)`, and the parent scope is 0 — the body's
+    // fresh scope is 1 and the redirect must not be in it.
+    let s = vouch::shell::Bash.scan("{ :; } > f.txt").expect("scans");
+    assert_eq!(s.redirect_order, vec![Order::Seq(0)]);
+    assert_eq!(s.redirect_scope, vec![Some(0)]);
+
+    // A loop is the same shape and the design's own example spelling.
+    let s = vouch::shell::Bash
+        .scan("cd /x ; for f in 1; do :; done > rel.txt")
+        .expect("scans");
+    assert_eq!(s.redirect_order, vec![Order::Seq(1)]);
+    assert_eq!(s.redirect_scope, vec![Some(0)]);
+
+    // The extended-test arm of the same walk already passed a real order;
+    // pinned here so the two compound-shaped arms cannot drift apart again.
+    let s = vouch::shell::Bash.scan("[[ -f a ]] > f.txt").expect("scans");
+    assert_eq!(s.redirect_order, vec![Order::Seq(0)]);
+}
+
+#[test]
 fn finds_command_heads() {
     let p = parse("ls -la /c/workspace && git status").unwrap();
     assert!(p.heads.contains(&"ls".to_string()), "heads: {:?}", p.heads);

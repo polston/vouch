@@ -123,7 +123,7 @@
       "additionalProperties": false
     },
     "GuardOverride": {
-      "description": "A place-scoped guard override (`[[run.guards]]`): under one of `under`'s\ntrees, each named guard takes the action given here instead of its global\n`[guards]` action. A looser override applies only where vouch can PROVE\nthe command ran in the tree.",
+      "description": "A place-scoped guard override (`[[run.guards]]`): under one of `under`'s\ntrees, each named guard takes the action given here instead of its global\n`[guards]` action. A looser override applies only where vouch can PROVE\nthe command ran in the tree. A stricter one restricts instead, so it\napplies wherever any directory the command could be running in is under\nthe tree, and wherever vouch cannot place the command at all; it stands\ndown only when every possible directory is known and none is under it.",
       "type": "object",
       "properties": {
         "under": {
@@ -222,7 +222,7 @@
           }
         },
         "trust_all_under": {
-          "description": "Trust zone: any command run from under one of these trees is\nrecognised, whatever it is — recognition only, guards and write\nrules still apply. `None` means absent (fine); a written empty list\nis refused at load, since it can never apply.",
+          "description": "Trust zone: any command run from under one of these trees is\nrecognised, whatever it is — recognition only, guards and write\nrules still apply. `None` means absent (fine); a written empty list\nis refused at load, since it can never apply.\nIt grants, so it needs every directory the command could be running in\nproven inside one of these trees: one member vouch cannot place, or one\nthat is outside, recognises nothing.",
           "type": [
             "array",
             "null"
@@ -233,7 +233,7 @@
           }
         },
         "trust_nothing_under": {
-          "description": "Distrust zone: no command run from under one of these trees is\nrecognised, whatever it is — even a program a knowledge entry\ndescribes. Refused when written empty, same as the grants above: a\nwritten empty list can only be a mistake.",
+          "description": "Distrust zone: no command run from under one of these trees is\nrecognised, whatever it is — even a program a knowledge entry\ndescribes. Refused when written empty, same as the grants above: a\nwritten empty list can only be a mistake. It restricts, so it applies\nwherever any directory the command could be running in is under it,\nand wherever vouch cannot place the command at all; it stands down\nonly when every possible directory is known and none is under it.",
           "type": [
             "array",
             "null"

@@ -50,7 +50,10 @@ it is allowed to land.
 A place-scoped guard override (`[[run.guards]]`): under one of `under`'s
 trees, each named guard takes the action given here instead of its global
 `[guards]` action. A looser override applies only where vouch can PROVE
-the command ran in the tree.
+the command ran in the tree. A stricter one restricts instead, so it
+applies wherever any directory the command could be running in is under
+the tree, and wherever vouch cannot place the command at all; it stands
+down only when every possible directory is known and none is under it.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -98,8 +101,8 @@ program trust, and place-scoped guard overrides.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `guards` | array of GuardOverride | (none) | Place-scoped guard overrides, written as `[[run.guards]]`. |
-| `trust_all_under` | array of string (optional) | (unset) | Trust zone: any command run from under one of these trees is recognised, whatever it is — recognition only, guards and write rules still apply. `None` means absent (fine); a written empty list is refused at load, since it can never apply. |
-| `trust_nothing_under` | array of string (optional) | (unset) | Distrust zone: no command run from under one of these trees is recognised, whatever it is — even a program a knowledge entry describes. Refused when written empty, same as the grants above: a written empty list can only be a mistake. |
+| `trust_all_under` | array of string (optional) | (unset) | Trust zone: any command run from under one of these trees is recognised, whatever it is — recognition only, guards and write rules still apply. `None` means absent (fine); a written empty list is refused at load, since it can never apply. It grants, so it needs every directory the command could be running in proven inside one of these trees: one member vouch cannot place, or one that is outside, recognises nothing. |
+| `trust_nothing_under` | array of string (optional) | (unset) | Distrust zone: no command run from under one of these trees is recognised, whatever it is — even a program a knowledge entry describes. Refused when written empty, same as the grants above: a written empty list can only be a mistake. It restricts, so it applies wherever any directory the command could be running in is under it, and wherever vouch cannot place the command at all; it stands down only when every possible directory is known and none is under it. |
 | `trust_program` | array of ProgramLocationTrust | (none) | Program-location trust rules, written as `[[run.trust_program]]`. Both an existing canonical executable location and a logical filename convention must match; bare names and uncertainty grant nothing. |
 
 ### `ShadowSection`

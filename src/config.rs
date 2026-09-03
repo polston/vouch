@@ -117,7 +117,10 @@ fn default_ask() -> Action {
 /// A place-scoped guard override (`[[run.guards]]`): under one of `under`'s
 /// trees, each named guard takes the action given here instead of its global
 /// `[guards]` action. A looser override applies only where vouch can PROVE
-/// the command ran in the tree.
+/// the command ran in the tree. A stricter one restricts instead, so it
+/// applies wherever any directory the command could be running in is under
+/// the tree, and wherever vouch cannot place the command at all; it stands
+/// down only when every possible directory is known and none is under it.
 #[derive(Debug, Deserialize, Default, Clone, JsonSchema)]
 pub struct GuardOverride {
     /// The trees this override applies under. Each entry is a path or a
@@ -174,12 +177,18 @@ pub struct RunSection {
     /// recognised, whatever it is — recognition only, guards and write
     /// rules still apply. `None` means absent (fine); a written empty list
     /// is refused at load, since it can never apply.
+    /// It grants, so it needs every directory the command could be running in
+    /// proven inside one of these trees: one member vouch cannot place, or one
+    /// that is outside, recognises nothing.
     #[serde(default)]
     pub trust_all_under: Option<Vec<String>>,
     /// Distrust zone: no command run from under one of these trees is
     /// recognised, whatever it is — even a program a knowledge entry
     /// describes. Refused when written empty, same as the grants above: a
-    /// written empty list can only be a mistake.
+    /// written empty list can only be a mistake. It restricts, so it applies
+    /// wherever any directory the command could be running in is under it,
+    /// and wherever vouch cannot place the command at all; it stands down
+    /// only when every possible directory is known and none is under it.
     #[serde(default)]
     pub trust_nothing_under: Option<Vec<String>>,
     /// Program-location trust rules, written as `[[run.trust_program]]`.

@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.17.1 (2026-09-03)
+
+
+### Bug Fixes
+
+* a place-scoped entry and a loosening guard override reach a command on the same terms, and the allow names every tree and directory that let it through
+* a place-scoped entry missed by known directories recommends widening only_under, instead of saying no remedy can help
+* a place-scoped run.guards entry no longer tightens a command whose every possible directory is known and outside its tree
+* a prompt naming a place-scoped guard override names every entry holding the line, not only the first
+* a prompt no longer says vouch cannot prove where a command runs when every directory it could be in is known
+* a redirect after a directory change that an and-chain proved is judged from the directory the shell actually moved to, rather than from both that directory and the one it left
+* a redirect written on a loop, brace group or conditional is judged from the directory that construct runs in, instead of asking about a position vouch could not place
+* a run-place prompt no longer says vouch cannot prove where a command runs when it has proven every possibility
+* a trust zone recognises a command when every directory it could be running in is inside the zone, instead of refusing because there is more than one
+* a trust zone that covers some but not all of a command's possible directories says so, and names the ones it does not cover
+* a trust_nothing_under zone no longer holds a command whose every possible directory is known and outside the zone
+
 ## 0.17.0 (2026-09-01)
 
 

@@ -726,7 +726,7 @@ fn judge_once(
     // registered scanner with no entries for it yet still has SOMETHING
     // looking at protected names inside its snippets.
     if let Some(home) = home {
-        for (_plang, psrc, _, _) in &snippets {
+        for (_plang, psrc, _, _, _) in &snippets {
             if let Some(hit) = mentions_protected(cfg, home, project_root, psrc) {
                 let reason = format!(
                     "{PROTECTED_FILE_LINE}\n  {hit}\n  \
@@ -751,7 +751,7 @@ fn judge_once(
     // `lang.python.constructs.dynamic_call`, not bash's (spec's
     // shared-vocabulary paragraph, "on every path").
     let mut snippet_constructs: Vec<(String, String)> = Vec::new();
-    for (plang, psrc, porder, pscope) in &snippets {
+    for (plang, psrc, porder, pscope, pchain) in &snippets {
         // A language the registry has no scanner for `continue`s here —
         // recorded divergence from the route path, which asks explicitly
         // instead (`route::decide_snippet`'s `unreadable_language`). This
@@ -788,6 +788,8 @@ fn judge_once(
                 .extend(std::iter::repeat(porder.clone()).take(inner.redirect_targets.len()));
             scan.redirect_scope
                 .extend(std::iter::repeat(*pscope).take(inner.redirect_targets.len()));
+            scan.redirect_chain
+                .extend(std::iter::repeat(*pchain).take(inner.redirect_targets.len()));
             scan.redirect_targets.extend(inner.redirect_targets);
             for c in inner.constructs {
                 snippet_constructs.push((plang.clone(), c));
@@ -809,6 +811,29 @@ fn judge_once(
             }
         }
     }
+    // The four redirect channels are read positionally against each other
+    // (`redirect_chain`'s doc comment, M2.229). The fold above is the one
+    // place outside the scanners that appends to them, and it has now shortened
+    // a channel twice — `redirect_scope` (M2.221, IMPORTANT 2) and
+    // `redirect_chain` after it, because a channel added later does not
+    // inherit the folds the older ones already had. Neither was reachable by
+    // the scanner-level lockstep test, which asserts over one scan and cannot
+    // see what happens after. This is that test's missing half.
+    debug_assert_eq!(
+        scan.redirect_targets.len(),
+        scan.redirect_order.len(),
+        "redirect_order fell out of lockstep with redirect_targets in the snippet fold"
+    );
+    debug_assert_eq!(
+        scan.redirect_targets.len(),
+        scan.redirect_scope.len(),
+        "redirect_scope fell out of lockstep with redirect_targets in the snippet fold"
+    );
+    debug_assert_eq!(
+        scan.redirect_targets.len(),
+        scan.redirect_chain.len(),
+        "redirect_chain fell out of lockstep with redirect_targets in the snippet fold"
+    );
     // Guards resolve per HIT, not per guard NAME, because a `[[run.guards]]`
     // override answers per place: `rm -rf a && cd <tree> && rm -rf b` trips one
     // guard from two directories, and collapsing them to one hit before the
@@ -827,7 +852,11 @@ fn judge_once(
         // Where this one command runs: its position in the line, then its own
         // run-dir flag. Same call the write pass and the recognition pass make
         // — one command, one run place.
-        let base = timeline.base_at(i, &all_cmds);
+        // One walk of the timeline, read both ways: `base_at` IS
+        // `base_set_at(..).collapse()`, so asking for both walked the same
+        // position twice on every command of every tool call.
+        let base_set = timeline.base_set_at(i, &all_cmds);
+        let base = base_set.collapse();
         let clang = all_langs.get(i).map(String::as_str).unwrap_or(lang);
         let (state, _) = run_dir_place(
             kb,
@@ -842,14 +871,84 @@ fn judge_once(
             let (a, _) = construct_action_for(cfg, lang, "unread_verb");
             (a, None)
         } else {
-            resolve_guard_action(
-                cfg,
-                &hit.guard,
-                &place_of(&state, here_home),
-                unproven_cause(&state),
-                here_home,
-                project_root,
-            )
+            // A plural set asks the question of every candidate and keeps the
+            // strictest answer, which is §4.3 read literally in BOTH
+            // directions: a restriction applies if ANY candidate is inside a
+            // tightening tree, a grant requires EVERY candidate proven inside
+            // a loosening one. Neither needs its own arm —
+            // `resolve_guard_action` already refuses a grant on an unproven
+            // place and applies a restriction to one, so a member vouch cannot
+            // place still narrows the line and one escaping member still
+            // refuses the grant.
+            //
+            // The consequence worth stating, because the collapsed reading got
+            // it backwards: a set whose members are every one PROVEN outside
+            // every tightening tree reaches the global action and does not
+            // ask. Collapsing turned that set into `Unknown`, which says "vouch
+            // cannot prove where this runs" about a line where it has proven
+            // every possibility. Doubt narrows; a set of known directories is
+            // not doubt (operator decision 2026-09-03).
+            //
+            // A SINGLETON resolves ONCE, against the place already computed
+            // above. This runs for every guard hit on every tool call and a
+            // singleton is the overwhelmingly common case, so the plural
+            // branch is never entered to reach an answer already in hand.
+            let members = &base_set.states;
+            if members.len() <= 1 {
+                resolve_guard_action(
+                    cfg,
+                    &hit.guard,
+                    &place_of(&state, here_home),
+                    unproven_cause(&state),
+                    here_home,
+                    project_root,
+                )
+            } else {
+                let mut per_candidate: Option<(Action, Vec<String>)> = None;
+                for member in members {
+                    let (member_state, _) = run_dir_place(
+                        kb,
+                        &all_cmds[i],
+                        clang,
+                        member,
+                        inherited_at(&all_inherited, i),
+                        &resolve,
+                    );
+                    let candidate = resolve_guard_action(
+                        cfg,
+                        &hit.guard,
+                        &place_of(&member_state, here_home),
+                        unproven_cause(&member_state),
+                        here_home,
+                        project_root,
+                    );
+                    // Strictly greater rank replaces and starts a fresh
+                    // sentence list; an equal rank ADDS its sentence. §5 is
+                    // why the tie does not simply keep the first: when two
+                    // entries each cover a different candidate, naming one
+                    // names a setting that does not turn the prompt off —
+                    // remove it and the other candidate still asks. The zone
+                    // pass already names every tree that decided; this is the
+                    // same rule for guard overrides.
+                    match per_candidate {
+                        Some((won, ref mut sentences)) if rank(won) == rank(candidate.0) => {
+                            if let Some(s) = candidate.1 {
+                                remember(sentences, s);
+                            }
+                        }
+                        Some((won, _)) if rank(won) > rank(candidate.0) => {}
+                        _ => {
+                            per_candidate =
+                                Some((candidate.0, candidate.1.into_iter().collect::<Vec<_>>()));
+                        }
+                    }
+                }
+                let (won, sentences) =
+                    per_candidate.expect("a set of more than one member has a first member");
+                // Several sentences read as one, in the order the candidates
+                // were walked, so the prompt names every entry holding the line.
+                (won, (!sentences.is_empty()).then(|| sentences.join("\n  ")))
+            }
         };
         // An override that LOOSENS is what let this hit through, and `worst`
         // drops an Allow on the floor — so the sentence would be lost with it.
@@ -974,10 +1073,19 @@ fn judge_once(
                     _ => None,
                 }
             });
+            // An unowned redirect places by (scope, order) AND its own chain:
+            // a compound's redirect is anchored at the construct's position,
+            // and a compound is not a `Cmd`, so no execution site can ever
+            // own it. Handing the fallback the chain the scanner recorded is
+            // what lets an `&&`-proven mover count as certified there, exactly
+            // as it does for a redirect that does have an owning command.
+            let redirect_chain = scan.redirect_chain.get(i).copied().flatten();
             let redirect_base = owner
                 .map(|index| timeline.base_set_at(index, &all_cmds))
                 .unwrap_or_else(|| match eng_scope {
-                    Some(scope) => timeline.scope_base_at(scope, &order),
+                    Some(scope) => {
+                        timeline.scope_base_at(scope, &order, redirect_chain.as_ref())
+                    }
                     None => BaseSet::of(CdState::Unknown(UNPLACED_POS_CD.to_string())),
                 });
             // One pushed target per CANDIDATE (design §4.3): the existing
@@ -1949,7 +2057,11 @@ fn judge_once(
         // directory while the same command's writes were judged at the flag's,
         // so `git -C <tree> <verb>` stepped around a zone that a `cd` into the
         // same tree would have entered.
-        let base = timeline.base_at(i, &all_cmds);
+        // One walk of the timeline, read both ways: `base_at` IS
+        // `base_set_at(..).collapse()`, so asking for both walked the same
+        // position twice on every command of every tool call.
+        let base_set = timeline.base_set_at(i, &all_cmds);
+        let base = base_set.collapse();
         let (state, _) = run_dir_place(
             kb,
             c,
@@ -1959,6 +2071,53 @@ fn judge_once(
             &resolve,
         );
         let place = place_of(&state, here_home);
+        // The same question asked of every candidate the position could be in
+        // (design 2026-08-30 §4.3, M2.228). Every run-place consumer below
+        // reads the SET: 3a's distrust zone restricts if any member is
+        // covered, and 3b's place-scoped entry and 3d's trust zone grant only
+        // if every member is proven inside. `place` above is the collapsed
+        // reading, kept for the program-location rule, which §4.3 holds to a
+        // singleton on purpose.
+        //
+        // Each member's unproven CAUSE travels beside it, because a
+        // restriction that fires on a candidate vouch could not place has to
+        // name that candidate's own reason — the collapsed `PLURAL_BASES`
+        // cause would say "more than one possible directory" about a member
+        // whose real problem is something else entirely.
+        //
+        // Built unconditionally, on purpose. Gating them on a zone being
+        // configured saves one small allocation per command and buys a
+        // fail-OPEN hazard in exchange: every reader zips places against
+        // causes, and an empty causes vector makes that zip yield nothing —
+        // a restriction silently not applying, which is the one direction
+        // this file must never fail in. The allocation is a static string's
+        // copy; the hazard is a wrong allow.
+        //
+        // A singleton REUSES the `place` just computed rather than resolving
+        // the same member a second time: this loop runs for every command on
+        // every tool call, a singleton is the overwhelmingly common case, and
+        // `run_dir_place` is not free. Recomputing it would have doubled the
+        // gate's per-command work to reach an answer already in hand.
+        let candidate_bases = &base_set.states;
+        let mut places: Vec<Place> = Vec::with_capacity(candidate_bases.len().max(1));
+        let mut causes: Vec<String> = Vec::with_capacity(candidate_bases.len().max(1));
+        if candidate_bases.len() <= 1 {
+            places.push(place.clone());
+            causes.push(unproven_cause(&state).to_string());
+        } else {
+            for member in candidate_bases {
+                let (member_state, _) = run_dir_place(
+                    kb,
+                    c,
+                    clang,
+                    member,
+                    inherited_at(&all_inherited, i),
+                    &resolve,
+                );
+                causes.push(unproven_cause(&member_state).to_string());
+                places.push(place_of(&member_state, here_home));
+            }
+        }
 
         // 3a. The distrust zone, FIRST (spec §Precedence for recognition,
         // step 1). It RESTRICTS, so it applies unless the place is provably
@@ -1966,8 +2125,18 @@ fn judge_once(
         // spared them would be a no-op, since unknown programs already ask.
         // Its off-switch is the zone itself, never `unmodeled_command`, so it
         // is consulted before that setting is read at all.
+        //
+        // Asked of EVERY candidate, and the first one it covers stops the
+        // line: a restriction applies if ANY directory this command could be
+        // running in is under the zone, and a member vouch cannot place counts
+        // as one of them. It stands down only where every candidate is PROVEN
+        // outside every tree the zone could locate — a set of known
+        // directories, none of them in the zone, is knowledge and not doubt,
+        // so the zone has nothing to say about the line (operator decision
+        // 2026-09-03). The collapsed reading asked there, because a plural set
+        // became `Unproven` and an unproven place takes a restriction.
         if !distrust.is_empty() {
-            let stop = match &place {
+            let stop = places.iter().zip(&causes).find_map(|(place, cause)| match place {
                 Place::Proven(d) => match distrust.holding(d) {
                     Some(glob) => Some(format!(
                         "vouch stopped on: run.trust_nothing_under\n  \
@@ -2005,10 +2174,10 @@ fn judge_once(
                      runs outside it\n  \
                      to stop asking here, remove that tree from run.trust_nothing_under, or run \
                      the command where vouch can place it",
-                    unproven_cause(&state),
+                    cause,
                     distrust.written()
                 )),
-            };
+            });
             if let Some(reason) = stop {
                 if worst.as_ref().map_or(true, |(w, _)| rank(Action::Ask) > rank(*w)) {
                     worst = Some((Action::Ask, reason));
@@ -2021,43 +2190,76 @@ fn judge_once(
         // counts only where the place PROVES the command runs under its trees
         // — a grant, so an unproven place unlocks nothing. One walk answers
         // both questions: whether it was recognised, and by what.
-        let run_place = match &place {
-            Place::Proven(d) => Some(d.as_str()),
-            Place::Unproven => None,
-        };
-        match crate::guards::recognition_at(
-            kb,
-            c,
-            clang,
-            crate::guards::RecognitionPlace {
-                dir: run_place,
-                home: here_home,
-                project_root,
-            },
-            standalone_eligible,
-        ) {
+        // Asked once per candidate (§4.3, M2.228). A scoped entry grants only
+        // when EVERY directory this command could be running in is under its
+        // trees: one member that the entry does not reach refuses the whole
+        // thing, which is what the collapsed reading did for every plural set
+        // before. `Yes` is place-independent, so a mix of `Yes` and `AtPlace`
+        // still grants — the entry recognises the command either way, and only
+        // the sentence differs.
+        let mut scoped_globs: Vec<String> = Vec::new();
+        let mut scoped_dirs: Vec<String> = Vec::new();
+        let mut every_candidate_recognised = true;
+        for candidate in &places {
+            let run_place = match candidate {
+                Place::Proven(d) => Some(d.as_str()),
+                Place::Unproven => None,
+            };
+            match crate::guards::recognition_at(
+                kb,
+                c,
+                clang,
+                crate::guards::RecognitionPlace {
+                    dir: run_place,
+                    home: here_home,
+                    project_root,
+                },
+                standalone_eligible,
+            ) {
+                crate::guards::Recognised::AtPlace(glob) => {
+                    if !scoped_globs.contains(&glob) {
+                        scoped_globs.push(glob);
+                    }
+                    // Only a proven candidate can reach a scoped entry, so
+                    // this arm always has a directory to name.
+                    if let Place::Proven(d) = candidate {
+                        if !scoped_dirs.contains(d) {
+                            scoped_dirs.push(d.clone());
+                        }
+                    }
+                }
+                crate::guards::Recognised::Yes => {}
+                crate::guards::Recognised::No => {
+                    every_candidate_recognised = false;
+                    break;
+                }
+            }
+        }
+        if every_candidate_recognised && !places.is_empty() {
             // The PLACE is what recognised this, so the allow says which entry
-            // and which of its trees.
-            crate::guards::Recognised::AtPlace(glob) => {
-                let at = match &place {
-                    Place::Proven(d) => d.as_str(),
-                    // Unreachable: a scoped entry never matches without a
-                    // place. Named rather than unwrapped, because a panic in
-                    // the gate is a worse answer than a sentence.
-                    Place::Unproven => "a place vouch cannot name",
-                };
+            // and which of its trees. With nothing scoped it was an ordinary
+            // unscoped recognition and says nothing extra, exactly as before.
+            if !scoped_globs.is_empty() {
                 remember(
                     &mut grants,
                     format!(
-                        "allowed by your entry for `{}`, which recognises it only under {glob} \
-                         — this command runs at {at}",
-                        crate::guards::base_name(&c.head)
+                        "allowed by your entry for `{}`, which recognises it only under {} \
+                         — this command runs at {}",
+                        crate::guards::base_name(&c.head),
+                        scoped_globs.join(", "),
+                        if scoped_dirs.is_empty() {
+                            // Unreachable: a scoped entry never matches
+                            // without a place. Named rather than unwrapped,
+                            // because a panic in the gate is a worse answer
+                            // than a sentence.
+                            "a place vouch cannot name".to_string()
+                        } else {
+                            scoped_dirs.join(", ")
+                        }
                     ),
                 );
-                continue;
             }
-            crate::guards::Recognised::Yes => continue,
-            crate::guards::Recognised::No => {}
+            continue;
         }
 
         // 3c. A proven program file whose canonical location AND logical name
@@ -2088,20 +2290,48 @@ fn judge_once(
             continue;
         }
 
-        // 3d. A compatibility trust zone (spec step 4), which grants, so it needs a proven
-        // place. "Whatever it is" includes an unknown VERB of a described
-        // program: 3b and 3c left that unrecognised like anything else.
-        if let Place::Proven(d) = &place {
-            if let Some(glob) = trust.holding(d) {
-                remember(
-                    &mut grants,
-                    format!(
-                        "allowed by run.trust_all_under ({glob}) — trusted because you trust \
-                         commands run from this location ({d})"
-                    ),
-                );
-                continue;
+        // 3d. A compatibility trust zone (spec step 4), which grants, so every
+        // candidate directory this command could be running in has to be
+        // proven inside a trusted tree — §4.3's grant clause. One unproven or
+        // one escaping member refuses, which is exactly what the collapsed
+        // reading did for the whole set before M2.228; what changes is that a
+        // set whose members are ALL inside now grants, instead of being
+        // refused for being plural. "Whatever it is" includes an unknown VERB
+        // of a described program: 3b and 3c left that unrecognised like
+        // anything else.
+        let zone_hits: Option<Vec<(String, String)>> = places
+            .iter()
+            .map(|p| match p {
+                Place::Proven(d) => trust.holding(d).map(|glob| (glob.to_string(), d.clone())),
+                Place::Unproven => None,
+            })
+            .collect();
+        if let Some(hits) = zone_hits.filter(|h| !h.is_empty()) {
+            // Every decider is named, the same rule the guard pass follows for
+            // overrides: a set covered by two different trees was let through
+            // by both, and printing one would read as one rule deciding what
+            // two decided.
+            let mut globs: Vec<&str> = Vec::new();
+            let mut dirs: Vec<&str> = Vec::new();
+            for (glob, dir) in &hits {
+                if !globs.contains(&glob.as_str()) {
+                    globs.push(glob);
+                }
+                if !dirs.contains(&dir.as_str()) {
+                    dirs.push(dir);
+                }
             }
+            remember(
+                &mut grants,
+                format!(
+                    "allowed by run.trust_all_under ({}) — trusted because you trust \
+                     commands run from {} ({})",
+                    globs.join(", "),
+                    if dirs.len() == 1 { "this location" } else { "every location this command could be running in" },
+                    dirs.join(", ")
+                ),
+            );
+            continue;
         }
 
         let a = cfg.construct_action(clang, "unmodeled_command");
@@ -2132,17 +2362,46 @@ fn judge_once(
         // changes the prompt, so it is part of what makes this item distinct.
         let scopes = crate::guards::place_scopes(kb, &c.head, clang);
         let answer = if scopes.is_empty() {
-            match &place {
-                // Nothing places this command, and a trust zone covers
-                // somewhere it might be standing. Without this line an
-                // operator standing in their own zone sees vouch apparently
-                // ignoring their config. `resolved`, not the whole list: a
-                // zone whose patterns name no directory here covers nowhere,
-                // so it is not a grant this command missed.
-                Place::Unproven if !trust.resolved.is_empty() => {
-                    PlaceAnswer::Missed { cause: unproven_cause(&state).to_string() }
+            // Asked of every candidate, like the zone pass that just refused
+            // the grant. A zone was MISSED only where it could have applied:
+            // an unplaceable candidate might be standing in a trusted tree, so
+            // that keeps the line — without it an operator standing in their
+            // own zone sees vouch apparently ignoring their config.
+            //
+            // Where every candidate is PROVEN there is nothing vouch could
+            // not prove, and saying so was the collapsed reading's false
+            // sentence: it reported "cannot prove it runs there (more than one
+            // possible directory)" about a line whose every possibility it had
+            // proven. The grant was refused for a nameable reason instead, and
+            // the escaping candidates are that reason.
+            //
+            // `resolved`, not the whole list: a zone whose patterns name no
+            // directory here covers nowhere, so it is not a grant this
+            // command missed.
+            if trust.resolved.is_empty() {
+                PlaceAnswer::Plain
+            } else if let Some(cause) = places
+                .iter()
+                .zip(&causes)
+                .find_map(|(p, cause)| matches!(p, Place::Unproven).then(|| cause.clone()))
+            {
+                PlaceAnswer::Missed { cause }
+            } else {
+                // Every candidate proven. Only a set with at least one member
+                // inside a trusted tree missed anything; the rest never came
+                // near the zone and get the ordinary unknown-program ask.
+                let escaping: Vec<&str> = places
+                    .iter()
+                    .filter_map(|p| match p {
+                        Place::Proven(d) if trust.holding(d).is_none() => Some(d.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                if escaping.len() == places.len() {
+                    PlaceAnswer::Plain
+                } else {
+                    PlaceAnswer::MissedEscaping { escaping: escaping.join(", ") }
                 }
-                _ => PlaceAnswer::Plain,
             }
         } else {
             // A scoped entry for this very name exists and did not reach this
@@ -2150,24 +2409,56 @@ fn judge_once(
             // in "write an entry" — that entry exists, and a second one for
             // the same name refuses the whole file.
             let entry_trees = PlaceTrees::of(Some(&scopes), here_home, project_root);
-            let why = match &place {
-                Place::Proven(d) => match entry_trees.holding(d) {
-                    // Inside the trees and still unrecognised: the entry's own
-                    // `subcommands` list is what excluded it, never the place.
-                    Some(_) => ScopedMiss::Verb {
-                        runs_at: d.clone(),
-                        verb: crate::guards::subcommand_of_in(kb, c, clang).map(str::to_string),
-                    },
-                    // Outside every tree it could LOCATE — and if it could
-                    // locate none, "outside them" would be a claim about
-                    // trees that are not anywhere.
-                    None if entry_trees.resolved.is_empty() => ScopedMiss::Unlocatable,
-                    None => ScopedMiss::Outside {
-                        runs_at: d.clone(),
-                        unlocatable: entry_trees.unresolved.join(", "),
-                    },
+            // Per candidate, and the ORDER of these arms is the wording rule.
+            // An unplaceable candidate wins: no remedy can be recommended while
+            // one of the directories is unknown. Otherwise every candidate is
+            // proven, and which arm applies is decided by the ones the entry
+            // does NOT reach — because recognition needs every candidate
+            // inside, so a single escaping member is the whole reason. Only
+            // when the entry reaches all of them is the verb what excluded it.
+            //
+            // Getting this order wrong is not a wording nit: `Unproven`'s
+            // remedy says a wider `only_under` cannot help while the place is
+            // unknown, and on a fully-known set a wider `only_under` is
+            // exactly the edit that would work. The collapsed reading sent the
+            // operator away from the fix.
+            let unplaceable = places
+                .iter()
+                .zip(&causes)
+                .find_map(|(p, cause)| matches!(p, Place::Unproven).then(|| cause.clone()));
+            let outside: Vec<&str> = places
+                .iter()
+                .filter_map(|p| match p {
+                    Place::Proven(d) if entry_trees.holding(d).is_none() => Some(d.as_str()),
+                    _ => None,
+                })
+                .collect();
+            let why = match unplaceable {
+                Some(cause) => ScopedMiss::Unproven(cause),
+                // Outside every tree it could LOCATE — and if it could
+                // locate none, "outside them" would be a claim about
+                // trees that are not anywhere.
+                None if !outside.is_empty() && entry_trees.resolved.is_empty() => {
+                    ScopedMiss::Unlocatable
+                }
+                None if !outside.is_empty() => ScopedMiss::Outside {
+                    runs_at: outside.join(", "),
+                    unlocatable: entry_trees.unresolved.join(", "),
                 },
-                Place::Unproven => ScopedMiss::Unproven(unproven_cause(&state).to_string()),
+                // Every candidate inside the trees and still unrecognised: the
+                // entry's own `subcommands` list is what excluded it, never
+                // the place.
+                None => ScopedMiss::Verb {
+                    runs_at: places
+                        .iter()
+                        .filter_map(|p| match p {
+                            Place::Proven(d) => Some(d.as_str()),
+                            Place::Unproven => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    verb: crate::guards::subcommand_of_in(kb, c, clang).map(str::to_string),
+                },
             };
             PlaceAnswer::Scoped { trees: scopes.join(", "), why }
         };
@@ -2429,6 +2720,17 @@ fn judge_once(
                         ),
                     );
                 }
+                if let PlaceAnswer::MissedEscaping { escaping } = &it.place {
+                    remember(
+                        &mut parts,
+                        format!(
+                            "a trust zone covers some of the directories this command could be \
+                             running in, but not {escaping} — and a zone recognises a command \
+                             only when it covers every one of them, so widening \
+                             run.trust_all_under to include it would recognise this"
+                        ),
+                    );
+                }
             }
             parts.push(format!(
                 "to stop checking for unknown programs entirely, set {settings} — that allows \
@@ -2524,7 +2826,13 @@ struct Expanded {
     /// snippet has no position of its own, so it takes the wrapper's, on the
     /// redirect_scope channel exactly as it already takes the wrapper's order
     /// (review finding IMPORTANT 2, M2.221).
-    snippets: Vec<(String, String, crate::syntax::Order, Option<usize>)>,
+    snippets: Vec<(
+        String,
+        String,
+        crate::syntax::Order,
+        Option<usize>,
+        Option<crate::syntax::ChainPos>,
+    )>,
     /// The language whose wrapper-nesting cap was reached while expanding
     /// THIS line, if any — first hit across every top-level command wins,
     /// since vouch decides once per command (M2.55). `None` means every
@@ -2737,13 +3045,17 @@ fn collect_expanded(
         }
         // The wrapper command `c` (index `i`) is the redirect's owner once a
         // nested snippet's own redirects are folded onto it below — carry
-        // ITS `cmd_scope` entry alongside its order so that fold can extend
-        // `redirect_scope` in step with `redirect_order`/`redirect_targets`
-        // instead of leaving it short (review finding IMPORTANT 2).
+        // ITS `cmd_scope` entry and ITS chain membership alongside its order,
+        // so that fold can extend `redirect_scope` and `redirect_chain` in
+        // step with `redirect_order`/`redirect_targets` instead of leaving
+        // them short (review finding IMPORTANT 2 for the scope channel; the
+        // chain channel repeated it, since a channel added later inherits
+        // every fold the older ones already had).
         let wrapper_scope = scan.cmd_scope.get(i).copied().flatten();
+        let wrapper_chain = c.chain;
         for (plang, psrc) in ex.srcs {
             out.snippets
-                .push((plang, psrc, order.clone(), wrapper_scope));
+                .push((plang, psrc, order.clone(), wrapper_scope, wrapper_chain));
         }
         out.parse_failures.extend(ex.parse_failures);
         out.constructs.extend(ex.constructs);
@@ -3514,6 +3826,12 @@ enum PlaceAnswer {
     /// No entry names this program, the place could not be proven, and a trust
     /// zone covers somewhere it might be standing.
     Missed { cause: String },
+    /// No entry names this program, every directory it could be running in is
+    /// PROVEN, a trust zone covers some of them, and `escaping` lists the ones
+    /// it does not — which is why the grant was refused. Distinct from
+    /// `Missed` because nothing here was unprovable, and a prompt that said so
+    /// would be describing a doubt the line does not contain.
+    MissedEscaping { escaping: String },
 }
 
 /// Why a place-scoped entry did not recognise a command it names.
@@ -4156,10 +4474,25 @@ impl ScopedCdTimelines {
     /// caller's cwd whenever the child's mover was sealed behind a process
     /// boundary — scope 0 event-free, child moved — which is a wrong base in
     /// the allow direction (Task 3 review, F1).
-    fn scope_base_at(&self, scope: usize, order: &crate::syntax::Order) -> BaseSet {
+    /// Two shapes reach it, not one: a redirect whose owner is a compound,
+    /// which is not a `Cmd` and so can never own anything; and an ordinary
+    /// redirect whose `Order::Unordered` is shared by more than one site in
+    /// its scope, leaving the owner lookup unable to pick between them.
+    ///
+    /// The chain is a parameter rather than `None` because without it the walk
+    /// cannot run `certifies()`, and an `&&`-proven mover earlier in the scope
+    /// then stays uncertified: the position is judged over {moved, unmoved}
+    /// where the shell is provably in one directory. That is the whole reason
+    /// `Scan::redirect_chain` exists (M2.226 with M2.229).
+    fn scope_base_at(
+        &self,
+        scope: usize,
+        order: &crate::syntax::Order,
+        chain: Option<&crate::syntax::ChainPos>,
+    ) -> BaseSet {
         match (self.timelines.get(scope), self.starts.get(scope)) {
             (Some(timeline), Some(start)) => {
-                timeline.base_at(order, None, start, &self.timelines)
+                timeline.base_at(order, chain, start, &self.timelines)
             }
             _ => BaseSet::of(CdState::Unknown(LOOKUP_GAP_CD.to_string())),
         }

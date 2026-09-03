@@ -4048,6 +4048,7 @@ fn scan_snippet(lang: &str, src: &str, srcs: &mut Vec<(String, String)>) -> Resu
             scan_scopes: s.scan_scopes,
             cmd_scope: s.cmd_scope,
             redirect_scope: s.redirect_scope,
+            redirect_chain: s.redirect_chain,
             parsed: true,
         })
         .map_err(|e| (lang.to_string(), e))
@@ -4085,6 +4086,13 @@ struct SnippetScan {
     scan_scopes: Vec<crate::syntax::ScanScope>,
     #[allow(dead_code)]
     redirect_scope: Vec<Option<usize>>,
+    /// Carried for the same reason as `redirect_scope` above and unread for
+    /// the same reason: the outer scan's own redirects answer for the line
+    /// today, so nothing downstream reads a nested scan's copy yet. Named
+    /// here because a Scan-parallel array absent from this struct does not
+    /// survive the boundary at all (see the struct doc).
+    #[allow(dead_code)]
+    redirect_chain: Vec<Option<crate::syntax::ChainPos>>,
     parsed: bool,
 }
 

@@ -379,7 +379,11 @@ fn an_unprovable_place_grants_nothing_and_the_prompt_says_a_zone_might_have() {
     let d = decide_command_at(
         &cfg,
         "bash",
-        "cd a || cd b; someunknownprogramzz x",
+        // A GENUINELY unprovable place, not a plural one: an unreadable
+        // destination leaves a single Unknown. `cd a || cd b` was the old
+        // spelling and is no longer unprovable — every candidate it leaves is
+        // a known directory inside the zone, which §4.3 grants (M2.228).
+        "cd \"$MYSTERY\"; someunknownprogramzz x",
         None,
         None,
         Some("C:/scratch/j"),
@@ -407,21 +411,36 @@ fn a_distrust_zone_makes_even_a_described_program_ask() {
 #[test]
 fn an_unprovable_place_near_a_distrust_zone_restricts_and_names_the_cause() {
     let cfg = zone_cfg("[run]\ntrust_nothing_under = [\"D:/inbox/**\"]");
-    let d = decide_command_at(&cfg, "bash", "cd a || cd b; ls -la", None, None, Some("C:/work"));
+    // A GENUINELY unprovable place, per the note in the zone probe above:
+    // `cd a || cd b` leaves only known directories, and a zone stands down
+    // where none of them is inside it (design §3.3a; pinned below).
+    let d = decide_command_at(&cfg, "bash", "cd \"$MYSTERY\"; ls -la", None, None, Some("C:/work"));
     match d {
         Decision::Ask(r) => {
             assert!(r.contains("trust_nothing_under"), "{r}");
             assert!(r.contains("might"), "{r}");
-            // The M2.58 standard: WHAT made the place unprovable. The
-            // CdState::Unknown cause string is available per occurrence via
-            // base_at; NoDirectory's words are the NO_CWD const.
+            // The M2.58 standard: WHAT made the place unprovable.
             assert!(
-                r.contains("||") || r.contains("cannot order") || r.contains("directory"),
+                r.contains("changes directory to somewhere vouch cannot resolve"),
                 "cause required: {r}"
             );
         }
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn a_distrust_zone_stands_down_when_every_candidate_is_proven_outside() {
+    // The restriction clause's other direction at the zone site: several
+    // KNOWN directories, none under the zone, so the zone does not hold the
+    // line. `ls` is described, so recognition carries it once the zone stops
+    // stripping recognition (operator decision 2026-09-03, design §3.3a).
+    let cfg = zone_cfg("[run]\ntrust_nothing_under = [\"D:/inbox/**\"]");
+    let d = decide_command_at(&cfg, "bash", "cd a || cd b; ls -la", None, None, Some("C:/work"));
+    assert!(
+        matches!(d, Decision::Allow(_)),
+        "every candidate is proven outside the zone: {d:?}"
+    );
 }
 
 /// [review] A run-dir flag says where THIS command runs, and the zone pass has
@@ -763,7 +782,9 @@ fn a_place_scoped_entry_at_an_unprovable_place_asks_with_the_missed_grant_line()
         SCOPED_MINE,
         SCOPED_CFG,
         "C:/scratch/job1",
-        "cd a || cd b; probe-tool x",
+        // Genuinely unprovable, per the note in the zone probe above:
+        // a plural set of known directories is now a grant, not a doubt.
+        "cd \"$MYSTERY\"; probe-tool x",
     );
     assert_eq!(verdict, "ask", "{reason}");
     assert!(
@@ -1063,4 +1084,64 @@ fn a_snippet_with_no_directory_is_still_restricted_by_a_distrust_zone() {
         }
         other => panic!("a restriction must survive a snippet with no directory: {other:?}"),
     }
+}
+
+// --- the plural-but-fully-known set at the two remaining prompt sites -------
+//
+// 3a, 3b, 3d and the guard pass judge every candidate; 3e (the missed-grant
+// line) and the scoped-miss remedy still read the collapsed place. These two
+// pin the sentences they produce for a set whose members are all KNOWN.
+
+#[test]
+fn a_missed_zone_grant_is_not_claimed_when_every_candidate_is_known() {
+    // A zone covering a tree none of the candidates is under has not been
+    // "missed" — nothing about this line was close to it. Saying vouch cannot
+    // prove where the command runs, on a line where it proved three
+    // directories, is the false sentence the stand-down exists to remove.
+    let cfg = zone_cfg("[run]\ntrust_all_under = [\"D:/inbox/**\"]");
+    let d = decide_command_at(
+        &cfg,
+        "bash",
+        "cd a || cd b; someunknownprogramzz x",
+        None,
+        None,
+        Some("C:/work"),
+    );
+    match d {
+        Decision::Ask(r) => {
+            assert!(
+                !r.contains("cannot prove it runs there"),
+                "every candidate is known, so no place was unprovable: {r}"
+            );
+            assert!(
+                !r.contains("more than one possible directory"),
+                "the collapsed cause must not reach a fully-known set: {r}"
+            );
+        }
+        other => panic!("the unknown program still asks: {other:?}"),
+    }
+}
+
+#[test]
+fn a_scoped_entry_missed_by_every_known_candidate_says_outside_not_unprovable() {
+    // The remedy is the point: "a wider only_under cannot help while the place
+    // is unknown" is advice that sends the operator away from the one edit
+    // that would work. Every candidate here is a known directory outside the
+    // entry's trees, so widening them is exactly the fix.
+    let (verdict, reason) = hook_at(
+        "scoped_plural_known",
+        SCOPED_MINE,
+        SCOPED_CFG,
+        "C:/work",
+        "cd a || cd b; probe-tool x",
+    );
+    assert_eq!(verdict, "ask", "{reason}");
+    assert!(
+        !reason.contains("cannot prove it runs there"),
+        "every candidate is known: {reason}"
+    );
+    assert!(
+        !reason.contains("cannot help while the place is unknown"),
+        "widening only_under IS the remedy here: {reason}"
+    );
 }

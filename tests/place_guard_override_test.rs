@@ -43,7 +43,20 @@ fn a_stricter_override_applies_on_a_proven_place_and_says_it_overrode() {
 #[test]
 fn a_stricter_override_applies_on_an_unproven_place_and_names_the_cause() {
     let c = cfg("[[run.guards]]\nunder = [\"C:/workspace/**\"]\ndelete_recursive = \"ask\"");
-    let d = decide_command_at(&c, "bash", "cd a || cd b; rm -rf build", None, None, Some("C:/tmp"));
+    // A GENUINELY unprovable place: an unreadable destination leaves one
+    // Unknown, which the entry may cover, so the restriction applies.
+    // `cd a || cd b` was the old spelling and is no longer unprovable — every
+    // candidate it leaves is a known directory, and §4.3 read literally has a
+    // tightening entry stand down where none of them is inside its trees
+    // (design §3.3a; the stand-down is pinned below).
+    let d = decide_command_at(
+        &c,
+        "bash",
+        "cd \"$MYSTERY\"; rm -rf build",
+        None,
+        None,
+        Some("C:/tmp"),
+    );
     match d {
         Decision::Ask(r) => {
             assert!(
@@ -52,16 +65,29 @@ fn a_stricter_override_applies_on_an_unproven_place_and_names_the_cause() {
             );
             // The M2.58 standard: saying a place is unprovable without saying
             // what made it unprovable leaves the operator no move to make.
-            // Since candidate bases (design 2026-08-30 §4.2) the or-fallback
-            // shape resolves to several candidates, so the cause is the
-            // plural one, not "cannot order".
             assert!(
-                r.contains("more than one possible directory"),
+                r.contains("changes directory to somewhere vouch cannot resolve"),
                 "the cause, not just the fact: {r}"
             );
         }
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn a_stricter_override_stands_down_when_every_candidate_is_proven_outside() {
+    // §4.3's restriction clause read literally in its other direction: the
+    // or-fallback leaves several KNOWN directories, none of them under the
+    // entry's tree, so the entry has nothing to say and the global action
+    // stands. The collapsed reading asked here, naming "more than one
+    // possible directory" as the cause — a doubt the line does not contain
+    // (operator decision 2026-09-03).
+    let c = cfg("[[run.guards]]\nunder = [\"C:/workspace/**\"]\ndelete_recursive = \"ask\"");
+    let d = decide_command_at(&c, "bash", "cd a || cd b; rm -rf build", None, None, Some("C:/tmp"));
+    assert!(
+        matches!(d, Decision::Allow(_)),
+        "every candidate is proven outside the tightened tree: {d:?}"
+    );
 }
 
 #[test]
@@ -72,7 +98,7 @@ fn a_stricter_override_does_not_apply_provably_outside() {
 }
 
 #[test]
-fn a_loosening_override_applies_only_on_a_proven_place() {
+fn a_loosening_override_needs_every_candidate_under_its_tree() {
     let c = vouch::config::load(
         "[lang.bash]\ndefault = \"allow\"\n[guards]\ndelete_recursive = \"ask\"\n\
          [[run.guards]]\nunder = [\"C:/scratch/**\"]\ndelete_recursive = \"allow\"",
@@ -88,7 +114,12 @@ fn a_loosening_override_applies_only_on_a_proven_place() {
         }
         other => panic!("{other:?}"),
     }
-    let unproven = decide_command_at(
+    // Every candidate this shape leaves — the unmoved cwd and both relative
+    // destinations — is under `C:/scratch/**`, so the loosening entry covers
+    // all of them and reaches the command (§4.3's grant clause, M2.228).
+    // Before that clause shipped, the set collapsed to Unknown and this was
+    // refused for being plural rather than for escaping the tree.
+    let every_candidate_inside = decide_command_at(
         &c,
         "bash",
         "cd a || cd b; rm -rf build",
@@ -96,7 +127,44 @@ fn a_loosening_override_applies_only_on_a_proven_place() {
         None,
         Some("C:/scratch/j"),
     );
-    assert!(matches!(unproven, Decision::Ask(_)), "loosening needs proof: {unproven:?}");
+    match &every_candidate_inside {
+        Decision::Allow(r) => assert!(
+            r.contains("run.guards") && r.contains("C:/scratch/**"),
+            "the allow names the entry that loosened it: {r}"
+        ),
+        other => panic!("every candidate is under the tree: {other:?}"),
+    }
+
+    // A GENUINELY unprovable place still grants nothing — uncertainty is not
+    // a bounded set of directories, and a loosening entry cannot cover a
+    // member vouch cannot name.
+    let unprovable = decide_command_at(
+        &c,
+        "bash",
+        "cd \"$MYSTERY\"; rm -rf build",
+        None,
+        None,
+        Some("C:/scratch/j"),
+    );
+    assert!(
+        matches!(unprovable, Decision::Ask(_)),
+        "loosening needs every candidate proven: {unprovable:?}"
+    );
+
+    // And one candidate outside the tree refuses the loosening, which is the
+    // half that keeps this a grant rather than a blanket.
+    let one_outside = decide_command_at(
+        &c,
+        "bash",
+        "cd /elsewhere-not-scratch; rm -rf build",
+        None,
+        None,
+        Some("C:/scratch/j"),
+    );
+    assert!(
+        matches!(one_outside, Decision::Ask(_)),
+        "one escaping candidate refuses the loosening: {one_outside:?}"
+    );
 }
 
 #[test]
@@ -339,5 +407,39 @@ fn with_no_override_the_prompt_still_names_the_global_setting() {
             assert!(!r.contains("run.guards"), "no override decided this: {r}");
         }
         other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn every_entry_that_holds_a_plural_place_is_named() {
+    // §5: the prompt names the setting that turns it off. When two tightening
+    // entries each cover a different candidate, naming one is naming a switch
+    // that does not switch — removing it leaves the other candidate asking.
+    // The zone pass already names every tree that decided; the guard fold
+    // keeps only the first candidate to reach the winning rank.
+    let c = vouch::config::load(
+        "[lang.bash]\ndefault = \"allow\"\n[guards]\ndelete_recursive = \"allow\"\n\
+         [[run.guards]]\nunder = [\"C:/a/**\"]\ndelete_recursive = \"ask\"\n\
+         [[run.guards]]\nunder = [\"C:/b/**\"]\ndelete_recursive = \"ask\"",
+    )
+    .unwrap();
+    let d = decide_command_at(
+        &c,
+        "bash",
+        "cd C:/a || cd C:/b; rm -rf x",
+        None,
+        None,
+        Some("C:/a/start"),
+    );
+    match d {
+        Decision::Ask(r) => {
+            assert!(r.contains("C:/a/**"), "the first entry is named: {r}");
+            assert!(
+                r.contains("C:/b/**"),
+                "the other entry holding this line must be named too, or removing \
+                 the one that IS named leaves the ask standing: {r}"
+            );
+        }
+        other => panic!("both entries tighten this line: {other:?}"),
     }
 }

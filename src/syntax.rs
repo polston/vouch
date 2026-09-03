@@ -415,6 +415,20 @@ pub struct Scan {
     pub cmd_scope: Vec<Option<usize>>,
     /// Parallel to `redirect_targets`, same `None` semantics.
     pub redirect_scope: Vec<Option<usize>>,
+    /// The chain membership of the command a redirect hangs off, parallel to
+    /// `redirect_targets`. `None` = the redirect is not a chain member, the
+    /// same answer `Cmd::chain` gives for a lone statement.
+    ///
+    /// Its own channel rather than something recovered from the owning
+    /// command, because a redirect does not always HAVE an owning command:
+    /// a compound's redirect is anchored at the construct's position, and a
+    /// compound is not a `Cmd`, so the engine's owner lookup finds nothing
+    /// and falls back to placing the redirect by (scope, order) alone. Without
+    /// the chain that fallback cannot run `certifies()`, so an `&&`-proven
+    /// mover earlier on the line stays uncertified and the redirect is judged
+    /// over {moved, unmoved} instead of the one directory the shell is
+    /// provably in (M2.226 with M2.229 — neither is completable alone).
+    pub redirect_chain: Vec<Option<ChainPos>>,
     /// The next `HeredocId` `alloc_heredoc_id` hands out. Private: nothing
     /// outside this `impl` block has a reason to read the counter itself,
     /// only to ask for a fresh id or to merge one scan's range into
@@ -546,6 +560,16 @@ impl Scan {
             .extend(other.cmd_scope.into_iter().map(restamp_scope));
         self.redirect_scope
             .extend(other.redirect_scope.into_iter().map(restamp_scope));
+        // Chain ids get the same shift `commands` and `anchor_chain` get
+        // below and above: `other` numbered its chains from zero, so an
+        // unshifted id would name one of `self`'s chains instead.
+        self.redirect_chain
+            .extend(other.redirect_chain.into_iter().map(|c| {
+                c.map(|mut cp| {
+                    cp.id += chain_id_offset;
+                    cp
+                })
+            }));
         for c in other.constructs {
             self.note(&c);
         }
