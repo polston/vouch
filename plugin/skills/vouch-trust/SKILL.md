@@ -56,11 +56,19 @@ fields are only what the harness actually declares (rule 6 below).
    prefix, propose `[[run.trust_program]]`. This is whole-program recognition,
    not verb-scoped knowledge. A single observed filename is not evidence of a
    family, and a bare or PATH-resolved name cannot use this grant.
-3. **Destructive operations get no entry.** If the command's point is
-   deleting, force-pushing, or rewriting state, tell the operator vouch asks
-   about it on purpose and stop. Applies to a tool the same way: if its
-   DECLARED schema (never the name — rule 6) shows that is what it does,
-   propose no entry, same stop, same reason.
+3. **Destructive operations get an entry too — what they do not get is an
+   allow.** If the command's point is deleting, force-pushing, or rewriting
+   state, describe it and propose the rule that makes it ask by NAMING that
+   effect. Leaving it unmodelled is the wrong answer: the operator then gets
+   "vouch has never heard of this program" for the hundredth time, and the
+   only switch that prompt can name is the blanket that allows every unknown
+   program at once. A described destructive verb asks about the EFFECT and
+   names a switch scoped to it. Which guard, and whether the operator turns
+   it on, is theirs (rule 4 of the project's own invariants) — propose,
+   never invent, and never quietly pick `allow` to make a prompt go away.
+   Applies to a tool the same way: if its DECLARED schema (never the name —
+   rule 6) shows that is what it does, say so in the entry rather than
+   omitting the entry.
 4. **A name defined as a function in the same command gets no entry.** If
    the unrecognised name appears earlier in the very command as
    `name() { … }`, it is a shell function, not a program — vouch reporting
@@ -377,17 +385,24 @@ PY
 Three rules that only apply to the bulk case, and the first two are the ones
 that matter:
 
-1. **A frequency count is not a reason to describe something.** §3 still
-   binds every entry: a program that builds, installs, deploys or renders is
-   left unknown ON PURPOSE, however often it asks. On 2026-08-19 the top two
-   names in a day's traffic were a container tool and a toolchain installer
-   — both correctly undescribed, and describing them because they were noisy
-   would have been the §0 mistake in miniature.
+1. **A high count is the signal that a description is missing.**
+   `unmodeled_command` means a program vouch has never seen before just
+   showed up — a pause to evaluate something NEW, not a standing state. The
+   same program tripping it thousands of times is not the setting working; it
+   is a description nobody wrote, and its only off-switch allows EVERY
+   unknown program at once, which is the blanket §5 exists to prevent. A
+   program the operator actually runs gets described, in frequency order,
+   narrowest entry first: recognise only the verbs actually run, so an
+   unrecognised subcommand still asks (§2). What that does NOT license is
+   anything wider. Describing a program is recognition ONLY — it never claims
+   the program is harmless, guards and the write rules still decide what it
+   is handed, and a guard is never invented to justify a description (§4).
+   If a shape should ask, it asks because a rule says so.
 2. **Check the roadmap before minting entries.** A cluster of names often has
    a structural fix already queued, and hand-written entries would be work
-   the queue plans to delete. In the same measurement, most of the volume was
+   the queue plans to delete. In one such measurement most of the volume was
    python method names whose receiver vouch cannot yet track — which is a
    named roadmap item, not thirty entries waiting to be typed.
-3. What the count IS good for: telling the operator the price of a gap, and
-   ordering the queue. Report it as a number beside the roadmap row it
-   belongs to.
+3. What the count IS good for beyond ordering: telling the operator the price
+   of a gap that a queued structural fix will close. Report it as a number
+   beside the roadmap row it belongs to.

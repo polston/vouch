@@ -9,7 +9,7 @@
       "name": "vouch",
       "source": "./plugin",
       "description": "Skills for running vouch with Claude Code or Codex: evidence-first setup, read-only version status, verified release updates, and safe program recognition.",
-      "version": "0.17.1",
+      "version": "0.17.2",
       "keywords": [
         "permissions",
         "security",

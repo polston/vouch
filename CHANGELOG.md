@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.17.2 (2026-09-04)
+
+
+### Bug Fixes
+
+* the shipped knowledge's read-only section says where build, install and deploy tools do get described, instead of claiming they are not described at all
+* the vouch-trust skill now describes a destructive operation and proposes the rule that makes it ask by naming the effect, instead of directing you to leave it unrecognised
+
 ## 0.17.1 (2026-09-03)
 
 

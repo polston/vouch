@@ -34,7 +34,8 @@ calls, not a replacement for Codex's sandbox.
 
 **The judgment rules are `vouch-trust`'s hard rules, and that skill is the
 authority for them** — narrowest entry that covers the command, destructive
-operations get no entry, read a tool's declared schema rather than guessing
+operations get an entry and a rule that makes them ask by naming the effect
+rather than no entry at all, read a tool's declared schema rather than guessing
 from its name, nothing written without an accept. They are not restated here.
 This skill adds machine-level procedure, not a second philosophy. When a
 proposal in phase 4 is about recognising a program or a tool, follow

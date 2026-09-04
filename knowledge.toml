@@ -1934,10 +1934,18 @@ sub_arg_0_in = ["list", "remove"]
 #
 # An entry here is a claim: this program reads its inputs and writes only to
 # standard output. It is deliberately narrow. Programs that build, install,
-# deploy, or run other code are NOT here, because "described" would then be a
-# lie and an allow-list built on lies is worse than no allow-list at all.
+# deploy, or run other code do not belong in THIS section, because the
+# read-only claim would be a lie and an allow-list built on lies is worse than
+# no allow-list at all.
 #
-# Anything absent stays unknown, and under an allow-list unknown means ask.
+# They do still get described — elsewhere in this file, or in the operator's
+# own my-knowledge.toml — with rules that make their effects ask by name. What
+# is wrong is leaving a program nobody described: the prompt then says only
+# that vouch has never heard of it, and the one switch it can offer allows
+# EVERY unknown program at once.
+#
+# Anything absent stays unknown, and under an allow-list unknown means ask —
+# correct as a floor, and not a place a program in regular use should stay.
 # ============================================================================
 
 # Text in, text out. None of these open a file for writing.
