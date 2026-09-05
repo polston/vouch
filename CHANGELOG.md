@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.17.3 (2026-09-05)
+
+
+### Bug Fixes
+
+* a brace form in a for-loop's value list raises its construct instead of passing unexamined
+* a command inside a subshell whose only content is a subshell is judged instead of allowed unseen, so a delete there reaches its guard and a write there reaches the write rules
+* a recursive delete inside an arithmetic for-loop asks on its guard, like the same delete written in a plain loop
+* an arithmetic expression carrying a command substitution asks instead of allowing a command whose text is absent from the line
+
 ## 0.17.2 (2026-09-04)
 
 

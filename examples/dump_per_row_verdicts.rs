@@ -2,10 +2,30 @@
 //! build's decisions against another's — an aggregate cannot see compensating
 //! moves.
 //!
-//! The decide call mirrors `replay_test`'s row-deciding line exactly
-//! (`decide_command_in` with `home = Some("C:/Users/dev")`, no project root) so
-//! this dump measures the same thing the replay measures — NOT `decide_bash`,
-//! which passes `home: None` and would silently measure something else.
+//! The decide call supplies a STATED working directory (`common::HOOK_HOME`),
+//! the way the census (`count_cd_order_shapes`) already does, and prints it
+//! with every result.
+//!
+//! It did not, until 2026-09-04, and that was M2.231: the call was
+//! `decide_command_in`, which is `decide_command_at(…, cwd: None)`. With no
+//! working directory a relative write has no base to compose against, so the
+//! `cd` walk, the candidate set and every run-place consumer were inert and
+//! this harness reported a confident 0 for every directory-placement change
+//! ever measured through it. A fabricated zero in the direction that looks
+//! like success is §6.5's confusion one layer up, and it silently weakened
+//! every no-op check taken with it.
+//!
+//! Two consequences, stated rather than left to be rediscovered. Numbers
+//! recorded against this dump BEFORE that date are about a `cwd: None` run and
+//! do not transfer. And it no longer mirrors `replay_test`'s row-deciding line,
+//! which still passes no cwd: they now answer deliberately different questions
+//! — the gated test pins an invariant, this harness measures movement — which
+//! is exactly why the judging directory is printed rather than assumed.
+//!
+//! The corpus row schema carries `cmd` and `verdict` and no directory, so the
+//! fixed cwd is a stated convention, not a reconstruction of where each row
+//! really ran. Recording a directory per row in the fixture builder is
+//! M2.231's larger half and stays open.
 //!
 //! The destination comes from `VOUCH_DUMP_PER_ROW` rather than a fixed path. That
 //! fixed M2.81, and the defect it recorded is worth keeping in view: this used to
@@ -99,20 +119,25 @@ fn main() {
     let mut out = String::new();
     let mut current = Vec::with_capacity(rows.len());
     for (i, r) in rows.iter().enumerate() {
-        let d = vouch::engine::decide_command_in(&cfg, "bash", &r.cmd, Some("C:/Users/dev"), None);
-        let (v, cause) = match d {
-            vouch::protocol::Decision::Allow(_) => ("allow", "allow"),
-            vouch::protocol::Decision::Ask(ref reason) => ("ask", movement_cause(reason)),
-            vouch::protocol::Decision::Deny(ref reason) => ("deny", movement_cause(reason)),
-            vouch::protocol::Decision::Abstain => ("abstain", "abstain"),
+        // Through the shared helper, not a hand-typed `decide_command_at`.
+        // That helper exists for exactly the drift M2.231 turned out to be —
+        // its own doc says so — and the census this harness is now aligned
+        // with already calls it. Fixing the missing cwd by retyping the call
+        // would have left a second copy for the next signature change to miss.
+        let (v, reason) = common::decision_at(&cfg, &r.cmd, common::HOOK_HOME);
+        let cause = match v.as_str() {
+            "allow" => "allow",
+            "abstain" => "abstain",
+            _ => movement_cause(&reason),
         };
         out.push_str(&format!("{{\"i\":{i},\"verdict\":\"{v}\"}}\n"));
         current.push((v, cause));
     }
     std::fs::write(&path, out).unwrap();
     println!(
-        "MEASURE per-row dump written to {path}: {} rows, under {which}",
-        rows.len()
+        "MEASURE per-row dump written to {path}: {} rows, under {which}, judged at {}",
+        rows.len(),
+        common::HOOK_HOME
     );
 
     if let Ok(baseline) = std::env::var("VOUCH_DUMP_COMPARE") {
@@ -131,8 +156,8 @@ fn main() {
                 _ => panic!("baseline row has a known verdict"),
             };
             let (new, cause) = current.get(i).expect("baseline has no extra rows");
-            if old != *new {
-                *transitions.entry((old, *new, *cause)).or_default() += 1;
+            if old != new.as_str() {
+                *transitions.entry((old, new.as_str(), *cause)).or_default() += 1;
             }
             baseline_rows += 1;
         }
@@ -141,11 +166,18 @@ fn main() {
             current.len(),
             "baseline and tip row counts differ"
         );
+        // The judging directory is repeated on the movement line on purpose:
+        // a transition count that does not say where it was judged is a number
+        // nobody can reproduce, and this line is the one most often quoted on
+        // its own (M2.231).
         if transitions.is_empty() {
-            println!("MEASURE movement: 0 rows");
+            println!("MEASURE movement: 0 rows (judged at {})", common::HOOK_HOME);
         }
         for ((old, new, cause), count) in transitions {
-            println!("MEASURE movement {old}->{new} via {cause}: {count} rows");
+            println!(
+                "MEASURE movement {old}->{new} via {cause}: {count} rows (judged at {})",
+                common::HOOK_HOME
+            );
         }
     }
 }

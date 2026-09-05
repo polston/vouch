@@ -475,10 +475,7 @@ pub fn expand_braces(raw: &str) -> Braces {
 }
 
 pub fn parse(cmd: &str) -> Result<Parsed, String> {
-    let options = brush_parser::ParserOptions::default();
-    let mut parser = brush_parser::Parser::new(std::io::Cursor::new(cmd), &options);
-    let program = parser
-        .parse_program()
+    let program = parse_source(cmd)
         .map_err(|e| format!("{e}").lines().next().unwrap_or("parse error").to_string())?;
 
     let mut out = Parsed::default();
@@ -488,7 +485,7 @@ pub fn parse(cmd: &str) -> Result<Parsed, String> {
     // an inner `if a && b; then …` chain can never collide with an outer one.
     let mut chain_counter = 0u32;
     for cc in &program.complete_commands {
-        walk_compound_list(cc, &mut out, &mut counter, false, &mut chain_counter, 0);
+        walk_compound_list(cc, &mut out, &mut counter, false, &mut chain_counter, 0, cmd);
     }
     Ok(out)
 }
@@ -549,13 +546,14 @@ fn walk_compound_list(
     unordered: bool,
     chain_counter: &mut u32,
     scope: usize,
+    src: &str,
 ) {
     for item in &list.0 {
         let async_item = matches!(item.1, ast::SeparatorOperator::Async);
         if async_item {
             out.note("background");
         }
-        walk_and_or_list(&item.0, out, counter, unordered, chain_counter, scope, async_item);
+        walk_and_or_list(&item.0, out, counter, unordered, chain_counter, scope, async_item, src);
     }
 }
 
@@ -582,6 +580,7 @@ fn walk_and_or_list(
     chain_counter: &mut u32,
     scope: usize,
     async_list: bool,
+    src: &str,
 ) {
     let mut unordered = base_unordered;
     // A linkless list is not a chain — except when its sole pipeline is
@@ -624,7 +623,7 @@ fn walk_and_or_list(
         and_run_from,
         negated: list.first.bang,
     });
-    walk_pipeline(&list.first, out, counter, unordered, first_pos, chain_counter, scope, boundary_for(idx));
+    walk_pipeline(&list.first, out, counter, unordered, first_pos, chain_counter, scope, boundary_for(idx), src);
     idx += 1;
     for ao in &list.additional {
         match ao {
@@ -635,11 +634,11 @@ fn walk_and_or_list(
                 unordered = true;
                 and_run_from = idx;
                 let pos = id.map(|id| crate::syntax::ChainPos { id, idx, and_run_from, negated: p.bang });
-                walk_pipeline(p, out, counter, unordered, pos, chain_counter, scope, boundary_for(idx));
+                walk_pipeline(p, out, counter, unordered, pos, chain_counter, scope, boundary_for(idx), src);
             }
             ast::AndOr::And(p) => {
                 let pos = id.map(|id| crate::syntax::ChainPos { id, idx, and_run_from, negated: p.bang });
-                walk_pipeline(p, out, counter, unordered, pos, chain_counter, scope, boundary_for(idx));
+                walk_pipeline(p, out, counter, unordered, pos, chain_counter, scope, boundary_for(idx), src);
             }
         }
         idx += 1;
@@ -662,6 +661,7 @@ fn walk_pipeline(
     chain_counter: &mut u32,
     scope: usize,
     async_boundary: Option<crate::syntax::ScopeKind>,
+    src: &str,
 ) {
     if let Some(kind) = async_boundary {
         let anchor = own_order(counter, base_unordered);
@@ -671,7 +671,7 @@ fn walk_pipeline(
         };
         let wrapper = alloc_scope(out, scope, kind, class, anchor, chain);
         let mut local_counter = 0u32;
-        walk_pipeline(p, out, &mut local_counter, false, chain, chain_counter, wrapper, None);
+        walk_pipeline(p, out, &mut local_counter, false, chain, chain_counter, wrapper, None, src);
         return;
     }
     // A pipeline runs its members concurrently; with more than one member
@@ -698,11 +698,11 @@ fn walk_pipeline(
             // own standard input is whatever the pipeline as a whole was
             // given. Every piped stage shares the SAME `chain` value — they
             // are one chain member, not several (`ChainPos` doc).
-            walk_command(cmd, out, &mut local_counter, false, i > 0, chain, chain_counter, member_scope);
+            walk_command(cmd, out, &mut local_counter, false, i > 0, chain, chain_counter, member_scope, src);
         }
     } else {
         for (i, cmd) in p.seq.iter().enumerate() {
-            walk_command(cmd, out, counter, base_unordered, i > 0, chain, chain_counter, scope);
+            walk_command(cmd, out, counter, base_unordered, i > 0, chain, chain_counter, scope, src);
         }
     }
 }
@@ -716,10 +716,11 @@ fn walk_command(
     chain: Option<crate::syntax::ChainPos>,
     chain_counter: &mut u32,
     scope: usize,
+    src: &str,
 ) {
     match cmd {
         ast::Command::Simple(sc) => {
-            walk_simple(sc, out, counter, unordered, pipe_input, chain, chain_counter, scope)
+            walk_simple(sc, out, counter, unordered, pipe_input, chain, chain_counter, scope, src)
         }
         ast::Command::Compound(cc, redirects) => {
             // The construct's own position in ITS enclosing scope, captured
@@ -733,7 +734,7 @@ fn walk_command(
                 anchor_order: anchor_order.clone(),
                 anchor_chain: chain,
             };
-            let range = walk_compound(cc, out, chain_counter, scoping);
+            let range = walk_compound(cc, out, chain_counter, scoping, src);
             let mut own_stdin: Option<crate::syntax::InputSource> = None;
             if let Some(list) = redirects {
                 for r in &list.0 {
@@ -763,6 +764,7 @@ fn walk_command(
                         chain_counter,
                         scope,
                         chain,
+                        src,
                     )
                     {
                         own_stdin = Some(claimed);
@@ -786,7 +788,7 @@ fn walk_command(
             // resolved a source of its OWN untouched. It is not a body/process
             // boundary of its own — `Passthrough` walks it straight into the
             // scope the definition itself sits in, unchanged from today.
-            let range = walk_compound(&f.body.0, out, chain_counter, BodyScoping::Passthrough { scope });
+            let range = walk_compound(&f.body.0, out, chain_counter, BodyScoping::Passthrough { scope }, src);
             blank_inherited_input(out, range);
         }
         ast::Command::ExtendedTest(_, redirects) => {
@@ -797,7 +799,7 @@ fn walk_command(
                     // own either — same `None` as the compound-body arm above.
                     // It pushes no commands, so whatever its redirects claim
                     // about standard input has no occurrence to belong to.
-                    walk_redirect(r, out, order, None, chain_counter, scope, chain);
+                    walk_redirect(r, out, order, None, chain_counter, scope, chain, src);
                 }
             }
         }
@@ -895,6 +897,7 @@ fn walk_compound(
     out: &mut Parsed,
     chain_counter: &mut u32,
     scoping: BodyScoping,
+    src: &str,
 ) -> std::ops::Range<usize> {
     let start = out.commands.len();
     let unordered = scoping.children_unordered();
@@ -902,55 +905,73 @@ fn walk_compound(
         ast::CompoundCommand::BraceGroup(bg) => {
             let s = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::Brace));
             let mut counter = 0u32;
-            walk_compound_list(&bg.list, out, &mut counter, unordered, chain_counter, s);
+            walk_compound_list(&bg.list, out, &mut counter, unordered, chain_counter, s, src);
         }
         ast::CompoundCommand::Subshell(sub) => {
-            out.note("subshell");
-            let s = scoping.enter(out, crate::syntax::ScopeKind::ProcessBoundary, None);
-            let mut counter = 0u32;
-            walk_compound_list(&sub.list, out, &mut counter, unordered, chain_counter, s);
+            walk_subshell(std::iter::once(&sub.list), out, chain_counter, scoping, unordered, src);
         }
         ast::CompoundCommand::ForClause(f) => {
+            // The words after `in` are classified where they stand (M2.155).
+            // They reached no walker at all before this, so a brace form in a
+            // value list was silent while the identical token in a head or an
+            // argument raised its construct — and a word vouch never looks at
+            // is always silent, whatever it holds. A value list is not an
+            // argument to anything, so this records nothing.
+            //
+            // It raises only on `Rewritten`, NOT on the redirect-target
+            // treatment's "anything but literal". That difference is the
+            // construct's own contract — a simple comma list IS reproduced, so
+            // it raises nothing — and a redirect target only departs from it
+            // because a redirect must resolve to exactly one path, which has
+            // nothing to say about a loop's value list. Measured, not
+            // reasoned: the wider treatment was written first and moved two
+            // real corpus rows to ask over a plain comma list of filenames,
+            // which is the false positive §6.2's count exists to catch.
+            for w in f.values.iter().flatten() {
+                if matches!(expand_braces(&w.value), Braces::Rewritten) {
+                    out.note(BRACE_EXPANSION);
+                }
+            }
             let s = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::LoopBody));
             let mut counter = 0u32;
-            walk_compound_list(&f.body.list, out, &mut counter, unordered, chain_counter, s);
+            walk_compound_list(&f.body.list, out, &mut counter, unordered, chain_counter, s, src);
         }
         ast::CompoundCommand::CaseClause(c) => {
             for item in &c.cases {
                 if let Some(body) = &item.cmd {
                     let s = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::BranchBody));
                     let mut counter = 0u32;
-                    walk_compound_list(body, out, &mut counter, unordered, chain_counter, s);
+                    walk_compound_list(body, out, &mut counter, unordered, chain_counter, s, src);
                 }
             }
         }
         ast::CompoundCommand::IfClause(i) => {
             let cond_scope = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::CondList));
             let mut cond_counter = 0u32;
-            walk_compound_list(&i.condition, out, &mut cond_counter, unordered, chain_counter, cond_scope);
+            walk_compound_list(&i.condition, out, &mut cond_counter, unordered, chain_counter, cond_scope, src);
             let then_scope = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::ThenBody));
             let mut then_counter = 0u32;
-            walk_compound_list(&i.then, out, &mut then_counter, unordered, chain_counter, then_scope);
+            walk_compound_list(&i.then, out, &mut then_counter, unordered, chain_counter, then_scope, src);
             if let Some(elses) = &i.elses {
                 for e in elses {
                     if let Some(cond) = &e.condition {
                         let s = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::ElifCond));
                         let mut counter = 0u32;
-                        walk_compound_list(cond, out, &mut counter, unordered, chain_counter, s);
+                        walk_compound_list(cond, out, &mut counter, unordered, chain_counter, s, src);
                     }
                     let s = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::BranchBody));
                     let mut counter = 0u32;
-                    walk_compound_list(&e.body, out, &mut counter, unordered, chain_counter, s);
+                    walk_compound_list(&e.body, out, &mut counter, unordered, chain_counter, s, src);
                 }
             }
         }
         ast::CompoundCommand::WhileClause(w) | ast::CompoundCommand::UntilClause(w) => {
             let cond_scope = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::LoopCond));
             let mut cond_counter = 0u32;
-            walk_compound_list(&w.0, out, &mut cond_counter, unordered, chain_counter, cond_scope);
+            walk_compound_list(&w.0, out, &mut cond_counter, unordered, chain_counter, cond_scope, src);
             let body_scope = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::LoopBody));
             let mut body_counter = 0u32;
-            walk_compound_list(&w.1.list, out, &mut body_counter, unordered, chain_counter, body_scope);
+            walk_compound_list(&w.1.list, out, &mut body_counter, unordered, chain_counter, body_scope, src);
         }
         ast::CompoundCommand::Coprocess(c) => {
             out.note("background");
@@ -963,12 +984,107 @@ fn walk_compound(
             // and-or chain member — `chain: None`.
             let s = scoping.enter(out, crate::syntax::ScopeKind::ProcessBoundary, None);
             let mut counter = 0u32;
-            walk_command(&c.body, out, &mut counter, unordered, false, None, chain_counter, s);
+            walk_command(&c.body, out, &mut counter, unordered, false, None, chain_counter, s, src);
             blank_inherited_input(out, start..out.commands.len());
         }
-        ast::CompoundCommand::Arithmetic(_) | ast::CompoundCommand::ArithmeticForClause(_) => {}
+        ast::CompoundCommand::Arithmetic(a) => {
+            // Which of the two things this node is comes from the SOURCE
+            // SPELLING, because that is bash's own rule rather than a
+            // heuristic: `((` opens an arithmetic evaluation, and `( (` opens
+            // a subshell containing a subshell. brush hands both over as this
+            // one node, so without the source they are indistinguishable —
+            // `rm -rf /tmp/x` is also syntactically valid arithmetic (`rm`
+            // minus `rf` divided by `tmp` divided by `x`), which is exactly
+            // how an earlier token-shape rule let a recursive delete through.
+            match arithmetic_opening(src, a.loc.start.index) {
+                // A subshell the parser read as arithmetic. Read it as the
+                // command list it is, in a process-boundary scope, the same
+                // treatment the Subshell arm gives its own body (M2.222).
+                //
+                // Recursion terminates without a depth counter: the text
+                // handed over is what sat BETWEEN the parentheses, so it
+                // strictly shrinks at every level.
+                Opening::NestedSubshell => match parse_program(&a.expr.value) {
+                    Some(program) => walk_subshell(
+                        &program.complete_commands,
+                        out,
+                        chain_counter,
+                        scoping,
+                        unordered,
+                        &a.expr.value,
+                    ),
+                    // Spelled as a nested subshell and not parseable as one.
+                    // Saying so is the point; falling through would restore
+                    // the silence this row exists to remove.
+                    None => out.note("parse_failure"),
+                },
+                Opening::Arithmetic => {
+                    // Real arithmetic runs no command and writes nothing, so
+                    // it says nothing — unless it carries a substitution,
+                    // which really does run a command whose text is absent
+                    // from the line, or is empty, which means the parser
+                    // produced nothing for text that was plainly there.
+                    let e = a.expr.value.trim();
+                    if e.is_empty() || has_command_substitution(e) {
+                        out.note("parse_failure");
+                    }
+                }
+                // The source did not say. Fail closed rather than pick one.
+                Opening::Unknown => out.note("parse_failure"),
+            }
+        }
+        ast::CompoundCommand::ArithmeticForClause(f) => {
+            // The body holds real commands and is walked exactly as a plain
+            // `for` body is — the same `LoopBody` class, the same fresh local
+            // counter. Leaving this arm empty is what hid `rm -rf` inside an
+            // arithmetic loop from recognition, guards and the write rules at
+            // once (M2.224): an empty arm pushes nothing, so the line fell
+            // through to the language default and the miss was
+            // indistinguishable from there being nothing to report.
+            let s = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::LoopBody));
+            let mut counter = 0u32;
+            walk_compound_list(&f.body.list, out, &mut counter, unordered, chain_counter, s, src);
+            // The three clauses are arithmetic TEXT, not commands, so they get
+            // the classifier rather than a walk. A clause that is provably not
+            // arithmetic is not recovered as a command the way `((…))` is: a
+            // for-loop's own clauses are evaluated as arithmetic by bash
+            // whatever they contain, so reading one as a command would be a
+            // claim about a thing that never runs.
+            for e in [&f.initializer, &f.condition, &f.updater].into_iter().flatten() {
+                if has_command_substitution(&e.value) {
+                    out.note("parse_failure");
+                }
+            }
+        }
     }
     start..out.commands.len()
+}
+
+/// Walk one or more command lists as a subshell body: the construct note, a
+/// fresh process-boundary scope, and a local counter.
+///
+/// Shared by the `Subshell` arm and the nested-subshell recovery rather than
+/// written twice. The design claims the recovered nest is treated "exactly as
+/// the Subshell arm walks its own body"; two hand-written copies made that
+/// true only for as long as nobody edited one of them.
+///
+/// `src` is a parameter rather than the caller's own, because the recovery
+/// passes the RECOVERED text: spans inside a re-parsed program are relative to
+/// the text it was parsed from, never to the outer line.
+fn walk_subshell<'a>(
+    lists: impl IntoIterator<Item = &'a ast::CompoundList>,
+    out: &mut Parsed,
+    chain_counter: &mut u32,
+    scoping: BodyScoping,
+    unordered: bool,
+    src: &str,
+) {
+    out.note("subshell");
+    let s = scoping.enter(out, crate::syntax::ScopeKind::ProcessBoundary, None);
+    let mut counter = 0u32;
+    for list in lists {
+        walk_compound_list(list, out, &mut counter, unordered, chain_counter, s, src);
+    }
 }
 
 /// `pipe_input` is true when this command is a pipeline member other than the
@@ -984,6 +1100,7 @@ fn walk_simple(
     chain: Option<crate::syntax::ChainPos>,
     chain_counter: &mut u32,
     scope: usize,
+    src: &str,
 ) {
     let mut cmd = Cmd::default();
     cmd.chain = chain;
@@ -1046,10 +1163,10 @@ fn walk_simple(
         Order::Unordered
     };
     if let Some(prefix) = &sc.prefix {
-        walk_items(&prefix.0, out, &mut cmd, false, order.clone(), &mut landing, chain_counter, scope);
+        walk_items(&prefix.0, out, &mut cmd, false, order.clone(), &mut landing, chain_counter, scope, src);
     }
     if let Some(suffix) = &sc.suffix {
-        walk_items(&suffix.0, out, &mut cmd, true, order.clone(), &mut landing, chain_counter, scope);
+        walk_items(&suffix.0, out, &mut cmd, true, order.clone(), &mut landing, chain_counter, scope, src);
     }
     if !cmd.head.is_empty() {
         // `landing.stdin` already carries the correct, final
@@ -1150,6 +1267,7 @@ fn walk_items(
     landing: &mut Landing,
     chain_counter: &mut u32,
     scope: usize,
+    src: &str,
 ) {
     for item in items {
         match item {
@@ -1158,7 +1276,7 @@ fn walk_items(
                 // consume it; otherwise it keeps the construct note.
                 let records = (!cmd.head.is_empty()).then_some(&mut landing.pending);
                 if let Some(claimed) =
-                    walk_redirect(r, out, order.clone(), records, chain_counter, scope, cmd.chain)
+                    walk_redirect(r, out, order.clone(), records, chain_counter, scope, cmd.chain, src)
                 {
                     // The LAST redirect resolving to descriptor 0 wins, which is
                     // the shell's own rule.
@@ -1187,7 +1305,7 @@ fn walk_items(
                     cmd.chain,
                 );
                 let mut counter = 0u32;
-                walk_compound_list(&s.list, out, &mut counter, false, chain_counter, sub_scope);
+                walk_compound_list(&s.list, out, &mut counter, false, chain_counter, sub_scope, src);
             }
             // A command substitution runs a command in a subshell, whether it
             // appears as an argument or on the right of an assignment. Both count.
@@ -1283,6 +1401,60 @@ fn note_target_braces(out: &mut Parsed, raw: &str) {
     }
 }
 
+/// Which construct a node the parser called arithmetic was actually written as.
+pub(crate) enum Opening {
+    /// `((` — an arithmetic evaluation, exactly as bash reads it.
+    Arithmetic,
+    /// `( (` — a subshell whose only content is a subshell. bash runs this;
+    /// checked against bash 5.2, which really writes the file for
+    /// `( ( echo A > f ) )`.
+    NestedSubshell,
+    /// The source did not answer, so neither does vouch.
+    Unknown,
+}
+
+/// Read the two opening characters of an arithmetic-looking node.
+///
+/// Indexed by CHARACTER rather than by byte: the span type documents its
+/// length as a count of characters, and slicing a multi-byte source by a
+/// character index would either misalign or silently return nothing.
+pub(crate) fn arithmetic_opening(src: &str, start: usize) -> Opening {
+    let mut it = src.chars().skip(start);
+    if it.next() != Some('(') {
+        return Opening::Unknown;
+    }
+    match it.next() {
+        Some('(') => Opening::Arithmetic,
+        Some(c) if c.is_whitespace() => {
+            // Any run of whitespace, then the inner open paren. Anything else
+            // is a spelling this reading does not cover, and guessing at it is
+            // what the Unknown arm exists to avoid.
+            let mut rest = it.skip_while(|c| c.is_whitespace());
+            match rest.next() {
+                Some('(') => Opening::NestedSubshell,
+                _ => Opening::Unknown,
+            }
+        }
+        _ => Opening::Unknown,
+    }
+}
+
+/// The one parser construction in this file. Both entry points go through it,
+/// so a future change to the options cannot reach `parse` and miss the
+/// recovered-text re-read — which a comment saying "keep these in sync" was
+/// the only thing preventing.
+fn parse_source(text: &str) -> Result<brush_parser::ast::Program, brush_parser::ParseError> {
+    let options = brush_parser::ParserOptions::default();
+    let mut parser = brush_parser::Parser::new(std::io::Cursor::new(text), &options);
+    parser.parse_program()
+}
+
+/// The same parse, for a caller that has no error to report — a re-read of
+/// text the walk recovered, whose failure is already a construct.
+fn parse_program(text: &str) -> Option<brush_parser::ast::Program> {
+    parse_source(text).ok()
+}
+
 /// `<<-` strips leading TAB characters (not spaces, and not from the middle
 /// of a line) from every line of the body — the parser keeps them in the AST
 /// (`IoHereDocument::doc`) rather than removing them itself, so text prep has
@@ -1323,6 +1495,7 @@ fn walk_redirect(
     chain_counter: &mut u32,
     scope: usize,
     chain: Option<crate::syntax::ChainPos>,
+    src: &str,
 ) -> Option<crate::syntax::InputSource> {
     use crate::syntax::InputSource;
     let mut claims_stdin = None;
@@ -1397,7 +1570,7 @@ fn walk_redirect(
                         chain,
                     );
                     let mut counter = 0u32;
-                    walk_compound_list(&s.list, out, &mut counter, false, chain_counter, sub_scope);
+                    walk_compound_list(&s.list, out, &mut counter, false, chain_counter, sub_scope, src);
                 }
                 // `>&word` duplicates a descriptor only when the word IS a
                 // descriptor — a number, or `-` for close. With a NAME there
