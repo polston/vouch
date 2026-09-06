@@ -94,10 +94,15 @@ wrap_unlocated = "ask"
 # ambiguity outright.
 wrap_ambiguous = "ask"
 # A wrap arm located a snippet in a language vouch has no scanner for --
-# opaque interpreters (node -e, awk's program text), cmd.exe batch, or any
-# other unscannable language. Every one of these asks, including a
-# harmless-looking read-only one: vouch cannot tell a printing awk program
-# from a writing one, so this is the honest cost of not reading it.
+# cmd.exe batch, or a language vouch does not model at all. Every one of
+# these asks, including a harmless-looking read-only one: vouch cannot tell
+# a printing program from a writing one, so this is the honest cost of not
+# reading it.
+#
+# Languages vouch can NAME but not read are keyed to their own name rather
+# than to this one, so their off-switches are separate: node -e is
+# lang.javascript, an awk program is lang.awk, and perl -e is lang.perl.
+# Set those individually -- allowing this one does not allow those.
 unreadable_language = "ask"
 # A wrapper runs a command with arguments it reads from standard input or from
 # a file (xargs), so what that command acts on is not on the line. Raised only

@@ -586,3 +586,116 @@ fn one_commands_located_snippet_does_not_silence_anothers_pipe() {
         other => panic!("a sibling's located snippet silenced a real pipe: {other:?}"),
     }
 }
+
+// ============================================================================
+// M2.242 — a snippet language's off-switch must name that language, not a
+// blanket shared with every other language vouch has no scanner for
+// ============================================================================
+
+/// The config text every test in this family shares: the host language allows
+/// its own constructs, so the only thing that can decide the outcome is the
+/// SNIPPET language's key.
+fn host_allows_plus(snippet_lang_table: &str) -> vouch::config::Config {
+    load(&format!(
+        "version = 1\n[lang.bash]\ndefault = \"allow\"\n\
+         [lang.bash.constructs]\nunmodeled_command = \"allow\"\n\
+         {snippet_lang_table}\
+         [write]\ndefault = \"ask\"\n"
+    ))
+    .expect("parses")
+}
+
+/// `node -e` hands off javascript. Both halves of vouch already agreed this
+/// construct is `unreadable_language` (M2.79); they disagreed about its KEY,
+/// because a `[[tool.snippet]]` declares `language = "javascript"` directly
+/// while the node entry declared the wrap language as `opaque`.
+///
+/// The comments in `src/guards.rs` and `src/route.rs` both assert the
+/// behaviour this test pins — that allowing javascript allows it "in any tool
+/// AND in any wrapped shell command alike". They were false until this
+/// changeset.
+#[test]
+fn a_javascript_snippet_names_javascripts_own_setting() {
+    let cfg = host_allows_plus(
+        "[lang.javascript]\ndefault = \"allow\"\n\
+         [lang.javascript.constructs]\nunreadable_language = \"allow\"\n",
+    );
+    match decide_command_in(&cfg, "bash", r#"node -e "console.log(1)""#, Some("C:/Users/dev"), None) {
+        Decision::Allow(r) => assert!(
+            r.contains("lang.javascript.constructs.unreadable_language"),
+            "allowed for the wrong reason: {r}"
+        ),
+        other => panic!("expected Allow keyed to javascript, got {other:?}"),
+    }
+}
+
+/// awk is the language that made this worth doing: 561 of the 648 corpus
+/// occurrences sharing the old blanket key were awk, so the one setting an
+/// operator reaches for to stop awk noise was silencing perl and javascript
+/// with it.
+#[test]
+fn an_awk_program_names_awks_own_setting() {
+    let cfg = host_allows_plus(
+        "[lang.awk]\ndefault = \"allow\"\n\
+         [lang.awk.constructs]\nunreadable_language = \"allow\"\n",
+    );
+    match decide_command_in(&cfg, "bash", "awk '{print $1}' f", Some("C:/Users/dev"), None) {
+        Decision::Allow(r) => assert!(
+            r.contains("lang.awk.constructs.unreadable_language"),
+            "allowed for the wrong reason: {r}"
+        ),
+        other => panic!("expected Allow keyed to awk, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_perl_one_liner_names_perls_own_setting() {
+    let cfg = host_allows_plus(
+        "[lang.perl]\ndefault = \"allow\"\n\
+         [lang.perl.constructs]\nunreadable_language = \"allow\"\n",
+    );
+    match decide_command_in(&cfg, "bash", r#"perl -e 'print 1'"#, Some("C:/Users/dev"), None) {
+        Decision::Allow(r) => assert!(
+            r.contains("lang.perl.constructs.unreadable_language"),
+            "allowed for the wrong reason: {r}"
+        ),
+        other => panic!("expected Allow keyed to perl, got {other:?}"),
+    }
+}
+
+/// The other direction, and the one that proves the split is real rather than
+/// three new names for one blanket: allowing awk does NOT allow javascript.
+/// Before this changeset both named `lang.opaque` and this allowed.
+#[test]
+fn allowing_one_snippet_language_does_not_silence_another() {
+    let cfg = host_allows_plus(
+        "[lang.awk]\ndefault = \"allow\"\n\
+         [lang.awk.constructs]\nunreadable_language = \"allow\"\n",
+    );
+    match decide_command_in(&cfg, "bash", r#"node -e "console.log(1)""#, Some("C:/Users/dev"), None) {
+        Decision::Ask(r) => assert!(
+            r.contains("lang.javascript.constructs.unreadable_language"),
+            "named the wrong language's setting: {r}"
+        ),
+        other => panic!("awk's setting silenced a javascript snippet: {other:?}"),
+    }
+}
+
+/// ruby keeps the `opaque` key deliberately: zero corpus occurrences, so
+/// naming it would be a claim with no evidence behind it (design §2). This
+/// pins that decision so a later sweep does not "finish the job" without
+/// re-counting.
+#[test]
+fn ruby_still_names_the_opaque_setting() {
+    let cfg = host_allows_plus(
+        "[lang.opaque]\ndefault = \"allow\"\n\
+         [lang.opaque.constructs]\nunreadable_language = \"allow\"\n",
+    );
+    match decide_command_in(&cfg, "bash", r#"ruby -e 'puts 1'"#, Some("C:/Users/dev"), None) {
+        Decision::Allow(r) => assert!(
+            r.contains("lang.opaque.constructs.unreadable_language"),
+            "allowed for the wrong reason: {r}"
+        ),
+        other => panic!("expected Allow keyed to opaque, got {other:?}"),
+    }
+}

@@ -186,14 +186,19 @@ pub struct Program {
     /// For `wraps = "after_flag"`: the flags whose value is the wrapped snippet.
     #[serde(default)]
     pub wrap_flags: Vec<String>,
-    /// Which language the wrapped snippet is written in: one of the scanner
-    /// languages (`bash`, `powershell`, `python`, `javascript`), or `opaque`
-    /// (a language vouch has no parser for at all) or `cmd` (cmd.exe batch —
-    /// not bash, so it is scanned no more than any other unscannable
-    /// language) — a closed set, checked in `knowledge::validate`. A
-    /// snippet in `opaque`, `cmd`, or any other unscannable language still
-    /// asks (`unreadable_language`, spec 2026-08-14 §5.2) rather than
-    /// passing unread.
+    /// Which language the wrapped snippet is written in: a scanner language
+    /// (`bash`, `powershell`, `python`), a language vouch recognises but
+    /// cannot read (`javascript`, `awk`, `perl`), `cmd` (cmd.exe batch — not
+    /// bash, so it is scanned no more than any other unreadable language), or
+    /// `opaque` (a language vouch does not model at all) — a closed set,
+    /// checked in `knowledge::validate`. A snippet vouch cannot read still
+    /// asks (`unreadable_language`, spec 2026-08-14 §5.2) rather than passing
+    /// unread.
+    ///
+    /// The named-but-unreadable group is not a scanner list and never was:
+    /// naming a language buys it its own `lang.<name>.constructs` off-switch,
+    /// so an operator silencing one unreadable language does not silence the
+    /// rest. `opaque` is what remains when vouch has no name to offer.
     ///
     /// Required for the three arms that scan TEXT (`wraps` = `"after_c"`,
     /// `"after_flag"`, or `"arg_<N>"`) — leaving it unset there used to fall
@@ -1935,7 +1940,7 @@ pub fn evaluates_input_in(
     standalone_eligible: bool,
 ) -> (bool, Option<String>, Option<StandaloneHint>) {
     for prog in entries_for_cmd(kb, cmd, lang) {
-        let wrap_lang = (!prog.wrap_lang.is_empty()).then(|| prog.wrap_lang.clone());
+        let wrap_lang = wrap_lang_opt(prog);
         match prog.evaluates_input.as_str() {
             // Untouched by the `holds_input` flag on purpose: an always-entry
             // runs computed text whatever its standard input holds, so no
@@ -2135,7 +2140,7 @@ pub fn runs_file_positional(kb: &Knowledge, cmd: &Cmd) -> (bool, Option<String>)
             continue;
         }
         if runs_file_in(prog, &cmd.args) {
-            return (true, (!prog.wrap_lang.is_empty()).then(|| prog.wrap_lang.clone()));
+            return (true, wrap_lang_opt(prog));
         }
     }
     (false, None)
@@ -2769,6 +2774,17 @@ pub fn heredoc_feeds<'k>(
             continue;
         }
         if prog.evaluates_input != "stdin" || !reads_stdin(cmd) {
+            continue;
+        }
+        // The entry's own recognition scope, asked through the same predicate
+        // `evaluates_input_in` uses. Reading `evaluates_input` alone made this
+        // a second implementation of one question: an entry scoped to its
+        // script-running verbs is claiming something about THOSE verbs, so a
+        // here-document on a verb it does not cover was being consumed on a
+        // claim the entry never made (M2.240). Fail-closed before this fix —
+        // the locator scanned a body it need not have scanned, and never stood
+        // a construct down that should have fired.
+        if !entry_covers(prog, cmd, entry_subcommand(prog, cmd, lang), lang) {
             continue;
         }
         // Rule 3, and the SAME test `holds_input` rule 2 applies one layer
@@ -3826,6 +3842,26 @@ fn start_process_args(prog: &Program, args: &[String]) -> ListPayload {
                  vouch cannot read"
             ));
         }
+        // The same unreadable payload reached by a different spelling: a
+        // variable rather than a literal. Without this the item became the
+        // single token `$list`, the rebuilt inner command found no `-Command`,
+        // and the arm reported that the wrapper wrapped NOTHING — the one
+        // answer §3.1 says it must never give, since a list vouch cannot
+        // attach a program to is unlocated, not absent (M2.138).
+        //
+        // Every spelling is refused, including the single-quoted one that
+        // PowerShell would pass through verbatim: the scanner removes quoting
+        // before a token reaches here, so `$list`, `"$list"` and `'$list'` are
+        // one string and the literal case is not recoverable from the text.
+        // Telling them apart needs the scanner to mark expansion out of band,
+        // the way python already marks computed argument positions (M2.245).
+        // Until then this over-refuses in the fail-closed direction only.
+        if carries_expansion(raw) {
+            return ListPayload::Unlocated(format!(
+                "the argument list item `{raw}` is a variable, so what the wrapper is handed \
+                 is decided when the command runs and is not in the command text"
+            ));
+        }
         if !matches!(
             crate::flags::classify(raw, &vocab),
             crate::flags::Class::NotFlag | crate::flags::Class::Undescribed { .. }
@@ -4599,13 +4635,30 @@ struct WalkOut {
 }
 
 /// Builds one `constructs` entry attributed to the HOST language — the
-/// `None` third member every wrap arm pushes except the one that already
-/// names a located snippet's own `wrap_lang` (`scan_wrap_snippet`'s
-/// `unreadable_language` push, which stays a literal `Some(lang)` at its own
-/// call site). States the meaning out loud rather than leaving a bare
-/// positional `None` for the reader to attribute by habit.
+/// `None` third member every wrap arm pushes except the two that name the
+/// occurrence's own `wrap_lang` instead, each a literal tuple at its own call
+/// site: `scan_wrap_snippet`'s `unreadable_language` push, and the `arg_<N>`
+/// arm's `evaluated_input` push for a command string it could not read
+/// (M2.240). States the meaning out loud rather than leaving a bare positional
+/// `None` for the reader to attribute by habit.
+///
+/// Both exceptions go through `wrap_lang_opt` below, so an entry that declares
+/// no language falls back to this same host attribution rather than keying a
+/// construct to the empty string.
 fn host_construct(key: &str, detail: impl Into<String>) -> (String, String, Option<String>) {
     (key.to_string(), detail.into(), None)
+}
+
+/// An entry's declared wrap language, with the empty-string sentinel read as
+/// the absent claim it is.
+///
+/// `Program::wrap_lang` is a plain `String` because that is what the TOML
+/// deserializer produces for an absent key, so every reader has to translate
+/// "" into "this entry declares no language" before keying anything to it.
+/// Three readers do, and they must agree: a construct keyed to "" would name
+/// `lang..constructs.<name>`, a setting no operator can write.
+fn wrap_lang_opt(prog: &Program) -> Option<String> {
+    (!prog.wrap_lang.is_empty()).then(|| prog.wrap_lang.clone())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4937,13 +4990,27 @@ pub fn expand_wrappers_forking(
                                 scan
                             }
                             Some(_) => {
-                                out.constructs.push(host_construct(
-                                    "evaluated_input",
+                                // Keyed to the OCCURRENCE's own declared wrap
+                                // language rather than the host line's, the way
+                                // `scan_wrap_snippet` already keys its three
+                                // `unreadable_language` sites. `host_construct`
+                                // supplies `None`, which attributes the ask to
+                                // whatever language the outer line happened to
+                                // be — the fourth site of the class M2.79 made
+                                // the first three consistent on (M2.240).
+                                //
+                                // Latent until an entry's wrap language differs
+                                // from its host's: the shipped
+                                // `python:os.system` declares bash, so the two
+                                // keys coincide whenever the host is bash.
+                                out.constructs.push((
+                                    "evaluated_input".to_string(),
                                     format!(
                                         "`{}` is handed a command string vouch could not read the \
                                      value of",
                                         cmd.head
                                     ),
+                                    wrap_lang_opt(prog),
                                 ));
                                 SnippetScan::default()
                             }

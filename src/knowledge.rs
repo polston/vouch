@@ -250,7 +250,16 @@ const PROGRAM_LANGUAGE_SCOPES: &[&str] = &["bash", "powershell"];
 /// automatically; this separate list names recognised but unscannable
 /// languages. A name outside both sets is a typo, not a future scanner, and
 /// must fail before it reaches the engine's no-scanner abstain arm.
-const UNSCANNED_SNIPPET_LANGUAGES: &[&str] = &["javascript"];
+///
+/// Membership is what vouch is prepared to SAY in a prompt, not what it can
+/// read: none of these three has a scanner. `awk` and `perl` joined
+/// `javascript` because a name here is what gives a snippet language its own
+/// off-switch — while they shared `opaque`, one setting silenced all of them
+/// at once, and 561 of the 648 corpus occurrences behind that one key were awk
+/// (M2.242). `ruby` is deliberately absent: zero corpus occurrences, so naming
+/// it would be a claim with nothing behind it, and `opaque` has to keep meaning
+/// something.
+const UNSCANNED_SNIPPET_LANGUAGES: &[&str] = &["javascript", "awk", "perl"];
 
 /// Every recognised snippet language, in stable diagnostic order.
 pub fn snippet_languages() -> impl Iterator<Item = &'static str> + Clone {
@@ -383,8 +392,21 @@ fn scope_of(languages: &[String]) -> HashSet<String> {
 /// loud refusal instead. Structured tool `write_path` declarations and the
 /// `apply_patch` path-envelope format take it to 9. Value-origin producer and
 /// receiver claims (`produces`, `receiver_from`) take it to 10. Structured
-/// nested recognition paths (`subcommand_paths`) take it to 11.
-pub const KNOWLEDGE_SCHEMA_VERSION: u32 = 12;
+/// nested recognition paths (`subcommand_paths`) take it to 11. The
+/// retractable `snippet_args` vector takes it to 12.
+///
+/// Widening the closed set `wrap_lang` may hold — `awk` and `perl` joining
+/// `javascript` in `UNSCANNED_SNIPPET_LANGUAGES` — takes it to 13. That is a
+/// new VALUE of an existing key rather than a new key, and the distinction
+/// matters to what an old binary reports: a new key trips
+/// `deny_unknown_fields`, the file fails to PARSE, and `GapKind::NewerThanBinary`
+/// gives the precise "your vouch is older than this file" refusal. A new value
+/// parses fine and fails later in `validate_wrap_lang`, so an old binary names
+/// the offending value instead. Still loud, still fail-closed, and still worth
+/// the bump — the rule this constant states is about what the shipped file can
+/// SAY, which a widened set changes — but the refusal is less precise than the
+/// one the gate was built for (M2.244).
+pub const KNOWLEDGE_SCHEMA_VERSION: u32 = 13;
 
 /// Semantic checks `deny_unknown_fields` cannot express: a `takes` value
 /// outside the closed set, a `run_dir_flags` entry that is not also in

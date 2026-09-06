@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.18.0 (2026-09-06)
+
+
+### Features
+
+* javascript, awk and perl snippets each name their own construct setting, rather than sharing one setting that silenced all of them together
+* the knowledge schema is 13, so a wrap language may name javascript, awk or perl
+
+
+### Bug Fixes
+
+* a PowerShell Start-Process handed a variable as its argument list now asks instead of allowing silently
+
 ## 0.17.5 (2026-09-06)
 
 

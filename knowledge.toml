@@ -76,7 +76,7 @@
 # origin claims.
 # 11 (2026-08-27): `[[program]]` gained structured `subcommand_paths` for
 # exact nested operation recognition.
-version = 12
+version = 13
 
 # ============================================================================
 # FROM YOUR EXISTING POLICY — these are rules your current tool already applies
@@ -1352,11 +1352,34 @@ receiver_from = ["file_handle"]
 match = ["python:print"]
 writes_via_handle = "file"
 
-# node/perl/ruby/deno/bun stay opaque: vouch has no scanner for these
-# languages, so the snippet is kept as text only so the protected paths can
-# still be looked for in it; nothing else is claimed about it.
+# The shared -e/--eval spelling covers five programs across three languages, so
+# it is three entries rather than one: a wrap language is a claim about the
+# TEXT, and one entry cannot make three different ones. vouch has no scanner
+# for any of them — the snippet is kept as text only so the protected paths can
+# still be looked for in it, and nothing else is claimed about what it does.
+#
+# What naming the language buys is the off-switch. Every snippet vouch cannot
+# read asks through `unreadable_language`, keyed to the snippet's own language,
+# so an operator silencing awk noise must not be silencing javascript too.
 [[program]]
-match = ["node", "perl", "ruby", "deno", "bun"]
+match = ["node", "deno", "bun"]
+wraps = "after_flag"
+wrap_flags = ["-e", "--eval"]
+wrap_lang = "javascript"
+case_sensitive_flags = true
+
+[[program]]
+match = ["perl"]
+wraps = "after_flag"
+wrap_flags = ["-e", "--eval"]
+wrap_lang = "perl"
+case_sensitive_flags = true
+
+# ruby keeps `opaque` deliberately. The corpus holds zero ruby invocations, so
+# naming the language would be a claim with no evidence behind it, and `opaque`
+# has to keep meaning something or the split has only moved the blanket.
+[[program]]
+match = ["ruby"]
 wraps = "after_flag"
 wrap_flags = ["-e", "--eval"]
 wrap_lang = "opaque"
@@ -1425,7 +1448,7 @@ evaluates_input = "stdin"
 match = ["perl"]
 wraps = "after_flag"
 wrap_flags = ["-E"]
-wrap_lang = "opaque"
+wrap_lang = "perl"
 case_sensitive_flags = true
 
 # node's `-p`/`--print`: verified by running `node --help` (v24.13.1) —
@@ -1443,7 +1466,7 @@ case_sensitive_flags = true
 match = ["node", "bun"]
 wraps = "after_flag"
 wrap_flags = ["-p", "--print"]
-wrap_lang = "opaque"
+wrap_lang = "javascript"
 case_sensitive_flags = true
 
 # deno has no top-level `-e`/`--eval` (unlike the four names above — see
@@ -1464,7 +1487,7 @@ case_sensitive_flags = true
 [[program]]
 match = ["deno"]
 wraps = "arg_1"
-wrap_lang = "opaque"
+wrap_lang = "javascript"
 
 # `Start-Process powershell -ArgumentList "-Command","…"` is one more shape of
 # one shell invoking another. The program is the first positional argument.
@@ -1967,13 +1990,18 @@ write_flags = ["-o", "--output"]
 case_sensitive_flags = true
 
 # `awk '{print > "f"}'` writes from INSIDE its program text, which vouch has no
-# parser for. Same case as `python -c`: the snippet is kept as opaque text so
+# parser for. Same case as `python -c`: the snippet is kept as text so
 # protected paths can be looked for in it, and nothing else is claimed.
+#
+# The language is named rather than left as `opaque` because awk is the bulk of
+# what that key used to cover — 561 of 648 corpus occurrences — so the setting
+# an operator reaches for to stop awk noise was silencing perl and javascript
+# with it. Naming it is also what an awk scanner would need in place first.
 [[program]]
 match = ["awk", "gawk", "mawk", "nawk"]
 wraps = "after_flag"
 wrap_flags = ["-f", "--file"]
-wrap_lang = "opaque"
+wrap_lang = "awk"
 case_sensitive_flags = true
 
 # The entry above only covers `-f progfile`. The ordinary inline spelling,
@@ -1989,7 +2017,7 @@ case_sensitive_flags = true
 [[program]]
 match = ["awk", "gawk", "mawk", "nawk"]
 wraps = "arg_0"
-wrap_lang = "opaque"
+wrap_lang = "awk"
 
 # Path arithmetic and lookups. These compute strings; they touch nothing.
 #

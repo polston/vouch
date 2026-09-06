@@ -1197,3 +1197,69 @@ fn m2_131_scp_declared_remote_destination() {
     let cfg = common::realistic_config();
     assert_verdict(&cfg, OUTSIDE, "scp f host:d", "allow", None);
 }
+
+// ============================================================================
+// M2.138 — a wrapper's argument list that is an unreadable VALUE allows
+// silently, where the array-expression spelling beside it is already loud
+// ============================================================================
+
+/// `Start-Process pwsh -ArgumentList $list` was ALLOW: the located list became
+/// the single item `$list`, the rebuilt inner command found no `-Command`, and
+/// the arm reported that the wrapper wrapped nothing — which is exactly the one
+/// answer the wrapper spec says this arm must stop being able to give. A
+/// located list vouch cannot attach a program to is `wrap_unlocated`.
+///
+/// Pairs with `m2_123_powershell_start_process_array_literal_unlocated` above:
+/// the array-expression spelling has been loud since the boundary changeset,
+/// and this is the sibling shape that was left silent.
+#[test]
+fn m2_138_powershell_argument_list_variable_unlocated() {
+    let cfg = common::realistic_config();
+    for spelling in [
+        r#"start-process powershell -ArgumentList $list"#,
+        r#"start-process powershell -ArgumentList "$list""#,
+        r#"start-process -FilePath powershell -Args $list"#,
+    ] {
+        assert_verdict(&cfg, OUTSIDE, spelling, "ask", Some("wrap_unlocated"));
+    }
+}
+
+/// The reason the silence mattered: a variable can be carrying the same
+/// wrapped delete the literal spelling is caught for. Neither vouch nor the
+/// operator can see which, and "wrapped nothing" claimed it saw.
+#[test]
+fn m2_138_a_delete_behind_a_variable_no_longer_allows() {
+    let cfg = common::realistic_config();
+    let (literal, _) = decision_at(
+        &cfg,
+        r#"start-process powershell -ArgumentList "-Command","Remove-Item -Recurse C:/allowed/x""#,
+        OUTSIDE,
+    );
+    assert_eq!(literal, "ask", "the literal spelling should already ask");
+    assert_verdict(
+        &cfg,
+        OUTSIDE,
+        r#"start-process powershell -ArgumentList $hidden"#,
+        "ask",
+        Some("wrap_unlocated"),
+    );
+}
+
+/// The other direction: a list with no expansion in it still reaches its
+/// wrapped command, so this is not a blanket ask on the flag. The delete
+/// inside is still found and still named by its own guard rather than by
+/// `wrap_unlocated`.
+#[test]
+fn m2_138_a_literal_argument_list_is_still_read() {
+    let cfg = common::realistic_config();
+    assert_verdict(
+        &cfg,
+        OUTSIDE,
+        r#"start-process powershell -ArgumentList "-Command","Remove-Item -Recurse C:/allowed/x""#,
+        "ask",
+        Some("delete_recursive"),
+    );
+    let (benign, _) =
+        decision_at(&cfg, r#"start-process powershell -ArgumentList "-Command","Get-Date""#, OUTSIDE);
+    assert_eq!(benign, "allow", "a benign literal list must not start asking");
+}

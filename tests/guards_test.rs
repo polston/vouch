@@ -2223,11 +2223,12 @@ fn one_command_with_heredoc(src: &str) -> (vouch::syntax::Cmd, vouch::syntax::He
 fn heredoc_feeds_ignores_an_entry_scoped_to_another_language() {
     // `overlay_all`'s scope-split mints language-scoped same-name entries. A
     // powershell-scoped stdin claim must not be consulted on a bash line.
-    let kb = knowledge_from(
-        "version = 12\n\
+    let kb = knowledge_from(&format!(
+        "version = {}\n\
          [[program]]\nmatch = [\"gadgetshell\"]\nlanguages = [\"powershell\"]\n\
          evaluates_input = \"stdin\"\nwrap_lang = \"bash\"\n",
-    );
+        common::v()
+    ));
     let (cmd, doc) = one_command_with_heredoc("gadgetshell <<'EOF'\necho hi\nEOF");
     assert!(
         heredoc_feeds(&kb, &cmd, "bash", &doc).is_none(),
@@ -2244,11 +2245,12 @@ fn heredoc_feeds_consumes_an_entry_explicitly_scoped_to_the_occurrences_own_lang
     // inert predicate and an absent shape both print `is_none()`) would make
     // the negative test pass for the wrong reason and nothing here would say
     // so.
-    let kb = knowledge_from(
-        "version = 12\n\
+    let kb = knowledge_from(&format!(
+        "version = {}\n\
          [[program]]\nmatch = [\"gadgetshell\"]\nlanguages = [\"bash\"]\n\
          evaluates_input = \"stdin\"\nwrap_lang = \"bash\"\n",
-    );
+        common::v()
+    ));
     let (cmd, doc) = one_command_with_heredoc("gadgetshell <<'EOF'\necho hi\nEOF");
     assert!(
         heredoc_feeds(&kb, &cmd, "bash", &doc).is_some(),
