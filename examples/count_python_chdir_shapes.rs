@@ -69,12 +69,12 @@ fn main() {
         let mut row_chdir = false;
         let mut row_later_write = false;
 
-        for (lang, source) in expanded.srcs {
-            if lang != "python" {
+        for snippet in expanded.srcs {
+            if snippet.lang != "python" {
                 continue;
             }
             python_snippets += 1;
-            let Ok(inner) = python.scan(&source) else {
+            let Ok(inner) = python.scan(&snippet.src) else {
                 continue;
             };
             let mut snippet_chdir = false;

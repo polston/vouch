@@ -713,8 +713,8 @@ pub fn python_snippets(kb: &vouch::guards::Knowledge, cmd: &str) -> Option<Vec<S
         expanded
             .srcs
             .into_iter()
-            .filter(|(language, _)| language == "python")
-            .map(|(_, source)| source)
+            .filter(|snippet| snippet.lang == "python")
+            .map(|snippet| snippet.src)
             .collect(),
     )
 }

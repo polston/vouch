@@ -4031,8 +4031,17 @@ fn operand_walk(prog: &Program, args: &[String], wrap_flag: Option<&[String]>, f
 /// error))` when the registry has a scanner for this language but the text
 /// did not parse — `lang` is the language actually scanned, so the reason it
 /// drives names a setting that is really the decider.
-fn scan_snippet(lang: &str, src: &str, srcs: &mut Vec<(String, String)>) -> Result<SnippetScan, (String, String)> {
-    srcs.push((lang.to_string(), src.to_string()));
+fn scan_snippet(
+    lang: &str,
+    src: &str,
+    srcs: &mut Vec<SnippetSource>,
+) -> Result<SnippetScan, (String, String)> {
+    // Pushed with an EMPTY scope table, before the scan: the body scope this
+    // snippet gets is allocated by the caller, after it knows the scan found
+    // commands at all, and `fill_snippet_scopes` writes it back. A snippet
+    // that never reaches that point keeps the empty table, which is the
+    // truthful record that it has no position of its own.
+    srcs.push(SnippetSource { lang: lang.to_string(), src: src.to_string(), scope_table: Vec::new() });
     let Some(scanner) = crate::syntax::scanner_for(lang) else {
         return Ok(SnippetScan::default());
     };
@@ -4076,57 +4085,80 @@ struct SnippetScan {
     indexed_values: Vec<std::collections::HashMap<usize, crate::syntax::IndexedValueRef>>,
     order: Vec<crate::syntax::Order>,
     cmd_scope: Vec<Option<usize>>,
-    // The scope channel's unread half: `fold_inner_order` reads `cmd_scope`
-    // to flatten inner orders fail-closed, while these two have no reader
-    // until snippet scope translation exists — the inner-scan counterpart of
-    // `collect_expanded`'s scope table, which the appended-redirect fix
-    // (M2.225) needs. Kept plumbed because a Scan-parallel array absent from
-    // this struct does not survive the boundary (see the struct doc above).
-    #[allow(dead_code)]
+    /// The snippet's own scopes, read by `allocate_snippet_scopes`: each one
+    /// becomes an expansion scope of its own, so a compound body inside a
+    /// snippet keeps the position its scan gave it instead of flattening into
+    /// the snippet's body (M2.225).
     scan_scopes: Vec<crate::syntax::ScanScope>,
+    /// The snippet's own redirect placement. Unread HERE and read at the
+    /// engine's per-snippet fold, from that fold's own re-scan of the same
+    /// text; the scope table this walk builds is what translates the ids.
+    /// Carried anyway because a Scan-parallel array absent from this struct
+    /// does not survive the boundary at all (see the struct doc), and the
+    /// duplicate scan is itself recorded as ROADMAP M2.238.
     #[allow(dead_code)]
     redirect_scope: Vec<Option<usize>>,
-    /// Carried for the same reason as `redirect_scope` above and unread for
-    /// the same reason: the outer scan's own redirects answer for the line
-    /// today, so nothing downstream reads a nested scan's copy yet. Named
-    /// here because a Scan-parallel array absent from this struct does not
-    /// survive the boundary at all (see the struct doc).
+    /// Carried and unread for the same reason as `redirect_scope` above.
     #[allow(dead_code)]
     redirect_chain: Vec<Option<crate::syntax::ChainPos>>,
     parsed: bool,
 }
 
-/// Fold an inner snippet scan's raw, unfolded per-command `order` down to
-/// what a scope-blind wrapper recursion may safely compare against its
-/// siblings — the same fold `collect_expanded` (src/engine.rs) performs at
-/// the outer-scan boundary, applied one wrapper level deeper, where it was
-/// missing. Entry `i`'s own scanner-reported order survives only
-/// when `cmd_scope[i]` proves it sits at THIS scan's own top level
-/// (`Some(Some(0))`); every other entry — a command inside a subshell or
-/// brace-group body, or one whose scope vouch could not prove at all —
-/// folds to `Order::Unordered`. Fail-closed: an absent or `None` scope
-/// entry also folds to `Unordered`; there is no None-as-top-level arm.
-/// Without this, a body command's scope-local `Seq` collides with the
-/// inner top level's own numbering and a `cd -> write` pair can look
-/// ordered when it is not.
+/// Allocate one parsed snippet's own scope numbering into the expansion's,
+/// and record it against the `srcs` entry that snippet's scan pushed (M2.225).
 ///
-/// This fold is the INNER-scan boundary, and it outlived the outer one:
-/// the engine now translates the outer scan's scanner scopes into real
-/// engine scopes (`collect_expanded`'s scope table), but a parsed
-/// snippet's own `scan_scopes` still flatten into the one engine scope
-/// this recursion allocates per snippet, so a compound body one wrapper
-/// level down keeps folding to `Unordered` here — fail-closed — until
-/// snippet scope translation exists.
-fn fold_inner_order(scan: &SnippetScan) -> Vec<crate::syntax::Order> {
-    (0..scan.cmds.len())
-        .map(|i| {
-            if matches!(scan.cmd_scope.get(i), Some(Some(0))) {
-                scan.order.get(i).cloned().unwrap_or(crate::syntax::Order::Unordered)
-            } else {
-                crate::syntax::Order::Unordered
-            }
+/// The returned table is indexed by the SNIPPET's scanner scope id, matching
+/// the convention `cmd_scope` and `redirect_scope` use: index 0 is the
+/// snippet's top level, which becomes its body scope, and index `k` is the
+/// scope allocated for its own `scan_scopes[k - 1]`. Allocated
+/// parent-before-child, which is the order a scanner allocates them in, so a
+/// parent is always in the table before the child that names it.
+///
+/// This is the answer `Scan::absorb`'s own comment defers for its case: a
+/// nested scan's top level anchors on the scope allocated for the construct
+/// that embedded it — here, the snippet's body — rather than staying 0 and
+/// naming whatever the enclosing scan happens to call its own top level.
+/// Returns the body scope every command in the snippet is certainly inside,
+/// and each command's own scope — one call rather than two, because there is
+/// no correct way to take the first without the second: a body scope handed to
+/// the recursion without the per-command scopes beside it puts every command
+/// back in one place, which is the flattening this replaces.
+///
+/// Fail-closed on the unprovable case: a command whose scope the snippet's
+/// scan could not record, or that names a scope the table does not hold, lands
+/// in the body scope rather than being assumed to sit at the top level.
+fn allocate_snippet_scopes(
+    inner: &SnippetScan,
+    self_idx: usize,
+    src_mark: usize,
+    out: &mut WalkOut,
+) -> (usize, Vec<usize>) {
+    let body = out.scope_parents.len() + 1;
+    out.scope_parents.push(WrapScope::AtCommand(self_idx));
+    let mut table = vec![body];
+    for ss in &inner.scan_scopes {
+        let id = out.scope_parents.len() + 1;
+        out.scope_parents.push(WrapScope::AtOrder {
+            // An inner scope whose parent is the snippet's own top level
+            // anchors on the body scope; `table` already holds it at 0.
+            parent: table.get(ss.parent).copied().unwrap_or(body),
+            order: ss.anchor_order.clone(),
+            chain: ss.anchor_chain,
+            kind: ss.kind,
+            class: ss.class,
+        });
+        table.push(id);
+    }
+    let per_command = (0..inner.cmds.len())
+        .map(|i| match inner.cmd_scope.get(i).copied().flatten() {
+            Some(k) => table.get(k).copied().unwrap_or(body),
+            None => body,
         })
-        .collect()
+        .collect();
+    if let Some(entry) = out.srcs.get_mut(src_mark) {
+        entry.scope_table = table;
+    }
+    (body, per_command)
 }
 
 /// Connect scanner-reported indexed references to raw enclosing arguments
@@ -4206,7 +4238,7 @@ fn scan_wrap_snippet(
     head: &str,
     wrap_lang: &str,
     src: &str,
-    srcs: &mut Vec<(String, String)>,
+    srcs: &mut Vec<SnippetSource>,
     failures: &mut Vec<(String, String)>,
     constructs: &mut Vec<(String, String)>,
 ) -> (SnippetScan, String) {
@@ -4220,7 +4252,7 @@ fn scan_wrap_snippet(
         ));
     }
     let result = scan_snippet(wrap_lang, src, srcs);
-    let lang = srcs.last().map(|(l, _)| l.clone()).unwrap_or_else(|| wrap_lang.to_string());
+    let lang = srcs.last().map(|s| s.lang.clone()).unwrap_or_else(|| wrap_lang.to_string());
     match result {
         Ok(scan) => (scan, lang),
         Err(e) => {
@@ -4291,6 +4323,50 @@ pub struct ExecutionSite {
     pub scanner_order: bool,
 }
 
+/// What one expansion-allocated scope hangs off (M2.225).
+///
+/// Two shapes, because a snippet's body and a compound INSIDE that body are
+/// anchored by different things, and a bare parent-command index could only
+/// ever express the first. It mirrors `engine::ScopeParent` deliberately: the
+/// engine already knows how to anchor both, and until now the expansion walk
+/// had no way to say which one it meant, so a snippet's own scanner scopes
+/// were flattened into its body and every position inside one was lost.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WrapScope {
+    /// A parsed snippet's body: it starts wherever the command that ran it
+    /// runs, run-dir flag included. The index is into the expansion's own
+    /// `cmds`.
+    AtCommand(usize),
+    /// A scanner scope INSIDE such a body — the snippet's own subshell, brace
+    /// group, branch or loop — carrying the anchor its own scan recorded.
+    /// `parent` is an expansion-local scope id: 0 names the caller's own
+    /// scope, and every other value one this walk allocated earlier.
+    AtOrder {
+        parent: usize,
+        order: crate::syntax::Order,
+        chain: Option<crate::syntax::ChainPos>,
+        kind: crate::syntax::ScopeKind,
+        class: Option<crate::syntax::ScopeClass>,
+    },
+}
+
+/// One snippet the walk handed to a scanner, and where its own scan structure
+/// landed in the expansion's scope numbering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnippetSource {
+    pub lang: String,
+    pub src: String,
+    /// This snippet's own scanner scope ids, mapped to expansion-local scope
+    /// ids: index 0 is the snippet's body scope, index `k` the scope
+    /// allocated for the snippet's own `scan_scopes[k - 1]`.
+    ///
+    /// EMPTY when the snippet allocated no body scope at all — it did not
+    /// parse, or held no commands. A reader must treat that as "this snippet
+    /// has no position of its own", which is the one case where the wrapper's
+    /// own stamp is the right answer rather than a lost one.
+    pub scope_table: Vec<usize>,
+}
+
 pub struct ExpandedWrappers {
     /// Every occurrence: the top-level commands plus every command found
     /// inside a wrapper snippet or a consumed here-document body, in walk
@@ -4298,12 +4374,13 @@ pub struct ExpandedWrappers {
     pub cmds: Vec<Cmd>,
     /// Parallel to `cmds`: parsed-snippet scope and local scanner order.
     pub execution_sites: Vec<ExecutionSite>,
-    /// Parent command index for child scopes 1..N, in allocation order.
-    pub scope_parents: Vec<usize>,
+    /// What each child scope 1..N hangs off, in allocation order.
+    pub scope_parents: Vec<WrapScope>,
     /// Parallel to `cmds`: the language each occurrence was scanned under.
     pub langs: Vec<String>,
-    /// Every `(language, source)` snippet the walk handed to a scanner.
-    pub srcs: Vec<(String, String)>,
+    /// Every snippet the walk handed to a scanner, with its own scope
+    /// numbering.
+    pub srcs: Vec<SnippetSource>,
     /// The language whose nesting cap was reached, `None` if every layer was
     /// scanned (M2.55).
     pub wrap_depth_exceeded: Option<String>,
@@ -4367,13 +4444,13 @@ pub struct ExpandedWrappers {
 struct WalkOut {
     cmds: Vec<Cmd>,
     execution_sites: Vec<ExecutionSite>,
-    scope_parents: Vec<usize>,
+    scope_parents: Vec<WrapScope>,
     langs: Vec<String>,
     holds: Vec<bool>,
     from_input: Vec<bool>,
     complete: Vec<bool>,
     inherited_run_dir: Vec<Option<String>>,
-    srcs: Vec<(String, String)>,
+    srcs: Vec<SnippetSource>,
     exceeded: Option<String>,
     failures: Vec<(String, String)>,
     constructs: Vec<(String, String)>,
@@ -4421,6 +4498,12 @@ pub fn expand_wrappers_forking(
         args_complete: &[bool],
         lang: &str,
         scope: usize,
+        // Per-command scopes, when the caller has them: a snippet's own
+        // commands sit in whichever of ITS scopes the snippet's scan put
+        // them in, not all together in the body. Empty means every command
+        // in `cmds` is in `scope`, which is what a same-syntax unwrap
+        // (`sudo`, `find -exec`) and the top-level call both want.
+        scopes: &[usize],
         orders: &[crate::syntax::Order],
         inherited_order: Option<&crate::syntax::Order>,
         depth: u8,
@@ -4455,9 +4538,13 @@ pub fn expand_wrappers_forking(
             // block's own comment warns about.
             let own_args_complete = args_complete.get(i).copied().unwrap_or(false);
             let own_order = orders.get(i).or(inherited_order).cloned();
+            // The scope this occurrence itself sits in. `scopes` is the
+            // snippet case (each command in its own scanner scope); `scope`
+            // is every other, where the whole slice shares one.
+            let own_scope = scopes.get(i).copied().unwrap_or(scope);
             out.cmds.push(cmd.clone());
             out.execution_sites.push(ExecutionSite {
-                scope,
+                scope: own_scope,
                 local_order: own_order.clone(),
                 scanner_order: orders.get(i).is_some(),
             });
@@ -4522,6 +4609,13 @@ pub fn expand_wrappers_forking(
                 // empty would read as "incomplete" for every same-syntax
                 // wrapper, which is not a fail-closed default here but a wrong
                 // answer about a record nothing re-read.
+                // Where this entry's own snippet lands in `srcs`, captured
+                // before the arms run: every text-scanning arm pushes exactly
+                // one entry, and the body scope allocated below is written
+                // back onto it so the engine can map the snippet's own
+                // redirect positions (M2.225). An arm that scans no text
+                // pushes nothing and leaves `srcs` at this length.
+                let src_mark = out.srcs.len();
                 let inner: SnippetScan = match prog.wraps.as_str() {
                     "rest" => {
                         // The wrapped command starts at the first token that is
@@ -4758,24 +4852,26 @@ pub fn expand_wrappers_forking(
                     _ => SnippetScan::default(),
                 };
                 if !inner.cmds.is_empty() {
-                    // Bound here, outside the branch, so the `Vec` outlives
-                    // the `go()` call below — a fold produced inside the
+                    // Bound here, outside the branch, so these outlive the
+                    // `go()` call below — a `Vec` produced inside the
                     // `if inner.parsed` arm would be dropped at the end of
                     // that arm while still borrowed. Only the parsed arm
-                    // reads it; the other arm skips the work.
-                    let folded_inner_order =
-                        if inner.parsed { fold_inner_order(&inner) } else { Vec::new() };
+                    // fills them; the other skips the work.
+                    let mut inner_scopes: Vec<usize> = Vec::new();
                     let (inner_scope, inner_orders, inherited_inner_order, inner_run_dir) =
                         if inner.parsed {
-                            let child_scope = out.scope_parents.len() + 1;
-                            out.scope_parents.push(self_idx);
-                            // The child scope starts in this occurrence's run
-                            // place. Reapplying that inherited directory to
-                            // every command inside the child would erase a
+                            // The snippet's own scan structure, allocated into
+                            // this expansion's numbering rather than flattened
+                            // onto one scope. The body scope starts in this
+                            // occurrence's run place; reapplying that inherited
+                            // directory to every command inside would erase a
                             // process-local directory change after it ran.
-                            (child_scope, folded_inner_order.as_slice(), None, None)
+                            let (body, per_command) =
+                                allocate_snippet_scopes(&inner, self_idx, src_mark, out);
+                            inner_scopes = per_command;
+                            (body, inner.order.as_slice(), None, None)
                         } else {
-                            (scope, &[][..], own_order.as_ref(), pass_down)
+                            (own_scope, &[][..], own_order.as_ref(), pass_down)
                         };
                     go(
                         kb,
@@ -4785,6 +4881,7 @@ pub fn expand_wrappers_forking(
                         &inner.args_complete,
                         &next_lang,
                         inner_scope,
+                        &inner_scopes,
                         inner_orders,
                         inherited_inner_order,
                         depth + 1,
@@ -4834,6 +4931,9 @@ pub fn expand_wrappers_forking(
                     // `unreadable_language` there, same as they do, so the
                     // language actually scanned is read back here too rather
                     // than re-derived.
+                    // Same reason as the wrap arms': the body scope allocated
+                    // below is written back onto the entry this scan pushes.
+                    let heredoc_src_mark = out.srcs.len();
                     let (mut scan, consumed_lang) = scan_wrap_snippet(
                         &cmd.head,
                         &entry_lang,
@@ -4877,13 +4977,12 @@ pub fn expand_wrappers_forking(
                         );
                     }
                     if !scan.cmds.is_empty() {
-                        let child_scope = out.scope_parents.len() + 1;
-                        out.scope_parents.push(self_idx);
-                        // Folded the same way as the parsed-wrapper arm
-                        // above: the heredoc-fed scan's raw order is
-                        // scope-blind, so only its own top-level entries
-                        // may be compared by the recursion below.
-                        let folded_scan_order = fold_inner_order(&scan);
+                        // Allocated exactly like the parsed-wrapper arm above:
+                        // a consumed here-document body is a snippet with its
+                        // own scan, so its own compounds get their own scopes
+                        // and its commands keep the orders that scan recorded.
+                        let (body, body_scopes) =
+                            allocate_snippet_scopes(&scan, self_idx, heredoc_src_mark, out);
                         go(
                             kb,
                             &scan.cmds,
@@ -4891,8 +4990,9 @@ pub fn expand_wrappers_forking(
                             &scan.input_source,
                             &scan.args_complete,
                             &consumed_lang,
-                            child_scope,
-                            &folded_scan_order,
+                            body,
+                            &body_scopes,
+                            &scan.order,
                             None,
                             depth + 1,
                             caps,
@@ -4915,6 +5015,10 @@ pub fn expand_wrappers_forking(
         args_complete,
         lang,
         0,
+        // No per-command scopes at the top level: every command the caller
+        // handed in sits in the caller's own scope 0, and the outer scan's
+        // scanner scopes are the ENGINE's to translate, not this walk's.
+        &[],
         &[],
         None,
         0,

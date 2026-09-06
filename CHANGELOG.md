@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.17.4 (2026-09-06)
+
+
+### Bug Fixes
+
+* a described write inside a compound body within a wrapped snippet now names its destination instead of refusing with unresolved_path
+* a redirect inside a wrapped snippet now resolves against the directory that snippet's own cd moved to, instead of the directory the wrapping command ran in
+
 ## 0.17.3 (2026-09-05)
 
 

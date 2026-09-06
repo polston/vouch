@@ -726,8 +726,8 @@ fn judge_once(
     // registered scanner with no entries for it yet still has SOMETHING
     // looking at protected names inside its snippets.
     if let Some(home) = home {
-        for (_plang, psrc, _, _, _) in &snippets {
-            if let Some(hit) = mentions_protected(cfg, home, project_root, psrc) {
+        for site in &snippets {
+            if let Some(hit) = mentions_protected(cfg, home, project_root, &site.src) {
                 let reason = format!(
                     "{PROTECTED_FILE_LINE}\n  {hit}\n  \
                      this file controls vouch itself, so no write.allow_paths entry can \
@@ -751,7 +751,19 @@ fn judge_once(
     // `lang.python.constructs.dynamic_call`, not bash's (spec's
     // shared-vocabulary paragraph, "on every path").
     let mut snippet_constructs: Vec<(String, String)> = Vec::new();
-    for (plang, psrc, porder, pscope, pchain) in &snippets {
+    // Engine scopes for the redirects the fold below appends, parallel to
+    // `scan.redirect_targets` and `None` for every redirect the outer scan
+    // found itself.
+    //
+    // Its own channel rather than a value written into `scan.redirect_scope`,
+    // because that one holds SCANNER ids, which only this line's own
+    // `scope_table` can translate. A snippet's ids belong to a different
+    // numbering entirely: translating them through the outer table would
+    // silently name some unrelated scope, or none (M2.225).
+    let mut injected_redirect_scope: Vec<Option<usize>> =
+        vec![None; scan.redirect_targets.len()];
+    for site in &snippets {
+        let (plang, psrc) = (&site.lang, &site.src);
         // A language the registry has no scanner for `continue`s here —
         // recorded divergence from the route path, which asks explicitly
         // instead (`route::decide_snippet`'s `unreadable_language`). This
@@ -771,25 +783,63 @@ fn judge_once(
         // vanishes on `Err`: there is simply no redirect or construct list
         // to read from text that did not parse, and the ask already says so.
         if let Ok(inner) = ps.scan(psrc) {
-            // A redirect inside a wrapped snippet writes wherever the WRAPPER
-            // command runs — the snippet has no position of its own, so it
-            // takes the wrapper's (spec §3.5). Giving these `Unordered`
-            // instead would make every wrapped write unresolvable even when
-            // the wrapper's own place in the sequence is plain. `redirect_scope`
-            // has to extend in the same step, by the same reasoning: an
-            // injected redirect's scope IS the wrapper's own `cmd_scope`
-            // entry, never the inner re-scan's own local numbering (that
-            // numbering means nothing outside the inner snippet's own scan).
-            // Leaving this channel short of `redirect_order`/`redirect_targets`
-            // was review finding IMPORTANT 2 — every consumer that walks the
-            // three arrays in lockstep by index silently read past the end of
-            // this one for every wrapper-injected redirect.
-            scan.redirect_order
-                .extend(std::iter::repeat(porder.clone()).take(inner.redirect_targets.len()));
-            scan.redirect_scope
-                .extend(std::iter::repeat(*pscope).take(inner.redirect_targets.len()));
-            scan.redirect_chain
-                .extend(std::iter::repeat(*pchain).take(inner.redirect_targets.len()));
+            // A redirect inside a wrapped snippet keeps the position the
+            // SNIPPET gives it (M2.225). The expansion walk allocated one
+            // engine scope per scanner scope the snippet's own scan holds and
+            // handed the mapping up in `site.scopes`, so `redirect_scope[j]`
+            // — an id in the snippet's own numbering, which the outer scan
+            // cannot read — translates into a scope the outer scan can. Order
+            // and chain come from the same inner scan, for the same reason:
+            // they say where the redirect sits INSIDE the snippet, which is
+            // exactly what an ordered `cd` in that snippet has to be compared
+            // against.
+            //
+            // Position and scope are decided TOGETHER, per redirect. Taking
+            // the snippet's order with the wrapper's scope would compare an
+            // inner sequence number against the outer scope's own numbering,
+            // where the same number means a different place entirely.
+            //
+            // The wrapper's own order, scope and chain are that pair's
+            // fallback, and they are still right for the one case they
+            // describe: a snippet that allocated no scope at all (it held no
+            // commands, or the expansion walk's own scan of it did not parse)
+            // genuinely has no position of its own, and the wrapper's is the
+            // only one there is. Giving those `Unordered` instead would make
+            // every wrapped write unresolvable even when the wrapper's place
+            // in the sequence is plain.
+            //
+            // Every channel grows in the same step. Leaving one short was
+            // review finding IMPORTANT 2 (M2.221) — every consumer that walks
+            // them in lockstep by index silently read past the end of the
+            // short one for every wrapper-injected redirect — and the
+            // assertions below now cover the fifth channel too.
+            for j in 0..inner.redirect_targets.len() {
+                let placed = inner
+                    .redirect_scope
+                    .get(j)
+                    .copied()
+                    .flatten()
+                    .and_then(|k| site.scopes.get(k).copied());
+                let (order, chain) = match placed {
+                    Some(_) => (
+                        inner
+                            .redirect_order
+                            .get(j)
+                            .cloned()
+                            .unwrap_or(crate::syntax::Order::Unordered),
+                        inner.redirect_chain.get(j).copied().flatten(),
+                    ),
+                    None => (site.wrapper_order.clone(), site.wrapper_chain),
+                };
+                scan.redirect_order.push(order);
+                // The scanner channel keeps meaning what it has always meant
+                // — the OUTER scan's own view, which for an injected redirect
+                // is the wrapper's entry — while the translated engine scope
+                // travels beside it and wins when it is there.
+                scan.redirect_scope.push(site.wrapper_scope);
+                scan.redirect_chain.push(chain);
+                injected_redirect_scope.push(placed);
+            }
             scan.redirect_targets.extend(inner.redirect_targets);
             for c in inner.constructs {
                 snippet_constructs.push((plang.clone(), c));
@@ -833,6 +883,14 @@ fn judge_once(
         scan.redirect_targets.len(),
         scan.redirect_chain.len(),
         "redirect_chain fell out of lockstep with redirect_targets in the snippet fold"
+    );
+    // The fifth channel, added by M2.225 and read by index against the same
+    // four. It is a parallel array, which this file's own comments warn about,
+    // and this is the check that makes a desync loud instead of silent.
+    debug_assert_eq!(
+        scan.redirect_targets.len(),
+        injected_redirect_scope.len(),
+        "injected_redirect_scope fell out of lockstep with redirect_targets in the snippet fold"
     );
     // Guards resolve per HIT, not per guard NAME, because a `[[run.guards]]`
     // override answers per place: `rm -rf a && cd <tree> && rm -rf b` trips one
@@ -1044,12 +1102,17 @@ fn judge_once(
             // fail-closed direction. Only sites holding a scanner-reported
             // position may own a redirect: a synthesized occurrence's
             // inherited order is attribution, not an event.
-            let eng_scope = scan
-                .redirect_scope
-                .get(i)
-                .copied()
-                .flatten()
-                .and_then(|ss| scope_table.get(ss).copied());
+            // A redirect the snippet fold injected carries its scope already
+            // translated (M2.225): the snippet's own numbering is not this
+            // scan's, so `scope_table` has nothing to say about it. Everything
+            // else is a scanner id this line's own table translates.
+            let eng_scope = injected_redirect_scope.get(i).copied().flatten().or_else(|| {
+                scan.redirect_scope
+                    .get(i)
+                    .copied()
+                    .flatten()
+                    .and_then(|ss| scope_table.get(ss).copied())
+            });
             let order = scan
                 .redirect_order
                 .get(i)
@@ -2821,18 +2884,8 @@ struct Expanded {
     args_complete: Vec<bool>,
     /// The wrapped snippets themselves — whole scripts vouch has no parser for
     /// at the outer level but can still scan for redirects and protected-path
-    /// mentions (§1b in `decide_command_from`). The 4th element is the
-    /// wrapper command's OWN `cmd_scope` entry — a redirect nested inside the
-    /// snippet has no position of its own, so it takes the wrapper's, on the
-    /// redirect_scope channel exactly as it already takes the wrapper's order
-    /// (review finding IMPORTANT 2, M2.221).
-    snippets: Vec<(
-        String,
-        String,
-        crate::syntax::Order,
-        Option<usize>,
-        Option<crate::syntax::ChainPos>,
-    )>,
+    /// mentions (§1b in `decide_command_from`).
+    snippets: Vec<SnippetSite>,
     /// The language whose wrapper-nesting cap was reached while expanding
     /// THIS line, if any — first hit across every top-level command wins,
     /// since vouch decides once per command (M2.55). `None` means every
@@ -2854,6 +2907,28 @@ struct Expanded {
     /// Parallel to `cmds`: the directory a WRAPPER's own run-dir flag sent
     /// this occurrence to, before its own flags are read.
     inherited_run_dir: Vec<Option<String>>,
+}
+
+/// One wrapped snippet, and every position it can be judged at.
+///
+/// A struct rather than the five-then-six-element tuple this was: two of its
+/// fields are `Option<usize>`-shaped and only position told them apart, which
+/// is the same reason `Expanded` itself is a struct.
+struct SnippetSite {
+    lang: String,
+    src: String,
+    /// The WRAPPER command's own position. The fallback, and the right answer
+    /// for a snippet that allocated no scope of its own — see the fold in
+    /// `decide_command_from`.
+    wrapper_order: crate::syntax::Order,
+    wrapper_scope: Option<usize>,
+    wrapper_chain: Option<crate::syntax::ChainPos>,
+    /// Engine scope ids for this snippet's OWN scanner scopes, indexed the way
+    /// the snippet's scan indexes them: 0 is its top level (the body scope the
+    /// expansion allocated), `k` the scope allocated for its `scan_scopes[k-1]`.
+    /// Empty when the snippet allocated none — it did not parse, or held no
+    /// commands (M2.225).
+    scopes: Vec<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3002,9 +3077,30 @@ fn collect_expanded(
         let command_offset = out.cmds.len();
         let scope_offset = out.scope_parents.len();
         let execution_sites = ex.execution_sites;
+        // The expansion walk numbers its own scopes from 1, relative to this
+        // one command's expansion, and says of each what it hangs off. A
+        // snippet's body hangs off the command that ran it; a scope INSIDE
+        // that body hangs off a position in another expansion scope, and its
+        // `parent` rebases past everything already allocated exactly as
+        // `site.scope` does below. A `parent` of 0 would name the caller's own
+        // scope, which the walk never produces for a snippet scope — every one
+        // of them is anchored at or under a body it allocated first — so the
+        // arm is written to be correct rather than to be reachable.
         for parent in ex.scope_parents {
-            out.scope_parents
-                .push(ScopeParent::AtCommand(command_offset + parent));
+            out.scope_parents.push(match parent {
+                crate::guards::WrapScope::AtCommand(idx) => {
+                    ScopeParent::AtCommand(command_offset + idx)
+                }
+                crate::guards::WrapScope::AtOrder { parent, order, chain, kind, class } => {
+                    ScopeParent::AtOrder {
+                        parent_scope: if parent == 0 { outer_scope } else { scope_offset + parent },
+                        order,
+                        chain,
+                        kind,
+                        class,
+                    }
+                }
+            });
         }
         // Zipped rather than indexed, one more strand than before: the walk
         // builds these arrays in lockstep, and a zip that runs short stops
@@ -3043,19 +3139,31 @@ fn collect_expanded(
             out.args_from_input.push(efrom_input);
             out.args_complete.push(ecomplete);
         }
-        // The wrapper command `c` (index `i`) is the redirect's owner once a
-        // nested snippet's own redirects are folded onto it below — carry
-        // ITS `cmd_scope` entry and ITS chain membership alongside its order,
-        // so that fold can extend `redirect_scope` and `redirect_chain` in
-        // step with `redirect_order`/`redirect_targets` instead of leaving
-        // them short (review finding IMPORTANT 2 for the scope channel; the
-        // chain channel repeated it, since a channel added later inherits
-        // every fold the older ones already had).
+        // The wrapper command `c` (index `i`) is the fallback owner for a
+        // snippet with no scope of its own — carry ITS `cmd_scope` entry and
+        // ITS chain membership alongside its order, so that fold can extend
+        // `redirect_scope` and `redirect_chain` in step with
+        // `redirect_order`/`redirect_targets` instead of leaving them short
+        // (review finding IMPORTANT 2 for the scope channel; the chain
+        // channel repeated it, since a channel added later inherits every
+        // fold the older ones already had).
         let wrapper_scope = scan.cmd_scope.get(i).copied().flatten();
         let wrapper_chain = c.chain;
-        for (plang, psrc) in ex.srcs {
-            out.snippets
-                .push((plang, psrc, order.clone(), wrapper_scope, wrapper_chain));
+        for src in ex.srcs {
+            // Each snippet's own scope numbering, rebased into this line the
+            // same way `site.scope` was: an expansion-local id counts past
+            // every engine scope allocated before this command's expansion.
+            // Ids here start at 1 by construction, so no zero arm exists to
+            // be silently wrong.
+            let scopes = src.scope_table.iter().map(|k| scope_offset + k).collect();
+            out.snippets.push(SnippetSite {
+                lang: src.lang,
+                src: src.src,
+                wrapper_order: order.clone(),
+                wrapper_scope,
+                wrapper_chain,
+                scopes,
+            });
         }
         out.parse_failures.extend(ex.parse_failures);
         out.constructs.extend(ex.constructs);

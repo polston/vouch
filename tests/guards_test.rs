@@ -1215,6 +1215,9 @@ fn a_swapped_keyword_order_still_resolves_the_path() {
 // arg_<N> arm, and the scan_snippet split they now share (Task 8).
 // ---------------------------------------------------------------------------
 
+/// The `(language, source)` pairs alone: these tests are about WHICH snippet
+/// each wrap arm locates, and the scope numbering beside it is
+/// `wrapped_snippet_position_test.rs`'s subject, not theirs.
 fn wrap_srcs(kb: &vouch::guards::Knowledge, c: &vouch::syntax::Cmd) -> Vec<(String, String)> {
     vouch::guards::expand_wrappers_with_sources(
         kb,
@@ -1226,6 +1229,9 @@ fn wrap_srcs(kb: &vouch::guards::Knowledge, c: &vouch::syntax::Cmd) -> Vec<(Stri
         &|_| 4,
     )
     .srcs
+    .into_iter()
+    .map(|s| (s.lang, s.src))
+    .collect()
 }
 
 fn expand_bash_source(src: &str) -> vouch::guards::ExpandedWrappers {
@@ -1245,7 +1251,11 @@ fn expand_bash_source(src: &str) -> vouch::guards::ExpandedWrappers {
 fn parsed_python_snippets_keep_one_child_scope_and_their_local_order() {
     let expanded = expand_bash_source(r#"python -c "first(); second()""#);
     assert_eq!(expanded.execution_sites.len(), expanded.cmds.len());
-    assert_eq!(expanded.scope_parents, vec![0]);
+    // One scope, hanging off the command that ran the snippet. A snippet with
+    // no compounds of its own allocates nothing further — the `AtOrder`
+    // variant appears only where the snippet's own scan had a scope
+    // (`wrapped_snippet_position_test.rs`).
+    assert_eq!(expanded.scope_parents, vec![vouch::guards::WrapScope::AtCommand(0)]);
 
     let first = expanded
         .cmds
@@ -1284,7 +1294,13 @@ fn nested_and_held_snippets_keep_parent_indices_without_desynchronising() {
         .iter()
         .position(|command| command.head == "echo")
         .unwrap();
-    assert_eq!(nested.scope_parents, vec![0, system]);
+    assert_eq!(
+        nested.scope_parents,
+        vec![
+            vouch::guards::WrapScope::AtCommand(0),
+            vouch::guards::WrapScope::AtCommand(system),
+        ]
+    );
     assert_eq!(nested.execution_sites[system].scope, 1);
     assert_eq!(nested.execution_sites[echo].scope, 2);
 
@@ -1294,7 +1310,7 @@ fn nested_and_held_snippets_keep_parent_indices_without_desynchronising() {
         .iter()
         .position(|command| command.head == "python:first")
         .unwrap();
-    assert_eq!(held.scope_parents, vec![0]);
+    assert_eq!(held.scope_parents, vec![vouch::guards::WrapScope::AtCommand(0)]);
     assert_eq!(held.execution_sites[first].scope, 1);
     assert_eq!(
         held.execution_sites[first].local_order,
@@ -1485,7 +1501,10 @@ wrap_lang = "bash"
         &|_| 4,
     );
     let vouch::guards::ExpandedWrappers { cmds, srcs, .. } = ex;
-    assert_eq!(srcs, vec![("bash".to_string(), "echo hi".to_string())]);
+    assert_eq!(
+        srcs.iter().map(|s| (s.lang.as_str(), s.src.as_str())).collect::<Vec<_>>(),
+        vec![("bash", "echo hi")]
+    );
     assert!(
         cmds.iter().any(|c| c.head == "echo" && c.args == vec!["hi".to_string()]),
         "expected an inner echo command, got {cmds:?}"
@@ -1563,9 +1582,8 @@ no_value_options = ["-S", "-u"]
     assert_eq!(wrap_srcs(&kb, &cmd("py9", &["-Suc", "true"])), want, "two described switches");
     assert_eq!(wrap_srcs(&kb, &cmd("py9", &["-Sctrue"])), want, "value attached inside the cluster");
     let ex = expand(&kb, &cmd("py9", &["-Zc", "true"]));
-    assert_eq!(
-        ex.srcs,
-        Vec::<(String, String)>::new(),
+    assert!(
+        ex.srcs.is_empty(),
         "an undescribed letter in front of the wrap letter is not read as a cluster"
     );
     assert_eq!(
