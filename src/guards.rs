@@ -1209,6 +1209,41 @@ fn standalone_run(p: &Program, cmd: &Cmd, sub: Option<&str>, eligible: bool) -> 
     cmd.args.iter().all(|a| declares(&p.standalone_flags, crate::paths::unquote(a), case_sensitive))
 }
 
+/// Whether this entry's declared recognition scope covers this invocation —
+/// the SAME question `recognition_at`'s own `covers` local used to answer a
+/// second time, with a subtly different case rule (review finding, M2.236: an
+/// exact `==` here disagreed with `recognition_at`'s and
+/// `entry_subcommand_path_matches`'s `eq_ignore_ascii_case`, so an entry
+/// declaring `subcommands = ["Run"]` was RECOGNISED on `mytool run` while its
+/// unread-code claim silently stood down — a narrowing that was not true, in
+/// the one direction an allow-list forbids). One definition now:
+/// `recognition_at` composes it with `standalone_run` exactly as it always
+/// did, via `||`; `evaluates_input_in` composes the same two facts via `&&
+/// !standalone_run(...)`, since the two callers ask opposite-sense questions
+/// ("is this recognised" vs. "does the unread-code claim still apply").
+///
+/// An entry with neither scope key covers the whole program, which is what
+/// every shipped `evaluates_input` entry is, so this is a no-op for all of
+/// them. An entry that names verbs is claiming something about those verbs;
+/// reading its claim as program-wide gives a verb outside the scope the
+/// right verdict for a reason that is not true of it (M2.37's shape).
+///
+/// `subcommands`/`subcommand_paths` are `Option`, not a bare list: `None` on
+/// both is the whole-program state (spec 2026-08-20 §3), and that state is
+/// what every shipped `evaluates_input` entry is in today, which is why this
+/// is a no-op for them. `all_subcommands` needs no separate reading here —
+/// the merge already folds it back to `None`/`None` before this ever runs
+/// (`knowledge::overlay_all`).
+fn entry_covers(p: &Program, cmd: &Cmd, sub: Option<&str>, lang: &str) -> bool {
+    if p.subcommands.is_none() && p.subcommand_paths.is_none() {
+        return true;
+    }
+    p.subcommands
+        .as_ref()
+        .is_some_and(|subs| sub.is_some_and(|s| subs.iter().any(|k| k.eq_ignore_ascii_case(s))))
+        || entry_subcommand_path_matches(p, cmd, lang)
+}
+
 /// What `standalone_hint` found: the flags-only ask that remains may name
 /// `standalone_flags` as the setting that would quiet it. `pair_no_value_options`
 /// is true when the entry also needs the `no_value_options` pairing named
@@ -1831,11 +1866,23 @@ pub fn reads_stdin(cmd: &Cmd) -> bool {
 /// `lang.python.constructs.evaluated_input`, not the host command's, so a
 /// host-language allow of the same construct name does not silently cover
 /// it. `None` when the matched entry never named one — the caller falls back
-/// to the host language.
+/// to the OCCURRENCE's own language, and only to the host when the
+/// occurrence's own language is unknown. Falling back to the host
+/// unconditionally was the bug M2.79 named: an `evaluates_input = "always"`
+/// entry that wraps no further text (`python:eval`, `python:subprocess.run`)
+/// has no `wrap_lang` to give, so a python occurrence would key its ask to
+/// whatever language typed the outer line instead of to python's own.
 ///
 /// `holds_input` is what the judgement decided for THIS occurrence: vouch has
 /// the text of its standard input, so an entry claiming it runs code from
 /// standard input has nothing left to warn about.
+///
+/// `snippet_located` is the same stand-down from the other direction
+/// (M2.98): THIS occurrence's own entry vocabulary already found the code on
+/// the line — an inline-code flag's value, attached or spaced, whatever else
+/// the command also carries — so standard input is not where it came from.
+/// Per occurrence, never per line: a sibling command's located snippet says
+/// nothing about this one's standard input.
 ///
 /// The gate sits INSIDE the match arm rather than before the loop, and that
 /// placement is load-bearing: one name can match both a `"stdin"` entry and an
@@ -1847,9 +1894,36 @@ pub fn evaluates_input(
     kb: &Knowledge,
     cmd: &Cmd,
     holds_input: bool,
+    snippet_located: bool,
     standalone_eligible: bool,
 ) -> (bool, Option<String>, Option<StandaloneHint>) {
-    evaluates_input_in(kb, cmd, "bash", holds_input, standalone_eligible)
+    evaluates_input_in(kb, cmd, "bash", holds_input, snippet_located, standalone_eligible)
+}
+
+/// The shared gate both `evaluates_input_in` match arms apply before
+/// claiming their entry: is the occurrence's verb inside this entry's own
+/// declared scope (`entry_covers`), and is this NOT a standalone run of only
+/// listed `standalone_flags` (`standalone_run`)? Both arms ask the identical
+/// two questions in the identical order — an entry scoped to
+/// `subcommands`/`subcommand_paths` is claiming something about those verbs
+/// only, and a flags-only run of listed `standalone_flags` does the flag's
+/// own thing and stops rather than running anything this entry describes —
+/// so this is one definition of "does this entry's claim still apply to what
+/// actually ran" rather than two.
+///
+/// Returns the resolved subcommand alongside the verdict because the
+/// `"stdin"` arm needs it again afterward, for its own `standalone_hint`
+/// lookup.
+fn entry_applies<'a>(
+    prog: &Program,
+    cmd: &'a Cmd,
+    lang: &str,
+    standalone_eligible: bool,
+) -> (bool, Option<&'a str>) {
+    let sub = entry_subcommand(prog, cmd, lang);
+    let applies =
+        entry_covers(prog, cmd, sub, lang) && !standalone_run(prog, cmd, sub, standalone_eligible);
+    (applies, sub)
 }
 
 pub fn evaluates_input_in(
@@ -1857,32 +1931,59 @@ pub fn evaluates_input_in(
     cmd: &Cmd,
     lang: &str,
     holds_input: bool,
+    snippet_located: bool,
     standalone_eligible: bool,
 ) -> (bool, Option<String>, Option<StandaloneHint>) {
     for prog in entries_for_cmd(kb, cmd, lang) {
         let wrap_lang = (!prog.wrap_lang.is_empty()).then(|| prog.wrap_lang.clone());
         match prog.evaluates_input.as_str() {
-            // Untouched by the flag on purpose: an always-entry runs computed
-            // text whatever its standard input holds, so no here-document can
-            // satisfy that claim.
-            "always" => return (true, wrap_lang, None),
+            // Untouched by the `holds_input` flag on purpose: an always-entry
+            // runs computed text whatever its standard input holds, so no
+            // here-document can satisfy that claim.
+            //
+            // Scope and standalone are asked of an always-entry for the same
+            // reason the stdin arm asks them: an entry scoped to its
+            // script-running verbs (`subcommands`/`subcommand_paths`) is
+            // claiming something about THOSE verbs, not about one it does
+            // not cover, and a run of only listed `standalone_flags` does
+            // the flag's own thing and stops rather than running computed
+            // text. Standing down leaves the body empty rather than
+            // returning, so a same-name sibling entry still fires — the same
+            // fall-through the stdin arm below relies on.
+            "always" => {
+                let (applies, _) = entry_applies(prog, cmd, lang, standalone_eligible);
+                if applies {
+                    return (true, wrap_lang, None);
+                }
+            }
             // The standalone stand-down (spec 2026-08-20 §2 effect 2): a run
             // of only listed flags does its own thing and stops, so there is
             // no code left for standard input to supply — the same shape a
             // heredoc attached to this SAME command still gets judged
             // through, because the locator above answers a different
             // question and does not consult `standalone_flags` at all.
+            // `entry_covers` applies the same scope test the always arm
+            // uses, above: an entry scoped to `subcommands` or
+            // `subcommand_paths` is claiming something about those verbs,
+            // not about a verb it does not cover.
             //
             // Standing down leaves the body empty rather than returning, so
             // this entry falls through to the next one exactly as an unmatched
             // arm did: a name can carry both a `"stdin"` entry and an
             // `"always"` one, and the always entry still has to fire.
-            "stdin" if !holds_input && reads_stdin(cmd) => {
+            // `snippet_located` stands this arm down the same way `holds_input`
+            // does: if THIS occurrence's own entry vocabulary already found the
+            // code — whatever flag carried it, attached or spaced, however an
+            // unrelated flag happens to be spelled — standard input is not
+            // where the code came from. `"always"` above is deliberately
+            // untouched: an always-entry runs computed text whatever standard
+            // input holds, so a located snippet cannot satisfy that claim.
+            "stdin" if !holds_input && !snippet_located && reads_stdin(cmd) => {
                 // One lookup, both questions: whether this stands down, and —
                 // when it does not — the off-switch sentence saying what would
                 // have made it.
-                let sub = entry_subcommand(prog, cmd, lang);
-                if !standalone_run(prog, cmd, sub, standalone_eligible) {
+                let (applies, sub) = entry_applies(prog, cmd, lang, standalone_eligible);
+                if applies {
                     let hint = standalone_hint(prog, cmd, sub, standalone_eligible);
                     return (true, wrap_lang, hint);
                 }
@@ -2626,46 +2727,55 @@ pub fn unresolved_callback_argument(kb: &Knowledge, cmd: &Cmd) -> bool {
 /// `expand_wrappers_with_sources`, to consume the body) and the engine (to
 /// mark every heredoc the locator did NOT consume, at any depth).
 ///
-/// `Some(language)` requires all three of the design's rules at once:
+/// `Some(language)` requires every condition below at once:
+///   0. the matched entry is scoped to `lang` (via `entries_for`) and its
+///      receiver gate holds for `cmd`'s own receiver — an entry declared for
+///      a different shell language, or gated to a receiver `cmd` does not
+///      carry, is never even offered to the rules below;
 ///   1. the matched entry declares `evaluates_input = "stdin"` — it is a
 ///      program known to read code from standard input at all;
 ///   2. `cmd` itself actually reads from stdin (`reads_stdin`) — a `-c`
 ///      snippet or a script path on the SAME command means the heredoc's
 ///      text is not what runs, even if the program could otherwise read
 ///      stdin;
-///   3. the body reaches the consumer unmodified — a quoted delimiter
-///      (`<<'EOF'`) always qualifies; an unquoted one only when the body
-///      contains none of the characters shell expansion acts on (`$`, a
-///      backtick), since otherwise the raw captured text is not what the
-///      consumer actually sees.
+///   3. the body reaches the consumer unmodified (`delivers_verbatim`) — a
+///      quoted delimiter (`<<'EOF'`) always qualifies; an unquoted one only
+///      when the body carries none of the characters shell expansion acts on
+///      (`$`, a backtick) AND no backslash — an unquoted delimiter also has
+///      its backslash pairs collapsed and line continuations removed on
+///      delivery, so a backslash-bearing body can differ from what was
+///      scanned even with no expansion character present.
 ///
 /// Returns the ENTRY that matched alongside its own `wrap_lang` (possibly
 /// empty — `scan_snippet` already treats an empty or unregistered language as
 /// "fall back to bash", exactly like every other wrap arm).
 ///
 /// The entry is part of the answer, not a convenience: whatever judges this
-/// consumption downstream has to judge the entry that actually decided it. This
-/// walk takes the FIRST name match, while the language-aware lookup orders
-/// scoped entries ahead of unscoped ones — so a re-derived lookup can select a
-/// different same-name entry, and a judgement resting on that one can rest on a
-/// scan that never happened.
+/// consumption downstream has to judge the entry that actually decided it.
+/// This walk filters to entries scoped to `lang` via `entries_for` and returns
+/// the FIRST of those whose own stdin, receiver-gate and verbatim-body claims
+/// hold — `entry_for`'s single-entry pick (scoped-before-unscoped, then file
+/// order) evaluates none of those claims, so a re-derived `entry_for` lookup
+/// can select a different same-name entry, and a judgement resting on that one
+/// can rest on a scan that never happened.
 pub fn heredoc_feeds<'k>(
     kb: &'k Knowledge,
     cmd: &Cmd,
+    lang: &str,
     heredoc: &crate::syntax::Heredoc,
 ) -> Option<(&'k Program, &'k str)> {
-    let head = base(&cmd.head);
-    for prog in &kb.program {
+    for prog in entries_for(kb, &cmd.head, lang) {
         if !receiver_gate_holds(kb, prog, &cmd.receiver_origin) {
-            continue;
-        }
-        if !prog.match_names.iter().any(|n| n.to_ascii_lowercase() == head) {
             continue;
         }
         if prog.evaluates_input != "stdin" || !reads_stdin(cmd) {
             continue;
         }
-        if !(heredoc.quoted_delimiter || !carries_expansion(&heredoc.body)) {
+        // Rule 3, and the SAME test `holds_input` rule 2 applies one layer
+        // up: an unquoted delimiter also has its backslashes processed on
+        // delivery, so a backslash-bearing unquoted body can differ from
+        // what was scanned even with no expansion character present.
+        if !delivers_verbatim(heredoc) {
             continue;
         }
         return Some((prog, prog.wrap_lang.as_str()));
@@ -2673,14 +2783,23 @@ pub fn heredoc_feeds<'k>(
     None
 }
 
+/// Whether this here-document reaches its consumer as the text vouch scanned.
+///
+/// One definition, two readers — the locator's consumption rule above and
+/// `holds_input`'s rule 2 below — because a consumption side laxer than the
+/// hold side scans and judges text the hold side would refuse.
+fn delivers_verbatim(h: &crate::syntax::Heredoc) -> bool {
+    h.quoted_delimiter || (!carries_expansion(&h.body) && !h.body.contains('\\'))
+}
+
 /// Whether shell expansion would act on this text before a consumer sees it.
 ///
-/// One definition, three readers: the locator's unmodified-body rule above, the
-/// stricter verbatim rule in `holds_input` (which adds the backslash the shell
-/// also processes in an unquoted body), and the bash scanner's own
-/// dynamic-value test. Refining what counts as expansion — `${` awareness,
-/// quoting awareness — has to change one answer, not two that then disagree
-/// about the same body.
+/// One definition, two readers: `delivers_verbatim` above (which adds the
+/// backslash the shell also processes in an unquoted body, and is itself
+/// shared by the locator and `holds_input`'s rule 2), and the bash scanner's
+/// own dynamic-value test. Refining what counts as expansion — `${`
+/// awareness, quoting awareness — has to change one answer, not two that then
+/// disagree about the same body.
 pub fn carries_expansion(text: &str) -> bool {
     text.bytes().any(|b| b == b'$' || b == b'`')
 }
@@ -2696,16 +2815,21 @@ pub fn carries_expansion(text: &str) -> bool {
 /// `attached` — the locator's own verdict per record, so the sibling rule reads
 /// what was already decided rather than deciding it a second time.
 /// `entry` is the entry the locator actually consumed the delivered record
-/// with, never a re-derived lookup.
+/// with, never a re-derived lookup — this function takes no `lang` of its
+/// own for exactly that reason: `entry`'s language scope was already proven
+/// against the occurrence's `lang` by `heredoc_feeds`'s own
+/// `entries_for(kb, &cmd.head, lang)` walk before `entry` ever reached here,
+/// so re-checking it against a second `lang` parameter would be a second
+/// answer to a question `entries_for` already answered (rule 4 used to do
+/// exactly that, until Task 3 made `heredoc_feeds` language-aware and made
+/// the check unreachable in practice).
 ///
 /// Every rule that cannot be proven returns false, which keeps whatever ask the
 /// command already had. There is no third answer.
-#[allow(clippy::too_many_arguments)]
 fn holds_input(
     cmd: &Cmd,
     args_complete: bool,
     args_from_input: bool,
-    lang: &str,
     attached: &[&crate::syntax::Heredoc],
     consumption: &[Option<(&Program, &str)>],
     nth: usize,
@@ -2733,14 +2857,10 @@ fn holds_input(
     if !accepted_source {
         return false;
     }
-    // Rule 2: the delivered body must reach the consumer VERBATIM. A quoted
-    // delimiter always does. An unquoted one also has its backslashes processed
-    // on delivery — pairs collapse, line continuations vanish — so a
-    // backslash-bearing unquoted body can differ from what was scanned even
-    // with no expansion character present.
-    let verbatim =
-        delivered.quoted_delimiter || (!carries_expansion(&delivered.body) && !delivered.body.contains('\\'));
-    if !verbatim {
+    // Rule 2: the delivered body must reach the consumer VERBATIM — the SAME
+    // test the locator applies before consuming (`delivers_verbatim`), so
+    // this side can never hold a body the locator itself refused.
+    if !delivers_verbatim(delivered) {
         return false;
     }
     // Rule 3: every OTHER record that also feeds standard input must have been
@@ -2756,14 +2876,11 @@ fn holds_input(
             return false;
         }
     }
-    // Rule 4: the CONSUMING entry must be in scope for this occurrence's own
-    // language, and must declare a snippet language a scanner exists for. An
-    // empty declared language is refused for the same reason an unregistered
-    // one is: the scan falls back to bash, so a hold would rest on a reading
-    // the entry never claimed.
-    if !(entry.languages.is_empty() || entry.languages.iter().any(|l| l == lang)) {
-        return false;
-    }
+    // Rule 4: the CONSUMING entry must declare a snippet language a scanner
+    // exists for. An empty declared language is refused for the same reason
+    // an unregistered one is: the scan falls back to bash, so a hold would
+    // rest on a reading the entry never claimed. The entry's language SCOPE
+    // is not re-checked here — see this function's own doc comment.
     crate::syntax::scanner_for(&entry.wrap_lang).is_some()
 }
 
@@ -3308,18 +3425,12 @@ pub fn recognition_at(
         // the union. The standalone arm is the only way a fully empty scope
         // recognises anything, which is why the loader refuses that spelling
         // without a non-empty flag list (§3, §4).
-        let covers = if p.subcommands.is_none() && p.subcommand_paths.is_none() {
-            true
-        } else {
-            // The first-verb and standalone halves ask about the verb under
-            // THIS entry's vocabulary, so that lookup runs once.
-            let sub = entry_subcommand(p, cmd, lang);
-            p.subcommands.as_ref().is_some_and(|subs| {
-                !subs.is_empty()
-                    && sub.is_some_and(|sub| subs.iter().any(|s| s.eq_ignore_ascii_case(sub)))
-            }) || entry_subcommand_path_matches(p, cmd, lang)
-                || standalone_run(p, cmd, sub, standalone_eligible)
-        };
+        //
+        // `entry_covers` is the scope half (whole-program, listed
+        // subcommands, or subcommand_paths); the verb it reads is looked up
+        // once here and handed to both halves, exactly as before.
+        let sub = entry_subcommand(p, cmd, lang);
+        let covers = entry_covers(p, cmd, sub, lang) || standalone_run(p, cmd, sub, standalone_eligible);
         if covers {
             return match at_place {
                 Some(glob) => Recognised::AtPlace(glob.clone()),
@@ -4228,7 +4339,12 @@ fn join_snippet_args(
 /// `unreadable_language` here rather than in `scan_snippet` — this is the
 /// one place all three wrap sites share, so the construct lands the same way
 /// whichever site raised it, and `scan_snippet` stays a pure "read this
-/// text" function with no construct channel of its own.
+/// text" function with no construct channel of its own. Carried with the
+/// snippet's OWN `wrap_lang` (the third tuple element), not the host's — a
+/// javascript snippet on a bash line must name
+/// `lang.javascript.constructs.unreadable_language`, matching what
+/// `route::decide_snippet` already does for the identical construct on the
+/// tool path (M2.79/M2.73).
 ///
 /// Shared by the three sites below that hand a snippet to `scan_snippet` and
 /// then need its answer folded back into `next_lang`/`inner_heredocs`: the
@@ -4240,7 +4356,7 @@ fn scan_wrap_snippet(
     src: &str,
     srcs: &mut Vec<SnippetSource>,
     failures: &mut Vec<(String, String)>,
-    constructs: &mut Vec<(String, String)>,
+    constructs: &mut Vec<(String, String, Option<String>)>,
 ) -> (SnippetScan, String) {
     if crate::syntax::scanner_for(wrap_lang).is_none() {
         constructs.push((
@@ -4249,6 +4365,7 @@ fn scan_wrap_snippet(
                 "`{head}` hands off a snippet in {wrap_lang}, a language vouch has no scanner \
                  for, so its contents were never read"
             ),
+            Some(wrap_lang.to_string()),
         ));
     }
     let result = scan_snippet(wrap_lang, src, srcs);
@@ -4391,6 +4508,20 @@ pub struct ExpandedWrappers {
     /// standard input — see `holds_input`. Read by the construct channel so a
     /// scanned body stops the ask that says the code is not in the command.
     pub holds_input: Vec<bool>,
+    /// Parallel to `cmds`: whether THIS occurrence's own entry vocabulary
+    /// located a snippet the walk then scanned — the `after_c`, `after_flag`,
+    /// and `arg_N` wrap arms alike, every one of them that reaches
+    /// `scan_snippet`/`scan_wrap_snippet` by its own flag or positional
+    /// vocabulary. If vouch found the code, the code did not come from
+    /// standard input — true whatever the flag that carried it was spelled,
+    /// which is why this closes both the attached inline-code form and an
+    /// unrelated flag that happens to be `-s`. Never the here-document
+    /// locator: a consumed here-document IS standard input, and
+    /// `holds_input` already answers for it.
+    ///
+    /// Per OCCURRENCE, never per line: a sibling command's located snippet
+    /// says nothing about this one's standard input (M2.98).
+    pub snippet_located: Vec<bool>,
     /// Parallel to `cmds`: whether this occurrence was produced by a wrapper
     /// that appends arguments from a channel the line never names
     /// (`args_from_input`). Its recorded arguments are therefore a partial
@@ -4420,20 +4551,27 @@ pub struct ExpandedWrappers {
     /// against `a` — the composition of two nested relative run-dir flags is
     /// not modelled.
     pub inherited_run_dir: Vec<Option<String>>,
-    /// Every `(key, detail)` construct the expansion walk itself raised —
-    /// distinct from a command's or a snippet's own scanned constructs, and
-    /// from `wrap_depth_exceeded` above (one cap-hit marker per line; this
-    /// carries however many the walk found). The engine folds each pair
-    /// through the same `construct_action_for`/`construct_reason` machinery
-    /// as every other construct channel, attributed to the HOST language.
+    /// Every `(key, detail, lang_override)` construct the expansion walk
+    /// itself raised — distinct from a command's or a snippet's own scanned
+    /// constructs, and from `wrap_depth_exceeded` above (one cap-hit marker
+    /// per line; this carries however many the walk found). The engine folds
+    /// each triple through the same `construct_action_for`/`construct_reason`
+    /// machinery as every other construct channel, attributed to the HOST
+    /// language when `lang_override` is `None`, or to that language when it
+    /// is `Some` — the seam `unreadable_language` needs, since a wrap arm's
+    /// snippet may be in a language other than the line it was found on.
     ///
     /// Three producers live here: `wrap_unlocated` (an arm was told a
-    /// payload exists and could not find it), `evaluated_input` (a wrap slot
-    /// holds a marker, so the command string is known to exist and known to
-    /// be unreadable), and `unreadable_language` (a located snippet — a wrap
-    /// arm's payload or a consumed here-document — is in a language nothing
-    /// can scan: `opaque`, `cmd`, or any other name outside the registry).
-    pub constructs: Vec<(String, String)>,
+    /// payload exists and could not find it, host-attributed, `None`),
+    /// `evaluated_input` (a wrap slot holds a marker, so the command string
+    /// is known to exist and known to be unreadable, host-attributed,
+    /// `None`), and `unreadable_language` (a located snippet — a wrap arm's
+    /// payload or a consumed here-document — is in a language nothing can
+    /// scan: `opaque`, `cmd`, or any other name outside the registry;
+    /// attributed to that snippet's own `wrap_lang`, `Some`, matching what
+    /// `route::decide_snippet` already does for the identical construct on
+    /// the tool path — M2.79/M2.73).
+    pub constructs: Vec<(String, String, Option<String>)>,
 }
 
 /// Everything one `go` pass accumulates. A struct rather than eight more
@@ -4447,13 +4585,27 @@ struct WalkOut {
     scope_parents: Vec<WrapScope>,
     langs: Vec<String>,
     holds: Vec<bool>,
+    /// Whether THIS occurrence's own entry vocabulary located a snippet the
+    /// walk then scanned — see `ExpandedWrappers::snippet_located` for the
+    /// full rationale.
+    snippet_located: Vec<bool>,
     from_input: Vec<bool>,
     complete: Vec<bool>,
     inherited_run_dir: Vec<Option<String>>,
     srcs: Vec<SnippetSource>,
     exceeded: Option<String>,
     failures: Vec<(String, String)>,
-    constructs: Vec<(String, String)>,
+    constructs: Vec<(String, String, Option<String>)>,
+}
+
+/// Builds one `constructs` entry attributed to the HOST language — the
+/// `None` third member every wrap arm pushes except the one that already
+/// names a located snippet's own `wrap_lang` (`scan_wrap_snippet`'s
+/// `unreadable_language` push, which stays a literal `Some(lang)` at its own
+/// call site). States the meaning out loud rather than leaving a bare
+/// positional `None` for the reader to attribute by habit.
+fn host_construct(key: &str, detail: impl Into<String>) -> (String, String, Option<String>) {
+    (key.to_string(), detail.into(), None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4556,6 +4708,11 @@ pub fn expand_wrappers_forking(
             // judgement on someone else's occurrence — and a desynced parallel
             // array does not fail loudly, it silently misattributes.
             out.holds.push(false);
+            // Same back-patch discipline as `holds` above: pushed false here,
+            // and set true by a wrap arm below ONLY when THIS occurrence's own
+            // entry vocabulary is what located the snippet. `self_idx` is
+            // captured on the next line for exactly this purpose.
+            out.snippet_located.push(false);
             out.from_input.push(from_input);
             out.complete.push(own_args_complete);
             out.inherited_run_dir.push(inherited.map(str::to_string));
@@ -4627,7 +4784,7 @@ pub fn expand_wrappers_forking(
                         let walk = operand_walk(prog, &cmd.args, None, fork);
                         match (walk.operand, walk.unlocated) {
                             (_, Some(detail)) => {
-                                out.constructs.push(("wrap_unlocated".to_string(), detail));
+                                out.constructs.push(host_construct("wrap_unlocated", detail));
                                 SnippetScan::default()
                             }
                             (Some(at), None) => SnippetScan {
@@ -4663,7 +4820,7 @@ pub fn expand_wrappers_forking(
                         let walk = operand_walk(prog, &cmd.args, Some(&prog.wrap_flags), fork);
                         match (walk.flag_seen, walk.operand, walk.unlocated) {
                             (_, _, Some(detail)) => {
-                                out.constructs.push(("wrap_unlocated".to_string(), detail));
+                                out.constructs.push(host_construct("wrap_unlocated", detail));
                                 SnippetScan::default()
                             }
                             // No wrap flag at all: a bare shell, or one handed a
@@ -4672,8 +4829,8 @@ pub fn expand_wrappers_forking(
                             // first and the file for the second.
                             (false, _, None) => SnippetScan::default(),
                             (true, None, None) => {
-                                out.constructs.push((
-                                    "wrap_unlocated".to_string(),
+                                out.constructs.push(host_construct(
+                                    "wrap_unlocated",
                                     format!(
                                         "`{}` was told to read a script and none of its arguments \
                                          is one, so the code it runs is not in this command",
@@ -4691,6 +4848,21 @@ pub fn expand_wrappers_forking(
                                 // unescape rule, one place).
                                 let inner_src = crate::paths::unquote_snippet(&cmd.args[at]);
                                 next_lang = "bash".to_string();
+                                // This occurrence's own flag vocabulary
+                                // located the payload — whatever it was
+                                // spelled — so standard input is not where
+                                // the code came from (M2.98). Same claim as
+                                // the `after_flag`/`arg_N` arms below; this
+                                // arm reaches `scan_snippet` directly rather
+                                // than `scan_wrap_snippet` because the
+                                // wrapped language here is always bash, never
+                                // another scanner's — but the location fact
+                                // is identical, and this is the entry shape
+                                // (bash/sh/dash/zsh/ksh) that actually
+                                // declares `evaluates_input = "stdin"`
+                                // alongside `wraps = "after_c"`, which
+                                // `after_flag`/`arg_N` do not.
+                                out.snippet_located[self_idx] = true;
                                 match scan_snippet("bash", &inner_src, &mut out.srcs) {
                                     Ok(scan) => scan,
                                     Err(e) => {
@@ -4714,6 +4886,11 @@ pub fn expand_wrappers_forking(
                                 &mut out.failures,
                                 &mut out.constructs,
                             );
+                            // This occurrence's own flag vocabulary located
+                            // the payload — whatever it was spelled — so
+                            // standard input is not where the code came from
+                            // (M2.98).
+                            out.snippet_located[self_idx] = true;
                             join_snippet_args(
                                 prog,
                                 &mut scan,
@@ -4726,7 +4903,7 @@ pub fn expand_wrappers_forking(
                             scan
                         }
                         Payload::Unlocated(detail) => {
-                            out.constructs.push(("wrap_unlocated".to_string(), detail));
+                            out.constructs.push(host_construct("wrap_unlocated", detail));
                             SnippetScan::default()
                         }
                         Payload::Absent => SnippetScan::default(),
@@ -4752,12 +4929,16 @@ pub fn expand_wrappers_forking(
                                     &mut out.failures,
                                     &mut out.constructs,
                                 );
+                                // Same reasoning as the `after_flag` arm above:
+                                // this occurrence's own positional vocabulary
+                                // located the payload (M2.98).
+                                out.snippet_located[self_idx] = true;
                                 next_lang = lang;
                                 scan
                             }
                             Some(_) => {
-                                out.constructs.push((
-                                    "evaluated_input".to_string(),
+                                out.constructs.push(host_construct(
+                                    "evaluated_input",
                                     format!(
                                         "`{}` is handed a command string vouch could not read the \
                                      value of",
@@ -4793,7 +4974,7 @@ pub fn expand_wrappers_forking(
                     // arm must stop being able to give.
                     "start_process" => match start_process_args(prog, &cmd.args) {
                         ListPayload::Unlocated(detail) => {
-                            out.constructs.push(("wrap_unlocated".to_string(), detail));
+                            out.constructs.push(host_construct("wrap_unlocated", detail));
                             SnippetScan::default()
                         }
                         // No declared list parameter anywhere: this really is
@@ -4817,8 +4998,8 @@ pub fn expand_wrappers_forking(
                                     ..SnippetScan::default()
                                 },
                                 (None, _) => {
-                                    out.constructs.push((
-                                        "wrap_unlocated".to_string(),
+                                    out.constructs.push(host_construct(
+                                        "wrap_unlocated",
                                         format!(
                                             "`{}` carries an argument list and vouch could not \
                                              tell which program it starts",
@@ -4828,8 +5009,8 @@ pub fn expand_wrappers_forking(
                                     SnippetScan::default()
                                 }
                                 (Some(_), true) => {
-                                    out.constructs.push((
-                                        "wrap_unlocated".to_string(),
+                                    out.constructs.push(host_construct(
+                                        "wrap_unlocated",
                                         format!(
                                             "`{}` names an argument list with no items vouch \
                                              could read",
@@ -4844,7 +5025,7 @@ pub fn expand_wrappers_forking(
                     "after_exec" => {
                         let (found, unlocated) = after_exec_commands(prog, &cmd.args);
                         for detail in unlocated {
-                            out.constructs.push(("wrap_unlocated".to_string(), detail));
+                            out.constructs.push(host_construct("wrap_unlocated", detail));
                         }
                         let complete = vec![own_args_complete; found.len()];
                         SnippetScan { cmds: found, args_complete: complete, ..SnippetScan::default() }
@@ -4912,7 +5093,7 @@ pub fn expand_wrappers_forking(
             // second site in charge of "was this sibling consumed".
             let attached: Vec<&crate::syntax::Heredoc> = heredocs.iter().filter(|h| h.cmd_index == i).collect();
             let consumption: Vec<Option<(&Program, &str)>> =
-                attached.iter().map(|h| heredoc_feeds(kb, cmd, h)).collect();
+                attached.iter().map(|h| heredoc_feeds(kb, cmd, lang, h)).collect();
             for (nth, heredoc) in attached.iter().enumerate() {
                 if let Some((entry, entry_lang)) = consumption[nth] {
                     let held = own_source == crate::syntax::InputSource::Heredoc(heredoc.id)
@@ -4920,7 +5101,6 @@ pub fn expand_wrappers_forking(
                             cmd,
                             own_args_complete,
                             from_input,
-                            lang,
                             &attached,
                             &consumption,
                             nth,
@@ -5037,6 +5217,7 @@ pub fn expand_wrappers_forking(
         wrap_depth_exceeded: walked.exceeded,
         parse_failures: walked.failures,
         holds_input: walked.holds,
+        snippet_located: walked.snippet_located,
         args_from_input: walked.from_input,
         args_complete: walked.complete,
         inherited_run_dir: walked.inherited_run_dir,

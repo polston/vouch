@@ -69,8 +69,8 @@ fn every_program_effect_uses_the_same_receiver_gate() {
     assert!(!guards::callback_argument_used(&knowledge, &unknown));
     assert!(guards::callback_argument_used(&knowledge, &known));
 
-    assert!(!guards::evaluates_input_in(&knowledge, &unknown, "python", false, true).0);
-    assert!(guards::evaluates_input_in(&knowledge, &known, "python", false, true).0);
+    assert!(!guards::evaluates_input_in(&knowledge, &unknown, "python", false, false, true).0);
+    assert!(guards::evaluates_input_in(&knowledge, &known, "python", false, false, true).0);
 
     assert!(!guards::appended_args_could_change_the_answer(
         &knowledge, &unknown, "python"

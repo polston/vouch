@@ -49,7 +49,7 @@ fn main() {
             scan.heredocs
                 .iter()
                 .filter(|h| h.cmd_index == ci)
-                .any(|h| vouch::guards::heredoc_feeds(kb, cmd, h).is_some())
+                .any(|h| vouch::guards::heredoc_feeds(kb, cmd, "bash", h).is_some())
         });
         // The REAL judgement, through the real threading — not a re-derived
         // partial predicate. Before the input source existed, the pre-code

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.17.5 (2026-09-06)
+
+
+### Bug Fixes
+
+* a flag unrelated to standard input no longer makes an inline-code run ask
+* a shell given its code by an inline-code flag no longer asks about code vouch cannot see merely because an unrelated flag looks like a standard-input marker
+* a snippet in a language vouch cannot scan names that language's setting on the command path, as it already did on the tool path
+* a verb an entry does not cover no longer asks citing code vouch cannot see, and a flag an entry lists as standalone no longer does either
+* an entry scoped to one shell language no longer has its standard-input claim consulted on a line of another
+* an inline-code flag written with its payload attached is judged the same as one written with a space, instead of asking about code vouch had already read
+* an unquoted here-document body carrying a backslash is no longer treated as reaching its consumer unchanged
+* an unread-code ask raised by a python call names python's own construct setting instead of the host shell's, so setting python's turns it off
+* an unresolved write path found in a snippet names that snippet's language, matching the sibling site that already did
+* an unresolved write path found in a snippet whose base directory could not be proven also names that snippet's language, not the host's
+
 ## 0.17.4 (2026-09-06)
 
 

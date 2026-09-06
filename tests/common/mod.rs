@@ -273,6 +273,21 @@ pub fn kb_with(mine: &str) -> vouch::guards::Knowledge {
     vouch::knowledge::merge(shipped_kb(), mine)
 }
 
+/// Writes TOML text to a scratch file under a shared temp directory and
+/// returns its path, ready for `knowledge::load_files` to read. Shared for
+/// the reason `cmd` below is: `tests/knowledge_source_test.rs`'s own private
+/// `scratch` (keyed by an explicit name per call) and `tests/guards_test.rs`'s
+/// own private `knowledge_from` (keyed by a hash of the body, so two tests
+/// writing the same text never race on the same path) both wrote this exact
+/// file — a third copy is the point this one should have become shared.
+pub fn scratch(name: &str, body: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join("vouch_test_knowledge_scratch");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let p = dir.join(name);
+    std::fs::write(&p, body).expect("write");
+    p
+}
+
 /// One parsed command, built by hand. Shared for the reason `decision_at` is:
 /// every test binary already includes this module, so the four pre-existing
 /// copies (`guards_test.rs`, `knowledge_merge_test.rs`, `rider_test.rs`,

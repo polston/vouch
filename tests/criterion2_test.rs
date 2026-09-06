@@ -168,6 +168,50 @@ fn setting_a_construct_to_allow_actually_stops_the_prompt() {
 /// scanner's list — which is exactly the failure they exist to prevent, and
 /// three of the current names (`unresolved_path`, `evaluated_input`,
 /// `splatting`) are engine-emitted and were added to those lists by hand.
+/// Every `"<name>"` immediately following `<call_prefix><ident>, "` in `src`,
+/// where `<ident>` is WHICHEVER local binding the call site uses for its
+/// language key — `lang`, `clang`, `ckey`, `plang`, or any future spelling.
+/// Hardcoding one spelling was already wrong once (the offset-by-one bug the
+/// comment on `names_in_source` used to record): a legitimate rename at a
+/// call site — `construct_reason(lang, "unresolved_path")` becoming
+/// `construct_reason(clang, "unresolved_path")` to key the prompt to the
+/// OCCURRENCE rather than the host (M2.79) — must not silently drop that
+/// site's name from the set this test exists to find. The identifier's own
+/// spelling is not part of what makes a name "engine-emitted"; only the call
+/// shape is.
+fn find_after_ident_arg(src: &str, call_prefix: &str, out: &mut Vec<String>) {
+    let mut rest = src;
+    while let Some(i) = rest.find(call_prefix) {
+        let after = &rest[i + call_prefix.len()..];
+        let ident_len =
+            after.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(0);
+        if let Some(tail) = after[ident_len..].strip_prefix(", \"") {
+            if let Some(end) = tail.find('"') {
+                let name = &tail[..end];
+                if !name.is_empty()
+                    && name.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+                    && !out.contains(&name.to_string())
+                {
+                    out.push(name.to_string());
+                }
+            }
+        }
+        // Advance past the matched prefix at minimum, so a `call_prefix`
+        // match with no valid identifier after it (a false hit inside a
+        // comment or a different call shape) still makes progress. A flat
+        // byte offset of 1 is not always a char boundary — the character
+        // right after the prefix can be multi-byte, such as an em dash in a
+        // doc comment — so the fallback step is that character's own byte
+        // length, never a fixed 1.
+        let advance = if ident_len > 0 {
+            ident_len
+        } else {
+            after.chars().next().map(char::len_utf8).unwrap_or(1)
+        };
+        rest = &after[advance.min(after.len())..];
+    }
+}
+
 fn names_in_source() -> Vec<String> {
     let mut out = Vec::new();
     for src in [
@@ -176,31 +220,22 @@ fn names_in_source() -> Vec<String> {
         include_str!("../src/powershell.rs"),
         include_str!("../src/python.rs"),
     ] {
-        // The offset is the pattern's own length. Hardcoding it was off by one
-        // on two of the three patterns, so the scan silently missed
-        // `unresolved_path` and `evaluated_input` — the engine-emitted names
-        // this check exists to catch. It passed while proving nothing.
-        for pat in [
-            "note(\"",
-            "construct_action_for(cfg, lang, \"",
-            "construct_reason(lang, \"",
-        ] {
-            let off = pat.len();
-            let mut rest = src;
-            while let Some(i) = rest.find(pat) {
-                let after = &rest[i + off..];
-                if let Some(end) = after.find('"') {
-                    let name = &after[..end];
-                    if !name.is_empty()
-                        && name.chars().all(|c| c.is_ascii_lowercase() || c == '_')
-                        && !out.contains(&name.to_string())
-                    {
-                        out.push(name.to_string());
-                    }
+        let mut rest = src;
+        while let Some(i) = rest.find("note(\"") {
+            let after = &rest[i + "note(\"".len()..];
+            if let Some(end) = after.find('"') {
+                let name = &after[..end];
+                if !name.is_empty()
+                    && name.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+                    && !out.contains(&name.to_string())
+                {
+                    out.push(name.to_string());
                 }
-                rest = &rest[i + off..];
             }
+            rest = &rest[i + "note(\"".len()..];
         }
+        find_after_ident_arg(src, "construct_action_for(cfg, ", &mut out);
+        find_after_ident_arg(src, "construct_reason(", &mut out);
     }
     out
 }
@@ -275,4 +310,24 @@ fn the_source_scan_actually_finds_names() {
             "source scan missed '{expect}': {found:?}"
         );
     }
+}
+
+#[test]
+fn find_after_ident_arg_does_not_panic_on_a_multi_byte_character() {
+    // A `call_prefix` match immediately followed by a multi-byte character
+    // (an em dash, as this codebase's own comments use) used to panic: the
+    // fallback advance was a flat byte offset of 1, which is not a char
+    // boundary partway through a multi-byte encoding.
+    let mut out = Vec::new();
+    find_after_ident_arg("construct_reason(— \"x\")", "construct_reason(", &mut out);
+    assert!(out.is_empty(), "no valid identifier arg here: {out:?}");
+
+    // A real match must still be found on the far side of such a character.
+    let mut out = Vec::new();
+    find_after_ident_arg(
+        "// construct_reason(—) construct_reason(lang, \"unresolved_path\")",
+        "construct_reason(",
+        &mut out,
+    );
+    assert_eq!(out, vec!["unresolved_path".to_string()]);
 }

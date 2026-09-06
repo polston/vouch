@@ -37,11 +37,42 @@ fn vouch_never_panics_on_any_command_in_any_corpus() {
     }
 }
 
+/// Whether `reason` contains `set lang.<name>.constructs.<key>` for ANY
+/// language name — not the three scanner languages alone. `unreadable_language`
+/// (M2.79/M2.73) legitimately names the snippet's own unscannable language
+/// (`cmd`, `opaque`, `javascript`, or any future one), keyed exactly like
+/// every other per-snippet construct — so a real, settable off-switch for one
+/// of those must not read as "names nothing" just because its language is not
+/// bash, powershell, or python.
+///
+/// Still requires the full `set lang.<name>.constructs.` shape, never a bare
+/// `.constructs.` search — see `names_a_setting`'s own doc for why that
+/// distinction is the whole point of this file.
+fn names_a_lang_construct_setting(reason: &str) -> bool {
+    reason.split("set lang.").skip(1).any(|rest| {
+        rest.split_once('.').is_some_and(|(lang, after)| {
+            // Both segments must be genuinely non-empty, or the literal
+            // string "set lang..constructs." (empty language) or
+            // "set lang.bash.constructs." with nothing after it (empty key)
+            // would satisfy this net — which is exactly the false "names a
+            // setting" this predicate exists to refuse (review Minor, this
+            // predicate is the CLAUDE.md §5 backstop and strictness is its
+            // whole job). A real construct name always starts with a
+            // lowercase letter or underscore.
+            !lang.is_empty()
+                && after
+                    .strip_prefix("constructs.")
+                    .is_some_and(|key| key.starts_with(|c: char| c.is_ascii_lowercase() || c == '_'))
+        })
+    })
+}
+
 /// CLAUDE.md §5, as one predicate: does this reason name something the
 /// operator can change to stop seeing it?
 ///
 /// Deliberately no bare `.constructs.` clause. Every emitting site in
-/// engine.rs already produces "setting: " or "set lang.bash.constructs."; a
+/// engine.rs already produces "setting: " or "set lang.<name>.constructs.";
+/// `names_a_lang_construct_setting` still requires that exact shape, so a
 /// looser clause would only ever accept a reason that mentions constructs
 /// WITHOUT naming a setting, which is the one thing this file exists to
 /// forbid.
@@ -57,9 +88,7 @@ fn vouch_never_panics_on_any_command_in_any_corpus() {
 /// never quietly loosen only that one.
 fn names_a_setting(reason: &str) -> bool {
     reason.contains("setting: ")
-        || reason.contains("set lang.bash.constructs.")
-        || reason.contains("set lang.powershell.constructs.")
-        || reason.contains("set lang.python.constructs.")
+        || names_a_lang_construct_setting(reason)
         || reason.contains("write.allow_paths")
         || reason.contains("no setting that allows this")
         || reason.contains("run.trust_all_under")
@@ -70,6 +99,30 @@ fn names_a_setting(reason: &str) -> bool {
         || reason.contains("write.scope")
         || reason.contains("only_under")
         || reason.contains("tools.")
+}
+
+#[test]
+fn names_a_lang_construct_setting_recognises_any_real_language_and_refuses_empty_segments() {
+    assert!(
+        names_a_lang_construct_setting("to allow this permanently, set lang.cmd.constructs.unreadable_language = \"allow\""),
+        "a real, non-scanner language did not read as naming a setting"
+    );
+    assert!(
+        names_a_lang_construct_setting("to allow this permanently, set lang.bash.constructs.dynamic_command = \"allow\""),
+        "a scanner language regressed"
+    );
+    assert!(
+        !names_a_lang_construct_setting("set lang..constructs.unresolved_path = \"allow\""),
+        "an empty language segment satisfied the net"
+    );
+    assert!(
+        !names_a_lang_construct_setting("set lang.bash.constructs."),
+        "an empty construct key satisfied the net"
+    );
+    assert!(
+        !names_a_lang_construct_setting("this reason mentions constructs. but names no setting"),
+        "a bare .constructs. mention without the full shape satisfied the net"
+    );
 }
 
 #[test]

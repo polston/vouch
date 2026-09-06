@@ -46,7 +46,7 @@ fn shipped_python_version_is_a_standalone_run() {
         recognises(&kb, &c, "bash", true),
         "python --version should be recognised against the shipped knowledge"
     );
-    let (fires, _, _) = evaluates_input(&kb, &c, false, true);
+    let (fires, _, _) = evaluates_input(&kb, &c, false, false, true);
     assert!(
         !fires,
         "python --version must not trip evaluated_input now that --version is a \
@@ -63,7 +63,7 @@ fn shipped_bash_version_is_a_standalone_run() {
         recognises(&kb, &c, "bash", true),
         "bash --version should be recognised against the shipped knowledge"
     );
-    let (fires, _, _) = evaluates_input(&kb, &c, false, true);
+    let (fires, _, _) = evaluates_input(&kb, &c, false, false, true);
     assert!(
         !fires,
         "bash --version must not trip evaluated_input now that --version is a \
@@ -78,7 +78,7 @@ fn shipped_bash_version_is_a_standalone_run() {
 fn shipped_python_dash_still_asks() {
     let kb = shipped();
     let c = cmd("python", &["-"]);
-    let (fires, _, _) = evaluates_input(&kb, &c, false, true);
+    let (fires, _, _) = evaluates_input(&kb, &c, false, false, true);
     assert!(
         fires,
         "python - reads its program from standard input and must still trip \

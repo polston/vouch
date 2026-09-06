@@ -1,0 +1,38 @@
+# A standalone knowledge fixture for Task 2 (M2.236): invented programs
+# covering the shapes no shipped entry has, which is what `entry_covers` and
+# the standalone stand-down have to be measured against. Loaded as the base
+# "knowledge" file (`load_files(fixture, ABSENT)`), never merged over the
+# shipped file, so `version` must satisfy the schema check. Every program
+# name is invented — never a real tool's name.
+version = 12
+
+# Scoped "always" claim, plus a standalone flag — but the standalone flag also
+# makes the verb unreadable (an undescribed pre-verb flag), so this entry
+# alone cannot isolate what `standalone_run` alone contributes; see
+# `gadgetconsole` below for that isolation (review Minor 2).
+[[program]]
+match = ["widgetrunner"]
+subcommands = ["run"]
+evaluates_input = "always"
+standalone_flags = ["--version"]
+case_sensitive_flags = true
+
+# Scoped "stdin" claim, no standalone flags — covers the stdin arm's own
+# scope gate (review Important 2), which the three `widgetrunner` tests never
+# exercise. `LOAD` (uppercase) against the declared lowercase `load` also
+# exercises the case-insensitive match `entry_covers` shares with
+# `recognition_at` (review Important 1).
+[[program]]
+match = ["sprocketreader"]
+subcommands = ["load"]
+evaluates_input = "stdin"
+
+# Unscoped "always" claim with a standalone flag: no subcommands/subcommand_paths
+# at all, so `entry_covers` returns true unconditionally (the whole-program
+# state) and `standalone_run` is the only thing that can produce the stand-down —
+# the isolation `widgetrunner --version` could not provide (review Minor 2).
+[[program]]
+match = ["gadgetconsole"]
+evaluates_input = "always"
+standalone_flags = ["--version"]
+case_sensitive_flags = true

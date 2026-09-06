@@ -6,9 +6,12 @@
 //! are grouped the same way.
 
 use vouch::config::load;
-use vouch::guards::{check_all, in_effect as builtin, KNOWN_GUARDS};
+use vouch::guards::{check_all, heredoc_feeds, in_effect as builtin, KNOWN_GUARDS};
 use vouch::protocol::Decision;
 use vouch::shell::parse;
+
+#[path = "common/mod.rs"]
+mod common;
 
 fn hits_for(cmd: &str) -> Vec<(String, String)> {
     let p = parse(cmd).expect("parses");
@@ -1535,7 +1538,7 @@ fn expand(kb: &vouch::guards::Knowledge, c: &vouch::syntax::Cmd) -> vouch::guard
 }
 
 fn construct_keys(ex: &vouch::guards::ExpandedWrappers) -> Vec<String> {
-    ex.constructs.iter().map(|(k, _)| k.clone()).collect()
+    ex.constructs.iter().map(|(k, _, _)| k.clone()).collect()
 }
 
 #[test]
@@ -2041,7 +2044,10 @@ fn the_judgement_needs_a_scanner_backed_in_scope_consuming_entry() {
     // spelling an operator entry actually uses.
     let kb = stdin_fixture("");
     assert!(!judged_with(&kb, "consume <<'EOF'\nls -la\nEOF\n", "consume"), "empty");
-    // Scoped to a different language than the occurrence's own.
+    // Scoped to a different language than the occurrence's own —
+    // `heredoc_feeds` itself refuses this now (its own `entries_for` filter,
+    // Task 3), so `consumption` is `None` and `holds_input` is never reached
+    // with this entry at all.
     let kb = stdin_fixture("wrap_lang = \"bash\"\nlanguages = [\"powershell\"]\n");
     assert!(!judged_with(&kb, "consume <<'EOF'\nls -la\nEOF\n", "consume"), "out of scope");
     // The same entry in scope: held — so the refusals above are about scope and
@@ -2052,18 +2058,54 @@ fn the_judgement_needs_a_scanner_backed_in_scope_consuming_entry() {
 
 #[test]
 fn the_judgement_reads_the_entry_that_consumed_the_body() {
-    // Two same-name stdin entries. The locator takes the FIRST name match, so
-    // that is the entry whose language the body was actually read as — here it
-    // is out of scope AND declares a language nothing can read, while a second
-    // entry for the same name looks fine. A re-derived lookup would hold this.
+    // Two same-name entries, both in scope for bash: the first is explicitly
+    // scoped to `["bash"]` but declares no stdin claim at all; the second is
+    // unscoped (every language) and declares one. `entries_for` cannot narrow
+    // this pair down to one — both pass its scope filter — so it is
+    // `heredoc_feeds`'s OWN walk (skipping the first for failing the stdin
+    // check, landing on the second) that decides consumption. A re-derived
+    // single-entry pick such as `entry_for` would return the FIRST entry
+    // instead — it prefers an explicitly-scoped entry over an unscoped one
+    // and evaluates no stdin or verbatim claim at all — and a judgement
+    // resting on that pick would rest on a scan that never happened.
     let kb = vouch::guards::load(
         "version = 5\n\
-         [[program]]\nmatch = [\"consume\"]\nevaluates_input = \"stdin\"\n\
-         wrap_lang = \"opaque\"\nlanguages = [\"powershell\"]\n\
+         [[program]]\nmatch = [\"consume\"]\nlanguages = [\"bash\"]\n\
          [[program]]\nmatch = [\"consume\"]\nevaluates_input = \"stdin\"\nwrap_lang = \"bash\"\n",
     )
     .expect("parses");
-    assert!(!judged_with(&kb, "consume <<'EOF'\nls -la\nEOF\n", "consume"));
+    assert!(
+        judged_with(&kb, "consume <<'EOF'\nls -la\nEOF\n", "consume"),
+        "the entry `heredoc_feeds` itself selected — not a re-derived pick — must govern"
+    );
+}
+
+#[test]
+fn the_judgement_does_not_hold_on_an_entry_a_re_derived_pick_would_have_chosen_instead() {
+    // The opposite, more dangerous direction from the test above (review
+    // Important 2): there, the locator's own pick was BETTER than a
+    // re-derived one and the judgement had to hold anyway. Here the
+    // locator's own pick is WORSE — first in file order, unscoped, but its
+    // own `wrap_lang` nothing can read — while a same-name entry after it is
+    // explicitly scoped to bash AND readable. Both pass `entries_for`, so
+    // the fix does not remove either from consideration; `heredoc_feeds`'s
+    // own walk still lands on the first (the unreadable one), and the
+    // judgement must NOT hold. A re-derived `entry_for(kb, "consume",
+    // "bash")` would prefer the explicitly-scoped second entry over the
+    // unscoped first and hold on a scan that never happened — the polarity
+    // direction this project actually cares about (§1: allow because
+    // something is proven, never because a re-derivation looked fine).
+    let kb = vouch::guards::load(
+        "version = 5\n\
+         [[program]]\nmatch = [\"consume\"]\nevaluates_input = \"stdin\"\nwrap_lang = \"opaque\"\n\
+         [[program]]\nmatch = [\"consume\"]\nlanguages = [\"bash\"]\nevaluates_input = \"stdin\"\n\
+         wrap_lang = \"bash\"\n",
+    )
+    .expect("parses");
+    assert!(
+        !judged_with(&kb, "consume <<'EOF'\nls -la\nEOF\n", "consume"),
+        "a re-derivable, more-readable later entry must not stand in for the locator's own (worse) pick"
+    );
 }
 
 #[test]
@@ -2126,6 +2168,183 @@ fn heredoc_selection_survives_a_preceding_sibling_inside_a_snippet() {
             "python"
         ),
         "a preceding sibling INSIDE the same wrapped snippet must not desync this one"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `heredoc_feeds` reads its consuming entry's language scope, and applies the
+// same body-verbatim rule `holds_input` already used a layer up (Task 3,
+// M2.100 remainder / M2.99). Both changes are narrowing — fewer entries
+// match, a stricter body test — so they can only move consumption toward
+// refusal, never grant one that did not already hold.
+// ---------------------------------------------------------------------------
+
+/// Loads a `Knowledge` from inline TOML text — `load_files` reads real files, so
+/// the text is written to a scratch file first via the shared `common::scratch`,
+/// under a hashed name so two tests writing the same body never race on the same
+/// path. Passing `ABSENT` as the overlay means the text is read as the BASE file
+/// alone, never merged over the shipped knowledge.
+///
+/// Asserts the load actually produced something (review Important 1, §6.8): a
+/// refused file — say, a hardcoded `version` that falls behind
+/// `KNOWLEDGE_SCHEMA_VERSION` after a future field bump — returns an EMPTY
+/// `kb` with the refusal recorded only in `gaps`
+/// (`knowledge::load_files`/`knowledge.rs:1303`), which a caller reading only
+/// `.kb` cannot tell apart from "zero entries matched, as asserted". A test
+/// built on a silently-emptied fixture would keep passing over zero entries
+/// forever — the exact zero-versus-inert failure §6.8 exists to catch.
+fn knowledge_from(toml: &str) -> vouch::guards::Knowledge {
+    use std::hash::{Hash, Hasher};
+    const ABSENT: &str = "tests/fixtures/there-is-no-such-file.toml";
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    toml.hash(&mut hasher);
+    let name = format!("{:x}.toml", hasher.finish());
+    let path = common::scratch(&name, toml);
+    let loaded = vouch::knowledge::load_files(&path, std::path::Path::new(ABSENT));
+    assert!(loaded.gaps.is_empty(), "the fixture was refused, not loaded: {:?}", loaded.gaps);
+    assert!(!loaded.kb.program.is_empty(), "the fixture loaded with zero program entries");
+    loaded.kb
+}
+
+/// Parses one bash source, and returns the first here-document it captured
+/// alongside the command it is attached to (`Heredoc::cmd_index`).
+fn one_command_with_heredoc(src: &str) -> (vouch::syntax::Cmd, vouch::syntax::Heredoc) {
+    let scan = parse(src).expect("bash parses");
+    let heredoc = scan.heredocs.first().cloned().expect("a here-document");
+    let cmd = scan
+        .commands
+        .get(heredoc.cmd_index)
+        .cloned()
+        .expect("the heredoc's own consuming command");
+    (cmd, heredoc)
+}
+
+#[test]
+fn heredoc_feeds_ignores_an_entry_scoped_to_another_language() {
+    // `overlay_all`'s scope-split mints language-scoped same-name entries. A
+    // powershell-scoped stdin claim must not be consulted on a bash line.
+    let kb = knowledge_from(
+        "version = 12\n\
+         [[program]]\nmatch = [\"gadgetshell\"]\nlanguages = [\"powershell\"]\n\
+         evaluates_input = \"stdin\"\nwrap_lang = \"bash\"\n",
+    );
+    let (cmd, doc) = one_command_with_heredoc("gadgetshell <<'EOF'\necho hi\nEOF");
+    assert!(
+        heredoc_feeds(&kb, &cmd, "bash", &doc).is_none(),
+        "a powershell-scoped entry consumed a bash line's here-document"
+    );
+}
+
+#[test]
+fn heredoc_feeds_consumes_an_entry_explicitly_scoped_to_the_occurrences_own_language() {
+    // The in-scope positive control for the negative test above (review
+    // Important 1): the identical fixture and command, `languages` naming
+    // the occurrence's OWN language instead of a different one. Without this,
+    // a `knowledge_from` fixture that silently loaded empty (§6.8 — an
+    // inert predicate and an absent shape both print `is_none()`) would make
+    // the negative test pass for the wrong reason and nothing here would say
+    // so.
+    let kb = knowledge_from(
+        "version = 12\n\
+         [[program]]\nmatch = [\"gadgetshell\"]\nlanguages = [\"bash\"]\n\
+         evaluates_input = \"stdin\"\nwrap_lang = \"bash\"\n",
+    );
+    let (cmd, doc) = one_command_with_heredoc("gadgetshell <<'EOF'\necho hi\nEOF");
+    assert!(
+        heredoc_feeds(&kb, &cmd, "bash", &doc).is_some(),
+        "a bash-scoped entry did not consume a bash line's here-document"
+    );
+}
+
+#[test]
+fn heredoc_feeds_refuses_a_backslash_bearing_unquoted_body() {
+    // An unquoted delimiter has backslash pairs collapsed and line
+    // continuations removed on delivery, so the scanned text can differ from
+    // the delivered text with no expansion character present. `holds_input`
+    // rule 2 already refuses this; consumption must agree.
+    let kb = builtin();
+    let (cmd, doc) = one_command_with_heredoc("bash <<EOF\necho a\\\\b\nEOF");
+    assert!(
+        heredoc_feeds(kb, &cmd, "bash", &doc).is_none(),
+        "consumption trusted a body the hold rule refuses"
+    );
+}
+
+#[test]
+fn heredoc_feeds_still_consumes_a_quoted_delimiter_body_with_a_backslash() {
+    // A quoted delimiter delivers verbatim, backslashes included.
+    let kb = builtin();
+    let (cmd, doc) = one_command_with_heredoc("bash <<'EOF'\necho a\\\\b\nEOF");
+    assert!(heredoc_feeds(kb, &cmd, "bash", &doc).is_some());
+}
+
+// ---------------------------------------------------------------------------
+// snippet_located: the `after_c` arm locates and scans exactly like the
+// `after_flag`/`arg_N` arms, and must record it the same way (M2.98, review
+// round: the arm was found scanning without setting the flag).
+//
+// Bash/sh/dash declare `-c` as a plain SWITCH — real getopt does not support
+// an attached value the way python's own value-taking `-c` does. Verified on
+// this machine: `bash -c'echo hi'` and `sh -c'echo hi'` both print
+// "option requires an argument" and run nothing, so a single token gluing
+// `-c` directly to its payload is not "the same code, spelled differently"
+// for a shell the way it is for python — it is an invocation real bash
+// itself refuses, and vouch's own `wrap_unlocated` ask for that shape (an
+// undescribed character following the flag letter) is correct, not a gap.
+//
+// The genuinely analogous, WORKING shape for a switch-shaped `-c` is a
+// CLUSTERED spelling: `bash -cx 'echo hi'` is a real invocation (the entry's
+// own comment already cites `bash -cx 'echo x'` as verified to run the
+// string), and it reaches `-c`'s operand through the identical `after_c`
+// arm the plain `-c 'echo hi'` spelling does.
+//
+// This does not change `decide()`'s verdict for either command — proven
+// separately, not assumed: `operand_walk` only ever returns `Some(operand)`
+// through its `NotFlag` arm, which by construction cannot match a
+// dash-prefixed token, so a located `after_c` operand is always exactly the
+// kind of token `reads_stdin`'s own "any non-dash argument" check already
+// treats as a source, independent of `snippet_located`. The field's own
+// contract ("whether THIS occurrence's own entry vocabulary located a
+// snippet the walk then scanned") is what this test pins, at the level
+// where the after_c arm's fix is actually observable.
+#[test]
+fn a_shells_clustered_inline_code_flag_locates_its_own_snippet() {
+    let ex = expand_bash_source("bash -cx 'echo hi'");
+    let i = ex
+        .cmds
+        .iter()
+        .position(|c| c.head == "bash")
+        .expect("the outer bash occurrence is in the expansion");
+    assert!(
+        ex.snippet_located[i],
+        "the after_c arm located `-c`'s clustered operand without recording it"
+    );
+    assert!(
+        ex.srcs.iter().any(|s| s.lang == "bash" && s.src.contains("echo")),
+        "the clustered snippet was not actually scanned: {:?}",
+        ex.srcs
+    );
+}
+
+#[test]
+fn a_shells_glued_inline_code_flag_is_a_real_ambiguity_not_a_gap() {
+    // The negative control for the test above: the single-quote-GLUED form
+    // real bash rejects must keep asking — `wrap_unlocated`, not silently
+    // allowed by treating an undescribed character as an attached value.
+    let ex = expand_bash_source("bash -c'echo hi'");
+    let i = ex
+        .cmds
+        .iter()
+        .position(|c| c.head == "bash")
+        .expect("the outer bash occurrence is in the expansion");
+    assert!(
+        !ex.snippet_located[i],
+        "a shape real bash itself rejects must not be treated as a located snippet"
+    );
+    assert!(
+        ex.constructs.iter().any(|(k, _, _)| k == "wrap_unlocated"),
+        "expected wrap_unlocated for the glued spelling: {:?}",
+        ex.constructs
     );
 }
 

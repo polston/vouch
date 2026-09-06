@@ -10,7 +10,7 @@ use vouch::syntax::Cmd;
 
 #[path = "common/mod.rs"]
 mod common;
-use common::v;
+use common::{scratch, v};
 
 
 
@@ -1254,14 +1254,6 @@ fn every_writes_only_with_file_mode_entry_names_mode_in_arg_names() {
         offenders.is_empty(),
         "writes_only_with_file_mode = true with no \"mode\" named in arg_names: {offenders:?}"
     );
-}
-
-fn scratch(name: &str, body: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join("vouch_knowledge_source_test");
-    std::fs::create_dir_all(&dir).expect("mkdir");
-    let p = dir.join(name);
-    std::fs::write(&p, body).expect("write");
-    p
 }
 
 #[test]

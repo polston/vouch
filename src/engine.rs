@@ -211,25 +211,30 @@ fn construct_grant(lang: &str, key: &str) -> String {
     format!("allowed by lang.{lang}.constructs.{key} = \"allow\" — {}", describe(key))
 }
 
-/// Folds every `(key, detail)` construct the wrapper-EXPANSION walk raised
-/// into `worst`, attributed to the HOST language — same shape as the
-/// parse-failure and wrap-depth channels just above, kept as its own
-/// function so a synthetic entry can drive the routing directly in a test
-/// without a real producer (none lands with this change; see the `Expanded`
-/// struct doc).
+/// Folds every `(key, detail, lang_override)` construct the wrapper-EXPANSION
+/// walk raised into `worst` — same shape as the parse-failure and wrap-depth
+/// channels just above, kept as its own function so a synthetic entry can
+/// drive the routing directly in a test without a real producer (none lands
+/// with this change; see the `Expanded` struct doc). Attributed to the HOST
+/// language when `lang_override` is `None` (`wrap_unlocated`,
+/// `evaluated_input`); `unreadable_language` carries its own snippet's
+/// language instead, so a javascript snippet on a bash line names
+/// `lang.javascript.constructs.unreadable_language`, matching the identical
+/// construct on the tool path (M2.79/M2.73).
 fn fold_expansion_constructs(
     cfg: &Config,
     lang: &str,
-    constructs: &[(String, String)],
+    constructs: &[(String, String, Option<String>)],
     worst: &mut Option<(Action, String)>,
     grants: &mut Vec<String>,
 ) {
-    for (key, detail) in constructs {
-        let (a, setting_key) = construct_action_for(cfg, lang, key);
+    for (key, detail, lang_override) in constructs {
+        let key_lang = lang_override.as_deref().unwrap_or(lang);
+        let (a, setting_key) = construct_action_for(cfg, key_lang, key);
         if a == Action::Allow {
-            remember(grants, construct_grant(lang, &setting_key));
+            remember(grants, construct_grant(key_lang, &setting_key));
         }
-        let reason = format!("{}\n  {detail}", construct_reason(lang, &setting_key));
+        let reason = format!("{}\n  {detail}", construct_reason(key_lang, &setting_key));
         if worst.as_ref().map_or(true, |(w, _)| rank(a) > rank(*w)) {
             *worst = Some((a, reason));
         }
@@ -634,6 +639,7 @@ fn judge_once(
         scope_table,
         langs: all_langs,
         holds_input: all_holds_input,
+        snippet_located: all_snippet_located,
         args_from_input: all_args_from_input,
         args_complete: all_args_complete,
         snippets,
@@ -656,7 +662,7 @@ fn judge_once(
     let any_heredoc_unconsumed = scan.heredocs.iter().any(|heredoc| {
         scan.commands
             .get(heredoc.cmd_index)
-            .is_some_and(|consumer| crate::guards::heredoc_feeds(kb, consumer, heredoc).is_none())
+            .is_some_and(|consumer| crate::guards::heredoc_feeds(kb, consumer, lang, heredoc).is_none())
     });
     if any_heredoc_unconsumed {
         scan.note("heredoc");
@@ -854,7 +860,7 @@ fn judge_once(
             // undeclared), and never marked (nothing else re-reads it).
             for heredoc in &inner.heredocs {
                 if let Some(consumer) = inner.commands.get(heredoc.cmd_index) {
-                    if crate::guards::heredoc_feeds(kb, consumer, heredoc).is_none() {
+                    if crate::guards::heredoc_feeds(kb, consumer, plang, heredoc).is_none() {
                         snippet_constructs.push((plang.clone(), "heredoc".to_string()));
                     }
                 }
@@ -915,7 +921,7 @@ fn judge_once(
         // position twice on every command of every tool call.
         let base_set = timeline.base_set_at(i, &all_cmds);
         let base = base_set.collapse();
-        let clang = all_langs.get(i).map(String::as_str).unwrap_or(lang);
+        let clang = occurrence_lang(&all_langs, i, lang);
         let (state, _) = run_dir_place(
             kb,
             &all_cmds[i],
@@ -925,7 +931,7 @@ fn judge_once(
             &resolve,
         );
         let (a, overrode) = if hit.unread_verb.is_some() {
-            let lang = all_langs.get(i).map(String::as_str).unwrap_or(lang);
+            let lang = occurrence_lang(&all_langs, i, lang);
             let (a, _) = construct_action_for(cfg, lang, "unread_verb");
             (a, None)
         } else {
@@ -1025,10 +1031,7 @@ fn judge_once(
         let (command_index, hit, _, overrode) =
             resolved.iter().find(|(_, _, a, _)| *a == top).unwrap();
         let mut reason = if let Some(token) = &hit.unread_verb {
-            let lang = all_langs
-                .get(*command_index)
-                .map(String::as_str)
-                .unwrap_or(lang);
+            let lang = occurrence_lang(&all_langs, *command_index, lang);
             let (_, key) = construct_action_for(cfg, lang, "unread_verb");
             format!(
                 "{}\n  vouch could not determine the command's verb at token {:?}",
@@ -1077,8 +1080,14 @@ fn judge_once(
         // whole walk — targets used to be stripped to bare paths here, and a
         // scope rule reaching `decide_file` with no program to match would be
         // a rule that could never fire.
-        let mut targets: Vec<(String, Option<String>, By)> = Vec::new();
-        let mut unplaced: Vec<Unplaced> = Vec::new();
+        // The fourth member is the OCCURRENCE's own language — the same
+        // `all_langs[i]`-else-host resolution every other per-snippet
+        // construct uses — carried alongside the path so the consumption
+        // loop below can key `unresolved_path` to the occurrence that
+        // produced this target rather than to the whole line's host
+        // language (M2.79).
+        let mut targets: Vec<(String, Option<String>, By, &str)> = Vec::new();
+        let mut unplaced: Vec<Unplaced<'_>> = Vec::new();
 
         // Which `[[write.scope]]` rule claims a program's write, if any. One
         // definition, so the two arms that answer for an UNPROVABLE
@@ -1160,21 +1169,28 @@ fn judge_once(
             // sibling; an absolute target composes identically from every
             // member and is pushed once via the dedup.
             let resolved = resolve(t);
+            // The redirect's own occurrence, when it has one: the owning
+            // command's language, exactly as every other per-occurrence
+            // lookup here resolves it. An unowned redirect (a compound's own,
+            // anchored at the construct rather than a command) has no
+            // occurrence to name and reads as the host's.
+            let rlang = owner.and_then(|idx| all_langs.get(idx).map(String::as_str)).unwrap_or(lang);
             let mut pushed: Vec<String> = Vec::new();
             for member in &redirect_base.states {
                 match place(&resolved, member) {
                     Placed::At(p) => {
                         if !pushed.contains(&p) {
                             pushed.push(p.clone());
-                            targets.push((p, None, None));
+                            targets.push((p, None, None, rlang));
                         }
                     }
                     Placed::Nowhere(cause) => {
                         unplaced.push(Unplaced {
-                            generic: where_it_lands(lang, &cause, Some(t)),
+                            generic: where_it_lands(rlang, &cause, Some(t)),
                             cause,
                             what: Some(t.clone()),
                             by: None,
+                            lang: rlang,
                         });
                         break;
                     }
@@ -1183,7 +1199,7 @@ fn judge_once(
         }
 
         for (i, c) in all_cmds.iter().enumerate() {
-            let clang = all_langs.get(i).map(String::as_str).unwrap_or(lang);
+            let clang = occurrence_lang(&all_langs, i, lang);
             let wt = crate::guards::written_paths_in(kb, c, clang);
             if wt.paths.is_empty() && !wt.run_dir_dest && wt.unknowable.is_empty() {
                 continue;
@@ -1221,7 +1237,7 @@ fn judge_once(
                 }
                 named.push(tok);
                 unplaced.push(Unplaced {
-                    generic: which_token(lang, tok, sub.as_deref().unwrap_or("")),
+                    generic: which_token(clang, tok, sub.as_deref().unwrap_or("")),
                     cause: format!(
                         "'{tok}' after '{}' is not described, so vouch cannot tell which \
                          argument is the destination",
@@ -1229,6 +1245,7 @@ fn judge_once(
                     ),
                     what: None,
                     by: by.clone(),
+                    lang: clang,
                 });
             }
 
@@ -1284,20 +1301,22 @@ fn judge_once(
                         CdState::Known(d) => {
                             if !pushed.contains(d) {
                                 pushed.push(d.clone());
-                                targets.push((d.clone(), provenance.clone(), by.clone()));
+                                targets.push((d.clone(), provenance.clone(), by.clone(), clang));
                             }
                         }
                         CdState::Unknown(cause) => unplaced.push(Unplaced {
-                            generic: where_it_lands(lang, cause, None),
+                            generic: where_it_lands(clang, cause, None),
                             cause: cause.clone(),
                             what: None,
                             by: by.clone(),
+                            lang: clang,
                         }),
                         CdState::NoDirectory => unplaced.push(Unplaced {
-                            generic: where_it_lands(lang, NO_CWD, None),
+                            generic: where_it_lands(clang, NO_CWD, None),
                             cause: NO_CWD.to_string(),
                             what: None,
                             by: by.clone(),
+                            lang: clang,
                         }),
                     }
                 }
@@ -1331,6 +1350,7 @@ fn judge_once(
                                     t,
                                     if is_relative(&p) { provenance.clone() } else { None },
                                     by.clone(),
+                                    clang,
                                 ));
                             }
                         }
@@ -1338,10 +1358,11 @@ fn judge_once(
                             if !unplaced_causes.contains(&cause) {
                                 unplaced_causes.push(cause.clone());
                                 unplaced.push(Unplaced {
-                                    generic: where_it_lands(lang, &cause, Some(&p)),
+                                    generic: where_it_lands(clang, &cause, Some(&p)),
                                     cause,
                                     what: Some(p.clone()),
                                     by: by.clone(),
+                                    lang: clang,
                                 });
                             }
                         }
@@ -1354,7 +1375,11 @@ fn judge_once(
             // The action AND the setting behind it: a scoped destination whose
             // setting is stricter than the scope's ask is decided by that
             // setting, and the prompt has to name it rather than the scope.
-            let declared = construct_setting_for(cfg, lang, "unresolved_path");
+            // Keyed to the OCCURRENCE that produced this write (`u.lang`),
+            // not the host — the same split this task exists to remove
+            // (M2.79 review, Important): a python-snippet write whose base
+            // cannot be proven must still name python's own setting.
+            let declared = construct_setting_for(cfg, u.lang, "unresolved_path");
             let generic = declared.as_ref().map_or(Action::Ask, |(a, _)| *a);
             // A destination vouch cannot place, produced by a program a
             // `[[write.scope]]` rule governs: the scope is why this one
@@ -1398,7 +1423,7 @@ fn judge_once(
             }
         }
 
-        for (t, provenance, by) in targets {
+        for (t, provenance, by, clang) in targets {
             if t == "/dev/null" || t.eq_ignore_ascii_case("nul") {
                 continue;
             }
@@ -1420,10 +1445,13 @@ fn judge_once(
                 // Which setting that action came from, so a scoped prompt can
                 // name its real decider — here it is `write.default` whenever
                 // the operator named no construct, and that is a different
-                // sentence from the construct's own.
-                let (declared, setting) = match cfg.named_construct_action(lang, "unresolved_path")
+                // sentence from the construct's own. Keyed to the OCCURRENCE
+                // that produced this target (`clang`, carried on the pushed
+                // target itself), not the line's host language — the same
+                // per-snippet keying every other construct uses (M2.79).
+                let (declared, setting) = match cfg.named_construct_action(clang, "unresolved_path")
                 {
-                    Some(a) => (a, format!("lang.{lang}.constructs.unresolved_path")),
+                    Some(a) => (a, format!("lang.{clang}.constructs.unresolved_path")),
                     None => (cfg.write.default, "write.default".to_string()),
                 };
                 // The second unprovable shape, answered the same way as the
@@ -1459,7 +1487,7 @@ fn judge_once(
                     }
                     None => (
                         declared,
-                        format!("{}\n  the path: {t}", construct_reason(lang, "unresolved_path")),
+                        format!("{}\n  the path: {t}", construct_reason(clang, "unresolved_path")),
                     ),
                 };
                 if worst.as_ref().map_or(true, |(w, _)| rank(a) > rank(*w)) {
@@ -1509,38 +1537,50 @@ fn judge_once(
     // language when it named one vouch can actually scan (`wrap_lang`), not
     // the host command's — a python entry that declares `evaluates_input`
     // trips `lang.python.constructs.evaluated_input`, and a host-language
-    // allow of the same construct name must not silently cover it (`lang`
-    // shadowed here on purpose: the source shape criterion 2's coverage scan
-    // looks for).
+    // allow of the same construct name must not silently cover it.
     for (i, c) in all_cmds.iter().enumerate() {
         // Out of bounds reads as NOT held — the fail-closed direction, so a
         // desynced array keeps today's ask rather than inventing a hold.
         let holds = all_holds_input.get(i).copied().unwrap_or(false);
+        // Same fail-closed direction as `holds` above: out of bounds reads as
+        // NOT located, so a desynced array keeps today's ask rather than
+        // inventing a stand-down (M2.98).
+        let located = all_snippet_located.get(i).copied().unwrap_or(false);
         // The same fold the recognition loop below reads — one definition, two
         // separate loops over the same parallel vectors.
         let standalone_eligible =
             standalone_eligible_at(&all_args_complete, &all_args_from_input, i);
-        let clang = all_langs.get(i).map(String::as_str).unwrap_or(lang);
+        let clang = occurrence_lang(&all_langs, i, lang);
         let (triggered, wrap_lang, hint) = crate::guards::evaluates_input_in(
             kb,
             c,
             clang,
             holds,
+            located,
             standalone_eligible,
         );
         if !triggered {
             continue;
         }
-        let lang = wrap_lang
+        // Keyed by the CONSUMING entry's own declared snippet language when
+        // it named one vouch can scan, else by the OCCURRENCE's own
+        // language (`clang`, already bound above) — the same order §1d1
+        // uses for the identical construct. An entry that wraps no further
+        // text (python's `eval`, `subprocess.run`) declares no wrap_lang at
+        // all, and falling back to the HOST language there made
+        // `lang.python.constructs.evaluated_input` unable to silence a
+        // python occurrence while `lang.bash`'s could, backwards from every
+        // other per-snippet construct (M2.79).
+        let ckey = wrap_lang
             .as_deref()
             .filter(|l| crate::syntax::scanner_for(l).is_some())
-            .unwrap_or(lang);
-        let (a, key) = construct_action_for(cfg, lang, "evaluated_input");
+            .unwrap_or(clang);
+        let (a, key) = construct_action_for(cfg, ckey, "evaluated_input");
         if a == Action::Allow {
-            remember(&mut grants, construct_grant(lang, &key));
+            remember(&mut grants, construct_grant(ckey, &key));
         }
         if worst.as_ref().map_or(true, |(w, _)| rank(a) > rank(*w)) {
-            let mut reason = construct_reason(lang, &key);
+            let mut reason = construct_reason(ckey, &key);
             if let Some(h) = hint {
                 let pairing =
                     if h.pair_no_value_options { ", and in `no_value_options`," } else { "" };
@@ -1573,8 +1613,7 @@ fn judge_once(
         let clang = wrap_lang
             .as_deref()
             .filter(|l| crate::syntax::scanner_for(l).is_some())
-            .or_else(|| all_langs.get(i).map(String::as_str))
-            .unwrap_or(lang);
+            .unwrap_or_else(|| occurrence_lang(&all_langs, i, lang));
         let (a, key) = construct_action_for(cfg, clang, "evaluated_input");
         if a == Action::Allow {
             remember(&mut grants, construct_grant(clang, &key));
@@ -1602,7 +1641,7 @@ fn judge_once(
     {
         let mut rebinding: Vec<(&str, &str, &str)> = Vec::new();
         for (i, c) in all_cmds.iter().enumerate() {
-            let clang = all_langs.get(i).map(String::as_str).unwrap_or(lang);
+            let clang = occurrence_lang(&all_langs, i, lang);
             if let Some((name, effect)) = crate::guards::env_name_effect(kb, &c.prefix_assigns, clang)
             {
                 rebinding.push((name, effect, clang));
@@ -1662,7 +1701,7 @@ fn judge_once(
         if !all_args_from_input.get(i).copied().unwrap_or(false) {
             continue;
         }
-        let clang = all_langs.get(i).map(String::as_str).unwrap_or(lang);
+        let clang = occurrence_lang(&all_langs, i, lang);
         if !crate::guards::appended_args_could_change_the_answer(kb, c, clang) {
             continue;
         }
@@ -1676,6 +1715,7 @@ fn judge_once(
                      acts on is not on this line at all",
                     crate::guards::base_name(&c.head)
                 ),
+                None,
             )],
             &mut worst,
             &mut grants,
@@ -1715,7 +1755,7 @@ fn judge_once(
     // cause in, resolved through the same `place_of`/`unproven_cause`/
     // `resolve_guard_action` a real command's place would be.
     for (i, c) in all_cmds.iter().enumerate() {
-        let clang = all_langs.get(i).map(String::as_str).unwrap_or(lang);
+        let clang = occurrence_lang(&all_langs, i, lang);
         for by in crate::guards::by_reference_invocations(kb, c) {
             let state = CdState::Unknown(
                 "this call is made by reference — vouch does not know whether, when, or how \
@@ -1934,7 +1974,7 @@ fn judge_once(
         if !crate::guards::unresolved_callback_argument(kb, c) {
             continue;
         }
-        let clang = all_langs.get(i).map(String::as_str).unwrap_or(lang);
+        let clang = occurrence_lang(&all_langs, i, lang);
         let (a, key) = construct_action_for(cfg, clang, "callable_argument");
         if a == Action::Allow {
             remember(&mut grants, construct_grant(clang, &key));
@@ -1962,9 +2002,9 @@ fn judge_once(
     // the same occupant (see `callback_argument_used`'s own doc comment).
     // Keyed on the OCCURRENCE's own language (`all_langs[i]`),
     // never the host language — the parse-failure loop below is the pattern
-    // this copies; §1d's `evaluated_input` loop above keys on the host
-    // language instead, which is a recorded defect (M2.79) this loop must
-    // not repeat.
+    // this copies, and §1d's `evaluated_input` loop above now keys the same
+    // way (M2.79, closed 2026-09-05 by the evaluated_input seam); this loop
+    // was written to match it rather than to repeat the defect.
     //
     // Runs AFTER 1d2b/1d2c on purpose (task 4 review C1) — see the comment
     // above 1d2b for why source order differs from the step numbers.
@@ -1972,7 +2012,7 @@ fn judge_once(
         if !crate::guards::callback_argument_used(kb, c) {
             continue;
         }
-        let clang = all_langs.get(i).map(String::as_str).unwrap_or(lang);
+        let clang = occurrence_lang(&all_langs, i, lang);
         let (a, key) = construct_action_for(cfg, clang, "callback_argument");
         if a == Action::Allow {
             remember(&mut grants, construct_grant(clang, &key));
@@ -2110,7 +2150,7 @@ fn judge_once(
         if c.head.is_empty() {
             continue;
         }
-        let clang = all_langs.get(i).map(String::as_str).unwrap_or(lang);
+        let clang = occurrence_lang(&all_langs, i, lang);
         let standalone_eligible =
             standalone_eligible_at(&all_args_complete, &all_args_from_input, i);
         // The place this occurrence runs in: the timeline, hoisted above
@@ -2869,6 +2909,11 @@ struct Expanded {
     /// channel reads it so a scanned body stops the ask that says the code is
     /// not in what vouch was handed.
     holds_input: Vec<bool>,
+    /// Parallel to `cmds`: whether THIS occurrence's own entry vocabulary
+    /// located a snippet the wrapper walk then scanned, so the code did not
+    /// come from standard input — see
+    /// `guards::ExpandedWrappers::snippet_located` for the full rationale.
+    snippet_located: Vec<bool>,
     /// Whether each command's recorded arguments are a partial record because
     /// a wrapper above it appends more from a channel the line never names
     /// (`xargs`). Read by §1d4, which fails closed for every claim an
@@ -2896,14 +2941,17 @@ struct Expanded {
     /// (channel 1). Folded as the `parse_failure` construct under the
     /// SNIPPET's own language, never the host's.
     parse_failures: Vec<(String, String)>,
-    /// Every `(key, detail)` construct the wrapper-expansion walk itself
-    /// raised — distinct from `scan.constructs`/`snippet_constructs`, which
-    /// come from scanning a command's or a snippet's own text. Attributed to
-    /// the HOST language: the walk that raises these operates on the outer
-    /// text, not on one particular snippet. Two producers: `wrap_unlocated`
-    /// and the `evaluated_input` a wrap slot holding an unreadable value
-    /// raises.
-    constructs: Vec<(String, String)>,
+    /// Every `(key, detail, lang_override)` construct the wrapper-expansion
+    /// walk itself raised — distinct from `scan.constructs`/
+    /// `snippet_constructs`, which come from scanning a command's or a
+    /// snippet's own text. `wrap_unlocated` and the `evaluated_input` a wrap
+    /// slot holding an unreadable value raises are attributed to the HOST
+    /// language (`lang_override` is `None`): the walk that raises these
+    /// operates on the outer text, not on one particular snippet.
+    /// `unreadable_language` carries its own snippet's `wrap_lang` as `Some`
+    /// instead, matching the `unreadable_language` the tool path already
+    /// keys to the snippet's own language (M2.79/M2.73).
+    constructs: Vec<(String, String, Option<String>)>,
     /// Parallel to `cmds`: the directory a WRAPPER's own run-dir flag sent
     /// this occurrence to, before its own flags are read.
     inherited_run_dir: Vec<Option<String>>,
@@ -2995,6 +3043,7 @@ fn collect_expanded(
         scope_parents: Vec::new(),
         langs: Vec::new(),
         holds_input: Vec::new(),
+        snippet_located: Vec::new(),
         args_from_input: Vec::new(),
         args_complete: Vec::new(),
         snippets: Vec::new(),
@@ -3106,12 +3155,13 @@ fn collect_expanded(
         // builds these arrays in lockstep, and a zip that runs short stops
         // early instead of reading a neighbour's answer for the strand that
         // fell behind.
-        for (j, ((((((ec, site), elang), eholds), einherited), efrom_input), ecomplete)) in ex
+        for (j, (((((((ec, site), elang), eholds), elocated), einherited), efrom_input), ecomplete)) in ex
             .cmds
             .into_iter()
             .zip(execution_sites)
             .zip(ex.langs)
             .zip(ex.holds_input)
+            .zip(ex.snippet_located)
             .zip(ex.inherited_run_dir)
             .zip(ex.args_from_input)
             .zip(ex.args_complete)
@@ -3135,6 +3185,7 @@ fn collect_expanded(
             });
             out.langs.push(elang);
             out.holds_input.push(eholds);
+            out.snippet_located.push(elocated);
             out.inherited_run_dir.push(einherited);
             out.args_from_input.push(efrom_input);
             out.args_complete.push(ecomplete);
@@ -4018,6 +4069,18 @@ struct UnmodeledItem {
 /// exactly the kind of rule that must not have two spellings.
 fn standalone_eligible_at(complete: &[bool], from_input: &[bool], i: usize) -> bool {
     complete.get(i).copied().unwrap_or(false) && !from_input.get(i).copied().unwrap_or(true)
+}
+
+/// The occurrence's own scanned language — its position in `all_langs`,
+/// falling back to the host command's language when this occurrence's own
+/// was never recorded (a short array, the fail-closed direction M2.98 already
+/// reads every other per-occurrence vector in). Every §1d loop over
+/// `all_cmds` needs exactly this fallback; a site that has something more
+/// specific to prefer first (a snippet's own `wrap_lang`) still calls this
+/// for the fallback half, so there is one definition of what "this
+/// occurrence's language" means rather than one copy per call site.
+fn occurrence_lang<'a>(all_langs: &'a [String], i: usize, host: &'a str) -> &'a str {
+    all_langs.get(i).map(String::as_str).unwrap_or(host)
 }
 
 /// Whether two `standalone_flags` offers name the same SET of flags —
@@ -5986,8 +6049,12 @@ fn scope_for<'a>(scopes: &'a [crate::config::WriteScope], by: &By) -> Option<Sco
 /// inside its trees. A prompt naming an off-switch that does not switch it
 /// off is the M2.12 defect class, so the ingredients travel and the scoped
 /// sentence is built from them.
-struct Unplaced {
+struct Unplaced<'a> {
     /// The `unresolved_path` prompt, used when no scope claims this write.
+    /// Already built with the OCCURRENCE's own language (the `lang` field
+    /// below), not the host's — `where_it_lands`/`which_token` bake the
+    /// naming into the text itself, so the value has to be right at the
+    /// point this struct is built, not fixed up later.
     generic: String,
     /// Why the walk could not place it, in the words a prompt uses.
     cause: String,
@@ -5995,6 +6062,12 @@ struct Unplaced {
     what: Option<String>,
     /// The program whose declared write this is.
     by: By,
+    /// The OCCURRENCE that produced this unplaceable write — the same
+    /// `all_langs[i]`-else-host resolution `targets`'s fourth member uses,
+    /// carried here for the same reason: `construct_setting_for` must read
+    /// the setting that decides for the occurrence that actually raised
+    /// this, not the whole line's host language (M2.79 review, Important).
+    lang: &'a str,
 }
 
 /// The prompt for a write a `[[write.scope]]` rule governs and vouch could not
@@ -6395,7 +6468,8 @@ mod tests {
             .expect("config parses");
         let mut worst: Option<(Action, String)> = None;
         let mut grants: Vec<String> = Vec::new();
-        let constructs = vec![("dynamic_command".to_string(), "sample detail text".to_string())];
+        let constructs =
+            vec![("dynamic_command".to_string(), "sample detail text".to_string(), None)];
         fold_expansion_constructs(&cfg, "bash", &constructs, &mut worst, &mut grants);
         let (a, reason) = worst.expect("a construct with no configured action still asks");
         assert_eq!(a, Action::Ask);
@@ -6419,13 +6493,41 @@ mod tests {
         .expect("config parses");
         let mut worst: Option<(Action, String)> = None;
         let mut grants: Vec<String> = Vec::new();
-        let constructs = vec![("dynamic_command".to_string(), "sample detail text".to_string())];
+        let constructs =
+            vec![("dynamic_command".to_string(), "sample detail text".to_string(), None)];
         fold_expansion_constructs(&cfg, "bash", &constructs, &mut worst, &mut grants);
         let (a, _) = worst.expect("routing still records the outcome");
         assert_eq!(a, Action::Allow);
         assert!(
             grants.iter().any(|g| g.contains("dynamic_command")),
             "an allowed construct must record what allowed it: {grants:?}"
+        );
+    }
+
+    /// The `Some(lang)` override (`unreadable_language`'s own carried
+    /// language) wins over the host `lang` argument, both for which setting
+    /// decides and for which setting the reason names (M2.79/M2.73).
+    #[test]
+    fn fold_expansion_constructs_routes_to_the_carried_language_when_one_is_given() {
+        let cfg = crate::config::load(
+            "version = 1\n[lang.bash]\ndefault = \"allow\"\n\
+             [lang.cmd]\ndefault = \"allow\"\n\
+             [lang.cmd.constructs]\nunreadable_language = \"allow\"\n",
+        )
+        .expect("config parses");
+        let mut worst: Option<(Action, String)> = None;
+        let mut grants: Vec<String> = Vec::new();
+        let constructs = vec![(
+            "unreadable_language".to_string(),
+            "sample detail text".to_string(),
+            Some("cmd".to_string()),
+        )];
+        fold_expansion_constructs(&cfg, "bash", &constructs, &mut worst, &mut grants);
+        let (a, _) = worst.expect("routing still records the outcome");
+        assert_eq!(a, Action::Allow, "the carried language's setting did not decide");
+        assert!(
+            grants.iter().any(|g| g.contains("lang.cmd.constructs.unreadable_language")),
+            "the host language was named instead of the carried one: {grants:?}"
         );
     }
 }

@@ -297,7 +297,7 @@ fn measure_heredoc_feed_count() {
             } else {
                 expansion_free += 1;
             }
-            if let Some((_entry, lang)) = vouch::guards::heredoc_feeds(kb, cmd, heredoc) {
+            if let Some((_entry, lang)) = vouch::guards::heredoc_feeds(kb, cmd, "bash", heredoc) {
                 let h = cmd
                     .head
                     .rsplit('/')
