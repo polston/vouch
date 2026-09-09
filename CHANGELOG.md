@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.19.0 (2026-09-09)
+
+
+### Features
+
+* agy hook installer generation targeting hooks.json
+* automatic sandbox demotion for safe local workspace operations when BypassSandbox is requested
+* knowledge definitions for Antigravity tools (run_command, write_to_file, replace_file_content, and inspection tools)
+* native Google Antigravity (agy) host support, toolCall protocol parsing, and decision rendering
+
 ## 0.18.1 (2026-09-09)
 
 

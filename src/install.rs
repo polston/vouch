@@ -265,6 +265,94 @@ fn plan_codex_inner(
     })
 }
 
+fn agy_command(exe: &str, shadow: bool, state_dir: Option<&str>) -> String {
+    let quoted = if exe.contains(' ') {
+        format!("\"{exe}\"")
+    } else {
+        exe.to_string()
+    };
+    let shadow_str = if shadow { " --shadow" } else { "" };
+    let state_dir_str = state_dir
+        .map(|path| {
+            if path.contains(' ') {
+                format!(" --state-dir \"{path}\"")
+            } else {
+                format!(" --state-dir {path}")
+            }
+        })
+        .unwrap_or_default();
+    format!("{quoted} --hook --host agy{shadow_str}{state_dir_str}")
+}
+
+fn agy_hook_entry(exe: &str, shadow: bool, state_dir: Option<&str>) -> Value {
+    json!({
+        "matcher": "run_command|write_to_file|replace_file_content",
+        "hooks": [{
+            "type": "command",
+            "command": agy_command(exe, shadow, state_dir)
+        }]
+    })
+}
+
+/// Build a merged Antigravity `hooks.json`.
+pub fn plan_agy(
+    existing: &str,
+    exe: &str,
+    shadow: bool,
+    state_dir: Option<&str>,
+) -> Result<Plan, String> {
+    if let Some(path) = state_dir {
+        validate_state_dir(path)?;
+    }
+    let mut root: Value = if existing.trim().is_empty() {
+        json!({})
+    } else {
+        serde_json::from_str(existing).map_err(|e| format!("hooks.json is not valid JSON: {e}"))?
+    };
+    if !root.is_object() {
+        return Err("hooks.json is not a JSON object".into());
+    }
+
+    let pre_entry = agy_hook_entry(exe, shadow, state_dir);
+    let post_entry = agy_hook_entry(exe, false, state_dir);
+
+    let vouch_group = json!({
+        "PreToolUse": [pre_entry],
+        "PostToolUse": [post_entry]
+    });
+
+    root.as_object_mut()
+        .unwrap()
+        .insert("vouch".to_string(), vouch_group);
+
+    let mut notes = vec![
+        if shadow {
+            "SHADOW: vouch records what it would decide and emits no decision; Antigravity remains in charge."
+        } else {
+            "LIVE: vouch gates Antigravity tool calls (run_command, write_to_file, replace_file_content)."
+        }
+        .into(),
+        "Antigravity PreToolUse evaluates tool calls; PostToolUse records outcomes.".into(),
+        "Safe workspace operations with BypassSandbox are automatically demoted to run inside the sandbox.".into(),
+    ];
+    if state_dir.is_some() {
+        notes.push("Both Antigravity hooks use the explicit stable --state-dir.".into());
+    } else {
+        notes.push("No --state-dir was supplied; hooks use inherited VOUCH_STATE_DIR or the OS temp fallback.".into());
+    }
+
+    let hooks_view = serde_json::to_string_pretty(&json!({ "vouch": root["vouch"].clone() }))
+        .map_err(|e| e.to_string())?;
+    let settings = serde_json::to_string_pretty(&root)
+        .map_err(|e| format!("could not render hooks.json: {e}"))?;
+
+    Ok(Plan {
+        settings,
+        hooks_view,
+        notes,
+    })
+}
+
 /// Builds the merged settings.json. `shadow` keeps the existing gate in place and
 /// adds vouch alongside it, recording decisions without being able to affect any.
 pub fn plan(existing: &str, exe: &str, shadow: bool) -> Result<Plan, String> {

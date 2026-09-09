@@ -2297,6 +2297,44 @@ source = "reads one local image and writes nothing"
 match = ["mcp__vouch_approval__request_approval"]
 source = "validates a redacted pending request after Codex's native MCP approval and can grant only its exact one-time retry"
 
+[[tool]]
+match = ["run_command"]
+source = "runs the `CommandLine` field as bash in the calling session's directory"
+cwd_from_call = true
+[[tool.snippet]]
+field = "CommandLine"
+language = "bash"
+
+[[tool]]
+match = ["write_to_file", "replace_file_content"]
+source = "writes the file named by `TargetFile`, relative paths resolved in the calling session's directory"
+cwd_from_call = true
+write_path_field = "TargetFile"
+
+[[tool]]
+match = ["view_file", "list_dir", "grep_search", "find_by_name"]
+source = "reads the filesystem, writes nothing"
+
+[[tool]]
+match = ["read_url_content", "search_web"]
+source = "declared: deliberately out of scope, not gated"
+
+[[tool]]
+match = ["ask_question"]
+source = "talks to the operator or the harness; touches no file"
+
+[[tool]]
+match = ["schedule", "manage_task"]
+source = "the harness's own bookkeeping"
+
+[[tool]]
+match = ["invoke_subagent", "define_subagent", "manage_subagents"]
+source = "starts work whose own tool calls are gated, so this does not allow its effects"
+
+[[tool]]
+match = ["generate_image"]
+source = "generates visual assets or mockups for the conversation; writes no project file"
+
 # ---------------------------------------------------------------------------
 # Environment names the SHELL ITSELF consults (M2.120)
 #

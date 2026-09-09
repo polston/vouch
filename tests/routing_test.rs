@@ -1182,3 +1182,126 @@ format = "apply_patch"
     assert!(err.contains("write_path_field"), "got: {err}");
     assert!(err.contains("write_path"), "got: {err}");
 }
+
+#[test]
+fn shipped_knowledge_routes_antigravity_tools() {
+    let kb = shipped_kb();
+    let cfg = common::realistic_config();
+
+    // 1. run_command with allowed bash snippet
+    let raw_run = r#"{
+        "toolCall": {
+            "name": "run_command",
+            "args": {
+                "CommandLine": "ls -la",
+                "Cwd": "C:/Users/dev/project"
+            }
+        }
+    }"#;
+    let input = vouch::protocol::parse_input(raw_run).unwrap();
+    let outcome = decide(&cfg, &kb, HOME, &input);
+    assert!(matches!(outcome.decision, Decision::Allow(_)), "got: {:?}", outcome.decision);
+    assert_eq!(outcome.snippets, vec![("ls -la".to_string(), "bash".to_string())]);
+
+    // 2. run_command with missing CommandLine asks
+    let raw_empty = r#"{
+        "toolCall": {
+            "name": "run_command",
+            "args": {
+                "Cwd": "C:/Users/dev/project"
+            }
+        }
+    }"#;
+    let input = vouch::protocol::parse_input(raw_empty).unwrap();
+    let outcome = decide(&cfg, &kb, HOME, &input);
+    assert!(matches!(outcome.decision, Decision::Ask(_)), "got: {:?}", outcome.decision);
+    let reason = ask_reason(&outcome.decision);
+    assert!(reason.contains("CommandLine"), "must name missing field: {reason}");
+
+    // 2b. run_command writing outside allowed paths asks
+    let raw_write_cmd = r#"{
+        "toolCall": {
+            "name": "run_command",
+            "args": {
+                "CommandLine": "echo test > D:/elsewhere/unsafe.txt",
+                "Cwd": "C:/Users/dev/project"
+            }
+        }
+    }"#;
+    let input = vouch::protocol::parse_input(raw_write_cmd).unwrap();
+    let outcome = decide(&cfg, &kb, HOME, &input);
+    assert!(matches!(outcome.decision, Decision::Ask(_)), "got: {:?}", outcome.decision);
+
+    // 3. write_to_file safe path allows
+    let raw_write = r#"{
+        "toolCall": {
+            "name": "write_to_file",
+            "args": {
+                "TargetFile": "src/main.rs",
+                "Cwd": "C:/Users/dev/project"
+            }
+        }
+    }"#;
+    let input = vouch::protocol::parse_input(raw_write).unwrap();
+    let outcome = decide(&cfg, &kb, HOME, &input);
+    assert!(matches!(outcome.decision, Decision::Allow(_)), "got: {:?}", outcome.decision);
+
+    // 4. replace_file_content safe path allows
+    let raw_replace = r#"{
+        "toolCall": {
+            "name": "replace_file_content",
+            "args": {
+                "TargetFile": "src/main.rs",
+                "Cwd": "C:/Users/dev/project"
+            }
+        }
+    }"#;
+    let input = vouch::protocol::parse_input(raw_replace).unwrap();
+    let outcome = decide(&cfg, &kb, HOME, &input);
+    assert!(matches!(outcome.decision, Decision::Allow(_)), "got: {:?}", outcome.decision);
+
+    // 5. write_to_file outside home asks
+    let raw_write_outside = r#"{
+        "toolCall": {
+            "name": "write_to_file",
+            "args": {
+                "TargetFile": "D:/elsewhere/secrets.txt",
+                "Cwd": "C:/Users/dev/project"
+            }
+        }
+    }"#;
+    let input = vouch::protocol::parse_input(raw_write_outside).unwrap();
+    let outcome = decide(&cfg, &kb, HOME, &input);
+    assert!(matches!(outcome.decision, Decision::Ask(_)), "got: {:?}", outcome.decision);
+
+    // 6. Navigation / inspection harmless tools allow
+    for tool in [
+        "view_file",
+        "list_dir",
+        "grep_search",
+        "find_by_name",
+        "read_url_content",
+        "search_web",
+        "ask_question",
+        "schedule",
+        "manage_task",
+        "invoke_subagent",
+    ] {
+        let raw = format!(
+            r#"{{
+            "toolCall": {{
+                "name": "{tool}",
+                "args": {{}}
+            }}
+        }}"#
+        );
+        let input = vouch::protocol::parse_input(&raw).unwrap();
+        let outcome = decide(&cfg, &kb, HOME, &input);
+        assert!(
+            matches!(outcome.decision, Decision::Allow(_)),
+            "tool {tool} failed: {:?}",
+            outcome.decision
+        );
+    }
+}
+

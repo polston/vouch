@@ -74,7 +74,11 @@ fn run_hook_call(
                 );
             }
         }
-        return HookCall::Processed(None);
+        return HookCall::Processed(if host == Host::Agy {
+            Some("{}".into())
+        } else {
+            None
+        });
     }
 
     let outcome = vouch::route::decide(
@@ -136,6 +140,9 @@ fn run_hook_call(
 
     if !emit {
         HookCall::Processed(None)
+    } else if host == Host::Agy {
+        let demote = vouch::protocol::should_demote_sandbox(&input, &decision);
+        HookCall::Processed(vouch::protocol::render_for_agy(&decision, demote))
     } else {
         HookCall::Processed(render_for(host, &decision))
     }
@@ -1435,6 +1442,7 @@ fn main() {
         let settings_path = match options.host {
             Host::Claude => std::path::PathBuf::from(home()).join(".claude/settings.json"),
             Host::Codex => std::path::PathBuf::from(home()).join(".codex/hooks.json"),
+            Host::Agy => std::path::PathBuf::from(home()).join(".gemini/config/hooks.json"),
         };
         let existing = std::fs::read_to_string(&settings_path).unwrap_or_default();
         let exe = std::env::current_exe()
@@ -1457,6 +1465,12 @@ fn main() {
                     options.shadow,
                 ),
             },
+            Host::Agy => vouch::install::plan_agy(
+                &existing,
+                &exe,
+                options.shadow,
+                options.state_dir.as_deref(),
+            ),
         };
         match planned {
             Ok(p) => {

@@ -3,7 +3,7 @@
 use vouch::cli::{
     parse_hook_options, parse_install_args, parse_install_options, InstallHost, InstallShell,
 };
-use vouch::install::{plan, plan_codex, plan_codex_with_state};
+use vouch::install::{plan, plan_agy, plan_codex, plan_codex_with_state};
 
 const EXISTING: &str = r#"{
   "model": "opus",
@@ -488,3 +488,97 @@ fn codex_passive_shadow_has_one_stable_host_attributed_journal_and_no_broker_not
     assert!(!notes.contains("approvals_reviewer = \"user\""), "shadow cannot disable auto-review: {notes}");
     assert!(notes.contains("emits no decision"), "passive behavior unstated: {notes}");
 }
+
+#[test]
+fn agy_install_options_and_hook_options_parsing() {
+    let args = vec![
+        "--host".into(),
+        "agy".into(),
+        "--shadow".into(),
+        "--state-dir".into(),
+        "/tmp/vouch-agy".into(),
+        "--print".into(),
+    ];
+    let got = parse_install_options(&args).unwrap();
+    assert_eq!(got.host, InstallHost::Agy);
+    assert!(got.shadow);
+    assert!(got.hooks_only);
+    assert_eq!(got.state_dir.as_deref(), Some("/tmp/vouch-agy"));
+    assert!(got.shell.is_none());
+
+    let hook_args = vec![
+        "--hook".into(),
+        "--host".into(),
+        "agy".into(),
+        "--state-dir".into(),
+        "/tmp/vouch-agy".into(),
+    ];
+    let got_hook = parse_hook_options(&hook_args).unwrap();
+    assert_eq!(got_hook.host, InstallHost::Agy);
+    assert_eq!(got_hook.state_dir.as_deref(), Some("/tmp/vouch-agy"));
+
+    // Reject shell with agy
+    let bad_args = vec![
+        "--host".into(),
+        "agy".into(),
+        "--shell".into(),
+        "bash".into(),
+    ];
+    assert!(parse_install_options(&bad_args).is_err());
+    let bad_hook = vec![
+        "--hook".into(),
+        "--host".into(),
+        "agy".into(),
+        "--shell".into(),
+        "bash".into(),
+    ];
+    assert!(parse_hook_options(&bad_hook).is_err());
+}
+
+#[test]
+fn agy_plan_generation_and_idempotency() {
+    let existing = r#"{
+      "other_plugin": {
+        "PreToolUse": [{"matcher": ".*", "hooks": [{"type": "command", "command": "other-gate"}]}]
+      }
+    }"#;
+    let exe = "/opt/Vouch Bin/vouch";
+    let state = "/tmp/vouch agy state";
+    let p = plan_agy(existing, exe, true, Some(state)).unwrap();
+
+    let root: serde_json::Value = serde_json::from_str(&p.settings).unwrap();
+    assert!(root.get("other_plugin").is_some(), "other_plugin lost");
+    let vouch_group = root.get("vouch").expect("vouch group missing");
+    let pre_cmd = vouch_group["PreToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    let post_cmd = vouch_group["PostToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+
+    assert!(pre_cmd.starts_with(
+        "\"/opt/Vouch Bin/vouch\" --hook --host agy --shadow --state-dir \"/tmp/vouch agy state\""
+    ));
+    assert!(post_cmd.starts_with(
+        "\"/opt/Vouch Bin/vouch\" --hook --host agy --state-dir \"/tmp/vouch agy state\""
+    ));
+    assert!(!post_cmd.contains("--shadow"));
+
+    // Idempotent: running again produces identical vouch config
+    let p2 = plan_agy(&p.settings, exe, true, Some(state)).unwrap();
+    let root2: serde_json::Value = serde_json::from_str(&p2.settings).unwrap();
+    assert_eq!(root, root2);
+
+    // Live mode (shadow = false, state_dir = None)
+    let p_live = plan_agy("", "vouch", false, None).unwrap();
+    let root_live: serde_json::Value = serde_json::from_str(&p_live.settings).unwrap();
+    let live_pre = root_live["vouch"]["PreToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert_eq!(live_pre, "vouch --hook --host agy");
+    let live_post = root_live["vouch"]["PostToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert_eq!(live_post, "vouch --hook --host agy");
+}
+

@@ -17,6 +17,7 @@ fn claude_and_codex_plugin_catalogs_track_the_crate_version() {
         version
     );
     assert_eq!(json("plugin/.codex-plugin/plugin.json")["version"], version);
+    assert_eq!(json("plugin/plugin.json")["version"], version);
     let marketplace = json(".agents/plugins/marketplace.json");
     assert_eq!(marketplace["plugins"][0]["name"], "vouch");
     assert_eq!(marketplace["plugins"][0]["source"]["path"], "./plugin");

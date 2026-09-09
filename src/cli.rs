@@ -200,7 +200,7 @@ pub fn parse_hook_options(args: &[String]) -> Result<HookOptions, String> {
         (InstallHost::Codex, None, _) => {
             Err("vouch: Codex hook needs --shell bash or --shell powershell".into())
         }
-        (InstallHost::Claude, Some(_), _) => {
+        (InstallHost::Claude, Some(_), _) | (InstallHost::Agy, Some(_), _) => {
             Err("vouch: --shell is only meaningful with --host codex".into())
         }
         (InstallHost::Claude, None, true) => {
@@ -230,7 +230,7 @@ pub struct InstallOptions {
 /// `Bash` hook name does not identify the shell that executes the command.
 pub fn parse_install_options(args: &[String]) -> Result<InstallOptions, String> {
     const USAGE: &str =
-        "usage: vouch install [--host claude|codex] [--shell bash|powershell] [--state-dir <absolute>] [--shadow] [--print]";
+        "usage: vouch install [--host claude|codex|agy] [--shell bash|powershell] [--state-dir <absolute>] [--shadow] [--print]";
     let mut host = InstallHost::Claude;
     let mut shell = None;
     let mut shadow = false;
@@ -269,7 +269,7 @@ pub fn parse_install_options(args: &[String]) -> Result<InstallOptions, String> 
         (InstallHost::Codex, None, _) => Err(format!(
             "vouch: Codex installation needs --shell bash or --shell powershell.\n{USAGE}"
         )),
-        (InstallHost::Claude, Some(_), _) => Err(format!(
+        (InstallHost::Claude, Some(_), _) | (InstallHost::Agy, Some(_), _) => Err(format!(
             "vouch: --shell is only meaningful with --host codex.\n{USAGE}"
         )),
         (InstallHost::Claude, None, true) => Err(format!(

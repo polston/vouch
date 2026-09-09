@@ -14,6 +14,7 @@ pub enum Host {
     #[default]
     Claude,
     Codex,
+    Agy,
 }
 
 impl Host {
@@ -21,7 +22,10 @@ impl Host {
         match value {
             "claude" => Ok(Self::Claude),
             "codex" => Ok(Self::Codex),
-            other => Err(format!("vouch: unknown host {other:?}; expected claude or codex")),
+            "agy" | "antigravity" => Ok(Self::Agy),
+            other => Err(format!(
+                "vouch: unknown host {other:?}; expected claude, codex, or agy"
+            )),
         }
     }
 
@@ -29,6 +33,7 @@ impl Host {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Agy => "agy",
         }
     }
 }
@@ -88,8 +93,205 @@ pub enum Decision {
     Abstain,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgyToolCall {
+    name: String,
+    #[serde(default)]
+    args: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgyPayload {
+    tool_call: Option<AgyToolCall>,
+    step_idx: Option<serde_json::Value>,
+    conversation_id: Option<String>,
+    workspace_paths: Option<Vec<String>>,
+    error: Option<String>,
+    reason: Option<String>,
+}
+
 pub fn parse_input(raw: &str) -> Result<HookInput, serde_json::Error> {
+    if raw.contains("\"toolCall\"")
+        || raw.contains("\"workspacePaths\"")
+        || raw.contains("\"conversationId\"")
+    {
+        if let Ok(agy) = serde_json::from_str::<AgyPayload>(raw) {
+            if agy.tool_call.is_some()
+                || agy.workspace_paths.is_some()
+                || agy.conversation_id.is_some()
+            {
+                let session_id = agy.conversation_id.unwrap_or_default();
+                let turn_id = agy
+                    .step_idx
+                    .map(|v| match v {
+                        serde_json::Value::Number(n) => n.to_string(),
+                        serde_json::Value::String(s) => s,
+                        other => other.to_string(),
+                    })
+                    .unwrap_or_default();
+                let tool_use_id = if !turn_id.is_empty() {
+                    if !session_id.is_empty() {
+                        format!("{session_id}:{turn_id}")
+                    } else {
+                        turn_id.clone()
+                    }
+                } else {
+                    session_id.clone()
+                };
+                let default_cwd = agy
+                    .workspace_paths
+                    .as_ref()
+                    .and_then(|w| w.first().cloned())
+                    .unwrap_or_default();
+
+                if let Some(tc) = agy.tool_call {
+                    let command = tc
+                        .args
+                        .get("CommandLine")
+                        .or_else(|| tc.args.get("command"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    let file_path = tc
+                        .args
+                        .get("TargetFile")
+                        .or_else(|| tc.args.get("file_path"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    let url = tc
+                        .args
+                        .get("Url")
+                        .or_else(|| tc.args.get("url"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    let cwd = tc
+                        .args
+                        .get("Cwd")
+                        .or_else(|| tc.args.get("cwd"))
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(String::from)
+                        .unwrap_or(default_cwd);
+
+                    let mut extra = tc.args;
+                    if let Some(ref cmd) = command {
+                        extra.entry("CommandLine".to_string()).or_insert_with(|| serde_json::Value::String(cmd.clone()));
+                    }
+                    if let Some(ref fp) = file_path {
+                        extra.entry("TargetFile".to_string()).or_insert_with(|| serde_json::Value::String(fp.clone()));
+                    }
+                    return Ok(HookInput {
+                        hook_event_name: "PreToolUse".into(),
+                        tool_use_id,
+                        reason: String::new(),
+                        error: String::new(),
+                        is_interrupt: false,
+                        session_id,
+                        turn_id,
+                        cwd,
+                        permission_mode: String::new(),
+                        tool_name: tc.name,
+                        tool_input: ToolInput {
+                            command,
+                            file_path,
+                            url,
+                            extra,
+                        },
+                    });
+                } else {
+                    let error = agy.error.unwrap_or_default();
+                    let reason = agy.reason.unwrap_or_default();
+                    let hook_event_name = if !error.is_empty() {
+                        "PostToolUseFailure".to_string()
+                    } else {
+                        "PostToolUse".to_string()
+                    };
+                    return Ok(HookInput {
+                        hook_event_name,
+                        tool_use_id,
+                        reason,
+                        error,
+                        is_interrupt: false,
+                        session_id,
+                        turn_id,
+                        cwd: default_cwd,
+                        permission_mode: String::new(),
+                        tool_name: String::new(),
+                        tool_input: ToolInput::default(),
+                    });
+                }
+            }
+        }
+    }
     serde_json::from_str(raw)
+}
+
+/// Returns true if a command is a safe local workspace operation that does
+/// not require network access or host escape, and can be safely demoted
+/// from `BypassSandbox: true` to `BypassSandbox: false`.
+pub fn is_local_workspace_command(command: &str) -> bool {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let network_or_remote = [
+        "curl", "wget", "ssh", "scp", "sftp", "rsync", "git push", "git fetch", "git pull",
+        "git clone", "git remote", "kubectl", "docker", "podman", "nc", "netcat", "telnet",
+        "ping", "traceroute", "dig", "nslookup",
+    ];
+    for bad in network_or_remote {
+        if trimmed == bad
+            || trimmed.starts_with(&format!("{bad} "))
+            || trimmed.contains(&format!(" {bad} "))
+            || trimmed.contains(&format!("| {bad}"))
+            || trimmed.contains(&format!("; {bad}"))
+            || trimmed.contains(&format!("&& {bad}"))
+        {
+            return false;
+        }
+    }
+    true
+}
+
+pub fn should_demote_sandbox(input: &HookInput, d: &Decision) -> bool {
+    if !matches!(d, Decision::Allow(_)) {
+        return false;
+    }
+    let wants_bypass = input
+        .tool_input
+        .extra
+        .get("BypassSandbox")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !wants_bypass {
+        return false;
+    }
+    if let Some(cmd) = &input.tool_input.command {
+        is_local_workspace_command(cmd)
+    } else {
+        true
+    }
+}
+
+/// Render one normalized decision for Antigravity, including optional sandbox demotion.
+pub fn render_for_agy(d: &Decision, demote_sandbox: bool) -> Option<String> {
+    let (verdict, reason) = match d {
+        Decision::Abstain => return None,
+        Decision::Allow(r) => ("allow", r),
+        Decision::Ask(r) => ("ask", r),
+        Decision::Deny(r) => ("deny", r),
+    };
+    let mut body = serde_json::json!({
+        "decision": verdict,
+        "reason": reason,
+    });
+    if verdict == "allow" && demote_sandbox {
+        body["overwrite"] = serde_json::json!({
+            "BypassSandbox": false
+        });
+    }
+    Some(body.to_string())
 }
 
 /// Renders the hook response. `None` means emit nothing at all.
@@ -105,6 +307,9 @@ pub fn render(d: &Decision) -> Option<String> {
 /// does not support `ask`, so Ask blocks the first attempt; the caller adds
 /// the approval request id that lets the broker authorize one exact retry.
 pub fn render_for(host: Host, d: &Decision) -> Option<String> {
+    if host == Host::Agy {
+        return render_for_agy(d, false);
+    }
     if host == Host::Codex && matches!(d, Decision::Allow(_) | Decision::Abstain) {
         return None;
     }
