@@ -25,6 +25,8 @@ wrap_depth = 4
 dynamic_command = "allow"
 # A variable used as a redirect target: OUT=/tmp/x; echo hi > "$OUT"
 dynamic_redirect = "allow"
+# A nested command whose output is used here — the nested command itself is
+# judged on its own; this covers only the output vouch cannot read.
 subshell = "allow"
 background = "allow"
 heredoc = "allow"

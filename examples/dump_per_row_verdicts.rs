@@ -42,7 +42,10 @@
 //! resolved here.
 //!
 //! Run: `VOUCH_DUMP_PER_ROW=<absolute path> cargo run --release --example dump_per_row_verdicts`
-//! Add `VOUCH_DUMP_COMPARE=<absolute baseline path>` to print a counts-only
+//! Add `VOUCH_DUMP_UNMODELED=ask`, `VOUCH_DUMP_EVALUATED=ask` or
+//! `VOUCH_DUMP_SUBSHELL=ask` to switch which single construct the config
+//! asks on instead of the standing replay shape. Add
+//! `VOUCH_DUMP_COMPARE=<absolute baseline path>` to print a counts-only
 //! transition breakdown. The baseline contains only row indices and verdicts;
 //! neither comparison output nor the dump includes command text.
 //!
@@ -79,12 +82,23 @@ fn main() {
     // beats inheritance, so setting it once per language is sufficient — no
     // separate bash/python variant is needed.
     //
-    // Two settings are two measurements, never a before/after pair (§6.6):
-    // run this dump twice per end and diff each config against itself.
+    // `VOUCH_DUMP_SUBSHELL=ask` is the command-substitution changeset's own
+    // leg (design `2026-09-07-command-substitution-bodies-design.md` §5).
+    // Neither config above can show `subshell`'s own movement: the standing
+    // replay already allows it, and the live-shaped column above moves on
+    // `unmodeled_command`, a different construct. This switch names
+    // `subshell` alone, so a body vouch could not previously read moving
+    // toward ask, and (once the reader lands) the false notes of §1.4 moving
+    // toward allow, are both visible on their own axis.
+    //
+    // Three settings are three measurements, never a before/after pair
+    // (§6.6): run this dump once per end per setting and diff each config
+    // against itself.
     let ask_unmodeled = std::env::var("VOUCH_DUMP_UNMODELED").as_deref() == Ok("ask");
     let ask_evaluated = std::env::var("VOUCH_DUMP_EVALUATED").as_deref() == Ok("ask");
+    let ask_subshell = std::env::var("VOUCH_DUMP_SUBSHELL").as_deref() == Ok("ask");
     // The config and the name the banner gives it are decided together: two
-    // chains over the same two switches could disagree about which measurement
+    // chains over the same three switches could disagree about which measurement
     // just ran, and the banner is the only record of that in the output.
     let (cfg, which) = if ask_evaluated {
         let mut cfg = common::realistic_config_with_construct(
@@ -109,6 +123,15 @@ fn main() {
                 vouch::config::Action::Ask,
             ),
             "live-shaped (unmodeled_command=ask)",
+        )
+    } else if ask_subshell {
+        (
+            common::realistic_config_with_construct(
+                "bash",
+                "subshell",
+                vouch::config::Action::Ask,
+            ),
+            "subshell override (bash subshell=ask)",
         )
     } else {
         (
@@ -191,6 +214,8 @@ fn movement_cause(reason: &str) -> &'static str {
         "unresolved_path"
     } else if reason.contains("unmodeled_command") {
         "unmodeled_command"
+    } else if reason.contains("lang.bash.constructs.subshell") {
+        "subshell"
     } else if reason.contains("(guard)") {
         "guard"
     } else {

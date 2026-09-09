@@ -31,6 +31,692 @@ fn has_command_substitution(value: &str) -> bool {
     value.contains("$(") || value.contains('`')
 }
 
+/// `\`-newline is deleted by bash before any expansion — inside double quotes
+/// and inside an unquoted here-document body alike — so a substitution whose
+/// opener is split across a continuation still runs (probed: a body holding
+/// `$`, `\`, newline, `(touch M)` creates M). Every reader of raw text below
+/// starts from this, or the text pre-filter would miss what bash runs.
+pub fn strip_line_continuations(raw: &str) -> std::borrow::Cow<'_, str> {
+    if raw.contains("\\\n") {
+        std::borrow::Cow::Owned(raw.replace("\\\n", ""))
+    } else {
+        std::borrow::Cow::Borrowed(raw)
+    }
+}
+
+/// See the struct's field docs; the rules are the design's §2.1.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Bodies {
+    /// One entry per `$(…)` or backtick body, outermost only: a body's own
+    /// nested substitutions are found by the walk over that body, never here.
+    pub bodies: Vec<String>,
+    /// True when the text plainly holds a substitution vouch could not
+    /// delimit: the word failed to parse, or a literal piece still carries
+    /// `$(` or a backtick after parsing. The scan (`scan`, below) returns at
+    /// the first unreadable opener it meets — any bodies already found stay
+    /// in `bodies`, but a second, perfectly readable substitution later in
+    /// the same text is never reached and is silently dropped from `bodies`.
+    /// Deliberately fail-closed: the engine notes `parse_failure` for the
+    /// whole word rather than reporting a partial reading as though it were
+    /// complete.
+    pub unreadable: bool,
+}
+
+/// Which characters carry structure in the text the scan is walking. WORD
+/// mode is a word's own raw text, read with the quoting the shell applies to
+/// a command line. HERE-DOCUMENT mode is the body of an unquoted
+/// here-document, where `'` and `"` are ordinary characters and bash honours
+/// only four escapes. The extent of a `$( … )` found in EITHER is read in
+/// WORD mode, because a substitution's content is shell (design §2.1 step 3).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Word,
+    Heredoc,
+}
+
+/// The substitution bodies a word's raw text runs, delimited by vouch's own
+/// scan — `$((1+2))` is arithmetic, `'$(x)'` is literal, `${a[$(x)]}` runs
+/// `x`. Outermost bodies only: nesting is the walk's business, and it finds
+/// an inner body by visiting the outer body's own words.
+pub fn substitution_bodies(raw: &str) -> Bodies {
+    bodies_via(raw, Mode::Word)
+}
+
+/// The substitution bodies an unquoted here-document body runs. Shares its
+/// whole pipeline with `substitution_bodies` through `bodies_via` — the mode
+/// is the only thing that differs, so nothing else about the two readings can
+/// silently diverge.
+pub fn heredoc_substitution_bodies(body: &str) -> Bodies {
+    bodies_via(body, Mode::Heredoc)
+}
+
+/// Strip line continuations, pre-filter by text, then scan — the whole
+/// pipeline `substitution_bodies` and `heredoc_substitution_bodies` share.
+fn bodies_via(raw: &str, mode: Mode) -> Bodies {
+    let text = strip_line_continuations(raw);
+    let mut out = Bodies::default();
+    if !has_command_substitution(&text) {
+        return out;
+    }
+    scan(&text, mode, &mut out);
+    out
+}
+
+/// One flat pass over already-stripped text, emitting one body per OUTERMOST
+/// substitution and noting `unreadable` for one whose end vouch could not
+/// find (design §2.1 steps 3 and 4).
+///
+/// Deliberately not `brush_parser::word::parse`: brush's `command()` rule is
+/// not here-document aware, so an apostrophe or a backtick in the prose of
+/// `$(cat <<'EOF' … EOF)` opens a quoted piece that swallows parentheses —
+/// the substitution's closer is re-paired, the real body is truncated or
+/// lost, and every markdown backtick pair becomes a body of its own. That is
+/// the shape a commit message is written in, so it is not a rare one.
+///
+/// A flat scan also needs no structural reading of a parameter expansion:
+/// bash expands a `$(` wherever it stands outside single quotes, and so does
+/// this, which is why `${x:-$(a)}` and `${a[$(x)]}` need no arm of their own.
+fn scan(text: &str, mode: Mode, out: &mut Bodies) {
+    let cs: Vec<(usize, char)> = text.char_indices().collect();
+    let mut quoting = Quoting::default();
+    let mut memo = Memo::new();
+    let mut i = 0;
+    while i < cs.len() {
+        if mode == Mode::Word {
+            // `step_expanding` rather than `step`: double quotes leave a
+            // substitution live, so the two characters that can open one have
+            // to reach the match below from inside them as well as outside.
+            if let Some(next) = quoting.step_expanding(&cs, i) {
+                i = next;
+                continue;
+            }
+        } else if cs[i].1 == '\\' {
+            // bash's escape set inside an unquoted here-document body: these
+            // four and nothing else, so every other backslash is text. The
+            // newline can no longer be reached — `strip_line_continuations`
+            // ran first — and is named so the set reads as bash's own.
+            i += match cs.get(i + 1).map(|&(_, c)| c) {
+                Some('$' | '`' | '\\' | '\n') => 2,
+                _ => 1,
+            };
+            continue;
+        }
+        match cs[i].1 {
+            '$' if cs.get(i + 1).is_some_and(|&(_, n)| n == '(') => {
+                match substitution_at(&cs, text, i, out, &mut memo) {
+                    Some(next) => i = next,
+                    None => {
+                        out.unreadable = true;
+                        return;
+                    }
+                }
+            }
+            '`' => match skip_backquotes(&cs, i) {
+                Some(next) => {
+                    out.bodies
+                        .push(collapse_backquote_escapes(&text[cs[i].0 + 1..cs[next - 1].0]));
+                    i = next;
+                }
+                None => {
+                    out.unreadable = true;
+                    return;
+                }
+            },
+            _ => i += 1,
+        }
+    }
+}
+
+/// What one `$( … )` turns out to be. `Arithmetic` carries the text between
+/// the two inner parentheses, which runs no command of its own; `Body` carries
+/// the command text the substitution runs.
+#[derive(Clone, Copy)]
+enum Reading<'t> {
+    Arithmetic(&'t str),
+    Body(&'t str),
+}
+
+/// Every `$(` opener one scan of one text has already resolved, keyed on the
+/// index of its `$`.
+///
+/// It is not an optimisation, it is the bound on the work. `read_substitution`
+/// may run TWO walks over the same text — the arithmetic probe and the real
+/// one — and each walk resolves every nested opener it meets, so without a
+/// memo each `$((`-shaped level doubles everything below it: forty levels of
+/// `$((echo a); …)` costs 2^41 walks. That is not a contrived input. An
+/// unquoted here-document's RAW body reaches this reader
+/// (`heredoc_substitution_bodies`), so `cat <<EOF` and thirty openers is an
+/// ordinary command line, and the cost would land inside a PreToolUse hook.
+/// The nesting cap in `read_substitution` is the other half of the answer;
+/// this half keeps the levels that ARE resolved to one walk each.
+///
+/// The index alone is a sound key for ONE walk: openers nest strictly, so a
+/// given opener has exactly one enclosing chain within it. It is not sound
+/// ACROSS the two walks a `$((`-shaped opener can run: a here-document
+/// region the with-skip walk steps over as data can still be traversed by
+/// the no-skip arithmetic probe, so the same `$` index can be reached at two
+/// different depths depending on which walk gets there first. That order is
+/// fixed, not merely possible either way: `delimit_substitution` always runs
+/// the no-skip probe FIRST, and the no-skip probe is the one walk that can
+/// descend into here-document-hidden openers — so whenever the two walks
+/// diverge on an index, the no-skip probe is the one that reaches it, caches
+/// it, and the later with-skip lookup reuses that cached reading. The cached
+/// reading is therefore always the DEEPER of the two, which is harmless: the
+/// shallower walk only inherits a MORE conservative (fail-closed) answer
+/// than its own depth would have computed, never a more permissive one.
+type Memo<'t> = std::collections::HashMap<usize, Option<(Reading<'t>, usize)>>;
+
+/// Read the `$(` at `dollar` the one way the whole reader reads one, and say
+/// where it ends. `None` when it never closes, or when it sits deeper than the
+/// nesting cap.
+///
+/// `depth` is how many substitutions enclose this one, so a top-level opener
+/// is 0. At `SUBSTITUTION_DEPTH_CAP` the opener is not resolved at all and the
+/// enclosing extent is refused, which the reader reports as `unreadable` and
+/// the engine as `parse_failure` — fail-closed, but not lossless: refusing an
+/// opener this deep also makes every extent that ENCLOSES it unreadable, all
+/// the way up to whichever call first receives the `None`, so a nest nine
+/// deep drops the enclosing body's own shallower content too, not only the
+/// one construct `walk_substitution_body`'s own depth check already refuses
+/// to walk. Refusing HERE is what bounds the cost: that check runs after
+/// this reader has returned.
+///
+/// One function rather than two so that the reading `extent` jumps over and
+/// the reading `substitution_at` emits can never disagree.
+fn read_substitution<'t>(
+    cs: &[(usize, char)],
+    text: &'t str,
+    dollar: usize,
+    depth: usize,
+    memo: &mut Memo<'t>,
+) -> Option<(Reading<'t>, usize)> {
+    if depth >= SUBSTITUTION_DEPTH_CAP {
+        return None;
+    }
+    if let Some(&cached) = memo.get(&dollar) {
+        return cached;
+    }
+    let read = delimit_substitution(cs, text, dollar, depth, memo);
+    memo.insert(dollar, read);
+    read
+}
+
+/// `read_substitution` without the cap and the memo — the reading itself.
+///
+/// The arithmetic question is answered FIRST, and on the extent read WITHOUT
+/// the here-document pass: an arithmetic reading never looks for a delimiter,
+/// so the `<<` in `$(( x << 2 ))` is a shift (design §2.1 step 3). A
+/// here-document reading of that text would go looking for a body terminated
+/// by `2` and run off the end. Only a `$((` can be arithmetic, so that first
+/// walk is skipped entirely unless the character after the opener is `(` —
+/// which is exactly `arithmetic_inside`'s own first condition, and which keeps
+/// an ordinary substitution to a single walk.
+fn delimit_substitution<'t>(
+    cs: &[(usize, char)],
+    text: &'t str,
+    dollar: usize,
+    depth: usize,
+    memo: &mut Memo<'t>,
+) -> Option<(Reading<'t>, usize)> {
+    if cs.get(dollar + 2).is_some_and(|&(_, c)| c == '(') {
+        if let Some((span, after)) = extent(cs, text, dollar, false, depth, memo) {
+            if let Some(inner) = arithmetic_inside(span) {
+                return Some((Reading::Arithmetic(inner), after));
+            }
+        }
+    }
+    // Not arithmetic, so the body is the extent read WITH here-document
+    // content skipped as data. That is the only reading that survives an
+    // apostrophe, a backtick or an unbalanced parenthesis in the prose of a
+    // here-document, and it is what bash does.
+    let (span, after) = extent(cs, text, dollar, true, depth, memo)?;
+    Some((Reading::Body(span), after))
+}
+
+/// One `$(` at `dollar`: emit its body, or recurse into it as arithmetic, and
+/// answer where the scan continues. `None` when it never closes — the text
+/// plainly holds a substitution whose edges vouch could not find.
+fn substitution_at<'t>(
+    cs: &[(usize, char)],
+    text: &'t str,
+    dollar: usize,
+    out: &mut Bodies,
+    memo: &mut Memo<'t>,
+) -> Option<usize> {
+    // A substitution the top-level scan meets has nothing enclosing it.
+    let (reading, after) = read_substitution(cs, text, dollar, 0, memo)?;
+    match reading {
+        // Arithmetic runs no command of its own — and an arithmetic syntax
+        // error at runtime runs nothing, so `$((touch M))` walks nothing —
+        // but a substitution written inside it runs first.
+        Reading::Arithmetic(inner) => {
+            if has_command_substitution(inner) {
+                scan(inner, Mode::Word, out);
+            }
+        }
+        Reading::Body(span) => out.bodies.push(span.to_string()),
+    }
+    Some(after)
+}
+
+/// The inside of `$(( … ))` when this extent is arithmetic rather than a
+/// command substitution: the span begins with `(`, ends with `)`, and what
+/// lies between balances. Balance is the test because bash counts
+/// parentheses — `$((echo a); (touch M))` really does run a subshell, and
+/// `$((touch M))` is an arithmetic syntax error that runs nothing (both
+/// probed). Arithmetic VALIDITY is deliberately not the test: it would refuse
+/// `touch M` and send a spelling bash never runs to the guard.
+fn arithmetic_inside(span: &str) -> Option<&str> {
+    let inner = span.strip_prefix('(')?.strip_suffix(')')?;
+    parens_balance(inner).then_some(inner)
+}
+
+/// The text between a `$(` at `dollar` and its depth-matched `)`, plus the
+/// position just past that `)`.
+///
+/// What the walk counts as this substitution's own structure, and what it
+/// steps over whole:
+///   * Parentheses are counted outside quotes, with WORD-mode quoting applied
+///     to the content whatever mode the scan itself is in, because a
+///     substitution's content is shell.
+///   * A NESTED substitution — `$( … )` or a backquoted one — is opaque: its
+///     own extent is found first and the walk resumes past its closer, so
+///     nothing written inside it reaches this level's paren count OR this
+///     level's quote state. That is how bash reads it, and it is what makes
+///     `$(echo "$(echo "a)")")` come out whole: the inner `"` pair belongs to
+///     the inner substitution, and letting it flip the outer parity ended the
+///     extent five characters early.
+///   * A comment runs from a word-initial `#` to the end of its line, so a
+///     `)` written in one closes nothing.
+///   * Inside a `case` statement a `)` at this level's own depth terminates a
+///     pattern rather than the substitution.
+///   * With `skip_docs`, each `<<`/`<<-` operator's delimiter is read and that
+///     here-document's lines are skipped as data — bash's own reading, and the
+///     one the arithmetic test in `read_substitution` must not have.
+///
+/// `nesting` is how many substitutions enclose the one being delimited, and it
+/// is passed on one deeper to every nested opener; `memo` is the per-scan
+/// resolution cache both halves of `read_substitution`'s cost bound live in.
+///
+/// `None` when no depth-zero `)` arrives — including when the text ends inside
+/// a comment, an unclosed nested substitution or an unclosed `case`, or when a
+/// nested opener sits past the nesting cap — or before a here-document's
+/// terminator.
+fn extent<'t>(
+    cs: &[(usize, char)],
+    text: &'t str,
+    dollar: usize,
+    skip_docs: bool,
+    nesting: usize,
+    memo: &mut Memo<'t>,
+) -> Option<(&'t str, usize)> {
+    let content = dollar + 2;
+    let start = cs.get(content)?.0;
+    let mut depth = 0usize;
+    let mut quoting = Quoting::default();
+    // The index just past the most recent nested substitution's closer. That
+    // `)` is INSIDE a word, unlike the `)` that ends a subshell, so it does not
+    // end the word before a `#` — see `starts_comment`.
+    let mut after_nested: Option<usize> = None;
+    // The delimiters declared on the line being read, in the order they were
+    // written: bash consumes their bodies in that order at the next newline.
+    let mut pending: Vec<(String, bool)> = Vec::new();
+    // How many `case` statements are open at this level. A COUNT rather than a
+    // flag because a `case` nested in a `case` arm ends at its own `esac`, and
+    // reading that inner `esac` as the end of both would hand the outer
+    // statement's next pattern `)` back to the paren count.
+    let mut cases = 0usize;
+    let mut i = dollar + 1;
+    while i < cs.len() {
+        // `step_expanding`, not `step`: double quotes leave a nested
+        // substitution live, and the arm below has to see the character that
+        // opens one from inside them.
+        if let Some(next) = quoting.step_expanding(cs, i) {
+            i = next;
+            continue;
+        }
+        match cs[i].1 {
+            '$' if cs.get(i + 1).is_some_and(|&(_, c)| c == '(') => {
+                i = read_substitution(cs, text, i, nesting + 1, memo)?.1;
+                after_nested = Some(i);
+                continue;
+            }
+            '`' => {
+                i = skip_backquotes(cs, i)?;
+                continue;
+            }
+            '(' => depth += 1,
+            ')' => {
+                // A pattern's terminator, not this substitution's closer. A
+                // `)` deeper than this level is the mate of a `(` the walk
+                // counted, which is the `(a)` pattern spelling as well as any
+                // ordinary subshell.
+                if cases > 0 && depth == 1 {
+                    i += 1;
+                    continue;
+                }
+                depth -= 1;
+                if depth == 0 {
+                    return Some((&text[start..cs[i].0], i + 1));
+                }
+            }
+            // bash parses a substitution's content with its full parser, so a
+            // `#` where a word can start runs a comment to the end of the
+            // line and a `)` written in that comment closes nothing. BOTH
+            // walks need it: an arithmetic `$(( … ))` cannot hold a comment,
+            // but the no-skip extent of a body that is not arithmetic must
+            // not be cut short by one either. Running out of text inside a
+            // comment leaves the substitution unclosed, which is the `None`
+            // below. A backquoted body is deliberately unlike this: bash
+            // finds its closing backquote character-first, so a `#` inside
+            // one protects nothing and `skip_backquotes` stays as it is.
+            '#' if starts_comment(cs, i, after_nested) => {
+                while i < cs.len() && cs[i].1 != '\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            // `case` takes a word, so bash requires a blank after it; `esac`
+            // ends a command and may be followed by anything that ends one,
+            // `)` included. Both count only at command position — `grep case
+            // file` passes `case` as an argument and opens nothing.
+            'c' if word_at(cs, i, "case", true) && at_command_position(cs, i, content) => {
+                cases += 1;
+                i += "case".chars().count();
+                continue;
+            }
+            'e' if word_at(cs, i, "esac", false) && at_command_position(cs, i, content) => {
+                cases = cases.saturating_sub(1);
+                i += "esac".chars().count();
+                continue;
+            }
+            '<' if skip_docs && is_heredoc_operator(cs, i) => {
+                let (delim, strip_tabs, next) = heredoc_delimiter(cs, i);
+                // An operator with no delimiter after it introduces no
+                // here-document; the `<` is then ordinary text.
+                if !delim.is_empty() {
+                    pending.push((delim, strip_tabs));
+                    i = next;
+                    continue;
+                }
+            }
+            '\n' if !pending.is_empty() => {
+                i = skip_heredoc_bodies(cs, i + 1, &mut pending)?;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// A `#` that BEGINS A WORD, which is where the shell starts a comment. So the
+/// set below is what a word can follow: whitespace or a newline, and the
+/// operators `(`, `)`, `;`, `|`, `&`, each of which ends the word before it.
+/// `a#b` is one word carrying a hash, and a `#` inside quotes is text — the
+/// quoting step in `extent` consumed that one before this is asked.
+///
+/// `)` is in the set and needs `after_nested` to earn it, because two
+/// different parentheses are spelled the same way. The `)` that ends a
+/// SUBSHELL is an operator and does end the word before it, so `$( (echo
+/// a)#x )` really is a comment — and the comment then swallows the `)` a
+/// reader would otherwise close the substitution on. The `)` that closes a
+/// nested `$( … )` or `$(( … ))` is INSIDE a word, so `$(echo $(echo a)#x)`
+/// runs `echo` with the single argument `a#x`. `after_nested` is the one index
+/// where the walk knows it just passed the second kind, which is exactly the
+/// `after` that `read_substitution` returned.
+///
+/// The reference is zsh 5.9. macOS's bash 3.2 is known-deficient for command
+/// substitutions and is not the reference: its reader honours only a blank, a
+/// newline or the start of the substitution before a `#`.
+///
+/// The set is `ends_word` MINUS `<` and `>`, and the two that come out are the
+/// redirection operators. They do end the word before them, but what follows
+/// one is a redirect TARGET, and bash reads a `#` there as the first character
+/// of a filename rather than as a comment — `echo >#x` redirects into a file
+/// named `#x` (probed). Every other word-ending character really does put the
+/// next `#` where a comment can start.
+fn starts_comment(cs: &[(usize, char)], i: usize, after_nested: Option<usize>) -> bool {
+    if after_nested == Some(i) {
+        return false;
+    }
+    if i == 0 {
+        return true;
+    }
+    let before = cs[i - 1].1;
+    ends_word(before) && !matches!(before, '<' | '>')
+}
+
+/// The characters that END A WORD in the reader's own scan: blanks and a
+/// newline, the list and pipeline operators, the two parentheses, and the two
+/// redirection operators.
+///
+/// One set, because the two questions asked of it are the same question. A
+/// keyword only counts as one when the next character ends the word
+/// (`word_at`), and a bare here-document delimiter runs until the first
+/// character that ends the word (`heredoc_delimiter`) — so `<<EOF)` and
+/// `esac)` have to agree about `)`, and two hand-written copies could only
+/// drift.
+fn ends_word(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | ';' | '|' | '&' | '(' | ')' | '<' | '>')
+}
+
+/// The exact word `w` at `i`, ended by something that ends a word rather than
+/// running on into a longer one. `blank_after` is bash's own difference
+/// between the two keywords this is asked about: `case` takes a word, so a
+/// blank must follow it, while `esac` ends a command and may be followed by
+/// anything that ends one — `esac)` closes a substitution on the same line.
+fn word_at(cs: &[(usize, char)], i: usize, w: &str, blank_after: bool) -> bool {
+    if !w.chars().enumerate().all(|(k, c)| cs.get(i + k).is_some_and(|&(_, got)| got == c)) {
+        return false;
+    }
+    match cs.get(i + w.chars().count()).map(|&(_, c)| c) {
+        None => !blank_after,
+        Some(c) if blank_after => matches!(c, ' ' | '\t' | '\n'),
+        Some(c) => ends_word(c),
+    }
+}
+
+/// Whether a word starting at `i` stands where a COMMAND starts rather than
+/// where an argument does: at the beginning of the substitution's content, or
+/// after `;`, `|`, `&`, `(`, `{` or a newline, with spaces and tabs skipped
+/// back over. `;;` is covered by `;`. This is what separates the keyword
+/// `case` from the argument in `grep case file`.
+fn at_command_position(cs: &[(usize, char)], i: usize, content: usize) -> bool {
+    let mut j = i;
+    while j > content && matches!(cs[j - 1].1, ' ' | '\t') {
+        j -= 1;
+    }
+    j == content || matches!(cs[j - 1].1, ';' | '|' | '&' | '(' | '{' | '\n')
+}
+
+/// A `<<` that really introduces a here-document: two of them and not three
+/// (`<<<` is a here-string, whose word is not a delimiter), and not the
+/// second `<` of a pair the walk has already read.
+fn is_heredoc_operator(cs: &[(usize, char)], i: usize) -> bool {
+    cs.get(i + 1).is_some_and(|&(_, c)| c == '<')
+        && !cs.get(i + 2).is_some_and(|&(_, c)| c == '<')
+        && !(i > 0 && cs[i - 1].1 == '<')
+}
+
+/// Read a here-document operator's delimiter, starting at its first `<`.
+/// `<<-` strips leading tabs from the body lines and from the terminator;
+/// spaces and tabs before the delimiter are skipped; a quoted delimiter runs
+/// to its matching quote, and a bare one to the first character that ends a
+/// word, with backslashes removed. Returns the delimiter, whether tabs are
+/// stripped, and the position just past it.
+///
+/// Which quote the delimiter carried is not recorded, because this reader
+/// does not expand a here-document's content: it only needs to know where the
+/// content ENDS, and the terminator is the same either way.
+fn heredoc_delimiter(cs: &[(usize, char)], op: usize) -> (String, bool, usize) {
+    let mut i = op + 2;
+    let strip_tabs = cs.get(i).is_some_and(|&(_, c)| c == '-');
+    if strip_tabs {
+        i += 1;
+    }
+    while cs.get(i).is_some_and(|&(_, c)| c == ' ' || c == '\t') {
+        i += 1;
+    }
+    let mut delim = String::new();
+    match cs.get(i).map(|&(_, c)| c) {
+        Some(quote @ ('\'' | '"')) => {
+            i += 1;
+            while i < cs.len() {
+                let c = cs[i].1;
+                i += 1;
+                if c == quote {
+                    break;
+                }
+                delim.push(c);
+            }
+        }
+        _ => {
+            while let Some(&(_, c)) = cs.get(i) {
+                if ends_word(c) {
+                    break;
+                }
+                i += 1;
+                if c == '\\' {
+                    if let Some(&(_, escaped)) = cs.get(i) {
+                        delim.push(escaped);
+                        i += 1;
+                    }
+                    continue;
+                }
+                delim.push(c);
+            }
+        }
+    }
+    (delim, strip_tabs, i)
+}
+
+/// From the first character after the operator line's newline, skip each
+/// pending here-document's lines up to and including its terminator, in the
+/// order the operators were written. `None` when the text ends before a
+/// terminator arrives: the body cannot be delimited, so the scan says so
+/// rather than guessing where the content stopped.
+fn skip_heredoc_bodies(
+    cs: &[(usize, char)],
+    from: usize,
+    pending: &mut Vec<(String, bool)>,
+) -> Option<usize> {
+    let mut i = from;
+    for (delim, strip_tabs) in pending.drain(..) {
+        loop {
+            if i >= cs.len() {
+                return None;
+            }
+            let start = i;
+            while i < cs.len() && cs[i].1 != '\n' {
+                i += 1;
+            }
+            let line: String = cs[start..i].iter().map(|&(_, c)| c).collect();
+            let unterminated = i >= cs.len();
+            i += 1;
+            let seen = if strip_tabs { line.trim_start_matches('\t') } else { line.as_str() };
+            if seen == delim {
+                break;
+            }
+            if unterminated {
+                return None;
+            }
+        }
+    }
+    Some(i)
+}
+
+/// The three escapes bash processes inside backquotes before running the text
+/// they enclose: an escaped backquote is a literal backquote, `\\` a literal
+/// backslash, `\$` a literal dollar. Every other backslash reaches the
+/// command unchanged, which is why this is not a general unescape.
+fn collapse_backquote_escapes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(&next) = chars.peek() {
+                if matches!(next, '`' | '\\' | '$') {
+                    out.push(next);
+                    chars.next();
+                    continue;
+                }
+            }
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// How a `walk_parens` run ended. The three outcomes are what the two callers
+/// below need between them, and neither invents a fourth.
+enum ParenWalk {
+    /// A `)` brought the depth back to zero; this is the index just past it.
+    Closed(usize),
+    /// A `)` arrived with nothing open — the text cannot balance from here.
+    Underflow,
+    /// The text ran out with `depth` parentheses still open (`0` when the walk
+    /// never opened one, or opened and closed only whole balanced groups).
+    Ran { depth: usize },
+}
+
+/// One quote-aware parenthesis walk, from `from` to whichever of the three
+/// endings above arrives first: parentheses are counted only where `Quoting`
+/// says the shell reads them as structure, so a `)` inside a string counts for
+/// nothing.
+///
+/// Both readers below are this walk asking a different question of the same
+/// stepping loop — "does this span balance" and "where does the depth opened
+/// at this `(` return to zero" — and they were two hand-written copies of it,
+/// which is one more place a quoting fix would have to be found. Restarting the
+/// walk after `Closed` is sound and is what `parens_balance` does: the `)` that
+/// returned the depth to zero was itself read as structure, so the quote state
+/// at that point is the default one a fresh walk begins with.
+fn walk_parens(cs: &[(usize, char)], from: usize) -> ParenWalk {
+    let mut quoting = Quoting::default();
+    let mut depth = 0usize;
+    let mut i = from;
+    while i < cs.len() {
+        if let Some(next) = quoting.step(cs, i) {
+            i = next;
+            continue;
+        }
+        match cs[i].1 {
+            '(' => depth += 1,
+            ')' => {
+                if depth == 0 {
+                    return ParenWalk::Underflow;
+                }
+                depth -= 1;
+                if depth == 0 {
+                    return ParenWalk::Closed(i + 1);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    ParenWalk::Ran { depth }
+}
+
+/// Parentheses balance outside quotes — bash's own test for whether `$((`
+/// opened arithmetic or a substitution.
+///
+/// The whole text has to balance, not just its first group, so a `Closed`
+/// answer resumes the walk past that group rather than returning.
+fn parens_balance(text: &str) -> bool {
+    let cs: Vec<(usize, char)> = text.char_indices().collect();
+    let mut i = 0;
+    loop {
+        match walk_parens(&cs, i) {
+            ParenWalk::Closed(next) => i = next,
+            ParenWalk::Underflow => return false,
+            ParenWalk::Ran { depth } => return depth == 0,
+        }
+    }
+}
+
 /// Resolve `\X` -> `X` in the UNQUOTED regions of a word's raw text, leaving
 /// quoted regions exactly as the parser handed them.
 ///
@@ -181,19 +867,29 @@ struct Group {
 }
 
 /// Where a walk over a word's raw text stands with respect to quoting: inside
-/// a single-quoted string, inside a double-quoted one, or neither.
+/// a single-quoted string, inside a double-quoted one, inside an ANSI-C
+/// quoted one (`$'…'`), or neither.
 ///
-/// Defined once because three walks over the same raw text need it — the
-/// command-substitution skip, the top-level group scan, and the group-body
-/// scan — and a copy per walk is three places a quoting fix has to be found.
+/// Defined once because six walks over raw text need it — the body reader and
+/// its extent walk through `step_expanding`, and the paren-balance test, the
+/// command-substitution skip, the top-level group scan and the group-body scan
+/// through `step` — and a copy per walk is one more place a quoting fix has to
+/// be found.
 /// It is deliberately NOT `unescape_unquoted`'s state machine: that one BUILDS
 /// the unescaped text and so must keep the character a backslash protects,
-/// while these three only need to know which positions the shell's own
+/// while all six of these only need to know which positions the shell's own
 /// structure characters can occupy.
 #[derive(Default)]
 struct Quoting {
     in_single: bool,
     in_double: bool,
+    /// Inside `$'…'` — ANSI-C quoting, the one single-quote spelling bash
+    /// gives escapes. A plain `'…'` has none: `\` is ordinary text and the
+    /// first `'` ends the string. `$'…'` is different on purpose — it exists
+    /// so a script can write `\'`, `\\`, `\n` and the rest inside a quoted
+    /// literal — so `$'\''` is a quoted `'` and the string runs past it
+    /// rather than closing two characters early.
+    in_ansi_c: bool,
 }
 
 impl Quoting {
@@ -203,10 +899,19 @@ impl Quoting {
     /// the character is the caller's own to interpret.
     ///
     /// A step rather than a predicate because a backslash consumes the
-    /// character after it — inside double quotes as well as outside — so the
-    /// answer is a position, not a flag.
+    /// character after it — inside double quotes and inside an ANSI-C string,
+    /// as well as outside — so the answer is a position, not a flag.
     fn step(&mut self, cs: &[(usize, char)], i: usize) -> Option<usize> {
         let c = cs[i].1;
+        if self.in_ansi_c {
+            if c == '\\' {
+                return Some(i + 2);
+            }
+            if c == '\'' {
+                self.in_ansi_c = false;
+            }
+            return Some(i + 1);
+        }
         if self.in_single {
             if c == '\'' {
                 self.in_single = false;
@@ -225,7 +930,11 @@ impl Quoting {
         match c {
             '\\' => Some(i + 2),
             '\'' => {
-                self.in_single = true;
+                if dollar_before_is_unescaped(cs, i) {
+                    self.in_ansi_c = true;
+                } else {
+                    self.in_single = true;
+                }
                 Some(i + 1)
             }
             '"' => {
@@ -235,6 +944,47 @@ impl Quoting {
             _ => None,
         }
     }
+
+    /// `step`, except that the two characters double quotes do NOT make
+    /// literal are left for the caller: bash runs a `$( … )` and a backquoted
+    /// command inside a double-quoted string, so the body reader has to see
+    /// them there (design §2.1 step 3). `step` itself keeps its own rule — the
+    /// four callers that still use it directly (the paren-balance test, the
+    /// command-substitution skip, the top-level group scan and the group-body
+    /// scan) classify structure characters the shell reads only outside every
+    /// quote.
+    fn step_expanding(&mut self, cs: &[(usize, char)], i: usize) -> Option<usize> {
+        let c = cs[i].1;
+        if !self.in_single && self.in_double && (c == '$' || c == '`') {
+            return None;
+        }
+        self.step(cs, i)
+    }
+}
+
+/// Whether the `$` sitting immediately before the `'` at `i` opens ANSI-C
+/// quoting — present, and itself unescaped.
+///
+/// Outside every quote a backslash always escapes exactly the next
+/// character, so a run of consecutive backslashes pairs off two at a time;
+/// counting the run immediately before the `$` and checking its parity is
+/// bash's own answer, and it does not depend on how the walk arrived at `i`.
+/// Probed against zsh 5.9: `\$'x'` reads as a literal `$` followed by a plain
+/// quoted string (one backslash — the `$` is escaped), while `\\$'x'` reads
+/// as a literal `\` followed by an ANSI-C one (two backslashes — the `$` is
+/// not). A single "is the previous character `$`" test would get the first
+/// of those wrong.
+fn dollar_before_is_unescaped(cs: &[(usize, char)], i: usize) -> bool {
+    if i == 0 || cs[i - 1].1 != '$' {
+        return false;
+    }
+    let mut j = i - 1;
+    let mut backslashes = 0usize;
+    while j > 0 && cs[j - 1].1 == '\\' {
+        backslashes += 1;
+        j -= 1;
+    }
+    backslashes % 2 == 0
 }
 
 /// The position just past a `$( … )` command substitution that starts at the
@@ -242,28 +992,15 @@ impl Quoting {
 ///
 /// Nest- and quote-aware: a `)` inside a string or inside an inner
 /// substitution does not end the outer one.
+///
+/// The walk starts at the `(` this `$` introduces, so the first structural
+/// character it reads opens the depth this is asking about — an `Underflow`
+/// is unreachable from a real caller and is refused rather than guessed at.
 fn skip_command_substitution(cs: &[(usize, char)], dollar: usize) -> Option<usize> {
-    let mut depth = 0usize;
-    let mut quoting = Quoting::default();
-    let mut i = dollar + 1;
-    while i < cs.len() {
-        if let Some(next) = quoting.step(cs, i) {
-            i = next;
-            continue;
-        }
-        match cs[i].1 {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i + 1);
-                }
-            }
-            _ => {}
-        }
-        i += 1;
+    match walk_parens(cs, dollar + 1) {
+        ParenWalk::Closed(next) => Some(next),
+        ParenWalk::Underflow | ParenWalk::Ran { .. } => None,
     }
-    None
 }
 
 /// The position just past a backquoted command substitution that starts at the
@@ -480,12 +1217,11 @@ pub fn parse(cmd: &str) -> Result<Parsed, String> {
 
     let mut out = Parsed::default();
     let mut counter = 0u32;
-    // Identifies one and-or chain (`ChainPos.id`) uniquely across the whole
-    // parse — unlike `counter`, never reset for a nested compound body, so
-    // an inner `if a && b; then …` chain can never collide with an outer one.
-    let mut chain_counter = 0u32;
+    // One walk, one `WalkState`: both of its fields are whole-walk state, and
+    // both start at zero for every parse.
+    let mut walk = WalkState::default();
     for cc in &program.complete_commands {
-        walk_compound_list(cc, &mut out, &mut counter, false, &mut chain_counter, 0, cmd);
+        walk_compound_list(cc, &mut out, &mut counter, false, &mut walk, 0, cmd);
     }
     Ok(out)
 }
@@ -544,7 +1280,7 @@ fn walk_compound_list(
     out: &mut Parsed,
     counter: &mut u32,
     unordered: bool,
-    chain_counter: &mut u32,
+    walk: &mut WalkState,
     scope: usize,
     src: &str,
 ) {
@@ -553,7 +1289,7 @@ fn walk_compound_list(
         if async_item {
             out.note("background");
         }
-        walk_and_or_list(&item.0, out, counter, unordered, chain_counter, scope, async_item, src);
+        walk_and_or_list(&item.0, out, counter, unordered, walk, scope, async_item, src);
     }
 }
 
@@ -577,7 +1313,7 @@ fn walk_and_or_list(
     out: &mut Parsed,
     counter: &mut u32,
     base_unordered: bool,
-    chain_counter: &mut u32,
+    walk: &mut WalkState,
     scope: usize,
     async_list: bool,
     src: &str,
@@ -593,8 +1329,8 @@ fn walk_and_or_list(
     let id = if list.additional.is_empty() && !list.first.bang {
         None
     } else {
-        let id = *chain_counter;
-        *chain_counter += 1;
+        let id = walk.chains;
+        walk.chains += 1;
         Some(id)
     };
     let n_members = 1 + list.additional.len() as u32;
@@ -623,7 +1359,7 @@ fn walk_and_or_list(
         and_run_from,
         negated: list.first.bang,
     });
-    walk_pipeline(&list.first, out, counter, unordered, first_pos, chain_counter, scope, boundary_for(idx), src);
+    walk_pipeline(&list.first, out, counter, unordered, first_pos, walk, scope, boundary_for(idx), src);
     idx += 1;
     for ao in &list.additional {
         match ao {
@@ -634,11 +1370,11 @@ fn walk_and_or_list(
                 unordered = true;
                 and_run_from = idx;
                 let pos = id.map(|id| crate::syntax::ChainPos { id, idx, and_run_from, negated: p.bang });
-                walk_pipeline(p, out, counter, unordered, pos, chain_counter, scope, boundary_for(idx), src);
+                walk_pipeline(p, out, counter, unordered, pos, walk, scope, boundary_for(idx), src);
             }
             ast::AndOr::And(p) => {
                 let pos = id.map(|id| crate::syntax::ChainPos { id, idx, and_run_from, negated: p.bang });
-                walk_pipeline(p, out, counter, unordered, pos, chain_counter, scope, boundary_for(idx), src);
+                walk_pipeline(p, out, counter, unordered, pos, walk, scope, boundary_for(idx), src);
             }
         }
         idx += 1;
@@ -658,7 +1394,7 @@ fn walk_pipeline(
     counter: &mut u32,
     base_unordered: bool,
     chain: Option<crate::syntax::ChainPos>,
-    chain_counter: &mut u32,
+    walk: &mut WalkState,
     scope: usize,
     async_boundary: Option<crate::syntax::ScopeKind>,
     src: &str,
@@ -671,7 +1407,7 @@ fn walk_pipeline(
         };
         let wrapper = alloc_scope(out, scope, kind, class, anchor, chain);
         let mut local_counter = 0u32;
-        walk_pipeline(p, out, &mut local_counter, false, chain, chain_counter, wrapper, None, src);
+        walk_pipeline(p, out, &mut local_counter, false, chain, walk, wrapper, None, src);
         return;
     }
     // A pipeline runs its members concurrently; with more than one member
@@ -698,11 +1434,11 @@ fn walk_pipeline(
             // own standard input is whatever the pipeline as a whole was
             // given. Every piped stage shares the SAME `chain` value — they
             // are one chain member, not several (`ChainPos` doc).
-            walk_command(cmd, out, &mut local_counter, false, i > 0, chain, chain_counter, member_scope, src);
+            walk_command(cmd, out, &mut local_counter, false, i > 0, chain, walk, member_scope, src);
         }
     } else {
         for (i, cmd) in p.seq.iter().enumerate() {
-            walk_command(cmd, out, counter, base_unordered, i > 0, chain, chain_counter, scope, src);
+            walk_command(cmd, out, counter, base_unordered, i > 0, chain, walk, scope, src);
         }
     }
 }
@@ -714,13 +1450,13 @@ fn walk_command(
     unordered: bool,
     pipe_input: bool,
     chain: Option<crate::syntax::ChainPos>,
-    chain_counter: &mut u32,
+    walk: &mut WalkState,
     scope: usize,
     src: &str,
 ) {
     match cmd {
         ast::Command::Simple(sc) => {
-            walk_simple(sc, out, counter, unordered, pipe_input, chain, chain_counter, scope, src)
+            walk_simple(sc, out, counter, unordered, pipe_input, chain, walk, scope, src)
         }
         ast::Command::Compound(cc, redirects) => {
             // The construct's own position in ITS enclosing scope, captured
@@ -734,7 +1470,7 @@ fn walk_command(
                 anchor_order: anchor_order.clone(),
                 anchor_chain: chain,
             };
-            let range = walk_compound(cc, out, chain_counter, scoping, src);
+            let range = walk_compound(cc, out, walk, scoping, src);
             let mut own_stdin: Option<crate::syntax::InputSource> = None;
             if let Some(list) = redirects {
                 for r in &list.0 {
@@ -761,7 +1497,7 @@ fn walk_command(
                         out,
                         anchor_order.clone(),
                         None,
-                        chain_counter,
+                        walk,
                         scope,
                         chain,
                         src,
@@ -788,20 +1524,83 @@ fn walk_command(
             // resolved a source of its OWN untouched. It is not a body/process
             // boundary of its own — `Passthrough` walks it straight into the
             // scope the definition itself sits in, unchanged from today.
-            let range = walk_compound(&f.body.0, out, chain_counter, BodyScoping::Passthrough { scope }, src);
+            let range = walk_compound(&f.body.0, out, walk, BodyScoping::Passthrough { scope }, src);
             blank_inherited_input(out, range);
+            // The definition's OWN redirect list (`f() { :; } > $(…)`) is
+            // performed at every future call, exactly as unplaceable as the
+            // body it belongs to — `Order::Unordered`, no chain, no pending
+            // heredoc records (a redirect on the definition itself has no
+            // landing `Cmd` of its own to tie a capture to, same as the
+            // extended-test arm below), in the definition's own scope. Never
+            // visited before this task, so neither its write target nor a
+            // substitution inside it was judged.
+            if let Some(list) = &f.body.1 {
+                for r in &list.0 {
+                    walk_redirect(r, out, Order::Unordered, None, walk, scope, None, src);
+                }
+            }
         }
-        ast::Command::ExtendedTest(_, redirects) => {
+        ast::Command::ExtendedTest(test, redirects) => {
+            // The construct's own position in its enclosing scope, minted
+            // ONCE and unconditionally — before this, `own_order` was called
+            // INSIDE the redirect loop below, so `[[ ]]` with two redirects
+            // minted two positions and with none minted none, the same
+            // construct answering "where am I" differently depending on how
+            // many redirects happened to follow it (design §2.2, "The
+            // extended test mints its anchor once"). Every operand
+            // substitution and every redirect target now shares this one
+            // anchor.
+            let order = own_order(counter, unordered);
+            // `[[ ]]`'s own operands can carry a substitution exactly as a
+            // plain command's argument can, and a short-circuited operand
+            // never runs at runtime — judged anyway, because a gate fails
+            // closed rather than guessing which side of `||` bash would
+            // evaluate (design §2.2, "Positions bash evaluates conditionally
+            // are judged anyway").
+            visit_test_words(&test.expr, out, scope, &order, chain, walk);
             if let Some(list) = redirects {
                 for r in &list.0 {
-                    let order = own_order(counter, unordered);
                     // An extended-test expression has no landing `Cmd` of its
                     // own either — same `None` as the compound-body arm above.
                     // It pushes no commands, so whatever its redirects claim
                     // about standard input has no occurrence to belong to.
-                    walk_redirect(r, out, order, None, chain_counter, scope, chain, src);
+                    walk_redirect(r, out, order.clone(), None, walk, scope, chain, src);
                 }
             }
+        }
+    }
+}
+
+/// Walks every operand word of a `[[ ]]` expression for a substitution body,
+/// recursing through the boolean structure (`&&`, `||`, `!`, explicit parens)
+/// without evaluating any of it: a short-circuited operand never actually
+/// runs at scan time, but the walk judges it anyway (design §2.2, "Positions
+/// bash evaluates conditionally are judged anyway") — a gate fails closed
+/// rather than predicting which side of an operator bash would take. Every
+/// operand shares the ONE anchor `walk_command`'s `ExtendedTest` arm mints
+/// before calling this, so it is a parameter here rather than re-derived.
+fn visit_test_words(
+    expr: &ast::ExtendedTestExpr,
+    out: &mut Parsed,
+    scope: usize,
+    order: &Order,
+    chain: Option<crate::syntax::ChainPos>,
+    walk: &mut WalkState,
+) {
+    match expr {
+        ast::ExtendedTestExpr::And(a, b) | ast::ExtendedTestExpr::Or(a, b) => {
+            visit_test_words(a, out, scope, order, chain, walk);
+            visit_test_words(b, out, scope, order, chain, walk);
+        }
+        ast::ExtendedTestExpr::Not(e) | ast::ExtendedTestExpr::Parenthesized(e) => {
+            visit_test_words(e, out, scope, order, chain, walk);
+        }
+        ast::ExtendedTestExpr::UnaryTest(_, w) => {
+            visit_substitutions(&w.value, out, scope, order, chain, walk);
+        }
+        ast::ExtendedTestExpr::BinaryTest(_, a, b) => {
+            visit_substitutions(&a.value, out, scope, order, chain, walk);
+            visit_substitutions(&b.value, out, scope, order, chain, walk);
         }
     }
 }
@@ -876,6 +1675,41 @@ impl BodyScoping {
     fn children_unordered(&self) -> bool {
         matches!(self, BodyScoping::Passthrough { .. })
     }
+
+    /// The `(parent_scope, anchor_order, anchor_chain)` triple a compound
+    /// WORD position — a for-clause value, a case subject or pattern, an
+    /// arithmetic expression — hands to `visit_substitutions` so THAT call
+    /// can allocate the substitution body's own `ProcessBoundary` scope; this
+    /// method allocates nothing of its own (design §2.2, "Where the anchor
+    /// comes from at a compound position"). `Fresh` hands over the
+    /// construct's own parent and anchor, cloned exactly as `.enter()` clones
+    /// them when it builds the construct's OWN body scope. `Passthrough` (a
+    /// function body used directly as the compound) hands over its own scope
+    /// as the parent, with `Order::Unordered` and no chain: there is no
+    /// anchor of the definition's own to give, which is exactly as
+    /// unprovable as everything else inside a function body.
+    fn boundary(&self) -> (usize, Order, Option<crate::syntax::ChainPos>) {
+        match self {
+            BodyScoping::Fresh { parent, anchor_order, anchor_chain } => {
+                (*parent, anchor_order.clone(), *anchor_chain)
+            }
+            BodyScoping::Passthrough { scope } => (*scope, Order::Unordered, None),
+        }
+    }
+}
+
+/// One WORD position belonging to a compound command itself rather than to
+/// its body — a for-clause value, a case subject or pattern, an arithmetic
+/// expression — visited at the boundary `scoping` hands over (design §2.2,
+/// "Where the anchor comes from at a compound position").
+///
+/// `BodyScoping::boundary` is the whole reason this is one call: the triple it
+/// returns is the CONSTRUCT's own parent and anchor, not the body scope
+/// `.enter()` would allocate, and destructuring it by hand at each site was
+/// four chances to hand a word the wrong one of the two.
+fn visit_compound_word(raw: &str, out: &mut Parsed, scoping: &BodyScoping, walk: &mut WalkState) {
+    let (parent, order, chain) = scoping.boundary();
+    visit_substitutions(raw, out, parent, &order, chain, walk);
 }
 
 /// Every compound body — subshells, loops, if/case branches, brace groups,
@@ -895,7 +1729,7 @@ impl BodyScoping {
 fn walk_compound(
     cc: &ast::CompoundCommand,
     out: &mut Parsed,
-    chain_counter: &mut u32,
+    walk: &mut WalkState,
     scoping: BodyScoping,
     src: &str,
 ) -> std::ops::Range<usize> {
@@ -905,10 +1739,10 @@ fn walk_compound(
         ast::CompoundCommand::BraceGroup(bg) => {
             let s = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::Brace));
             let mut counter = 0u32;
-            walk_compound_list(&bg.list, out, &mut counter, unordered, chain_counter, s, src);
+            walk_compound_list(&bg.list, out, &mut counter, unordered, walk, s, src);
         }
         ast::CompoundCommand::Subshell(sub) => {
-            walk_subshell(std::iter::once(&sub.list), out, chain_counter, scoping, unordered, src);
+            walk_subshell(std::iter::once(&sub.list), out, walk, scoping, unordered, src);
         }
         ast::CompoundCommand::ForClause(f) => {
             // The words after `in` are classified where they stand (M2.155).
@@ -927,51 +1761,70 @@ fn walk_compound(
             // reasoned: the wider treatment was written first and moved two
             // real corpus rows to ask over a plain comma list of filenames,
             // which is the false positive §6.2's count exists to catch.
+            // A value-list word can carry a substitution exactly as a plain
+            // command's argument can — `for x in $(rm -rf d); do :; done` —
+            // and reached no walker at all before this, so the body ran
+            // silent whatever `subshell` was set to (M2.155 the other
+            // half). It anchors at the `for` construct's own position, the
+            // same boundary its loop body enters at (design §2.2's
+            // for-clause row) — one boundary, shared by every word in the
+            // list.
             for w in f.values.iter().flatten() {
                 if matches!(expand_braces(&w.value), Braces::Rewritten) {
                     out.note(BRACE_EXPANSION);
                 }
+                visit_compound_word(&w.value, out, &scoping, walk);
             }
             let s = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::LoopBody));
             let mut counter = 0u32;
-            walk_compound_list(&f.body.list, out, &mut counter, unordered, chain_counter, s, src);
+            walk_compound_list(&f.body.list, out, &mut counter, unordered, walk, s, src);
         }
         ast::CompoundCommand::CaseClause(c) => {
+            // The subject and every pattern word can carry a substitution
+            // too, and a `case` pattern after the matching clause is never
+            // expanded at runtime — judged anyway, because a gate fails
+            // closed rather than guessing which clause bash would pick
+            // (design §2.2, "Positions bash evaluates conditionally are
+            // judged anyway").
+            visit_compound_word(&c.value.value, out, &scoping, walk);
             for item in &c.cases {
+                for pat in &item.patterns {
+                    visit_compound_word(&pat.value, out, &scoping, walk);
+                }
                 if let Some(body) = &item.cmd {
                     let s = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::BranchBody));
                     let mut counter = 0u32;
-                    walk_compound_list(body, out, &mut counter, unordered, chain_counter, s, src);
+                    walk_compound_list(body, out, &mut counter, unordered, walk, s, src);
                 }
             }
         }
         ast::CompoundCommand::IfClause(i) => {
             let cond_scope = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::CondList));
             let mut cond_counter = 0u32;
-            walk_compound_list(&i.condition, out, &mut cond_counter, unordered, chain_counter, cond_scope, src);
+            walk_compound_list(&i.condition, out, &mut cond_counter, unordered, walk, cond_scope, src);
             let then_scope = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::ThenBody));
             let mut then_counter = 0u32;
-            walk_compound_list(&i.then, out, &mut then_counter, unordered, chain_counter, then_scope, src);
+            walk_compound_list(&i.then, out, &mut then_counter, unordered, walk, then_scope, src);
             if let Some(elses) = &i.elses {
                 for e in elses {
                     if let Some(cond) = &e.condition {
                         let s = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::ElifCond));
                         let mut counter = 0u32;
-                        walk_compound_list(cond, out, &mut counter, unordered, chain_counter, s, src);
+                        walk_compound_list(cond, out, &mut counter, unordered, walk, s, src);
                     }
                     let s = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::BranchBody));
                     let mut counter = 0u32;
-                    walk_compound_list(&e.body, out, &mut counter, unordered, chain_counter, s, src);
+                    walk_compound_list(&e.body, out, &mut counter, unordered, walk, s, src);
                 }
             }
         }
         ast::CompoundCommand::WhileClause(w) | ast::CompoundCommand::UntilClause(w) => {
             let cond_scope = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::LoopCond));
             let mut cond_counter = 0u32;
-            walk_compound_list(&w.0, out, &mut cond_counter, unordered, chain_counter, cond_scope, src);
+            walk_compound_list(&w.0, out, &mut cond_counter, unordered, walk, cond_scope, src);
             let body_scope = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::LoopBody));
             let mut body_counter = 0u32;
-            walk_compound_list(&w.1.list, out, &mut body_counter, unordered, chain_counter, body_scope, src);
+            walk_compound_list(&w.1.list, out, &mut body_counter, unordered, walk, body_scope, src);
         }
         ast::CompoundCommand::Coprocess(c) => {
             out.note("background");
@@ -984,7 +1837,7 @@ fn walk_compound(
             // and-or chain member — `chain: None`.
             let s = scoping.enter(out, crate::syntax::ScopeKind::ProcessBoundary, None);
             let mut counter = 0u32;
-            walk_command(&c.body, out, &mut counter, unordered, false, None, chain_counter, s, src);
+            walk_command(&c.body, out, &mut counter, unordered, false, None, walk, s, src);
             blank_inherited_input(out, start..out.commands.len());
         }
         ast::CompoundCommand::Arithmetic(a) => {
@@ -1008,7 +1861,7 @@ fn walk_compound(
                     Some(program) => walk_subshell(
                         &program.complete_commands,
                         out,
-                        chain_counter,
+                        walk,
                         scoping,
                         unordered,
                         &a.expr.value,
@@ -1020,13 +1873,18 @@ fn walk_compound(
                 },
                 Opening::Arithmetic => {
                     // Real arithmetic runs no command and writes nothing, so
-                    // it says nothing — unless it carries a substitution,
-                    // which really does run a command whose text is absent
-                    // from the line, or is empty, which means the parser
-                    // produced nothing for text that was plainly there.
+                    // it says nothing on its own — the two exceptions are an
+                    // EMPTY expression, which means the parser produced
+                    // nothing for text that was plainly there, and a
+                    // substitution inside it, which really does run a
+                    // command. The text was never absent from the line; the
+                    // walk simply never read it, and now it does (design
+                    // §2.2, "The arithmetic parse_failure arms go").
                     let e = a.expr.value.trim();
-                    if e.is_empty() || has_command_substitution(e) {
+                    if e.is_empty() {
                         out.note("parse_failure");
+                    } else {
+                        visit_compound_word(e, out, &scoping, walk);
                     }
                 }
                 // The source did not say. Fail closed rather than pick one.
@@ -1034,6 +1892,21 @@ fn walk_compound(
             }
         }
         ast::CompoundCommand::ArithmeticForClause(f) => {
+            // The three clauses are arithmetic TEXT, not commands, so they are
+            // never recovered as commands the way `((…))` is: a for-loop's own
+            // clauses are evaluated as arithmetic by bash whatever they
+            // contain, so reading one as a command would be a claim about a
+            // thing that never runs. Only a substitution inside one runs, and
+            // that is what gets walked — the same visit the plain `((…))` arm
+            // above makes, anchored at this construct's own boundary (design
+            // §2.2, "The arithmetic parse_failure arms go"). Visited BEFORE
+            // the body: bash evaluates the initializer once, before the
+            // loop's first iteration, so pushing these first keeps recorded
+            // order matching run order — the same reason the `ForClause` arm
+            // above visits its value words before entering the loop body.
+            for e in [&f.initializer, &f.condition, &f.updater].into_iter().flatten() {
+                visit_compound_word(&e.value, out, &scoping, walk);
+            }
             // The body holds real commands and is walked exactly as a plain
             // `for` body is — the same `LoopBody` class, the same fresh local
             // counter. Leaving this arm empty is what hid `rm -rf` inside an
@@ -1043,18 +1916,7 @@ fn walk_compound(
             // indistinguishable from there being nothing to report.
             let s = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::LoopBody));
             let mut counter = 0u32;
-            walk_compound_list(&f.body.list, out, &mut counter, unordered, chain_counter, s, src);
-            // The three clauses are arithmetic TEXT, not commands, so they get
-            // the classifier rather than a walk. A clause that is provably not
-            // arithmetic is not recovered as a command the way `((…))` is: a
-            // for-loop's own clauses are evaluated as arithmetic by bash
-            // whatever they contain, so reading one as a command would be a
-            // claim about a thing that never runs.
-            for e in [&f.initializer, &f.condition, &f.updater].into_iter().flatten() {
-                if has_command_substitution(&e.value) {
-                    out.note("parse_failure");
-                }
-            }
+            walk_compound_list(&f.body.list, out, &mut counter, unordered, walk, s, src);
         }
     }
     start..out.commands.len()
@@ -1074,7 +1936,7 @@ fn walk_compound(
 fn walk_subshell<'a>(
     lists: impl IntoIterator<Item = &'a ast::CompoundList>,
     out: &mut Parsed,
-    chain_counter: &mut u32,
+    walk: &mut WalkState,
     scoping: BodyScoping,
     unordered: bool,
     src: &str,
@@ -1083,7 +1945,163 @@ fn walk_subshell<'a>(
     let s = scoping.enter(out, crate::syntax::ScopeKind::ProcessBoundary, None);
     let mut counter = 0u32;
     for list in lists {
-        walk_compound_list(list, out, &mut counter, unordered, chain_counter, s, src);
+        walk_compound_list(list, out, &mut counter, unordered, walk, s, src);
+    }
+}
+
+/// One constant serving two separate quantities, deliberately kept as one so
+/// they can never drift apart. The READER's own per-word nesting cap: inside
+/// a single `read_substitution` call, an opener nested `SUBSTITUTION_DEPTH_CAP`
+/// levels deep inside the same word's text is refused rather than resolved,
+/// independent of anything below. And how deep a nest of substitution BODIES
+/// the WALK descends before it stops reading further — bounding substitution
+/// nesting only, not the Rust stack in general: the arithmetic
+/// `Opening::NestedSubshell` arm's own repeated `parse_program`/`walk_subshell`
+/// recursion (pre-existing) has no cap of its own. Termination needs no
+/// counter for either quantity — a body sits strictly between its own
+/// delimiters, so the text shrinks at every level — but the Rust stack still
+/// grows by one frame per level, so past this depth a body notes
+/// `parse_failure` (already `ask` in every config on disk) and is not read.
+/// The corpus nests three deep at most.
+///
+/// The reader's half reads its own `depth` parameter; the walk's half reads
+/// `WalkState::depth`, which the walk threads through its own signatures.
+const SUBSTITUTION_DEPTH_CAP: usize = 8;
+
+/// The two counters one whole `parse` carries from top to bottom, borrowed
+/// down through every walk function rather than passed as loose parameters or
+/// parked in thread-local state.
+///
+/// Borrowed state is what makes both fields correct by construction. `chains`
+/// must never reset for a nested body, or an inner `if a && b; then …` chain
+/// could collide with an outer one; `depth` must be restored exactly on the
+/// way back out of a substitution body, and a `&mut` that cannot outlive the
+/// scan it belongs to cannot leak either value into the next scan the way a
+/// thread-local could.
+#[derive(Default)]
+struct WalkState {
+    /// Next and-or chain id (`ChainPos.id`), unique across the whole parse.
+    chains: u32,
+    /// How many substitution BODIES enclose the position being walked; 0 at
+    /// the top level, checked against `SUBSTITUTION_DEPTH_CAP` by
+    /// `walk_substitution_body`.
+    depth: usize,
+}
+
+/// Walk every substitution body a word's raw text runs, each as the
+/// process-boundary child it is, anchored at the ENCLOSING construct's own
+/// position (design §2.1–§2.2). The `subshell` note stays and now means
+/// only that the body's output becomes text vouch cannot read.
+fn visit_substitutions(
+    raw: &str,
+    out: &mut Parsed,
+    parent_scope: usize,
+    anchor_order: &Order,
+    anchor_chain: Option<crate::syntax::ChainPos>,
+    walk: &mut WalkState,
+) {
+    visit_bodies(substitution_bodies(raw), out, parent_scope, anchor_order, anchor_chain, walk);
+}
+
+/// What a `Bodies` reading MEANS to the walk, in one place: text the reader
+/// could not delimit is a `parse_failure` for the whole occurrence, and every
+/// body it did delimit is walked as its own process-boundary child.
+///
+/// Both readers hand their answer here — a word's own raw text through
+/// `visit_substitutions`, and an unquoted here-document body from
+/// `walk_redirect`'s `HereDocument` arm — so the two can never come to differ
+/// about what an unreadable reading costs.
+fn visit_bodies(
+    read: Bodies,
+    out: &mut Parsed,
+    parent_scope: usize,
+    anchor_order: &Order,
+    anchor_chain: Option<crate::syntax::ChainPos>,
+    walk: &mut WalkState,
+) {
+    if read.unreadable {
+        out.note("parse_failure");
+    }
+    for body in read.bodies {
+        walk_substitution_body(&body, out, parent_scope, anchor_order, anchor_chain, walk);
+    }
+}
+
+fn walk_substitution_body(
+    body: &str,
+    out: &mut Parsed,
+    parent_scope: usize,
+    anchor_order: &Order,
+    anchor_chain: Option<crate::syntax::ChainPos>,
+    walk: &mut WalkState,
+) {
+    out.note("subshell");
+    if walk.depth >= SUBSTITUTION_DEPTH_CAP {
+        out.note("parse_failure");
+        return;
+    }
+    // A body that does not re-parse still gets its scope: the boundary is a
+    // fact about the line, not about whether vouch could read what runs
+    // inside it, and the empty child below is what keeps the scope table the
+    // same shape either way.
+    let parsed = parse_program(body);
+    if parsed.is_none() {
+        out.note("parse_failure");
+    }
+    // Saved and restored around the body walk alone. A plain saved value is
+    // enough where a thread-local needed a `Drop` guard: this depth lives in
+    // borrowed state that dies with the scan, so an unwind cannot carry an
+    // elevated value into whatever runs next.
+    let enclosing = walk.depth;
+    walk.depth = enclosing + 1;
+    walk_boundary_child(
+        parsed.iter().flat_map(|p| &p.complete_commands),
+        out,
+        parent_scope,
+        anchor_order,
+        anchor_chain,
+        walk,
+        body,
+    );
+    walk.depth = enclosing;
+}
+
+/// The forked child a command substitution's body and both spellings of a
+/// process substitution all are: a fresh `ProcessBoundary` scope anchored at
+/// `(parent_scope, anchor_order, anchor_chain)`, then the list(s) walked
+/// inside it with a local sequence counter starting at 0.
+///
+/// The scope is allocated BEFORE anything is walked, because the engine's
+/// scope table is built in allocation order and a child must find its parent
+/// already there.
+///
+/// `unordered` is FALSE at every one of these sites and this helper is where
+/// that invariant lives: a child process starts at its own beginning, so its
+/// first command really is provably first WITHIN the child, whatever the
+/// enclosing scope could or could not prove about the position the child
+/// itself occupies (that part is carried by `anchor_order`). A test pins the
+/// `Order::Seq(0)` this produces, so passing the enclosing `unordered` here
+/// would be a silent behaviour change rather than a compile error.
+fn walk_boundary_child<'a>(
+    lists: impl IntoIterator<Item = &'a ast::CompoundList>,
+    out: &mut Parsed,
+    parent_scope: usize,
+    anchor_order: &Order,
+    anchor_chain: Option<crate::syntax::ChainPos>,
+    walk: &mut WalkState,
+    src: &str,
+) {
+    let scope = alloc_scope(
+        out,
+        parent_scope,
+        crate::syntax::ScopeKind::ProcessBoundary,
+        None,
+        anchor_order.clone(),
+        anchor_chain,
+    );
+    let mut counter = 0u32;
+    for list in lists {
+        walk_compound_list(list, out, &mut counter, false, walk, scope, src);
     }
 }
 
@@ -1098,7 +2116,7 @@ fn walk_simple(
     unordered: bool,
     pipe_input: bool,
     chain: Option<crate::syntax::ChainPos>,
-    chain_counter: &mut u32,
+    walk: &mut WalkState,
     scope: usize,
     src: &str,
 ) {
@@ -1162,11 +2180,17 @@ fn walk_simple(
         // of its own, so there is nothing to prove.
         Order::Unordered
     };
+    // The head is a word like any other: a substitution there runs at the
+    // command's own position, before the prefix and suffix are walked so
+    // that `cmd.head` and `cmd.chain` are already final (design §2.2).
+    if let Some(w) = &sc.word_or_name {
+        visit_substitutions(&w.value, out, scope, &order, cmd.chain, walk);
+    }
     if let Some(prefix) = &sc.prefix {
-        walk_items(&prefix.0, out, &mut cmd, false, order.clone(), &mut landing, chain_counter, scope, src);
+        walk_items(&prefix.0, out, &mut cmd, false, order.clone(), &mut landing, walk, scope, src);
     }
     if let Some(suffix) = &sc.suffix {
-        walk_items(&suffix.0, out, &mut cmd, true, order.clone(), &mut landing, chain_counter, scope, src);
+        walk_items(&suffix.0, out, &mut cmd, true, order.clone(), &mut landing, walk, scope, src);
     }
     if !cmd.head.is_empty() {
         // `landing.stdin` already carries the correct, final
@@ -1265,7 +2289,7 @@ fn walk_items(
     is_suffix: bool,
     order: Order,
     landing: &mut Landing,
-    chain_counter: &mut u32,
+    walk: &mut WalkState,
     scope: usize,
     src: &str,
 ) {
@@ -1276,7 +2300,7 @@ fn walk_items(
                 // consume it; otherwise it keeps the construct note.
                 let records = (!cmd.head.is_empty()).then_some(&mut landing.pending);
                 if let Some(claimed) =
-                    walk_redirect(r, out, order.clone(), records, chain_counter, scope, cmd.chain, src)
+                    walk_redirect(r, out, order.clone(), records, walk, scope, cmd.chain, src)
                 {
                     // The LAST redirect resolving to descriptor 0 wins, which is
                     // the shell's own rule.
@@ -1296,29 +2320,26 @@ fn walk_items(
                 // anchored at the ENCLOSING command's own pre-captured position,
                 // never at the substitution's own (there isn't one: it is not a
                 // pipeline/chain member of its own).
-                let sub_scope = alloc_scope(
+                walk_boundary_child(
+                    std::iter::once(&s.list),
                     out,
                     scope,
-                    crate::syntax::ScopeKind::ProcessBoundary,
-                    None,
-                    order.clone(),
+                    &order,
                     cmd.chain,
+                    walk,
+                    src,
                 );
-                let mut counter = 0u32;
-                walk_compound_list(&s.list, out, &mut counter, false, chain_counter, sub_scope, src);
             }
             // A command substitution runs a command in a subshell, whether it
-            // appears as an argument or on the right of an assignment. Both count.
+            // appears as an argument or on the right of an assignment. Both
+            // count, and both are now walked as the command list they run
+            // (design §2.1–§2.2), anchored at this command's own position.
             ast::CommandPrefixOrSuffixItem::Word(w) => {
-                if has_command_substitution(&w.value) {
-                    out.note("subshell");
-                }
+                visit_substitutions(&w.value, out, scope, &order, cmd.chain, walk);
                 push_word(out, cmd, &w.value);
             }
             ast::CommandPrefixOrSuffixItem::AssignmentWord(_, w) => {
-                if has_command_substitution(&w.value) {
-                    out.note("subshell");
-                }
+                visit_substitutions(&w.value, out, scope, &order, cmd.chain, walk);
                 if is_suffix {
                     // An assignment-shaped word AFTER the command name is an
                     // argument, and bash brace-expands it (`of={a,b}` becomes
@@ -1345,7 +2366,15 @@ fn walk_items(
                         // rather than skipped, so a name whose LAST write is
                         // poisoned reads as unresolvable at resolution time
                         // instead of silently falling through to a lookup the
-                        // shell never actually performed (M2.122).
+                        // shell never actually performed (M2.122). This reads
+                        // the word by TEXT rather than through the parser-
+                        // accurate `visit_substitutions` call above, and the
+                        // two deliberately differ: `X='$(x)'` is single-quoted,
+                        // so the walk above correctly finds no body, but this
+                        // text check still sees the `$(` shape and poisons X
+                        // anyway — fail-closed, since resolution has no
+                        // separate outcome for "shaped like a substitution but
+                        // actually literal".
                         let recorded = if has_command_substitution(&w.value) {
                             None
                         } else {
@@ -1398,6 +2427,33 @@ fn push_word(out: &mut Parsed, cmd: &mut Cmd, raw: &str) {
 fn note_target_braces(out: &mut Parsed, raw: &str) {
     if !matches!(expand_braces(raw), Braces::Literal) {
         out.note(BRACE_EXPANSION);
+    }
+}
+
+/// One redirect's own word, read the way all four of `walk_redirect`'s
+/// word-bearing arms read it: bash expands a substitution written there before
+/// the redirect opens, exactly as it does in an argument word (design §2.2),
+/// so the visit happens before the arm classifies what the word turned out to
+/// be.
+///
+/// `note_braces` is what the four arms genuinely differ on, and it carries the
+/// split unchanged: the three arms whose word names a redirect TARGET pass
+/// true, because a target must resolve to exactly one path and a brace rewrite
+/// vouch did not reproduce would leave the recorded path wrong. The
+/// here-string passes false — its word supplies standard input rather than
+/// naming a file, so there is no target for a rewrite to make wrong.
+fn visit_redirect_word(
+    w: &ast::Word,
+    out: &mut Parsed,
+    scope: usize,
+    order: &Order,
+    chain: Option<crate::syntax::ChainPos>,
+    walk: &mut WalkState,
+    note_braces: bool,
+) {
+    visit_substitutions(&w.value, out, scope, order, chain, walk);
+    if note_braces {
+        note_target_braces(out, &w.value);
     }
 }
 
@@ -1492,7 +2548,7 @@ fn walk_redirect(
     out: &mut Parsed,
     order: Order,
     pending: Option<&mut Vec<PendingHeredoc>>,
-    chain_counter: &mut u32,
+    walk: &mut WalkState,
     scope: usize,
     chain: Option<crate::syntax::ChainPos>,
     src: &str,
@@ -1539,7 +2595,9 @@ fn walk_redirect(
             }
             match target {
                 ast::IoFileRedirectTarget::Filename(w) => {
-                    note_target_braces(out, &w.value);
+                    // Visited before the target is classified, so the walk
+                    // runs whether or not this turns out to be a write.
+                    visit_redirect_word(w, out, scope, &order, chain, walk, true);
                     // `<` READS the file. Recording it as a written path made
                     // `wc -l < hosts` prompt about writing a file it only reads
                     // — and that fired on real traffic, not just in a probe.
@@ -1561,16 +2619,15 @@ fn walk_redirect(
                     // command's own pre-captured position, never at the
                     // redirect's own (a redirect is not a pipeline/chain
                     // member of its own).
-                    let sub_scope = alloc_scope(
+                    walk_boundary_child(
+                        std::iter::once(&s.list),
                         out,
                         scope,
-                        crate::syntax::ScopeKind::ProcessBoundary,
-                        None,
-                        order.clone(),
+                        &order,
                         chain,
+                        walk,
+                        src,
                     );
-                    let mut counter = 0u32;
-                    walk_compound_list(&s.list, out, &mut counter, false, chain_counter, sub_scope, src);
                 }
                 // `>&word` duplicates a descriptor only when the word IS a
                 // descriptor — a number, or `-` for close. With a NAME there
@@ -1580,7 +2637,10 @@ fn walk_redirect(
                 // as the write it is; without this the spelling reached even a
                 // protected path, which CLAUDE.md 5 says no rule can open.
                 ast::IoFileRedirectTarget::Duplicate(w) => {
-                    note_target_braces(out, &w.value);
+                    // Same reasoning as `Filename` above: `>&$(…)` expands the
+                    // substitution before bash decides whether the word names
+                    // a descriptor or a file.
+                    visit_redirect_word(w, out, scope, &order, chain, walk, true);
                     let v = unescape_unquoted(&w.value);
                     let names_a_descriptor =
                         v == "-" || (!v.is_empty() && v.chars().all(|c| c.is_ascii_digit()));
@@ -1601,43 +2661,59 @@ fn walk_redirect(
         // locator can later decide whether that command actually reads it
         // (`guards::heredoc_feeds`). A here-string (`<<<`) is out of the
         // locator's scope and keeps the plain construct note unchanged.
-        ast::IoRedirect::HereDocument(fd, doc) => match pending {
-            Some(records) => {
-                let body = if doc.remove_tabs {
-                    strip_leading_tabs(&doc.doc.value)
-                } else {
-                    doc.doc.value.clone()
-                };
-                // `<<` defaults to descriptor 0; `3<< TAG` feeds descriptor 3
-                // and never reaches standard input.
-                let resolved = fd.unwrap_or(0);
-                // Stamped here, once, from the owning scan's own counter — the
-                // record's identity for as long as it exists, independent of
-                // when this pending list flushes into `out.heredocs` relative
-                // to any nested construct's own flush (`HeredocId`'s doc). No
-                // rebasing step exists downstream any more; this is the value
-                // every reader will compare against.
-                let id = out.alloc_heredoc_id();
-                if resolved == 0 {
-                    claims_stdin = Some(InputSource::Heredoc(id));
-                }
-                records.push(PendingHeredoc {
-                    id,
-                    body,
-                    // The parser itself decides quotedness — a quoted tag
-                    // (`<<'EOF'`) or a backslash-escaped one both set
-                    // `requires_expansion = false`; deriving it again from the
-                    // delimiter TEXT here would miss the escaped-tag spelling.
-                    quoted_delimiter: !doc.requires_expansion,
-                    fd: resolved,
-                });
+        ast::IoRedirect::HereDocument(fd, doc) => {
+            // bash expands a substitution inside an unquoted here-document
+            // body before the command that reads it ever runs (design §2.2's
+            // "two here-document paths"). Visited on BOTH the captured
+            // (`Some`) and construct-note (`None`) paths below, from the raw
+            // body — never the tab-stripped copy the captured record keeps.
+            // This runs BEFORE and separately from the `match pending` block
+            // below, which is untouched and still computes the captured
+            // record's own `body` and `quoted_delimiter` exactly as it did
+            // before this task.
+            if doc.requires_expansion {
+                let read = heredoc_substitution_bodies(&doc.doc.value);
+                visit_bodies(read, out, scope, &order, chain, walk);
             }
-            None => out.note("heredoc"),
-        },
+            match pending {
+                Some(records) => {
+                    let body = if doc.remove_tabs {
+                        strip_leading_tabs(&doc.doc.value)
+                    } else {
+                        doc.doc.value.clone()
+                    };
+                    // `<<` defaults to descriptor 0; `3<< TAG` feeds descriptor 3
+                    // and never reaches standard input.
+                    let resolved = fd.unwrap_or(0);
+                    // Stamped here, once, from the owning scan's own counter — the
+                    // record's identity for as long as it exists, independent of
+                    // when this pending list flushes into `out.heredocs` relative
+                    // to any nested construct's own flush (`HeredocId`'s doc). No
+                    // rebasing step exists downstream any more; this is the value
+                    // every reader will compare against.
+                    let id = out.alloc_heredoc_id();
+                    if resolved == 0 {
+                        claims_stdin = Some(InputSource::Heredoc(id));
+                    }
+                    records.push(PendingHeredoc {
+                        id,
+                        body,
+                        // The parser itself decides quotedness — a quoted tag
+                        // (`<<'EOF'`) or a backslash-escaped one both set
+                        // `requires_expansion = false`; deriving it again from the
+                        // delimiter TEXT here would miss the escaped-tag spelling.
+                        quoted_delimiter: !doc.requires_expansion,
+                        fd: resolved,
+                    });
+                }
+                None => out.note("heredoc"),
+            }
+        }
         // A here-string supplies descriptor 0 too, but produces no record for a
         // locator to consume — so it is a stream, never a `Heredoc(i)` pointing
         // into a list that holds nothing for it.
-        ast::IoRedirect::HereString(fd, _) => {
+        ast::IoRedirect::HereString(fd, w) => {
+            visit_redirect_word(w, out, scope, &order, chain, walk, false);
             if fd.unwrap_or(0) == 0 {
                 claims_stdin = Some(InputSource::Stream);
             }
@@ -1647,7 +2723,7 @@ fn walk_redirect(
         // descriptors 1 and 2 and never standard input, so nothing is read for
         // it and it claims nothing.
         ast::IoRedirect::OutputAndError(w, _) => {
-            note_target_braces(out, &w.value);
+            visit_redirect_word(w, out, scope, &order, chain, walk, true);
             if is_dynamic(&w.value) {
                 out.note("dynamic_redirect");
             }

@@ -60,7 +60,7 @@ fn describe(name: &str) -> &'static str {
     match name {
         "dynamic_command" => "the program name comes from a variable, so vouch cannot tell in advance which program runs",
         "dynamic_redirect" => "the output file comes from a variable, so vouch cannot tell in advance which file is written",
-        "subshell" => "a nested command runs and its output is used here",
+        "subshell" => "a nested command runs and its output is used here; the nested command itself is judged on its own",
         "background" => "the command is started in the background",
         "heredoc" => "input is supplied inline in the command",
         "function_def" => "a function is defined",
@@ -4759,21 +4759,18 @@ fn scoped_cd_timelines(
         Vec<(u32, Option<crate::syntax::ChainPos>, usize, BodyTreatment)>,
     > = vec![Vec::new(); scope_count];
     // Every child anchor per parent scope — any kind, any taint — for the
-    // final-member scan; an unorderable child anchor is recorded as such by
-    // an Unordered entry, which the scan reads as unplaceable.
-    let mut anchors_for: Vec<Vec<(u32, Option<crate::syntax::ChainPos>)>> =
+    // final-member scan, carrying its own Order rather than a resolved
+    // position: an Unordered anchor's true position is its chain's own
+    // statement position, which only `chain_first` (scope-local, built
+    // inside `cd_timeline`) can look up. The scan places a chained
+    // Unordered anchor exactly as the command loop beside it places a
+    // chained Unordered command (design §2.5); a chainless one, or a
+    // chained one whose chain has no `chain_first` entry, is unplaceable.
+    let mut anchors_for: Vec<Vec<(crate::syntax::Order, Option<crate::syntax::ChainPos>)>> =
         vec![Vec::new(); scope_count];
-    let mut anchors_unplaceable: Vec<bool> = vec![false; scope_count];
     for sp in scope_parents.iter() {
         if let ScopeParent::AtOrder { parent_scope, order, chain, .. } = sp {
-            match order {
-                crate::syntax::Order::Seq(n) => {
-                    anchors_for[*parent_scope].push((*n, *chain));
-                }
-                crate::syntax::Order::Unordered => {
-                    anchors_unplaceable[*parent_scope] = true;
-                }
-            }
+            anchors_for[*parent_scope].push((order.clone(), *chain));
         }
     }
     let mut force_unplaceable = vec![false; scope_count];
@@ -5001,7 +4998,6 @@ fn scoped_cd_timelines(
             cdpath_bound,
             &extra_for[scope],
             &anchors_for[scope],
-            anchors_unplaceable[scope],
             force_unplaceable[scope],
         );
         starts.push(scope_start);
@@ -5687,11 +5683,13 @@ fn cd_timeline(
     // EVERY child anchor of this scope — any kind, tainted or not. Only the
     // final-member scan reads these: a moverless `{ true; }` or `( true )`
     // rescuing a condition list contributes no event, yet it is exactly
-    // what decides the list's status (Task 6 re-review, R1's brace arm).
-    all_anchors: &[(u32, Option<crate::syntax::ChainPos>)],
-    // A child anchor whose position could not be placed — the final member
-    // is then unknowable and the success walk unions everything.
-    anchors_unplaceable: bool,
+    // what decides the list's status (Task 6 re-review, R1's brace arm). An
+    // Unordered anchor is placed by its own chain's statement position —
+    // read via `chain_first` below, the same lookup `consider` gives an
+    // Unordered command (design §2.5) — and a chainless Unordered anchor,
+    // or a chained one whose chain has no `chain_first` entry, leaves the
+    // final member unknowable.
+    all_anchors: &[(crate::syntax::Order, Option<crate::syntax::ChainPos>)],
     // A tainted same-process child whose anchor is unprovable has nowhere to
     // poison FROM; its parent keeps the whole-scope flag.
     force_unplaceable: bool,
@@ -5738,7 +5736,7 @@ fn cd_timeline(
     // member whose position cannot be placed keeps the whole answer None,
     // which makes the success walk union everything: fail-closed.
     let mut final_member: Option<(u32, Option<crate::syntax::ChainPos>)> = None;
-    let mut final_placeable = !anchors_unplaceable;
+    let mut final_placeable = true;
     {
         let mut consider =
             |n: u32, chain: Option<&crate::syntax::ChainPos>| {
@@ -5761,24 +5759,36 @@ fn cd_timeline(
                     final_member = Some((pos, chain.copied()));
                 }
             };
+        // One reader for "where does this order/chain anchor land", so the
+        // command loop and the anchor loop below are two CALL SITES of it
+        // rather than two hand-kept copies (Task 6 fix round 1: the defect
+        // this task fixed was exactly two such copies drifting apart). A
+        // `Seq` position places directly; a chained `Unordered` member
+        // places at its chain's own statement position via `chain_first`,
+        // the same lookup `consider` already does internally; a chainless
+        // `Unordered` member, OR a chained one whose chain never got a
+        // `chain_first` entry (no `Seq`-positioned member of that chain
+        // exists in this scope), cannot be placed at all and unplaces the
+        // whole scope's final member.
+        let mut place = |order: &crate::syntax::Order, chain: Option<&crate::syntax::ChainPos>| {
+            match (order, chain) {
+                (crate::syntax::Order::Seq(n), chain) => consider(*n, chain),
+                (crate::syntax::Order::Unordered, Some(ch)) => match chain_first.get(&ch.id) {
+                    Some(n0) => consider(*n0, Some(ch)),
+                    None => final_placeable = false,
+                },
+                (crate::syntax::Order::Unordered, None) => final_placeable = false,
+            }
+        };
         for (i, c) in cmds.iter().enumerate() {
             let Some(site) = sites.get(i) else { continue };
             if site.scope != scope {
                 continue;
             }
-            match (&site.order, c.chain.as_ref()) {
-                (crate::syntax::Order::Seq(n), chain) => consider(*n, chain),
-                (crate::syntax::Order::Unordered, Some(ch)) => {
-                    match chain_first.get(&ch.id) {
-                        Some(n0) => consider(*n0, Some(ch)),
-                        None => final_placeable = false,
-                    }
-                }
-                (crate::syntax::Order::Unordered, None) => final_placeable = false,
-            }
+            place(&site.order, c.chain.as_ref());
         }
-        for (pn, pchain) in all_anchors {
-            consider(*pn, pchain.as_ref());
+        for (order, chain) in all_anchors {
+            place(order, chain.as_ref());
         }
     }
     let final_member = if final_placeable { final_member } else { None };

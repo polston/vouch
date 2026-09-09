@@ -63,6 +63,83 @@ fn a_writer_inside_a_subshell_gets_the_anchored_base() {
     assert_eq!(v2, "ask");
 }
 
+// ---------------------------------------------------------------------------
+// The same two shapes, spelled as a command substitution instead of a
+// subshell (Task 2 of the command-substitution-bodies design, §4's
+// behavioural leg): the body is a process boundary exactly as a subshell's
+// is, so a `cd` inside one composes and poisons identically.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_substitution_cd_no_longer_poisons_the_outer_line() {
+    // `$(cd /etc)` used bare is itself a (dynamic-headed) command; its body's
+    // cd can never move the parent shell, so the outer RELATIVE write still
+    // composes at the caller's cwd.
+    let (v, r) = common::decision_at(
+        &cfg(),
+        &format!("$(cd {}) ; echo x > f.txt", t("/etc")),
+        &t("/tmp/proj"),
+    );
+    assert_eq!(v, "allow", "{r}");
+}
+
+#[test]
+fn a_writer_inside_a_substitution_gets_the_anchored_base() {
+    // The body starts where its anchor's composed base says the shell was —
+    // certified through the && chain — and the write is judged there.
+    let (v, r) = common::decision_at(
+        &cfg(),
+        &format!("cd {} && $(echo x > f.txt)", t("/tmp/proj")),
+        &t("/somewhere/else"),
+    );
+    assert_eq!(v, "allow", "{r}");
+    let (v2, r2) = common::decision_at(
+        &cfg(),
+        &format!("cd {} && $(echo x > f.txt)", t("/etc")),
+        &t("/tmp/proj"),
+    );
+    assert_eq!(v2, "ask", "{r2}");
+}
+
+#[test]
+fn a_substitution_argument_cd_does_not_poison_the_outer_line() {
+    // The third leg: a `cd` inside a substitution used as an ARGUMENT (not
+    // the bare head) still cannot move the parent, so the separate
+    // semicolon-joined statement after it still resolves at the project
+    // directory.
+    let (v, r) = common::decision_at(
+        &cfg(),
+        &format!("echo $(cd {}); echo x > f.txt", t("/etc")),
+        &t("/tmp/proj"),
+    );
+    assert_eq!(v, "allow", "{r}");
+}
+
+#[test]
+fn a_substitutions_own_cd_and_write_compose_inside_its_own_scope() {
+    // The substitution twin of nested_scoped_movers_compose_inside_their_scope
+    // below (design §4's behavioural leg): the cd and the write are BOTH
+    // inside the body, chained by &&, so the write lands wherever the body's
+    // OWN ordered walk says the cd left it — never the caller's cwd. This is
+    // what pins `unordered = false` and the fresh local Seq counter in
+    // walk_substitution_body: flipping the `false` to `true` at that call
+    // site turns the body's cd into an unprovable mover, and the second
+    // assertion below (allow, because /tmp/proj is reachable) would go red
+    // as well as the reverse — checked by hand while writing this test.
+    let (v, r) = common::decision_at(
+        &cfg(),
+        &format!("echo $(cd {} && echo hi > rel.txt)", t("/etc")),
+        &t("/somewhere/else"),
+    );
+    assert_eq!(v, "ask", "{r}");
+    let (v2, r2) = common::decision_at(
+        &cfg(),
+        &format!("echo $(cd {} && echo hi > rel.txt)", t("/tmp/proj")),
+        &t("/somewhere/else"),
+    );
+    assert_eq!(v2, "allow", "{r2}");
+}
+
 #[test]
 fn nested_scoped_movers_compose_inside_their_scope() {
     // cd A && ( cd B && write ): the inner write lands at B — the body's own
@@ -300,4 +377,83 @@ fn a_wrapper_injected_redirect_keeps_the_channels_in_lockstep() {
              assertions: {r}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Task 6 (design §2.5): the final-member scan and the command loop beside it
+// read the same fact — an `Unordered` anchor's chain — and disagreed. A
+// process substitution or a subshell anchored in an or-tail already tripped
+// this before command-substitution bodies existed; walking those bodies
+// (this design) made every `$(…)` in an or-tail trip it too.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_or_tail_substitution_does_not_unplace_the_condition_list() {
+    // The condition's true final member is the `&&`-continuation `cd`,
+    // reached only once the `||`'s or-tail has been evaluated — exactly the
+    // shape `tests/cd_candidate_test.rs`'s
+    // `a_then_body_writer_is_certified_at_the_conditions_end_state` pins for
+    // an unchained condition, extended with an or-tail ahead of the mover.
+    // `false || cat <(true)` puts a process substitution's own scope at the
+    // or-tail's `(Unordered, chain)` anchor (design §2.1); the `sub` half
+    // puts a `$(…)` there instead, walked for the first time by this
+    // design. Before Task 6, EITHER anchor unconditionally marked the whole
+    // condition scope unplaceable (`anchors_unplaceable[cond] = true` for
+    // any `Order::Unordered` anchor, chain or not), discarding the
+    // correctly-computed final member and leaving `cd`'s own success
+    // uncertified: the then-body write unions {moved, unmoved} and asks.
+    // Confirmed by running this exact pair against the pre-fix code (git
+    // stash of this commit's `src/engine.rs` hunk): both asked. Fixed, the
+    // anchor is placed by its chain exactly as the or-tail COMMAND is via
+    // `consider`/`chain_first`, the chain's true final member survives, and
+    // `cd`'s success is certified by the list succeeding.
+    //
+    // A CHAINLESS `Unordered` anchor (design §2.5's other half — one with no
+    // `&&`/`||` chain to place it by) still marks the parent unplaceable:
+    // the `(Order::Unordered, None) => final_placeable = false` arm this
+    // commit adds beside the chained one is untouched by the fix and has no
+    // chain to fall back to. No natural shell shape was found that
+    // exercises this arm without an unrelated ask or a masking confound
+    // riding along. `src/shell.rs` produces `(Order::Unordered, None)` from
+    // at least three places: a function definition's own trailing redirect
+    // (`Command::Function`'s `walk_redirect(r, out, Order::Unordered, None,
+    // ...)`), a function body's own boundary
+    // (`BodyScoping::Passthrough`'s `boundary()` arm), and a multi-member
+    // pipeline in a LINKLESS and-or list (`walk_and_or_list`: no `&&`/`||`
+    // at all means `id = None`, so every pipe member gets `chain: None`
+    // while still `Order::Unordered`). The first needs the function
+    // mid-chain, and a bare `f() { :; }` mid-chain already asks for a
+    // reason this task does not touch (measured: the no-redirect control
+    // asks identically to the redirect-bearing form). The third does not
+    // even need a substitution to demonstrate: a pipeline's own members are
+    // THEMSELVES chainless `Unordered` COMMANDS, so they already unplace
+    // the scope through the per-command loop before any nested anchor gets
+    // a chance to — the ordinary command path masks the anchor path, and no
+    // shape isolates one from the other. Proved by construction instead:
+    // the arm fires only when the anchor's own `chain` is `None`, which is
+    // exactly and only the case this fix leaves unplaced.
+    let plain = format!(
+        "if false || cat <(true) && cd {}; then echo x > f.txt; fi",
+        t("/tmp/proj")
+    );
+    let (v, r) = common::decision_at(&cfg(), &plain, &t("/somewhere/else"));
+    let sub = format!(
+        "if false || echo $(true) && cd {}; then echo x > f.txt; fi",
+        t("/tmp/proj")
+    );
+    let (v2, r2) = common::decision_at(&cfg(), &sub, &t("/somewhere/else"));
+    assert_eq!((v.as_str(), v2.as_str()), ("allow", "allow"), "{r} / {r2}");
+
+    // Negative control: the certified base must be the `cd`'s OWN target,
+    // not merely some already-allowed state a broken certification could
+    // have unioned in. Same shape, walled destination — the starting `cwd`
+    // (`/tmp/proj`) is itself inside `allow_paths`, so a wrongly-certified
+    // base that fell back to the PRE-move state would read `allow` here
+    // too; only a base pinned at `/etc` reads `ask`.
+    let denied = format!(
+        "if false || cat <(true) && cd {}; then echo x > f.txt; fi",
+        t("/etc")
+    );
+    let (v3, r3) = common::decision_at(&cfg(), &denied, &t("/tmp/proj"));
+    assert_eq!(v3, "ask", "{r3}");
 }

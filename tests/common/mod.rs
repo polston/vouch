@@ -779,6 +779,30 @@ pub fn top_level_eligible(scan: &vouch::syntax::Scan, ci: usize) -> bool {
     scan.args_complete.get(ci).copied().unwrap_or(false)
 }
 
+/// True for a bare program name — letters, digits, `.`, `_`, `+`, `-`, no
+/// separator, no `~`, no drive letter.
+///
+/// This is the PRINT RULE, not a classification: a measurement may name a head
+/// it read out of the corpus only when the head passes this, because anything
+/// path-spelled carries an account name, a checkout, or a machine's directory
+/// layout, and a measurement's output lands in a terminal and in a transcript
+/// (the rule at the top of `CLAUDE.md`). Heads that fail it are counted and
+/// never named.
+///
+/// Lives here rather than in the one example that needs it today: the rule is
+/// about the corpus, so it belongs beside the corpus loader every measurement
+/// already shares.
+pub fn is_bare_program_name(head: &str) -> bool {
+    if head.is_empty() || head.starts_with('~') {
+        return false;
+    }
+    let bytes = head.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return false; // a drive letter
+    }
+    head.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '+' | '-'))
+}
+
 /// The body the four decision dumps share. Shared rather than copied so the
 /// sides of a pair can only differ by the config they were handed — two texts
 /// free to drift apart would produce a transition matrix nobody could attribute.

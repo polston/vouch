@@ -441,9 +441,10 @@ fn every_piped_stage_of_one_member_shares_its_chain_position() {
 }
 
 /// A nested script block re-parses its own text as a fresh, independent
-/// `parse()` call with its own `chain_counter` starting at 0 (powershell.rs
-/// has no cross-call state to thread the way shell.rs threads
-/// `chain_counter` through nested compounds within ONE parse). Left
+/// `parse()` call with its own chain counter starting at 0 (powershell.rs
+/// has no cross-call state to thread the way shell.rs threads its
+/// `WalkState` — chain ids and nesting depth — through nested compounds
+/// within ONE parse). Left
 /// unremapped, an absorbed chain's `id` would collide with an unrelated
 /// chain already present in the outer scan — `Scan::absorb` (syntax.rs)
 /// offsets every absorbed `ChainPos.id` past whatever the outer scan

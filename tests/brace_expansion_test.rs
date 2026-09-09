@@ -38,10 +38,16 @@ fn decide_unmodeled_asks(cmd: &str) -> Decision {
     decide_command_in(&cfg, "bash", cmd, Some(HOME), None)
 }
 
-/// The head and arguments the scanner recorded for the first command.
-fn first(src: &str) -> (String, Vec<String>) {
+/// The head and arguments the scanner recorded for the line's own top-level
+/// command — LAST in `commands`, not first: once a word carries a
+/// substitution, that body's own commands are pushed while the top-level one
+/// is still being assembled (its `push_cmd` waits until every prefix/suffix
+/// item, substitution bodies included, has been walked — design
+/// docs/specs/2026-09-07-command-substitution-bodies-design.md §2.1), so
+/// they land ahead of it.
+fn outer(src: &str) -> (String, Vec<String>) {
     let s = vouch::shell::Bash.scan(src).expect("scans");
-    let c = s.commands.first().expect("one command").clone();
+    let c = s.commands.last().expect("one command").clone();
     (c.head, c.args)
 }
 
@@ -93,7 +99,7 @@ fn a_brace_spelled_delete_trips_the_guard() {
 #[test]
 fn expansion_distributes_prefix_and_suffix() {
     // bash: a{b,c}d -> abd acd
-    let (head, args) = first("echo a{b,c}d");
+    let (head, args) = outer("echo a{b,c}d");
     assert_eq!(head, "echo");
     assert_eq!(args, vec!["abd".to_string(), "acd".to_string()]);
     assert!(!constructs("echo a{b,c}d").iter().any(|c| c == "brace_expansion"));
@@ -103,10 +109,10 @@ fn expansion_distributes_prefix_and_suffix() {
 fn an_empty_alternative_expands_with_surviving_affix() {
     // bash: x{a,} -> xa x. The empty alternative leaves a real word because
     // the prefix survives.
-    let (_, args) = first("echo x{a,}");
+    let (_, args) = outer("echo x{a,}");
     assert_eq!(args, vec!["xa".to_string(), "x".to_string()]);
     // bash: {a,}b -> ab b. The suffix serves the same purpose.
-    let (_, args) = first("echo {a,}b");
+    let (_, args) = outer("echo {a,}b");
     assert_eq!(args, vec!["ab".to_string(), "b".to_string()]);
     // Bare {a,} leaves an empty word, which bash then drops — a word count
     // vouch would get wrong, so it refuses to guess and says so.
@@ -121,7 +127,7 @@ fn a_brace_head_expands_or_asks_never_slips() {
     // bash: {echo,hi} runs `echo hi`. The head is a word like any other, so a
     // simple list there becomes real words rather than a literal head nobody
     // can recognise.
-    let (head, args) = first("{echo,hi}");
+    let (head, args) = outer("{echo,hi}");
     assert_eq!(head, "echo", "the head was left as a literal brace token");
     assert_eq!(args, vec!["hi".to_string()]);
     // A head-position group vouch does NOT reproduce must still be reported:
@@ -143,12 +149,12 @@ fn head_expansion_puts_its_extra_words_before_the_rest() {
     // The words a head group produces are earlier on the line than anything in
     // the suffix, and the recorded order has to say so — an argument walk reads
     // positions.
-    let (head, args) = first("{echo,one} two");
+    let (head, args) = outer("{echo,one} two");
     assert_eq!(head, "echo");
     assert_eq!(args, vec!["one".to_string(), "two".to_string()]);
     // A prefix assignment sits between the head and the arguments in the
     // walk, and contributes no argument of its own — so the order holds.
-    let (head, args) = first("FOO=1 {echo,one} two");
+    let (head, args) = outer("FOO=1 {echo,one} two");
     assert_eq!(head, "echo");
     assert_eq!(args, vec!["one".to_string(), "two".to_string()]);
 }
@@ -156,7 +162,7 @@ fn head_expansion_puts_its_extra_words_before_the_rest() {
 #[test]
 fn a_suffix_assignment_shaped_word_expands() {
     // bash: `of={a,b}` after a command name is an ARGUMENT, and it expands.
-    let (head, args) = first("dd of={a,b}");
+    let (head, args) = outer("dd of={a,b}");
     assert_eq!(head, "dd");
     assert_eq!(args, vec!["of=a".to_string(), "of=b".to_string()]);
 }
@@ -174,7 +180,7 @@ fn commaless_and_parameter_braces_stay_quiet() {
         );
     }
     // The placeholder really is passed through untouched, not just unreported.
-    let (_, args) = first("echo {}");
+    let (_, args) = outer("echo {}");
     assert_eq!(args, vec!["{}".to_string()]);
     let d = decide("find . -exec echo {} \\;");
     assert!(matches!(d, Decision::Allow(_)), "the placeholder shape stopped allowing: {d:?}");
@@ -190,7 +196,7 @@ fn quoted_braces_are_literal_and_quiet() {
             !constructs(src).iter().any(|c| c == "brace_expansion"),
             "a quoted brace raised the construct: {src}"
         );
-        let (_, args) = first(src);
+        let (_, args) = outer(src);
         assert_eq!(args.len(), 2, "a quoted brace was split: {src}");
     }
 }
@@ -285,7 +291,12 @@ fn a_group_inside_a_command_substitution_belongs_to_the_inner_command() {
     // passes, and record them silently.
     for src in ["echo x$(echo {a,b})", "echo x`echo {a,b}`"] {
         let s = vouch::shell::Bash.scan(src).expect("scans");
-        assert_eq!(s.commands[0].args.len(), 1, "an inner group was expanded outward: {src}");
+        // The substitution's own body is now walked (Task 2 of the
+        // command-substitution-bodies design) and pushes its OWN "echo"
+        // ahead of this line's top-level one, so the outer command is the
+        // LAST one recorded, not the first.
+        let outer = s.commands.last().expect("the outer echo lands");
+        assert_eq!(outer.args.len(), 1, "an inner group was expanded outward: {src}");
         assert!(
             !s.constructs.iter().any(|c| c == "brace_expansion"),
             "an inner group raised the outer word's construct: {src}"
@@ -305,7 +316,7 @@ fn a_group_outside_a_command_substitution_still_classifies() {
     let words = |v: &[&str]| Braces::Words(v.iter().map(|s| s.to_string()).collect());
     assert_eq!(expand_braces("$(echo z){a,b}"), words(&["$(echo z)a", "$(echo z)b"]));
     assert_eq!(expand_braces("`echo z`{a,b}"), words(&["`echo z`a", "`echo z`b"]));
-    let (_, args) = first("echo $(echo z){a,b}");
+    let (_, args) = outer("echo $(echo z){a,b}");
     assert_eq!(args, vec!["$(echo z)a".to_string(), "$(echo z)b".to_string()]);
     // A group outside the substitution that vouch does NOT reproduce still
     // raises, rather than being lost with the skipped span.

@@ -134,6 +134,10 @@ fn scanning_one_source_twice_yields_the_same_scope_and_redirect_ids() {
         "cd /etc && (echo x > rel.txt)",
         "if true; then cd /etc; echo x > a.txt; fi; echo y > b.txt",
         "for f in a b; do echo x > $f; done",
+        "echo $(cd /etc && echo x > rel.txt)",
+        "echo $(echo $(cd /etc))",
+        "cat <<EOF\n$(cd /etc)\nEOF\n",
+        "for x in $(cd /etc); do :; done",
     ] {
         let first = bash.scan(src).expect("parses");
         let second = bash.scan(src).expect("parses");
@@ -145,6 +149,8 @@ fn scanning_one_source_twice_yields_the_same_scope_and_redirect_ids() {
         assert_eq!(first.redirect_scope, second.redirect_scope, "redirect scopes differ: {src}");
         assert_eq!(first.redirect_order, second.redirect_order, "redirect orders differ: {src}");
         assert_eq!(first.cmd_scope, second.cmd_scope, "command scopes differ: {src}");
+        assert_eq!(first.constructs, second.constructs, "constructs differ: {src}");
+        assert_eq!(first.heads, second.heads, "head sequence differs: {src}");
     }
 }
 

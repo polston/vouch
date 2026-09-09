@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.18.1 (2026-09-09)
+
+
+### Bug Fixes
+
+* a case statement inside a command substitution is read past its pattern parentheses
+* a command substitution holding a dollar-single-quote string with an escaped quote is read whole instead of refused
+* a command substitution in a for-clause value list, a case subject or pattern, or an extended-test operand is judged instead of silently allowed
+* a command substitution in a redirect target, a here-string or an unquoted here-document body is judged
+* a command substitution inside an arithmetic expression is walked instead of refused as unreadable
+* a command substitution nested inside another's double-quoted string is read to its own closer
+* a command substitution whose body carries a here-document is read whole, apostrophes and backticks in the here-document's text included
+* a comment beginning right after a close parenthesis inside a command substitution no longer ends the substitution early
+* a comment inside a command substitution no longer ends the substitution at a parenthesis in the comment's text
+* a comment marker right after a nested substitution's closing parenthesis is text, not a comment
+* a deeply nested substitution is refused at the nesting cap instead of costing the gate exponential time
+* a function definition's own redirect list is judged, including a substitution in its target
+* a guard, a write or an undescribed program inside a command substitution is judged instead of allowed by the subshell construct
+* a substitution or subshell in an or-tail no longer coarsens the enclosing line's directory placement
+* arithmetic expansion, a single-quoted or escaped substitution spelling no longer raise the subshell construct
+
 ## 0.18.0 (2026-09-06)
 
 

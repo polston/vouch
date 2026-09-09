@@ -156,15 +156,23 @@ fn ordinary_arithmetic_stays_silent() {
     }
 }
 
-/// Arithmetic carrying a command substitution runs a command bash really runs,
-/// and vouch cannot read which one from the arithmetic reading it was handed.
+/// Arithmetic carrying a command substitution runs a command bash really
+/// runs, and vouch now reads it rather than refusing the whole expression as
+/// unparseable: a described program allows, and a real guard still fires for
+/// a command that deserves one (design
+/// `docs/specs/2026-09-07-command-substitution-bodies-design.md` §2.2, "The
+/// arithmetic parse_failure arms go").
 #[test]
-fn arithmetic_carrying_a_command_substitution_asks() {
+fn arithmetic_carrying_a_command_substitution_walks_it() {
     let d = decide("(( x = $(id -u) ))");
     assert!(
-        matches!(d, Decision::Ask(_)),
-        "arithmetic that runs a command was allowed unread: {d:?}"
+        matches!(d, Decision::Allow(_)),
+        "a described program inside arithmetic was refused unread: {d:?}"
     );
+    let d2 = decide("(( x = $(rm -rf C:/Users/dev/scratch) ))");
+    let Decision::Ask(reason) = d2 else { unreachable!("{d2:?}") };
+    assert!(reason.contains("delete_recursive"), "{reason}");
+    assert!(!reason.contains("parse_failure"), "{reason}");
 }
 
 // ---------------------------------------------------------------------------

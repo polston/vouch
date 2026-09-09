@@ -1,4 +1,4 @@
-use vouch::syntax::{Order, ScopeKind};
+use vouch::syntax::{Order, ScopeClass, ScopeKind};
 
 fn bash_scan(src: &str) -> vouch::syntax::Scan {
     vouch::syntax::scanner_for("bash").unwrap().scan(src).unwrap()
@@ -130,6 +130,76 @@ fn nested_bodies_parent_onto_the_enclosing_scope() {
     let s = bash_scan("( cd /a; ( cd /b ) )");
     let outer = s.cmd_scope[0].unwrap();
     let inner = s.cmd_scope[1].unwrap();
+    assert_eq!(s.scan_scopes[inner - 1].parent, outer);
+}
+
+#[test]
+fn a_substitution_body_anchors_at_its_enclosing_command() {
+    let s = bash_scan("cd /a; echo $(cd /b; pwd) f.txt");
+    // The body's commands sit in a ProcessBoundary scope anchored at the
+    // echo's own (pre-captured) position — never at the substitution's own,
+    // because it has none. The enclosing echo itself stays in scope 0.
+    let echo = s.commands.iter().position(|c| c.head == "echo").expect("echo lands");
+    let inner = s
+        .cmd_scope
+        .iter()
+        .flatten()
+        .find(|sc| **sc != 0)
+        .copied()
+        .expect("the substitution body allocates a scope");
+    let scope = &s.scan_scopes[inner - 1];
+    assert_eq!(scope.parent, 0);
+    assert_eq!(scope.kind, ScopeKind::ProcessBoundary);
+    assert_eq!(scope.anchor_order, s.order[echo], "anchored at echo's own Seq");
+    assert_eq!(scope.anchor_chain, s.commands[echo].chain);
+    assert_eq!(s.cmd_scope[echo], Some(0));
+}
+
+/// A compound WORD position (Task 4: a for-clause value, a case word, an
+/// extended-test operand, an arithmetic expression) has no landing `Cmd` of
+/// its own to anchor at the way `a_substitution_body_anchors_at_its_
+/// enclosing_command` above reads off `s.order[echo]` — so its substitution
+/// body must anchor at the SAME position the construct's own entered body
+/// scope does, via `BodyScoping::boundary`. This is the for-clause leg.
+#[test]
+fn a_for_clause_values_substitution_anchors_at_the_loops_own_position() {
+    let s = bash_scan("cd /a; for x in $(cd /b); do :; done");
+    // Neither scope's `kind` alone singles it out among a bigger scan's
+    // siblings, so each is found by what only IT is: the value-list
+    // substitution is the one `ProcessBoundary` scope, the loop's own body
+    // is the one carrying `ScopeClass::LoopBody`.
+    let value_body = s
+        .scan_scopes
+        .iter()
+        .find(|sc| sc.kind == ScopeKind::ProcessBoundary)
+        .expect("the for-clause value's substitution allocates its own scope");
+    let loop_body = s
+        .scan_scopes
+        .iter()
+        .find(|sc| sc.class == Some(ScopeClass::LoopBody))
+        .expect("the for's own body allocates a scope");
+    assert_eq!(value_body.parent, 0, "same parent scope the `for` itself sits in");
+    assert_eq!(value_body.parent, loop_body.parent, "same parent the loop body's own scope has");
+    assert_eq!(
+        value_body.anchor_order, loop_body.anchor_order,
+        "both anchor at the for construct's own position, per BodyScoping::boundary"
+    );
+}
+
+#[test]
+fn nested_substitution_bodies_parent_onto_the_enclosing_bodys_scope() {
+    let s = bash_scan("echo $(echo $(cd /b))");
+    // Push order is innermost-first: `cd /b` (the innermost body's own
+    // command) lands before the middle `echo` (the outer body's own
+    // command), which lands before the outermost `echo`. Both echoes share
+    // the head "echo", so `position()`'s FIRST match is the middle one —
+    // the command whose own scope directly encloses `cd /b`, which is what
+    // push order guarantees. The innermost body's scope parents onto that
+    // scope, not onto 0.
+    let cd = s.commands.iter().position(|c| c.head == "cd").expect("cd lands");
+    let middle_echo = s.commands.iter().position(|c| c.head == "echo").expect("echo lands");
+    let outer = s.cmd_scope[middle_echo].unwrap();
+    let inner = s.cmd_scope[cd].unwrap();
     assert_eq!(s.scan_scopes[inner - 1].parent, outer);
 }
 
