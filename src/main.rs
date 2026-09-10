@@ -141,7 +141,8 @@ fn run_hook_call(
     if !emit {
         HookCall::Processed(None)
     } else if host == Host::Agy {
-        HookCall::Processed(vouch::protocol::render_for_agy(&decision, false))
+        let demote = vouch::protocol::should_demote_sandbox(&input, &decision);
+        HookCall::Processed(vouch::protocol::render_for_agy(&decision, demote))
     } else {
         HookCall::Processed(render_for(host, &decision))
     }

@@ -158,6 +158,20 @@ fn parses_agy_post_tool_payloads() {
     assert_eq!(post_ok.hook_event_name, "PostToolUse");
     assert_eq!(post_ok.session_id, "conv-789");
 
+    let success_with_tool_call = r#"{
+        "stepIdx": 10,
+        "toolCall": {
+            "name": "run_command",
+            "args": { "CommandLine": "cargo test" }
+        },
+        "toolResponse": { "output": "ok" },
+        "conversationId": "conv-789",
+        "workspacePaths": ["C:/workspace/project"]
+    }"#;
+    let post_tc_ok = parse_input(success_with_tool_call).unwrap();
+    assert_eq!(post_tc_ok.hook_event_name, "PostToolUse");
+    assert_eq!(post_tc_ok.tool_name, "run_command");
+
     let failure = r#"{
         "stepIdx": 11,
         "error": "command failed with status 1",
@@ -167,6 +181,21 @@ fn parses_agy_post_tool_payloads() {
     let post_fail = parse_input(failure).unwrap();
     assert_eq!(post_fail.hook_event_name, "PostToolUseFailure");
     assert_eq!(post_fail.error, "command failed with status 1");
+
+    let failure_with_tool_call = r#"{
+        "stepIdx": 11,
+        "toolCall": {
+            "name": "run_command",
+            "args": { "CommandLine": "cargo test" }
+        },
+        "error": "command failed with status 1",
+        "conversationId": "conv-789",
+        "workspacePaths": ["C:/workspace/project"]
+    }"#;
+    let post_tc_fail = parse_input(failure_with_tool_call).unwrap();
+    assert_eq!(post_tc_fail.hook_event_name, "PostToolUseFailure");
+    assert_eq!(post_tc_fail.error, "command failed with status 1");
+    assert_eq!(post_tc_fail.tool_name, "run_command");
 }
 
 #[test]
@@ -234,3 +263,73 @@ fn preserves_unsandboxed_for_network_commands_in_agy() {
     let decision = Decision::Allow("fetch allowed".into());
     assert!(!should_demote_sandbox(&input, &decision));
 }
+
+#[test]
+fn demotes_safe_local_commands_on_ask_in_agy() {
+    use vouch::protocol::{render_for_agy, should_demote_sandbox};
+
+    let raw = r#"{
+        "toolCall": {
+            "name": "run_command",
+            "args": {
+                "CommandLine": "./scripts/validate-local-code-harness.sh --static",
+                "BypassSandbox": true
+            }
+        },
+        "conversationId": "c",
+        "stepIdx": 3
+    }"#;
+    let input = parse_input(raw).unwrap();
+    let decision = Decision::Ask("unmodeled_command: ./scripts/validate-local-code-harness.sh".into());
+    assert!(should_demote_sandbox(&input, &decision));
+
+    let rendered = render_for_agy(&decision, true).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+    assert_eq!(parsed["decision"], "ask");
+    assert_eq!(
+        parsed["reason"],
+        "unmodeled_command: ./scripts/validate-local-code-harness.sh"
+    );
+    assert_eq!(parsed["overwrite"]["BypassSandbox"], false);
+
+    // Network command on Ask does NOT demote
+    let network_raw = r#"{
+        "toolCall": {
+            "name": "run_command",
+            "args": {
+                "CommandLine": "git push origin master",
+                "BypassSandbox": true
+            }
+        },
+        "conversationId": "c",
+        "stepIdx": 4
+    }"#;
+    let network_input = parse_input(network_raw).unwrap();
+    assert!(!should_demote_sandbox(&network_input, &decision));
+}
+
+#[test]
+fn does_not_demote_on_deny() {
+    use vouch::protocol::{render_for_agy, should_demote_sandbox};
+
+    let raw = r#"{
+        "toolCall": {
+            "name": "run_command",
+            "args": {
+                "CommandLine": "git status",
+                "BypassSandbox": true
+            }
+        },
+        "conversationId": "c",
+        "stepIdx": 5
+    }"#;
+    let input = parse_input(raw).unwrap();
+    let decision = Decision::Deny("protected path".into());
+    assert!(!should_demote_sandbox(&input, &decision));
+
+    let rendered = render_for_agy(&decision, false).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+    assert_eq!(parsed["decision"], "deny");
+    assert!(parsed.get("overwrite").is_none());
+}
+

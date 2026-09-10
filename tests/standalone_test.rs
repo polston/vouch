@@ -341,12 +341,11 @@ fn a_process_substitution_keeps_the_ask() {
 }
 
 #[test]
-fn a_heredoc_on_a_standalone_run_is_still_judged() {
-    // The top-level ask is suppressed (this is a standalone run), but a
-    // heredoc attached to this same command still feeds the entry's own
-    // `evaluates_input = "stdin"` claim unconditionally — the locator does
-    // not consult `standalone_flags` at all — so its BODY is scanned and
-    // judged on its own merits, benign or not.
+fn a_heredoc_on_a_standalone_run_stands_down_with_stdin() {
+    // Under M2.249, `heredoc_feeds` checks `entry_applies` (including
+    // `standalone_run`). A standalone run evaluates no standard input, so its
+    // attached here-document is not consumed by the program and its body is
+    // not scanned as evaluated code.
     let (allow_decision, allow_reason) = stdin_hook(
         "heredoc_benign",
         STDIN_EVALUATOR,
@@ -354,12 +353,12 @@ fn a_heredoc_on_a_standalone_run_is_still_judged() {
     );
     assert_eq!(allow_decision, "allow", "got: {allow_reason}");
 
-    let (ask_decision, ask_reason) = stdin_hook(
+    let (standdown_decision, standdown_reason) = stdin_hook(
         "heredoc_risky",
         STDIN_EVALUATOR,
         "fake-interp --version <<'EOF'\nrm -rf /tmp/x\nEOF",
     );
-    assert_eq!(ask_decision, "ask", "got: {ask_reason}");
+    assert_eq!(standdown_decision, "allow", "got: {standdown_reason}");
 }
 
 #[test]

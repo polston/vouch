@@ -276,10 +276,9 @@ fn a_stdin_claim_still_fires_for_a_verb_the_entry_does_cover_any_case() {
 
 #[test]
 fn a_python_entrys_unread_code_ask_names_pythons_own_construct() {
-    // `python -c "eval('1')"` on a bash line: the occurrence raising this is
-    // the python `eval`, which declares no wrap_lang because it wraps no
-    // further text. Its off-switch must be python's, like every other
-    // per-snippet construct — today it is bash's, which is backwards.
+    // `python -c "eval(x)"` on a bash line: the occurrence raising this is
+    // the python `eval` handed an unreadable value. Its off-switch must be python's,
+    // like every other per-snippet construct (M2.79).
     let cfg = load(
         "version = 1\n[lang.bash]\ndefault = \"allow\"\n\
          [lang.bash.constructs]\nunmodeled_command = \"allow\"\n\
@@ -289,7 +288,7 @@ fn a_python_entrys_unread_code_ask_names_pythons_own_construct() {
          [write]\ndefault = \"ask\"\n",
     )
     .expect("parses");
-    match decide_command_in(&cfg, "bash", r#"python -c "eval('1')""#, Some("C:/Users/dev"), None) {
+    match decide_command_in(&cfg, "bash", r#"python -c "eval(x)""#, Some("C:/Users/dev"), None) {
         Decision::Ask(r) => assert!(
             r.contains("lang.python.constructs.evaluated_input"),
             "named the host language's setting: {r}"
@@ -315,11 +314,34 @@ fn allowing_the_host_languages_construct_does_not_silence_a_python_occurrence() 
     .expect("parses");
     assert!(
         !matches!(
-            decide_command_in(&cfg, "bash", r#"python -c "eval('1')""#, Some("C:/Users/dev"), None),
+            decide_command_in(&cfg, "bash", r#"python -c "eval(x)""#, Some("C:/Users/dev"), None),
             Decision::Allow(_)
         ),
         "the host language's allow silenced a python occurrence"
     );
+}
+
+#[test]
+fn literal_eval_and_exec_are_scanned_and_allowed_without_evaluated_input() {
+    // M2.74: A literal string argument to eval/exec is visible text scanned as
+    // Python code rather than unconditionally tripping evaluated_input.
+    let cfg = load(
+        "version = 1\n[lang.bash]\ndefault = \"allow\"\n\
+         [lang.bash.constructs]\nunmodeled_command = \"allow\"\n\
+         [lang.python]\ndefault = \"allow\"\n\
+         [lang.python.constructs]\nevaluated_input = \"ask\"\n\
+         [write]\ndefault = \"ask\"\n",
+    )
+    .expect("parses");
+    for cmd in [
+        r#"python -c "eval('1 + 1')""#,
+        r#"python -c "exec('x = 1')""#,
+    ] {
+        assert!(
+            matches!(decide_command_in(&cfg, "bash", cmd, Some("C:/Users/dev"), None), Decision::Allow(_)),
+            "literal snippet asked: {cmd}"
+        );
+    }
 }
 
 #[test]
@@ -697,5 +719,117 @@ fn ruby_still_names_the_opaque_setting() {
             "allowed for the wrong reason: {r}"
         ),
         other => panic!("expected Allow keyed to opaque, got {other:?}"),
+    }
+}
+
+// ============================================================================
+// M2.74 — Scan readable input inside process-spawning calls and eval/exec
+// ============================================================================
+
+fn python_default_config() -> vouch::config::Config {
+    load(
+        "version = 1\n\
+         [lang.bash]\ndefault = \"allow\"\n\
+         [lang.bash.constructs]\nunmodeled_command = \"ask\"\n\
+         [lang.python]\ndefault = \"allow\"\n\
+         [lang.python.constructs]\nevaluated_input = \"ask\"\nunmodeled_command = \"ask\"\n\
+         [write]\ndefault = \"ask\"\nallow_paths = [\"C:/work/**\"]\n",
+    )
+    .expect("parses")
+}
+
+#[test]
+fn subprocess_run_literal_allowed_vector_allows() {
+    let cfg = python_default_config();
+    for cmd in [
+        r#"python3 -c "import subprocess; subprocess.run(['git', 'log', '-n', '1'])""#,
+        r#"python -c "import subprocess; subprocess.Popen(['git', 'status'])""#,
+        r#"python -c "import subprocess; subprocess.call(['git', 'diff'])""#,
+        r#"python -c "import subprocess; subprocess.check_call(['git', 'branch'])""#,
+        r#"python -c "import subprocess; subprocess.check_output(['git', 'log'])""#,
+    ] {
+        match decide_command_in(&cfg, "bash", cmd, Some("C:/Users/dev"), None) {
+            Decision::Allow(_) => {}
+            other => panic!("{cmd}: expected Allow, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn subprocess_run_literal_guarded_command_prompts_on_guard() {
+    let cfg = python_default_config();
+    let cmd = r#"python3 -c "import subprocess; subprocess.run(['rm', '-rf', '/tmp/foo'])""#;
+    match decide_command_in(&cfg, "bash", cmd, Some("C:/Users/dev"), None) {
+        Decision::Ask(r) => {
+            assert!(
+                r.contains("delete_recursive"),
+                "expected delete_recursive guard, got: {r}"
+            );
+            assert!(
+                !r.contains("evaluated_input"),
+                "prompt mentioned evaluated_input: {r}"
+            );
+        }
+        other => panic!("{cmd}: expected Ask on delete_recursive, got {other:?}"),
+    }
+}
+
+#[test]
+fn subprocess_run_unmodeled_program_prompts_on_unmodeled() {
+    let cfg = python_default_config();
+    let cmd = r#"python3 -c "import subprocess; subprocess.run(['unmodeled_prog_xyz'])""#;
+    match decide_command_in(&cfg, "bash", cmd, Some("C:/Users/dev"), None) {
+        Decision::Ask(r) => {
+            assert!(
+                r.contains("unmodeled_command"),
+                "expected unmodeled_command, got: {r}"
+            );
+            assert!(
+                !r.contains("evaluated_input"),
+                "prompt mentioned evaluated_input: {r}"
+            );
+        }
+        other => panic!("{cmd}: expected Ask on unmodeled_command, got {other:?}"),
+    }
+}
+
+#[test]
+fn subprocess_run_dynamic_or_computed_expressions_prompt_on_evaluated_input() {
+    let cfg = python_default_config();
+    for cmd in [
+        r#"python3 -c "import subprocess; subprocess.run(cmd_var)""#,
+        r#"python3 -c "import subprocess, sys; subprocess.run(sys.argv[1:])""#,
+        r#"python3 -c "import subprocess; subprocess.run(['git', branch_var])""#,
+    ] {
+        match decide_command_in(&cfg, "bash", cmd, Some("C:/Users/dev"), None) {
+            Decision::Ask(r) => {
+                assert!(
+                    r.contains("evaluated_input"),
+                    "{cmd}: expected evaluated_input, got: {r}"
+                );
+            }
+            other => panic!("{cmd}: expected Ask on evaluated_input, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn subprocess_run_with_literal_shell_true_scans_as_shell() {
+    let cfg = python_default_config();
+    let cmd_ok = r#"python3 -c "import subprocess; subprocess.run('git log', shell=True)""#;
+    match decide_command_in(&cfg, "bash", cmd_ok, Some("C:/Users/dev"), None) {
+        Decision::Allow(_) => {}
+        other => panic!("{cmd_ok}: expected Allow, got {other:?}"),
+    }
+
+    let cmd_guard = r#"python3 -c "import subprocess; subprocess.run('rm -rf /tmp/foo', shell=True)""#;
+    match decide_command_in(&cfg, "bash", cmd_guard, Some("C:/Users/dev"), None) {
+        Decision::Ask(r) => {
+            assert!(
+                r.contains("delete_recursive"),
+                "expected delete_recursive guard, got: {r}"
+            );
+        }
+        other => panic!("{cmd_guard}: expected Ask on delete_recursive, got {other:?}"),
     }
 }

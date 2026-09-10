@@ -968,15 +968,30 @@ wrap_lang = "bash"
 # to this whole family unconditionally, so a callback_args declaration
 # here could never move the decision either direction, only add a claim
 # nothing reads.
+# Literal argv vectors in subprocess process-spawning calls are scanned
+# as commands (M2.74). Computed or unreadable arguments fall back to
+# evaluated_input.
 [[program]]
 match = [
   "python:subprocess.run", "python:subprocess.call", "python:subprocess.check_call",
   "python:subprocess.check_output", "python:subprocess.Popen",
+]
+wraps = "argv_0"
+wrap_lang = "bash"
+
+# Literal string arguments to eval/exec are scanned as nested Python
+# code (M2.74). Computed or unreadable arguments fall back to evaluated_input.
+[[program]]
+match = ["python:eval", "python:exec"]
+wraps = "arg_0"
+wrap_lang = "python"
+
+[[program]]
+match = [
   "python:os.execl", "python:os.execle", "python:os.execlp", "python:os.execlpe",
   "python:os.execv", "python:os.execve", "python:os.execvp", "python:os.execvpe",
   "python:os.spawnl", "python:os.spawnle", "python:os.spawnlp", "python:os.spawnlpe",
   "python:os.spawnv", "python:os.spawnve", "python:os.spawnvp", "python:os.spawnvpe",
-  "python:eval", "python:exec",
 ]
 evaluates_input = "always"
 
@@ -1232,7 +1247,9 @@ match = [
   "python:.groups", "python:.groupdict", "python:.format", "python:.count",
   "python:.find", "python:.index", "python:.encode", "python:.decode",
   "python:.isdigit", "python:.most_common", "python:.rfind", "python:.ljust",
-  "python:.discard", "python:.astype",
+  "python:.discard", "python:.astype", "python:.replace", "python:.start",
+  "python:.end", "python:.union", "python:.hexdigest", "python:.setdefault",
+  "python:.sort", "python:.raw_decode",
 ]
 receiver_from = ["data"]
 produces = ["data"]
@@ -1317,7 +1334,36 @@ arg_names = ["tz"]
 match = ["python:hashlib.sha1", "python:hashlib.sha256"]
 
 [[program]]
-match = ["python:math.ceil"]
+match = ["python:math.ceil", "python:math.sqrt"]
+
+# Pure inspection and utility functions from the Python standard library.
+# Audited against CPython 3.12 signatures for parameter invocation: none
+# writes to the filesystem, moves the process directory, or starts child processes.
+[[program]]
+match = [
+  "python:os.path.expanduser",
+  "python:os.path.exists",
+  "python:os.path.getsize",
+  "python:os.path.isabs",
+  "python:os.path.isdir",
+  "python:os.path.isfile",
+  "python:os.path.islink",
+  "python:glob.glob",
+  "python:os.access",
+  "python:tempfile.gettempdir",
+  "python:hashlib.md5",
+  "python:datetime.date.today",
+  "python:random.seed",
+]
+
+[[program]]
+match = ["python:os.walk"]
+callback_args = ["onerror"]
+
+[[program]]
+match = ["python:json.JSONDecoder"]
+callback_args = ["object_hook", "parse_float", "parse_int", "parse_constant", "object_pairs_hook"]
+
 
 # ── Writers through an already-opened file (writes_via_handle) ────────────
 # The position named by writes_via_handle is a claimed handle whose destination
@@ -2200,6 +2246,66 @@ match = [
 ]
 
 # ============================================================================
+# UNIVERSAL DEVELOPER AND SYSTEM UTILITIES
+# ============================================================================
+
+# mktemp generates unique temporary file or directory names.
+[[program]]
+match = ["mktemp"]
+case_sensitive_flags = true
+standalone_flags = ["--help", "-h", "--version", "-V", "-u", "--dry-run"]
+value_options = ["-p", "--tmpdir", "-t"]
+no_value_options = ["-d", "--directory", "-u", "--dry-run", "-q", "--quiet"]
+
+# sqlite3 CLI reads or writes the database file at arg_0.
+[[program]]
+match = ["sqlite3"]
+case_sensitive_flags = true
+writes = "arg_0"
+standalone_flags = ["-version", "--version", "-help", "--help"]
+value_options = ["-cmd", "-init", "-newline", "-nullvalue", "-separator", "-vfs"]
+no_value_options = [
+  "-bail", "-batch", "-box", "-column", "-csv", "-echo", "-explain",
+  "-header", "-noheader", "-help", "--help", "-html", "-interactive",
+  "-json", "-line", "-list", "-markdown", "-quote", "-readonly",
+  "-table", "-tabs", "-version", "--version",
+]
+
+# Rust compiler.
+[[program]]
+match = ["rustc"]
+case_sensitive_flags = true
+standalone_flags = ["--version", "-V", "--help", "-h"]
+value_options = ["--out-dir", "-o", "--print", "--target", "--crate-type", "--edition"]
+no_value_options = ["--version", "-V", "--help", "-h", "-v", "--verbose"]
+
+[[program.here_write]]
+unless_flags = ["-o", "--out-dir", "--print"]
+
+# Rust code formatter. Formats arguments in place.
+[[program]]
+match = ["rustfmt"]
+case_sensitive_flags = true
+writes = "all_args"
+standalone_flags = ["--version", "-V", "--help", "-h", "--check"]
+no_value_options = ["--check", "-v", "--verbose", "-q", "--quiet"]
+
+# macOS extended attributes utility.
+[[program]]
+match = ["xattr"]
+case_sensitive_flags = true
+standalone_flags = ["-h", "--help"]
+value_options = ["-w", "-r", "-p", "-d"]
+no_value_options = ["-l", "-c", "-v", "-s"]
+
+# macOS sw_vers utility.
+[[program]]
+match = ["sw_vers"]
+case_sensitive_flags = true
+standalone_flags = ["-productVersion", "-buildVersion", "-productName", "--help", "-h"]
+no_value_options = ["-productVersion", "-buildVersion", "-productName"]
+
+# ============================================================================
 # HARNESS TOOLS
 #
 # Harness tools, described as data. Listing one is a CLAIM, held to the same
@@ -2344,8 +2450,8 @@ match = ["invoke_subagent", "define_subagent", "manage_subagents"]
 source = "starts work whose own tool calls are gated, so this does not allow its effects"
 
 [[tool]]
-match = ["wait", "wait_agent", "list_agents"]
-source = "Codex agent coordination and status inspection; touches no files"
+match = ["wait", "wait_agent", "list_agents", "ListAgents"]
+source = "Codex/Claude agent coordination and status inspection; touches no files"
 
 [[tool]]
 match = ["spawn_agent"]

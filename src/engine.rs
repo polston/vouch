@@ -662,7 +662,11 @@ fn judge_once(
     let any_heredoc_unconsumed = scan.heredocs.iter().any(|heredoc| {
         scan.commands
             .get(heredoc.cmd_index)
-            .is_some_and(|consumer| crate::guards::heredoc_feeds(kb, consumer, lang, heredoc).is_none())
+            .is_some_and(|consumer| {
+                let standalone_eligible =
+                    standalone_eligible_at(&all_args_complete, &all_args_from_input, heredoc.cmd_index);
+                crate::guards::heredoc_feeds(kb, consumer, lang, heredoc, standalone_eligible).is_none()
+            })
     });
     if any_heredoc_unconsumed {
         scan.note("heredoc");
@@ -860,7 +864,8 @@ fn judge_once(
             // undeclared), and never marked (nothing else re-reads it).
             for heredoc in &inner.heredocs {
                 if let Some(consumer) = inner.commands.get(heredoc.cmd_index) {
-                    if crate::guards::heredoc_feeds(kb, consumer, plang, heredoc).is_none() {
+                    let standalone_eligible = true;
+                    if crate::guards::heredoc_feeds(kb, consumer, plang, heredoc, standalone_eligible).is_none() {
                         snippet_constructs.push((plang.clone(), "heredoc".to_string()));
                     }
                 }

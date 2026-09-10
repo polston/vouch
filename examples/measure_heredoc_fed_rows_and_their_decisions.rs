@@ -46,10 +46,11 @@ fn main() {
         }
         with_heredoc += 1;
         let any_consumed = scan.commands.iter().enumerate().any(|(ci, cmd)| {
+            let standalone_eligible = scan.args_complete.get(ci).copied().unwrap_or(true);
             scan.heredocs
                 .iter()
                 .filter(|h| h.cmd_index == ci)
-                .any(|h| vouch::guards::heredoc_feeds(kb, cmd, "bash", h).is_some())
+                .any(|h| vouch::guards::heredoc_feeds(kb, cmd, "bash", h, standalone_eligible).is_some())
         });
         // The REAL judgement, through the real threading — not a re-derived
         // partial predicate. Before the input source existed, the pre-code

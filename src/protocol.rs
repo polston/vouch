@@ -110,6 +110,9 @@ struct AgyPayload {
     workspace_paths: Option<Vec<String>>,
     error: Option<String>,
     reason: Option<String>,
+    tool_response: Option<serde_json::Value>,
+    tool_result: Option<serde_json::Value>,
+    response: Option<serde_json::Value>,
 }
 
 pub fn parse_input(raw: &str) -> Result<HookInput, serde_json::Error> {
@@ -146,7 +149,39 @@ pub fn parse_input(raw: &str) -> Result<HookInput, serde_json::Error> {
                     .and_then(|w| w.first().cloned())
                     .unwrap_or_default();
 
-                if let Some(tc) = agy.tool_call {
+                let is_terminal = agy.tool_response.is_some()
+                    || agy.tool_result.is_some()
+                    || agy.response.is_some()
+                    || agy.error.is_some()
+                    || (agy.tool_call.is_none() && agy.reason.is_some());
+
+                if is_terminal || agy.tool_call.is_none() {
+                    let error = agy.error.unwrap_or_default();
+                    let reason = agy.reason.unwrap_or_default();
+                    let hook_event_name = if !error.is_empty() {
+                        "PostToolUseFailure".to_string()
+                    } else {
+                        "PostToolUse".to_string()
+                    };
+                    let tool_name = agy
+                        .tool_call
+                        .as_ref()
+                        .map(|tc| tc.name.clone())
+                        .unwrap_or_default();
+                    return Ok(HookInput {
+                        hook_event_name,
+                        tool_use_id,
+                        reason,
+                        error,
+                        is_interrupt: false,
+                        session_id,
+                        turn_id,
+                        cwd: default_cwd,
+                        permission_mode: String::new(),
+                        tool_name,
+                        tool_input: ToolInput::default(),
+                    });
+                } else if let Some(tc) = agy.tool_call {
                     let command = tc
                         .args
                         .get("CommandLine")
@@ -199,27 +234,6 @@ pub fn parse_input(raw: &str) -> Result<HookInput, serde_json::Error> {
                             extra,
                         },
                     });
-                } else {
-                    let error = agy.error.unwrap_or_default();
-                    let reason = agy.reason.unwrap_or_default();
-                    let hook_event_name = if !error.is_empty() {
-                        "PostToolUseFailure".to_string()
-                    } else {
-                        "PostToolUse".to_string()
-                    };
-                    return Ok(HookInput {
-                        hook_event_name,
-                        tool_use_id,
-                        reason,
-                        error,
-                        is_interrupt: false,
-                        session_id,
-                        turn_id,
-                        cwd: default_cwd,
-                        permission_mode: String::new(),
-                        tool_name: String::new(),
-                        tool_input: ToolInput::default(),
-                    });
                 }
             }
         }
@@ -236,8 +250,11 @@ pub fn is_local_workspace_command(command: &str) -> bool {
         return false;
     }
     let network_or_remote = [
-        "curl", "wget", "ssh", "scp", "sftp", "rsync", "git push", "git fetch", "git pull",
-        "git clone", "git remote", "kubectl", "docker", "podman", "nc", "netcat", "telnet",
+        "gh", "curl", "wget", "ssh", "scp", "sftp", "rsync", "git push", "git fetch", "git pull",
+        "git clone", "git remote", "git add", "git commit", "git merge", "git rebase",
+        "git reset", "git checkout", "git cherry-pick", "git stash", "git tag",
+        "land-private-release.sh", "publish-mirror.sh", "verify-release-range.sh",
+        "kubectl", "docker", "podman", "nc", "netcat", "telnet",
         "ping", "traceroute", "dig", "nslookup",
     ];
     for bad in network_or_remote {
@@ -255,7 +272,7 @@ pub fn is_local_workspace_command(command: &str) -> bool {
 }
 
 pub fn should_demote_sandbox(input: &HookInput, d: &Decision) -> bool {
-    if !matches!(d, Decision::Allow(_)) {
+    if !matches!(d, Decision::Allow(_) | Decision::Ask(_)) {
         return false;
     }
     let wants_bypass = input
@@ -270,7 +287,7 @@ pub fn should_demote_sandbox(input: &HookInput, d: &Decision) -> bool {
     if let Some(cmd) = &input.tool_input.command {
         is_local_workspace_command(cmd)
     } else {
-        true
+        false
     }
 }
 
@@ -286,7 +303,7 @@ pub fn render_for_agy(d: &Decision, demote_sandbox: bool) -> Option<String> {
         "decision": verdict,
         "reason": reason,
     });
-    if verdict == "allow" && demote_sandbox {
+    if (verdict == "allow" || verdict == "ask") && demote_sandbox {
         body["overwrite"] = serde_json::json!({
             "BypassSandbox": false
         });

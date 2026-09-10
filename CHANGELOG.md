@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.21.0 (2026-09-10)
+
+
+### Features
+
+* demote BypassSandbox on local Ask verdicts in Antigravity host protocol
+* inspect readable literal argv and eval strings in Python subprocess and eval calls
+* unify entry_applies in heredoc_feeds with standalone run check
+
+
+### Bug Fixes
+
+* exclude gh from sandbox demotion in Antigravity
+* exclude git mutating commands from sandbox demotion in Antigravity
+* exclude release scripts from sandbox demotion in Antigravity
+
 ## 0.20.0 (2026-09-10)
 
 

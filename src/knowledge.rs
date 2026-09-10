@@ -308,8 +308,9 @@ fn is_wrap_language(lang: &str) -> bool {
 /// `load_files` pipeline; the narrow scope is deliberate; ANY other
 /// `validate` rule stays load_files-only, unchanged.
 fn validate_wrap_lang_for(prog: &Program) -> Result<(), String> {
-    let text_scanning =
-        matches!(prog.wraps.as_str(), "after_c" | "after_flag") || prog.wraps.starts_with("arg_");
+    let text_scanning = matches!(prog.wraps.as_str(), "after_c" | "after_flag")
+        || prog.wraps.starts_with("arg_")
+        || prog.wraps.starts_with("argv_");
     if text_scanning && prog.wrap_lang.is_empty() {
         let valid_wrap_languages: Vec<_> = wrap_languages().collect();
         return Err(format!(
@@ -575,6 +576,14 @@ pub(crate) fn validate(kb: &Knowledge) -> Result<(), String> {
             if n.parse::<usize>().is_err() {
                 return Err(format!(
                     "[[program]] {:?}: wraps = {:?}, whose \"arg_\" suffix must be a number",
+                    prog.match_names, prog.wraps
+                ));
+            }
+        }
+        if let Some(n) = prog.wraps.strip_prefix("argv_") {
+            if n.parse::<usize>().is_err() {
+                return Err(format!(
+                    "[[program]] {:?}: wraps = {:?}, whose \"argv_\" suffix must be a number",
                     prog.match_names, prog.wraps
                 ));
             }

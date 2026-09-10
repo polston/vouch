@@ -296,6 +296,46 @@ fn argument_value(
                 indexed: None,
             }
         }
+        ast::Expr::List(list) => {
+            let mut elements = Vec::new();
+            let mut readable = true;
+            for elt in &list.elts {
+                let v = argument_value(elt, assigned);
+                if !v.readable {
+                    readable = false;
+                    break;
+                }
+                elements.push(v.text);
+            }
+            if readable {
+                match serde_json::to_string(&elements) {
+                    Ok(json) => ArgumentValue::readable(json),
+                    Err(_) => ArgumentValue::unread(MARKER),
+                }
+            } else {
+                ArgumentValue::unread(MARKER)
+            }
+        }
+        ast::Expr::Tuple(tuple) => {
+            let mut elements = Vec::new();
+            let mut readable = true;
+            for elt in &tuple.elts {
+                let v = argument_value(elt, assigned);
+                if !v.readable {
+                    readable = false;
+                    break;
+                }
+                elements.push(v.text);
+            }
+            if readable {
+                match serde_json::to_string(&elements) {
+                    Ok(json) => ArgumentValue::readable(json),
+                    Err(_) => ArgumentValue::unread(MARKER),
+                }
+            } else {
+                ArgumentValue::unread(MARKER)
+            }
+        }
         _ => ArgumentValue::unread(MARKER),
     }
 }

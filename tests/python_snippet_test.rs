@@ -255,8 +255,10 @@ fn a_clean_snippet_allows_under_permissive_constructs_and_asks_with_no_python_se
 // unaffected by it.
 #[test]
 fn subprocess_and_eval_trip_evaluated_input_settable_via_pythons_own_construct() {
+    // M2.74: Computed or unreadable arguments to subprocess.run and eval trip
+    // evaluated_input, settable via lang.python.constructs.evaluated_input.
     let asking = cfg_python_only("unmodeled_command = \"allow\"");
-    for src in [r#"import subprocess; subprocess.run(['a', 'b'])"#, r#"eval("1 + 1")"#] {
+    for src in [r#"import subprocess; subprocess.run(cmd)"#, r#"eval(code)"#] {
         match decide_command_in(&asking, "python", src, Some(HOME), None) {
             Decision::Ask(r) => {
                 assert!(r.contains("lang.python.constructs.evaluated_input"), "{src}: got {r}")
@@ -266,7 +268,7 @@ fn subprocess_and_eval_trip_evaluated_input_settable_via_pythons_own_construct()
     }
 
     let allowing = cfg_python_only("unmodeled_command = \"allow\"\nevaluated_input = \"allow\"");
-    for src in [r#"import subprocess; subprocess.run(['a', 'b'])"#, r#"eval("1 + 1")"#] {
+    for src in [r#"import subprocess; subprocess.run(cmd)"#, r#"eval(code)"#] {
         assert!(
             matches!(decide_command_in(&allowing, "python", src, Some(HOME), None), Decision::Allow(_)),
             "{src}: evaluated_input = \"allow\" did not stop the prompt"

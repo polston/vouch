@@ -2768,6 +2768,7 @@ pub fn heredoc_feeds<'k>(
     cmd: &Cmd,
     lang: &str,
     heredoc: &crate::syntax::Heredoc,
+    standalone_eligible: bool,
 ) -> Option<(&'k Program, &'k str)> {
     for prog in entries_for(kb, &cmd.head, lang) {
         if !receiver_gate_holds(kb, prog, &cmd.receiver_origin) {
@@ -2776,15 +2777,10 @@ pub fn heredoc_feeds<'k>(
         if prog.evaluates_input != "stdin" || !reads_stdin(cmd) {
             continue;
         }
-        // The entry's own recognition scope, asked through the same predicate
-        // `evaluates_input_in` uses. Reading `evaluates_input` alone made this
-        // a second implementation of one question: an entry scoped to its
-        // script-running verbs is claiming something about THOSE verbs, so a
-        // here-document on a verb it does not cover was being consumed on a
-        // claim the entry never made (M2.240). Fail-closed before this fix —
-        // the locator scanned a body it need not have scanned, and never stood
-        // a construct down that should have fired.
-        if !entry_covers(prog, cmd, entry_subcommand(prog, cmd, lang), lang) {
+        // The entry's own recognition scope and standalone check, asked through the canonical
+        // predicate `entry_applies` that `evaluates_input_in` uses (M2.249).
+        let (applies, _) = entry_applies(prog, cmd, lang, standalone_eligible);
+        if !applies {
             continue;
         }
         // Rule 3, and the SAME test `holds_input` rule 2 applies one layer
@@ -4971,9 +4967,9 @@ pub fn expand_wrappers_forking(
                     // string is known to EXIST and known to be unreadable,
                     // which is not the same as an empty scan (M2.123).
                     s if s.starts_with("arg_") => {
-                        match s.strip_prefix("arg_").and_then(|n| n.parse::<usize>().ok()).and_then(|i| cmd.args.get(i))
-                        {
-                            Some(v) if !is_unresolved_marker(v) => {
+                        let arg_idx = s.strip_prefix("arg_").and_then(|n| n.parse::<usize>().ok());
+                        match arg_idx.and_then(|i| cmd.args.get(i).map(|v| (i, v))) {
+                            Some((i, v)) if !cmd.unread_args.contains(&i) && !is_unresolved_marker(v) => {
                                 let (scan, lang) = scan_wrap_snippet(
                                     &cmd.head,
                                     &prog.wrap_lang,
@@ -4998,11 +4994,6 @@ pub fn expand_wrappers_forking(
                                 // whatever language the outer line happened to
                                 // be — the fourth site of the class M2.79 made
                                 // the first three consistent on (M2.240).
-                                //
-                                // Latent until an entry's wrap language differs
-                                // from its host's: the shipped
-                                // `python:os.system` declares bash, so the two
-                                // keys coincide whenever the host is bash.
                                 out.constructs.push((
                                     "evaluated_input".to_string(),
                                     format!(
@@ -5010,13 +5001,131 @@ pub fn expand_wrappers_forking(
                                      value of",
                                         cmd.head
                                     ),
-                                    wrap_lang_opt(prog),
+                                    Some(lang.to_string()),
                                 ));
                                 SnippetScan::default()
                             }
                             // The declared position is not there at all: the call
                             // wraps nothing, which is a fact about the call rather
                             // than a miss.
+                            None => SnippetScan::default(),
+                        }
+                    }
+                    // `python:subprocess.run`-shaped calls: the wrapped command
+                    // is either an argv vector (list/tuple of strings), a shell
+                    // snippet when `shell=True`, or a single program head (M2.74).
+                    s if s.starts_with("argv_") => {
+                        let arg_idx = s.strip_prefix("argv_").and_then(|n| n.parse::<usize>().ok());
+                        let resolved_arg = arg_idx.and_then(|i| {
+                            if let Some(v) = cmd.args.get(i) {
+                                if !cmd.keyword_args.contains(&i) {
+                                    return Some((i, v.as_str()));
+                                }
+                            }
+                            for (pos, arg) in cmd.args.iter().enumerate() {
+                                if cmd.keyword_args.contains(&pos) {
+                                    if let Some(rest) = arg.strip_prefix("args=") {
+                                        return Some((pos, rest));
+                                    }
+                                }
+                            }
+                            cmd.args.get(i).map(|v| (i, v.as_str()))
+                        });
+
+                        match resolved_arg {
+                            Some((i, v)) if !cmd.unread_args.contains(&i) && !is_unresolved_marker(v) => {
+                                let has_shell = cmd.args.iter().enumerate().any(|(pos, a)| {
+                                    let is_shell_kw =
+                                        a.eq_ignore_ascii_case("shell=true") || a == "shell=1";
+                                    is_shell_kw && !cmd.unread_args.contains(&pos)
+                                });
+                                let unread_shell = cmd.args.iter().enumerate().any(|(pos, a)| {
+                                    let is_shell_kw = a.starts_with("shell=");
+                                    is_shell_kw
+                                        && (cmd.unread_args.contains(&pos)
+                                            || (!a.eq_ignore_ascii_case("shell=true")
+                                                && !a.eq_ignore_ascii_case("shell=false")
+                                                && a != "shell=1"
+                                                && a != "shell=0"))
+                                });
+                                if unread_shell {
+                                    out.constructs.push((
+                                        "evaluated_input".to_string(),
+                                        format!(
+                                            "`{}` has an unresolved shell argument",
+                                            cmd.head
+                                        ),
+                                        Some(lang.to_string()),
+                                    ));
+                                    SnippetScan::default()
+                                } else if let Ok(argv) = serde_json::from_str::<Vec<String>>(v) {
+                                    if argv.is_empty() {
+                                        SnippetScan::default()
+                                    } else {
+                                        let child = Cmd {
+                                            head: argv[0].clone(),
+                                            args: argv[1..].to_vec(),
+                                            unread_args: Default::default(),
+                                            keyword_args: Default::default(),
+                                            callable_args: Default::default(),
+                                            chain: None,
+                                            prefix_assigns: vec![],
+                                            receiver_origin: crate::syntax::ValueOrigin::Unknown,
+                                            by_reference: false,
+                                        };
+                                        out.snippet_located[self_idx] = true;
+                                        next_lang = prog.wrap_lang.clone();
+                                        SnippetScan {
+                                            cmds: vec![child],
+                                            args_complete: vec![own_args_complete],
+                                            ..SnippetScan::default()
+                                        }
+                                    }
+                                } else if has_shell {
+                                    let (scan, lang) = scan_wrap_snippet(
+                                        &cmd.head,
+                                        &prog.wrap_lang,
+                                        v,
+                                        &mut out.srcs,
+                                        &mut out.failures,
+                                        &mut out.constructs,
+                                    );
+                                    out.snippet_located[self_idx] = true;
+                                    next_lang = lang;
+                                    scan
+                                } else {
+                                    let child = Cmd {
+                                        head: v.to_string(),
+                                        args: vec![],
+                                        unread_args: Default::default(),
+                                        keyword_args: Default::default(),
+                                        callable_args: Default::default(),
+                                        chain: None,
+                                        prefix_assigns: vec![],
+                                        receiver_origin: crate::syntax::ValueOrigin::Unknown,
+                                        by_reference: false,
+                                    };
+                                    out.snippet_located[self_idx] = true;
+                                    next_lang = prog.wrap_lang.clone();
+                                    SnippetScan {
+                                        cmds: vec![child],
+                                        args_complete: vec![own_args_complete],
+                                        ..SnippetScan::default()
+                                    }
+                                }
+                            }
+                            Some(_) => {
+                                out.constructs.push((
+                                    "evaluated_input".to_string(),
+                                    format!(
+                                        "`{}` is handed a command string vouch could not read the \
+                                     value of",
+                                        cmd.head
+                                    ),
+                                    Some(lang.to_string()),
+                                ));
+                                SnippetScan::default()
+                            }
                             None => SnippetScan::default(),
                         }
                     }
@@ -5158,9 +5267,10 @@ pub fn expand_wrappers_forking(
             // `heredoc_feeds` again per sibling would walk the knowledge a
             // second time for records this loop already judged, and would put a
             // second site in charge of "was this sibling consumed".
+            let standalone_eligible = own_args_complete && !from_input;
             let attached: Vec<&crate::syntax::Heredoc> = heredocs.iter().filter(|h| h.cmd_index == i).collect();
             let consumption: Vec<Option<(&Program, &str)>> =
-                attached.iter().map(|h| heredoc_feeds(kb, cmd, lang, h)).collect();
+                attached.iter().map(|h| heredoc_feeds(kb, cmd, lang, h, standalone_eligible)).collect();
             for (nth, heredoc) in attached.iter().enumerate() {
                 if let Some((entry, entry_lang)) = consumption[nth] {
                     let held = own_source == crate::syntax::InputSource::Heredoc(heredoc.id)

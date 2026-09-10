@@ -2231,7 +2231,7 @@ fn heredoc_feeds_ignores_an_entry_scoped_to_another_language() {
     ));
     let (cmd, doc) = one_command_with_heredoc("gadgetshell <<'EOF'\necho hi\nEOF");
     assert!(
-        heredoc_feeds(&kb, &cmd, "bash", &doc).is_none(),
+        heredoc_feeds(&kb, &cmd, "bash", &doc, true).is_none(),
         "a powershell-scoped entry consumed a bash line's here-document"
     );
 }
@@ -2253,7 +2253,7 @@ fn heredoc_feeds_consumes_an_entry_explicitly_scoped_to_the_occurrences_own_lang
     ));
     let (cmd, doc) = one_command_with_heredoc("gadgetshell <<'EOF'\necho hi\nEOF");
     assert!(
-        heredoc_feeds(&kb, &cmd, "bash", &doc).is_some(),
+        heredoc_feeds(&kb, &cmd, "bash", &doc, true).is_some(),
         "a bash-scoped entry did not consume a bash line's here-document"
     );
 }
@@ -2267,7 +2267,7 @@ fn heredoc_feeds_refuses_a_backslash_bearing_unquoted_body() {
     let kb = builtin();
     let (cmd, doc) = one_command_with_heredoc("bash <<EOF\necho a\\\\b\nEOF");
     assert!(
-        heredoc_feeds(kb, &cmd, "bash", &doc).is_none(),
+        heredoc_feeds(kb, &cmd, "bash", &doc, true).is_none(),
         "consumption trusted a body the hold rule refuses"
     );
 }
@@ -2277,7 +2277,24 @@ fn heredoc_feeds_still_consumes_a_quoted_delimiter_body_with_a_backslash() {
     // A quoted delimiter delivers verbatim, backslashes included.
     let kb = builtin();
     let (cmd, doc) = one_command_with_heredoc("bash <<'EOF'\necho a\\\\b\nEOF");
-    assert!(heredoc_feeds(kb, &cmd, "bash", &doc).is_some());
+    assert!(heredoc_feeds(kb, &cmd, "bash", &doc, true).is_some());
+}
+
+#[test]
+fn heredoc_feeds_respects_standalone_run_via_entry_applies() {
+    // M2.249: heredoc_feeds checks entry_applies (entry_covers AND NOT standalone_run).
+    // An entry declaring both evaluates_input = "stdin" and standalone_flags stands down
+    // when run with standalone flags if standalone_eligible is true.
+    let kb = builtin();
+    let (cmd, doc) = one_command_with_heredoc("bash --version <<'EOF'\necho hi\nEOF");
+    assert!(
+        heredoc_feeds(kb, &cmd, "bash", &doc, true).is_none(),
+        "standalone run consumed here-document when standalone_eligible is true"
+    );
+    assert!(
+        heredoc_feeds(kb, &cmd, "bash", &doc, false).is_some(),
+        "non-standalone-eligible run did not consume here-document"
+    );
 }
 
 // ---------------------------------------------------------------------------
