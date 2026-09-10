@@ -36,6 +36,7 @@ Two journal facts the join is built around, both from src/main.rs:
 
 import argparse
 import concurrent.futures
+import itertools
 import json
 import os
 import pathlib
@@ -96,15 +97,98 @@ class Row:
         self.decided = decided
 
 
-def harvest(roots):
-    """Walk every *.jsonl under each root and collect the tool calls.
+CODEX_DECODER = json.JSONDecoder()
 
-    Returns (rows, counters). SNAPSHOT ONCE: phase 5's re-run must replay this
-    exact row set rather than harvesting again - the store grows while it is
-    being measured, and a re-harvest would fold new history into the delta.
-    The mechanism for that is `--samples-dest` here and `--samples-source` on
-    the later run; without those flags the reuse would be a claim with nothing
-    behind it, because a second invocation has no memory of this one.
+
+def parse_codex_exec(s):
+    """Extract (cmd, workdir) from a Codex custom_tool_call input string."""
+    idx = s.find("cmd:")
+    if idx == -1:
+        idx = s.find('"cmd":')
+        if idx != -1:
+            idx += 6
+    else:
+        idx += 4
+    if idx == -1:
+        return None, None
+    while idx < len(s) and s[idx] in " \t\r\n":
+        idx += 1
+    if idx >= len(s) or s[idx] != '"':
+        return None, None
+    try:
+        cmd, _ = CODEX_DECODER.raw_decode(s, idx)
+    except Exception:
+        return None, None
+
+    cwd = None
+    widx = s.find("workdir:")
+    if widx == -1:
+        widx = s.find('"workdir":')
+        if widx != -1:
+            widx += 10
+    else:
+        widx += 8
+    if widx != -1:
+        while widx < len(s) and s[widx] in " \t\r\n":
+            widx += 1
+        if widx < len(s) and s[widx] == '"':
+            try:
+                cwd, _ = CODEX_DECODER.raw_decode(s, widx)
+            except Exception:
+                pass
+    return cmd, cwd
+
+
+def detect_file_host_from_path(path):
+    """Determine host purely from path conventions without reading disk."""
+    norm = path.replace("\\", "/").lower()
+    if "antigravity-cli/brain" in norm or norm.endswith("/transcript.jsonl") or norm.endswith("/transcript_full.jsonl"):
+        return "agy"
+    if "codex/sessions" in norm or os.path.basename(norm).startswith("rollout-"):
+        return "codex"
+    if ".claude/projects" in norm:
+        return "claude"
+    return None
+
+
+def detect_file_host(path, sample_lines=None):
+    """Determine whether a transcript JSONL file is from Claude, Codex, or Antigravity."""
+    h = detect_file_host_from_path(path)
+    if h:
+        return h
+
+    if sample_lines:
+        for line in sample_lines:
+            if '"tool_calls"' in line or '"toolCall"' in line or '"workspacePaths"' in line:
+                return "agy"
+            if '"custom_tool_call"' in line or '"function_call"' in line or '"response_item"' in line:
+                return "codex"
+            if '"tool_use"' in line or '"attachment"' in line:
+                return "claude"
+    return "claude"
+
+
+def discover_default_roots(selected_host="all"):
+    """Find default transcript directories for Claude, Codex, and Antigravity."""
+    home = os.path.expanduser("~")
+    candidates = [
+        ("claude", os.path.join(home, ".claude", "projects")),
+        ("codex", os.path.join(home, ".codex", "sessions")),
+        ("agy", os.path.join(home, ".gemini", "antigravity-cli", "brain")),
+    ]
+    roots = []
+    for host, root in candidates:
+        if selected_host != "all" and selected_host != host:
+            continue
+        if os.path.isdir(root):
+            roots.append(root)
+    return roots
+
+
+def harvest(roots):
+    """Walk every *.jsonl under each root and collect tool calls across hosts.
+
+    Returns (rows, counters).
     """
     files = []
     for root in roots:
@@ -119,66 +203,167 @@ def harvest(roots):
     records = 0
     blocks_found = 0
     duplicates = 0
+    rows_by_host = {"claude": 0, "codex": 0, "agy": 0}
+    files_by_host = {"claude": 0, "codex": 0, "agy": 0}
 
     for path in files:
+        host = detect_file_host_from_path(path)
         try:
             fh = open(path, "r", encoding="utf-8", errors="replace")
         except OSError:
             continue
+
         with fh:
-            for line in fh:
-                if '"tool_use"' not in line and '"attachment"' not in line:
+            if not host:
+                buffered = []
+                for _ in range(20):
+                    l = fh.readline()
+                    if not l:
+                        break
+                    buffered.append(l)
+                if not buffered:
                     continue
-                try:
-                    rec = json.loads(line)
-                except Exception:
-                    continue
-                records += 1
+                host = detect_file_host(path, buffered)
+                line_iter = itertools.chain(buffered, fh)
+            else:
+                line_iter = fh
 
-                # A PreToolUse hook attachment whose stdout carried a
-                # permissionDecision means some gate already decided this
-                # call. Marked, never used as a filter: a fresh machine has
-                # no prior gate, and zero-rows-from-full-logs must stay
-                # distinguishable from no-logs.
-                att = rec.get("attachment")
-                if isinstance(att, dict) and str(att.get("hookName") or "").startswith(
-                    "PreToolUse"
-                ):
-                    out = att.get("stdout") or ""
-                    if out.strip():
-                        try:
-                            hso = json.loads(out).get("hookSpecificOutput") or {}
-                        except Exception:
-                            hso = {}
-                        if hso.get("permissionDecision"):
-                            previously_decided.add(att.get("toolUseID"))
+            files_by_host[host] += 1
+            file_tag = os.path.basename(path).replace(".jsonl", "")
 
-                msg = rec.get("message") or {}
-                content = msg.get("content")
-                if not isinstance(content, list):
-                    continue
-                cwd = rec.get("cwd")
-                sidechain = bool(rec.get("isSidechain"))
-                for b in content:
-                    if not isinstance(b, dict) or b.get("type") != "tool_use":
+            if host == "claude":
+                for line in line_iter:
+                    if '"tool_use"' not in line and '"attachment"' not in line:
                         continue
-                    blocks_found += 1
-                    tid = b.get("id")
-                    # Resumed and branched sessions rewrite prior history, so
-                    # the same tool_use id appears in more than one file.
-                    if tid in by_id:
-                        duplicates += 1
+                    try:
+                        rec = json.loads(line)
+                    except Exception:
                         continue
-                    ti = b.get("input")
-                    by_id[tid] = Row(
-                        tid,
-                        b.get("name") or "",
-                        ti if isinstance(ti, dict) else {},
-                        cwd,
-                        sidechain,
-                        False,
-                    )
-                    order.append(tid)
+                    records += 1
+
+                    att = rec.get("attachment")
+                    if isinstance(att, dict) and str(att.get("hookName") or "").startswith("PreToolUse"):
+                        out = att.get("stdout") or ""
+                        if out.strip():
+                            try:
+                                hso = json.loads(out).get("hookSpecificOutput") or {}
+                            except Exception:
+                                hso = {}
+                            if hso.get("permissionDecision"):
+                                previously_decided.add(att.get("toolUseID"))
+
+                    msg = rec.get("message") or {}
+                    content = msg.get("content")
+                    if not isinstance(content, list):
+                        continue
+                    cwd = rec.get("cwd")
+                    sidechain = bool(rec.get("isSidechain"))
+                    for b in content:
+                        if not isinstance(b, dict) or b.get("type") != "tool_use":
+                            continue
+                        blocks_found += 1
+                        tid = b.get("id")
+                        if tid in by_id:
+                            duplicates += 1
+                            continue
+                        ti = b.get("input")
+                        by_id[tid] = Row(
+                            tid,
+                            b.get("name") or "",
+                            ti if isinstance(ti, dict) else {},
+                            cwd,
+                            sidechain,
+                            False,
+                        )
+                        order.append(tid)
+                        rows_by_host["claude"] += 1
+
+            elif host == "codex":
+                for rec_idx, line in enumerate(line_iter):
+                    if '"custom_tool_call"' not in line and '"function_call"' not in line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except Exception:
+                        continue
+                    records += 1
+
+                    payload = rec.get("payload") or rec.get("item")
+                    if not isinstance(payload, dict):
+                        continue
+                    ptype = payload.get("type")
+                    name = payload.get("name")
+                    tid = payload.get("call_id") or payload.get("id") or f"codex-{file_tag}-{rec_idx}"
+
+                    if ptype == "custom_tool_call" and name == "exec":
+                        cmd, cwd = parse_codex_exec(payload.get("input", ""))
+                        if cmd:
+                            blocks_found += 1
+                            if tid in by_id:
+                                duplicates += 1
+                                continue
+                            by_id[tid] = Row(tid, "Bash", {"command": cmd}, cwd, False, False)
+                            order.append(tid)
+                            rows_by_host["codex"] += 1
+                    elif ptype == "function_call":
+                        args_raw = payload.get("arguments", "{}")
+                        if isinstance(args_raw, str):
+                            try:
+                                args_dict = json.loads(args_raw)
+                            except Exception:
+                                args_dict = {"arguments": args_raw}
+                        elif isinstance(args_raw, dict):
+                            args_dict = args_raw
+                        else:
+                            args_dict = {}
+                        blocks_found += 1
+                        if tid in by_id:
+                            duplicates += 1
+                            continue
+                        if name == "apply_patch":
+                            patch_cmd = args_raw if isinstance(args_raw, str) else args_dict.get("patch", "")
+                            by_id[tid] = Row(tid, "apply_patch", {"command": patch_cmd}, None, False, False)
+                        else:
+                            by_id[tid] = Row(tid, name, args_dict, None, False, False)
+                        order.append(tid)
+                        rows_by_host["codex"] += 1
+
+            elif host == "agy":
+                conv_id = os.path.basename(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(path)))))
+                for rec_idx, line in enumerate(line_iter):
+                    if '"tool_calls"' not in line and '"toolCall"' not in line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except Exception:
+                        continue
+                    records += 1
+                    step_idx = rec.get("step_index", rec_idx)
+                    source = rec.get("source", "MODEL")
+                    sidechain = (source == "SUBAGENT")
+                    tcs = rec.get("tool_calls")
+                    if not tcs and isinstance(rec.get("toolCall"), dict):
+                        tcs = [rec["toolCall"]]
+                    if not isinstance(tcs, list):
+                        continue
+                    workspace_paths = rec.get("workspacePaths") or []
+                    default_cwd = workspace_paths[0] if workspace_paths else None
+                    for tc_idx, tc in enumerate(tcs):
+                        if not isinstance(tc, dict):
+                            continue
+                        name = tc.get("name") or ""
+                        args = tc.get("args") or {}
+                        if not isinstance(args, dict):
+                            args = {}
+                        cwd = args.get("Cwd") or default_cwd
+                        tid = tc.get("id") or f"agy-{conv_id}-{step_idx}-{tc_idx}"
+                        blocks_found += 1
+                        if tid in by_id:
+                            duplicates += 1
+                            continue
+                        by_id[tid] = Row(tid, name, args, cwd, sidechain, False)
+                        order.append(tid)
+                        rows_by_host["agy"] += 1
 
     rows = [by_id[t] for t in order]
     for r in rows:
@@ -190,6 +375,12 @@ def harvest(roots):
         "blocks_found": blocks_found,
         "duplicates": duplicates,
         "rows": len(rows),
+        "rows_claude": rows_by_host["claude"],
+        "rows_codex": rows_by_host["codex"],
+        "rows_agy": rows_by_host["agy"],
+        "files_claude": files_by_host["claude"],
+        "files_codex": files_by_host["codex"],
+        "files_agy": files_by_host["agy"],
         "previously_decided": sum(1 for r in rows if r.decided),
         "sidechain_rows": sum(1 for r in rows if r.sidechain),
         "mainthread_rows": sum(1 for r in rows if not r.sidechain),
@@ -330,6 +521,8 @@ def head_name(row):
     field are grouped under their tool name instead.
     """
     cmd = row.input.get("command")
+    if not isinstance(cmd, str) or not cmd.strip():
+        cmd = row.input.get("CommandLine")
     if not isinstance(cmd, str) or not cmd.strip():
         return "tool:" + (row.tool or "?")
     for tok in cmd.split():
@@ -882,12 +1075,15 @@ def report(joined, refused, failed, counters, stats, scratch, capped, kept, sour
         ("tool-use blocks found           ", "blocks_found"),
         ("duplicate ids removed           ", "duplicates"),
         ("rows (deduped)                  ", "rows"),
+        ("  Claude rows                    ", "rows_claude"),
+        ("  Codex rows                     ", "rows_codex"),
+        ("  Antigravity rows               ", "rows_agy"),
         ("of those, previously decided    ", "previously_decided"),
         ("subagent sidechain rows         ", "sidechain_rows"),
         ("main-thread rows                ", "mainthread_rows"),
         ("rows that used the fallback cwd ", "rows_missing_cwd"),
     ):
-        if key in counters:
+        if key in counters and (counters[key] > 0 or key in ("files", "records", "blocks_found", "rows")):
             print("  %s %8d" % (label, counters[key]))
     if capped is not None:
         print("  replayed after --cap             %8d" % capped)
@@ -1003,10 +1199,16 @@ def parse_args(argv):
     p.add_argument("--knowledge", required=True)
     p.add_argument("--my-knowledge", required=True, dest="my_knowledge")
     p.add_argument(
+        "--host",
+        choices=["all", "claude", "codex", "agy"],
+        default="all",
+        help="harness to harvest transcripts from: all, claude, codex, agy (default: all)",
+    )
+    p.add_argument(
         "--roots",
         action="append",
         default=None,
-        help="transcript root; repeatable (default: ~/.claude/projects)",
+        help="transcript root; repeatable (default: auto-discovered for --host)",
     )
     p.add_argument("--cap", type=int, default=None)
     p.add_argument("--workers", type=int, default=os.cpu_count() or 4)
@@ -1107,10 +1309,19 @@ def _run(args, scratch):
             print("--samples-source holds no rows: %s" % args.samples_source)
             return 0
     else:
-        roots = args.roots or [
-            os.path.join(os.path.expanduser("~"), ".claude", "projects")
-        ]
-        present = [r for r in roots if os.path.isdir(r)]
+        if args.roots:
+            roots = args.roots
+            present = [r for r in roots if os.path.isdir(r)]
+        else:
+            candidates = [
+                ("claude", os.path.join(os.path.expanduser("~"), ".claude", "projects")),
+                ("codex", os.path.join(os.path.expanduser("~"), ".codex", "sessions")),
+                ("agy", os.path.join(os.path.expanduser("~"), ".gemini", "antigravity-cli", "brain")),
+            ]
+            expected = [r for h, r in candidates if args.host in ("all", h)]
+            present = [r for r in expected if os.path.isdir(r)]
+            roots = expected
+
         if not present:
             print("")
             print("no session logs found under: %s" % ", ".join(roots))

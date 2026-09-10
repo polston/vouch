@@ -223,6 +223,7 @@ pub struct InstallOptions {
     pub shadow: bool,
     pub hooks_only: bool,
     pub state_dir: Option<String>,
+    pub write: bool,
 }
 
 /// Parse the complete cross-host install interface without reading either
@@ -230,17 +231,19 @@ pub struct InstallOptions {
 /// `Bash` hook name does not identify the shell that executes the command.
 pub fn parse_install_options(args: &[String]) -> Result<InstallOptions, String> {
     const USAGE: &str =
-        "usage: vouch install [--host claude|codex|agy] [--shell bash|powershell] [--state-dir <absolute>] [--shadow] [--print]";
+        "usage: vouch install [--host claude|codex|agy] [--shell bash|powershell] [--state-dir <absolute>] [--shadow] [--print] [--write]";
     let mut host = InstallHost::Claude;
     let mut shell = None;
     let mut shadow = false;
     let mut hooks_only = false;
+    let mut write = false;
     let mut state_dir = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--shadow" => shadow = true,
             "--print" => hooks_only = true,
+            "--write" => write = true,
             "--host" | "--shell" | "--state-dir" if i + 1 == args.len() => {
                 return Err(format!("vouch: {} needs a value.\n{USAGE}", args[i]));
             }
@@ -265,6 +268,11 @@ pub fn parse_install_options(args: &[String]) -> Result<InstallOptions, String> 
         }
         i += 1;
     }
+    if hooks_only && write {
+        return Err(format!(
+            "vouch: --print and --write cannot be used together.\n{USAGE}"
+        ));
+    }
     match (host, shell, state_dir.is_some()) {
         (InstallHost::Codex, None, _) => Err(format!(
             "vouch: Codex installation needs --shell bash or --shell powershell.\n{USAGE}"
@@ -275,8 +283,40 @@ pub fn parse_install_options(args: &[String]) -> Result<InstallOptions, String> 
         (InstallHost::Claude, None, true) => Err(format!(
             "vouch: --state-dir is only meaningful with --host codex.\n{USAGE}"
         )),
-        _ => Ok(InstallOptions { host, shell, shadow, hooks_only, state_dir }),
+        _ => Ok(InstallOptions { host, shell, shadow, hooks_only, state_dir, write }),
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UninstallOptions {
+    pub host: InstallHost,
+    pub write: bool,
+}
+
+pub fn parse_uninstall_options(args: &[String]) -> Result<UninstallOptions, String> {
+    const USAGE: &str = "usage: vouch uninstall [--host claude|codex|agy] [--write]";
+    let mut host = InstallHost::Claude;
+    let mut write = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--write" => write = true,
+            "--host" if i + 1 == args.len() => {
+                return Err(format!("vouch: {} needs a value.\n{USAGE}", args[i]));
+            }
+            "--host" => {
+                host = InstallHost::parse(&args[i + 1])?;
+                i += 1;
+            }
+            other => {
+                return Err(format!(
+                    "vouch: '{other}' is not a recognised uninstall flag.\n{USAGE}"
+                ));
+            }
+        }
+        i += 1;
+    }
+    Ok(UninstallOptions { host, write })
 }
 
 /// Parse the arguments after `vouch install`. Returns `(shadow, hooks_only)`.

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.20.0 (2026-09-10)
+
+
+### Features
+
+* harvest tool calls across Claude Code, Codex, and Antigravity transcripts
+* introduce `vouch uninstall [--host claude|codex|agy] [--write]` to cleanly remove vouch hooks while preserving other configuration
+* model `uninstall` and `--write` mutating operations in `knowledge.toml` under `in_place_edit` guard
+* model native Codex and Antigravity agent tools in shipped knowledge
+* support `--write` flag on `vouch install` to atomically write merged configuration to the host settings/hooks file
+
 ## 0.19.0 (2026-09-09)
 
 

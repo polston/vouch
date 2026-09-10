@@ -141,8 +141,7 @@ fn run_hook_call(
     if !emit {
         HookCall::Processed(None)
     } else if host == Host::Agy {
-        let demote = vouch::protocol::should_demote_sandbox(&input, &decision);
-        HookCall::Processed(vouch::protocol::render_for_agy(&decision, demote))
+        HookCall::Processed(vouch::protocol::render_for_agy(&decision, false))
     } else {
         HookCall::Processed(render_for(host, &decision))
     }
@@ -1474,28 +1473,106 @@ fn main() {
         };
         match planned {
             Ok(p) => {
-                println!(
-                    "{}",
-                    if options.hooks_only {
-                        &p.hooks_view
-                    } else {
-                        &p.settings
+                if options.write {
+                    if let Err(e) = vouch::install::write_file_atomically(&settings_path, &p.settings) {
+                        eprintln!("install failed: {e}");
+                        std::process::exit(1);
                     }
-                );
-                eprintln!("
-# --- what this changes ---");
-                for n in &p.notes {
-                    eprintln!("# - {n}");
-                }
-                if options.hooks_only {
-                    eprintln!(
-                        "# hooks view only - redirect the bare form to a file to save the whole document"
+                    eprintln!("# written to: {}", settings_path.display());
+                    eprintln!("\n# --- what this changed ---");
+                    for n in &p.notes {
+                        eprintln!("# - {n}");
+                    }
+                } else {
+                    println!(
+                        "{}",
+                        if options.hooks_only {
+                            &p.hooks_view
+                        } else {
+                            &p.settings
+                        }
                     );
+                    eprintln!("\n# --- what this changes ---");
+                    for n in &p.notes {
+                        eprintln!("# - {n}");
+                    }
+                    if options.hooks_only {
+                        eprintln!(
+                            "# hooks view only - redirect the bare form to a file to save the whole document"
+                        );
+                    }
+                    eprintln!("# target: {}", settings_path.display());
+                    eprintln!("# nothing was written. Use --write to write directly.");
                 }
-                eprintln!("# target: {}", settings_path.display());
-                eprintln!("# nothing was written.");
             }
-            Err(e) => eprintln!("install failed: {e}"),
+            Err(e) => {
+                eprintln!("install failed: {e}");
+                std::process::exit(1);
+            }
+        }
+        std::process::exit(0);
+    }
+
+    // `vouch uninstall [--host claude|codex|agy] [--write]` — cleanly strip
+    // vouch hook registrations from the host configuration.
+    if args.first().map(String::as_str) == Some("uninstall") {
+        let options = match vouch::cli::parse_uninstall_options(&args[1..]) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(2);
+            }
+        };
+        let settings_path = match options.host {
+            Host::Claude => std::path::PathBuf::from(home()).join(".claude/settings.json"),
+            Host::Codex => std::path::PathBuf::from(home()).join(".codex/hooks.json"),
+            Host::Agy => std::path::PathBuf::from(home()).join(".gemini/config/hooks.json"),
+        };
+        if !settings_path.exists() {
+            eprintln!(
+                "# target {} does not exist; nothing to uninstall.",
+                settings_path.display()
+            );
+            std::process::exit(0);
+        }
+        let existing = match std::fs::read_to_string(&settings_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("uninstall failed: could not read {}: {e}", settings_path.display());
+                std::process::exit(1);
+            }
+        };
+        let planned = match options.host {
+            Host::Claude => vouch::install::unplan(&existing),
+            Host::Codex => vouch::install::unplan_codex(&existing),
+            Host::Agy => vouch::install::unplan_agy(&existing),
+        };
+        match planned {
+            Ok(p) => {
+                if options.write {
+                    if let Err(e) = vouch::install::write_file_atomically(&settings_path, &p.settings) {
+                        eprintln!("uninstall failed: {e}");
+                        std::process::exit(1);
+                    }
+                    eprintln!("# uninstalled from: {}", settings_path.display());
+                    eprintln!("\n# --- what this changed ---");
+                    for n in &p.notes {
+                        eprintln!("# - {n}");
+                    }
+                } else {
+                    println!("{}", p.settings);
+                    eprintln!("\n# --- what this changes ---");
+                    for n in &p.notes {
+                        eprintln!("# - {n}");
+                    }
+                    eprintln!("# target: {}", settings_path.display());
+                    eprintln!("# nothing was written. Use --write to write directly.");
+                }
+            }
+            Err(e) => {
+                eprintln!("uninstall failed: {e}");
+                std::process::exit(1);
+            }
         }
         std::process::exit(0);
     }
@@ -1553,7 +1630,7 @@ fn main() {
     {
         println!("vouch {}", env!("CARGO_PKG_VERSION"));
         println!("usage:");
-        println!("  vouch --hook [--host claude|codex] [--shell bash|powershell] [--state-dir <absolute>] [--shadow]");
+        println!("  vouch --hook [--host claude|codex|agy] [--shell bash|powershell] [--state-dir <absolute>] [--shadow]");
         println!("                            decide a tool call (reads hook JSON on stdin)");
         println!("  vouch --hook-batch       replay JSONL hook calls in one process (status JSONL out)");
         println!("  vouch explain '<cmd>'     what vouch decides, and why");
@@ -1562,8 +1639,10 @@ fn main() {
         println!("  vouch doctor              list what vouch could not read or describe");
         println!("  vouch review [--accept X] evidence-backed rule candidates");
         println!("  vouch import [file]       translate a cc-allow config to stdout");
-        println!("  vouch install [--host claude|codex] [--shell bash|powershell] [--state-dir <absolute>] [--shadow] [--print]");
-        println!("                            print merged host hook wiring; writes nothing");
+        println!("  vouch install [--host claude|codex|agy] [--shell bash|powershell] [--state-dir <absolute>] [--shadow] [--print] [--write]");
+        println!("                            merge host hook wiring (--write updates target file)");
+        println!("  vouch uninstall [--host claude|codex|agy] [--write]");
+        println!("                            remove vouch hook wiring (--write updates target file)");
         println!("  vouch schema <config|knowledge> [--write]");
         println!("                            print (or regenerate) the reference docs");
         std::process::exit(0);

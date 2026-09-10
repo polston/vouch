@@ -301,6 +301,21 @@ function tools. Hosted tools and some specialized paths can bypass the local
 hook path, so vouch is a guardrail over observed calls, not a replacement for
 the native sandbox.
 
+For Google Antigravity:
+
+```
+~/.config/vouch/bin/vouch install --host agy --write
+# or inspect first:
+~/.config/vouch/bin/vouch install --host agy > ~/.local/state/vouch/agy-hooks.json
+```
+
+`vouch install --host agy` updates `~/.gemini/antigravity-cli/hooks.json`, registering
+`PreToolUse` for decisions and `PostToolUse` for outcomes. Passing `--write` writes
+the merged document atomically with a rollback backup. Antigravity evaluates tool calls
+(`run_command`, `write_to_file`, `replace_file_content`, and custom MCP tools) and returns
+`decision: "allow" | "ask" | "deny"`. Allowed calls bypass interactive approval prompts
+while leaving Antigravity's seatbelt sandbox boundaries intact.
+
 Add `--shadow` to register vouch beside a gate you
 are still running: it evaluates and journals every call in full and emits no
 decision, so you can measure what it would have done before it does anything.
@@ -347,7 +362,8 @@ Everything else is for you:
 | `vouch doctor` | What vouch could not read or describe: place rules that can never fire, `my-knowledge.toml` lines the merge discarded, commands it could not parse, programs it has no description of, and undeclared options on directory-changing programs, by count and by spelling |
 | `vouch review [--accept <name>]` | Rule candidates drawn from recorded outcomes, each with the counts behind it, including the ones it will not propose and why. Prints only; `--accept` is the one thing that writes, and it never proposes a guard |
 | `vouch import [file]` | Translates a cc-allow config to standard output and lists on standard error what did not translate. Writes nothing |
-| `vouch install [--host claude\|codex] [--shell bash\|powershell] [--state-dir <absolute>] [--shadow] [--print]` | Prints the selected host's merged hook document for redirecting and saving. Codex requires an explicit shell; `--state-dir` is Codex-only and makes decision/outcome journaling durable. Live Codex notes include the broker route; passive `--shadow` notes leave the native reviewer unchanged and require no broker. `--print` narrows output to the hooks-only view. Writes nothing |
+| `vouch install [--host claude\|codex\|agy] [--shell bash\|powershell] [--state-dir <absolute>] [--shadow] [--print] [--write]` | Prints the selected host's merged hook document for redirecting and saving, or updates the configuration file in place with `--write`. Codex requires an explicit shell; `--state-dir` is Codex-only and makes decision/outcome journaling durable. Live Codex notes include the broker route; passive `--shadow` notes leave the native reviewer unchanged and require no broker. `--print` narrows output to the hooks-only view |
+| `vouch uninstall [--host claude\|codex\|agy] [--write]` | Removes vouch hook registrations from the host's configuration file, printing the cleaned document to standard output or updating in place with `--write`. Preserves unrelated hooks and MCP servers |
 | `vouch schema <config\|knowledge> [--write]` | Prints the JSON Schema generated from the structs the loaders actually read; `--write` regenerates the committed schemas and the reference page |
 
 ## What will not move, and how mature this is

@@ -192,7 +192,9 @@ fn vouch_recognises_its_read_only_setup_and_diagnostic_operations() {
         "vouch doctor",
         "vouch review",
         "vouch import candidate.toml",
+        "vouch install",
         "vouch install --print",
+        "vouch uninstall",
         "vouch schema config",
     ] {
         let input = serde_json::json!({
@@ -216,6 +218,8 @@ fn vouch_recognises_but_asks_on_its_file_mutating_operations() {
         "vouch trust newcli get",
         "vouch review --accept candidate",
         "vouch schema config --write",
+        "vouch install --write",
+        "vouch uninstall --write",
     ] {
         let input = serde_json::json!({
             "session_id": "self-write",

@@ -1,9 +1,13 @@
 //! The hook registration vouch needs, and the safety of the shadow variant.
 
 use vouch::cli::{
-    parse_hook_options, parse_install_args, parse_install_options, InstallHost, InstallShell,
+    parse_hook_options, parse_install_args, parse_install_options, parse_uninstall_options,
+    InstallHost, InstallShell,
 };
-use vouch::install::{plan, plan_agy, plan_codex, plan_codex_with_state};
+use vouch::install::{
+    plan, plan_agy, plan_codex, plan_codex_with_state, unplan, unplan_agy, unplan_codex,
+    write_file_atomically,
+};
 
 const EXISTING: &str = r#"{
   "model": "opus",
@@ -581,4 +585,121 @@ fn agy_plan_generation_and_idempotency() {
         .unwrap();
     assert_eq!(live_post, "vouch --hook --host agy");
 }
+
+#[test]
+fn install_write_flag_parsed_correctly() {
+    let args = vec!["--write".to_string()];
+    let got = parse_install_options(&args).unwrap();
+    assert!(got.write);
+    assert!(!got.hooks_only);
+
+    let conflict = vec!["--print".to_string(), "--write".to_string()];
+    let err = parse_install_options(&conflict).unwrap_err();
+    assert!(err.contains("--print and --write cannot be used together"), "got: {err}");
+}
+
+#[test]
+fn uninstall_options_parsing() {
+    let bare = parse_uninstall_options(&[]).unwrap();
+    assert_eq!(bare.host, InstallHost::Claude);
+    assert!(!bare.write);
+
+    let with_write = parse_uninstall_options(&["--write".into()]).unwrap();
+    assert_eq!(with_write.host, InstallHost::Claude);
+    assert!(with_write.write);
+
+    let agy = parse_uninstall_options(&["--host".into(), "agy".into(), "--write".into()]).unwrap();
+    assert_eq!(agy.host, InstallHost::Agy);
+    assert!(agy.write);
+
+    let codex = parse_uninstall_options(&["--host".into(), "codex".into()]).unwrap();
+    assert_eq!(codex.host, InstallHost::Codex);
+    assert!(!codex.write);
+
+    let missing_val = parse_uninstall_options(&["--host".into()]);
+    assert!(missing_val.is_err());
+    assert!(missing_val.unwrap_err().contains("needs a value"));
+
+    let unknown = parse_uninstall_options(&["--bogus".into()]);
+    assert!(unknown.is_err());
+    assert!(unknown.unwrap_err().contains("usage: vouch uninstall"));
+}
+
+#[test]
+fn claude_unplan_removes_vouch_and_preserves_others() {
+    let planned = plan(EXISTING_WITH_SERVER, "C:/workspace/vouch.exe", false).unwrap();
+    assert!(planned.settings.contains("vouch.exe --hook"));
+    assert!(planned.settings.contains("mcpServers"));
+
+    let unp = unplan(&planned.settings).unwrap();
+    assert!(!unp.settings.contains("vouch"));
+    assert!(unp.settings.contains("mcpServers"));
+    assert!(unp.settings.contains("opus"));
+    assert!(unp.notes.iter().any(|n| n.contains("removed from Claude settings.json")));
+
+    // When only vouch hooks were installed in a blank config, hooks object is pruned
+    let planned_blank = plan("{}", "C:/workspace/vouch.exe", false).unwrap();
+    let unp_blank = unplan(&planned_blank.settings).unwrap();
+    let root: serde_json::Value = serde_json::from_str(&unp_blank.settings).unwrap();
+    assert!(root.get("hooks").is_none(), "empty hooks object should be cleaned up: {}", unp_blank.settings);
+}
+
+#[test]
+fn codex_unplan_removes_vouch_and_preserves_others() {
+    let existing = r#"{
+      "hooks": {
+        "PreToolUse": [
+          {"matcher":".*","hooks":[{"type":"command","command":"other-gate"}]},
+          {"matcher":".*","hooks":[{"type":"command","command":"C:/vouch.exe --hook --host codex --shell bash","statusMessage":"vouch is checking this tool call"}]}
+        ],
+        "PostToolUse": [
+          {"matcher":".*","hooks":[{"type":"command","command":"C:/vouch.exe --hook --host codex --shell bash","statusMessage":"vouch is checking this tool call"}]}
+        ]
+      }
+    }"#;
+
+    let unp = unplan_codex(existing).unwrap();
+    assert!(!unp.settings.contains("vouch.exe"));
+    assert!(unp.settings.contains("other-gate"));
+    let root: serde_json::Value = serde_json::from_str(&unp.settings).unwrap();
+    assert!(root["hooks"]["PreToolUse"].as_array().unwrap().len() == 1);
+    assert!(root["hooks"].get("PostToolUse").is_none());
+}
+
+#[test]
+fn agy_unplan_removes_vouch_group_and_preserves_others() {
+    let existing = r#"{
+      "other_plugin": {
+        "PreToolUse": [{"matcher": ".*", "hooks": [{"type": "command", "command": "other-gate"}]}]
+      }
+    }"#;
+    let planned = plan_agy(existing, "/opt/vouch", false, None).unwrap();
+    assert!(planned.settings.contains("\"vouch\""));
+    assert!(planned.settings.contains("other-gate"));
+
+    let unp = unplan_agy(&planned.settings).unwrap();
+    assert!(!unp.settings.contains("\"vouch\""));
+    assert!(unp.settings.contains("other-gate"));
+    assert!(unp.notes.iter().any(|n| n.contains("vouch hook group removed")));
+}
+
+#[test]
+fn write_file_atomically_creates_parent_dirs_and_writes() {
+    let dir = std::env::temp_dir().join(format!("vouch_test_atomic_{}", std::process::id()));
+    let target = dir.join("sub/dir/config.json");
+    let content = "{\"test\": true}";
+
+    write_file_atomically(&target, content).unwrap();
+    let read_back = std::fs::read_to_string(&target).unwrap();
+    assert_eq!(read_back, content);
+
+    // Overwrite atomically
+    let updated = "{\"test\": false}";
+    write_file_atomically(&target, updated).unwrap();
+    let read_back2 = std::fs::read_to_string(&target).unwrap();
+    assert_eq!(read_back2, updated);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 

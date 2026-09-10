@@ -25,12 +25,15 @@ Passive `--shadow` evaluates and journals every delivered call but emits
 nothing; it needs no broker and leaves `approvals_reviewer = "auto_review"` (or
 whatever reviewer is configured) and the native policy unchanged. Codex Allow
 also emits nothing, so its native sandbox and approval policy remain
-authoritative in either route.
+authoritative in either route. Google Antigravity exposes `PreToolUse` hooks
+configured in `~/.gemini/antigravity-cli/hooks.json`, answering with native
+`decision: "allow" | "ask" | "deny"` without altering sandbox elevation.
 
 Codex tool hooks cover shell commands, `apply_patch`, MCP tools, and most local
 function tools. Hosted tools and some specialized paths are outside that hook
 boundary. Report that boundary plainly: vouch is a guardrail over observed
-calls, not a replacement for Codex's sandbox.
+calls, not a replacement for Codex's sandbox. Antigravity tool hooks cover
+`run_command`, `write_to_file`, `replace_file_content`, and custom tool calls.
 
 **The judgment rules are `vouch-trust`'s hard rules, and that skill is the
 authority for them** — narrowest entry that covers the command, destructive
@@ -153,10 +156,11 @@ Run each check and put the answers in one table.
    `claude plugin update <name>` runs (restart required). A lag is a FINDING —
    report it with both numbers. On Codex, use `codex plugin list` and compare
    the installed vouch plugin with the selected local marketplace entry.
-9. **Session logs**: whether `~/.claude/projects/` exists and roughly how many
-   `*.jsonl` files are under it. This is what phase 3 replays; no logs means
-   phase 3 reports that and moves on. The current replay harness reads Claude
-   Code's JSONL format only; do not present those counts as Codex traffic.
+9. **Session logs**: whether `~/.claude/projects/`, `~/.codex/sessions/`, and
+   `~/.gemini/antigravity-cli/brain/` exist and roughly how many `*.jsonl` files
+   are under them. This is what phase 3 replays; no logs means phase 3 reports
+   that and moves on. The replay harness reads Claude Code, Codex, and Antigravity
+   JSONL formats and breaks counts down per host.
 
 **End the phase with a one-table statement of which machine state applies.**
 Exactly one:
@@ -217,7 +221,8 @@ guard refuses to let an agent change which program gates its tool calls).
 
 1. For Claude Code, run `vouch install`. For Codex, run
    `vouch install --host codex --shell <bash|powershell>`; the shell must name
-   how Codex executes `Bash` calls on this machine. For passive observation,
+   how Codex executes `Bash` calls on this machine. For Antigravity, run
+   `vouch install --host agy`. For passive observation on Codex,
    add `--shadow --state-dir <absolute durable directory>`; the same explicit
    directory reaches both decision and outcome commands, so host-attributed
    rows do not split by session cwd. **Redirect every form to a scratch file**.
@@ -232,8 +237,10 @@ guard refuses to let an agent change which program gates its tool calls).
    would change, the target path, and that nothing was written.
 3. Record privately whether the target file was absent or take a byte-for-byte
    backup, then hand the operator the one command that saves the Claude scratch
-   file over `~/.claude/settings.json`, or the Codex scratch file over
-   `~/.codex/hooks.json`, and let them run it. Restoration returns that backup,
+   file over `~/.claude/settings.json`, the Codex scratch file over
+   `~/.codex/hooks.json`, or the Antigravity scratch file over
+   `~/.gemini/antigravity-cli/hooks.json` (or pass `--write` if the operator explicitly
+   authorizes updating in place). Restoration returns that backup,
    or removes only the newly created file when no file existed before.
 4. For a **live Codex gate only**, register the sibling release binary once
    using the exact command printed in `vouch install`'s notes:
@@ -284,10 +291,13 @@ deletes it when the delta table is printed.
 
 What it does, and why each part is the way it is:
 
-1. **It walks `~/.claude/projects/**/*.jsonl` and harvests `tool_use` blocks
+1. **It walks transcript stores across hosts (`~/.claude/projects/`,
+   `~/.codex/sessions/`, `~/.gemini/antigravity-cli/brain/`) and harvests tool calls
    DIRECTLY** — tool name, input, and the containing record's `cwd` —
-   independent of whether any hook ever decided them. This departs from the
-   repository's older extractor on purpose, in four ways: no hook-attachment
+   independent of whether any hook ever decided them. Tool calls from Claude (`tool_use`),
+   Codex (`custom_tool_call` exec, `function_call`), and Antigravity (`run_command`,
+   `write_to_file`, `replace_file_content`, etc.) are mapped into unified replay rows.
+   This departs from the repository's older extractor on purpose, in four ways: no hook-attachment
    dependency (a fresh machine has no prior gate, and zero-rows-from-full-logs
    must be distinguishable from no-logs, so "tool calls found" and "of those,
    previously decided" print as separate numbers); every tool call is kept, not

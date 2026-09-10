@@ -1,18 +1,21 @@
-//! `vouch install --print` — emit the exact hook registration vouch needs.
+//! `vouch install` & `vouch uninstall` — manage hook registrations across hosts.
 //!
-//! vouch cannot write `settings.json` itself: Claude Code's own guard refuses to
-//! let an agent change which program gates its tool calls. That guard is correct
-//! and is not worked around. So this produces the exact JSON, merged with what is
-//! already there, for a human to save.
+//! Generates merged hook configuration for Claude Code (`settings.json`), OpenAI
+//! Codex (`hooks.json`), and Google Antigravity (`hooks.json`). Emits merged JSON
+//! to standard output for manual review/redirection, or atomically writes to the
+//! host's configuration file when `--write` is specified (backed up with rollback).
+//! `vouch uninstall` cleanly strips vouch registrations while preserving unrelated
+//! hooks and MCP configurations.
 //!
-//! Four events are needed, and only the first one decides anything:
+//! For Claude Code, four events are registered:
 //!   PreToolUse         — the decision
 //!   PostToolUse        — "it ran"
 //!   PostToolUseFailure — "it errored or was interrupted"
 //!   PermissionDenied   — "the user refused it"
 //!
-//! The last three exist so `vouch review` is built on real outcomes rather than
-//! on the absence of a signal, which is the mistake that killed the first design.
+//! For Codex and Antigravity, `PreToolUse` gates decisions and `PostToolUse`
+//! records outcomes. The outcome events exist so `vouch review` is built on real
+//! outcomes rather than on the absence of a signal.
 
 use serde_json::{json, Value};
 
@@ -333,7 +336,7 @@ pub fn plan_agy(
         }
         .into(),
         "Antigravity PreToolUse evaluates tool calls; PostToolUse records outcomes.".into(),
-        "Safe workspace operations with BypassSandbox are automatically demoted to run inside the sandbox.".into(),
+        "Antigravity PreToolUse automatically allows safe operations without interactive prompts.".into(),
     ];
     if state_dir.is_some() {
         notes.push("Both Antigravity hooks use the explicit stable --state-dir.".into());
@@ -461,3 +464,170 @@ pub fn plan(existing: &str, exe: &str, shadow: bool) -> Result<Plan, String> {
         notes,
     })
 }
+
+/// Remove vouch hooks from Claude Code's settings.json.
+pub fn unplan(existing: &str) -> Result<Plan, String> {
+    let mut root: Value = if existing.trim().is_empty() {
+        json!({})
+    } else {
+        serde_json::from_str(existing)
+            .map_err(|e| format!("settings.json is not valid JSON: {e}"))?
+    };
+    if !root.is_object() {
+        return Err("settings.json is not a JSON object".into());
+    }
+
+    let mut removed = 0;
+    if let Some(hooks) = root.get_mut("hooks").and_then(Value::as_object_mut) {
+        let events = ["PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionDenied"];
+        for ev in events {
+            if let Some(groups) = hooks.get_mut(ev).and_then(Value::as_array_mut) {
+                for group in groups.iter_mut() {
+                    if let Some(hook_list) = group.get_mut("hooks").and_then(Value::as_array_mut) {
+                        let before = hook_list.len();
+                        hook_list.retain(|hook| {
+                            let command = hook.get("command").and_then(Value::as_str).unwrap_or_default();
+                            vouch_exe_of(command).is_none()
+                        });
+                        removed += before - hook_list.len();
+                    }
+                }
+                groups.retain(|group| {
+                    group.get("hooks").and_then(Value::as_array).is_some_and(|h| !h.is_empty())
+                });
+            }
+            if hooks.get(ev).and_then(Value::as_array).is_some_and(|g| g.is_empty()) {
+                hooks.remove(ev);
+            }
+        }
+        if hooks.is_empty() {
+            root.as_object_mut().unwrap().remove("hooks");
+        }
+    }
+
+    let notes = if removed > 0 {
+        vec![format!("{removed} vouch hook(s) removed from Claude settings.json.")]
+    } else {
+        vec!["No vouch hooks were found in Claude settings.json.".into()]
+    };
+
+    let hooks_view = if let Some(hooks) = root.get("hooks") {
+        serde_json::to_string_pretty(&json!({ "hooks": hooks.clone() })).map_err(|e| e.to_string())?
+    } else {
+        "{}".into()
+    };
+    let settings = serde_json::to_string_pretty(&root)
+        .map_err(|e| format!("could not render settings.json: {e}"))?;
+
+    Ok(Plan {
+        settings,
+        hooks_view,
+        notes,
+    })
+}
+
+/// Remove vouch hooks from Codex's hooks.json.
+pub fn unplan_codex(existing: &str) -> Result<Plan, String> {
+    let mut root: Value = if existing.trim().is_empty() {
+        json!({})
+    } else {
+        serde_json::from_str(existing)
+            .map_err(|e| format!("hooks.json is not valid JSON: {e}"))?
+    };
+    if !root.is_object() {
+        return Err("hooks.json is not a JSON object".into());
+    }
+
+    let mut removed = false;
+    if let Some(hooks) = root.get_mut("hooks").and_then(Value::as_object_mut) {
+        for event in ["PreToolUse", "PostToolUse"] {
+            let before_count = hooks.get(event).and_then(Value::as_array).map(|a| a.len()).unwrap_or(0);
+            let kept = without_codex_vouch(hooks.get(event), event)?;
+            if kept.len() < before_count {
+                removed = true;
+            }
+            if kept.is_empty() {
+                hooks.remove(event);
+            } else {
+                hooks.insert(event.to_string(), Value::Array(kept));
+            }
+        }
+        if hooks.is_empty() {
+            root.as_object_mut().unwrap().remove("hooks");
+        }
+    }
+
+    let mut notes = Vec::new();
+    if removed {
+        notes.push("vouch hooks removed from Codex hooks.json.".into());
+        notes.push("Note: to remove the vouch_approval MCP broker from Codex, run: codex mcp remove vouch_approval".into());
+    } else {
+        notes.push("No vouch hooks were found in Codex hooks.json.".into());
+    }
+
+    let hooks_view = if let Some(hooks) = root.get("hooks") {
+        serde_json::to_string_pretty(&json!({ "hooks": hooks.clone() })).map_err(|e| e.to_string())?
+    } else {
+        "{}".into()
+    };
+    let settings = serde_json::to_string_pretty(&root)
+        .map_err(|e| format!("could not render hooks.json: {e}"))?;
+
+    Ok(Plan {
+        settings,
+        hooks_view,
+        notes,
+    })
+}
+
+/// Remove vouch hooks from Antigravity's hooks.json.
+pub fn unplan_agy(existing: &str) -> Result<Plan, String> {
+    let mut root: Value = if existing.trim().is_empty() {
+        json!({})
+    } else {
+        serde_json::from_str(existing)
+            .map_err(|e| format!("hooks.json is not valid JSON: {e}"))?
+    };
+    if !root.is_object() {
+        return Err("hooks.json is not a JSON object".into());
+    }
+
+    let removed = root.as_object_mut().unwrap().remove("vouch").is_some();
+    let notes = if removed {
+        vec!["vouch hook group removed from Antigravity hooks.json.".into()]
+    } else {
+        vec!["No vouch hook group was found in Antigravity hooks.json.".into()]
+    };
+
+    let hooks_view = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    let settings = serde_json::to_string_pretty(&root)
+        .map_err(|e| format!("could not render hooks.json: {e}"))?;
+
+    Ok(Plan {
+        settings,
+        hooks_view,
+        notes,
+    })
+}
+
+/// Write configuration atomically to `path`, creating any missing parent directories.
+pub fn write_file_atomically(path: &std::path::Path, content: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("could not create directory {}: {e}", parent.display()))?;
+    }
+    let temp_name = format!(
+        ".{}.tmp.{}",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("config"),
+        std::process::id()
+    );
+    let temp_path = path.with_file_name(temp_name);
+    if std::fs::write(&temp_path, content).is_ok() && std::fs::rename(&temp_path, path).is_ok() {
+        return Ok(());
+    }
+    let _ = std::fs::remove_file(&temp_path);
+    std::fs::write(path, content)
+        .map_err(|e| format!("could not write {}: {e}", path.display()))?;
+    Ok(())
+}
+
