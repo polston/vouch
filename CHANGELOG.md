@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.22.0 (2026-09-11)
+
+
+### Features
+
+* model gh, kubectl, flux, just, tmux, gofmt, npx, curl, man, col, lsof, helm, gitleaks, and harness tools
+
 ## 0.21.0 (2026-09-10)
 
 

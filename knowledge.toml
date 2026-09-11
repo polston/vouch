@@ -91,7 +91,14 @@ match = ["git"]
 # (`git commit -C <commit>` reuses a commit message).
 value_options = ["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--depth", "-b"]
 run_dir_flags = ["-C"]
-no_value_options = ["-q", "--quiet", "--bare", "--mirror", "--detach", "--force"]
+no_value_options = [
+  "-q", "--quiet", "--bare", "--mirror", "--detach", "--force",
+  "--no-pager", "--paginate", "-p",
+  "--version", "--help", "-h",
+  "-u", "--include-untracked", "-a", "--all",
+  "--short", "-s", "--staged", "--cached", "--patch", "--stat", "--oneline",
+]
+standalone_flags = ["--version", "-v", "--help", "-h"]
 # git is the sharp case for exact flag matching: `-C` (run dir) and `-c`
 # (config) differ only by case, and that exactness is load-bearing (M2.119
 # knowledge audit).
@@ -197,6 +204,8 @@ sub_arg_0_in = ["expire"]
 [[program]]
 match = ["gh"]
 value_options = ["-R", "--repo"]
+no_value_options = ["--help", "--version"]
+standalone_flags = ["--help", "--version"]
 # unix CLI, case-sensitive flags (M2.119 knowledge audit).
 case_sensitive_flags = true
 
@@ -346,6 +355,18 @@ no_value_options = [
   "-t", "--verbose", "-x", "--exit", "--help", "--version",
 ]
 
+# npm package runner. Wraps and executes the named package binary.
+[[program]]
+match = ["npx"]
+wraps = "rest"
+case_sensitive_flags = true
+value_options = ["-p", "--package", "-c"]
+no_value_options = [
+  "-y", "--yes", "--no", "-q", "--quiet", "-h", "--help", "-v", "--version",
+  "--no-install",
+]
+standalone_flags = ["-h", "--help", "-v", "--version"]
+
 # GNU coreutils 8.32, `nohup --help`: no options at all beyond these two.
 [[program]]
 match = ["nohup"]
@@ -480,7 +501,7 @@ evaluates_input = "always"
 # declares no flags and the veto token has no case, and it only ever narrows
 # the veto, so it cannot loosen anything.
 [[program]]
-match = ["kill"]
+match = ["kill", "pkill"]
 case_sensitive_flags = true
 
 [[program.rule]]
@@ -865,6 +886,13 @@ writes_only_with_file_mode = true
 produces = ["file_handle"]
 arg_names = ["filename", "mode"]
 
+# Reading from opened file handles. Reading is not gated by vouch; produces in-memory data.
+[[program]]
+match = ["python:.read", "python:.readline", "python:.readlines"]
+receiver_from = ["file_handle"]
+produces = ["data"]
+
+
 [[program]]
 match = ["python:.write_text", "python:.write_bytes", "python:.touch", "python:.mkdir"]
 writes = "arg_0"
@@ -1048,7 +1076,7 @@ match = [
   "python:range", "python:enumerate", "python:reversed", "python:repr",
   "python:type", "python:chr", "python:ord", "python:hex", "python:oct",
   "python:bin", "python:format", "python:hash", "python:input",
-  "python:exit", "python:quit",
+  "python:exit", "python:quit", "python:next",
 ]
 
 # The higher-order builtins the group above fenced off. M2.86 excluded these
@@ -1243,7 +1271,7 @@ match = [
   "python:.lower", "python:.upper", "python:.strip", "python:.lstrip",
   "python:.rstrip", "python:.startswith", "python:.endswith",
   "python:.split", "python:.rsplit", "python:.splitlines", "python:.join",
-  "python:.append", "python:.extend", "python:.group",
+  "python:.append", "python:.extend", "python:.add", "python:.group",
   "python:.groups", "python:.groupdict", "python:.format", "python:.count",
   "python:.find", "python:.index", "python:.encode", "python:.decode",
   "python:.isdigit", "python:.most_common", "python:.rfind", "python:.ljust",
@@ -1279,6 +1307,21 @@ produces = ["data"]
 # in-memory dict lookup, not a filesystem or subprocess access.
 [[program]]
 match = ["python:os.environ.get"]
+produces = ["data"]
+
+# Pure construction of Path objects in memory. No filesystem access, process movement, or execution.
+[[program]]
+match = [
+  "python:pathlib.Path", "python:pathlib.PurePath", "python:pathlib.PosixPath",
+  "python:pathlib.WindowsPath", "python:pathlib.PurePosixPath", "python:pathlib.PureWindowsPath",
+  "python:Path",
+]
+produces = ["data"]
+
+# Reading from file paths. Reading is not gated by vouch; returns in-memory text/bytes data.
+[[program]]
+match = ["python:.read_text", "python:.read_bytes"]
+produces = ["data"]
 
 # Parses source text into a syntax tree; unlike eval/exec, it never runs it.
 [[program]]
@@ -1631,11 +1674,20 @@ case_sensitive_flags = true
 # --help all` on this machine (8.18.0): `-o, --output <file>`, `--output-dir
 # <dir>`, `-C, --continue-at <offset>` take values; `-O, --remote-name`,
 # `-s`, `-S`, `-L`, `-f` do not.
-value_options = ["-o", "--output", "--output-dir", "-C", "--continue-at"]
+value_options = [
+  "-o", "--output", "--output-dir", "-C", "--continue-at",
+  "-X", "--request", "-H", "--header", "-d", "--data", "--data-raw",
+  "--data-binary", "--data-urlencode", "-u", "--user", "-m", "--max-time",
+  "--connect-timeout", "-w", "--write-out", "-A", "--user-agent",
+  "-e", "--referer", "-b", "--cookie", "-c", "--cookie-jar",
+]
 no_value_options = [
   "-O", "--remote-name", "--remote-name-all", "-s", "--silent", "-S",
-  "--show-error", "-L", "--location", "-f", "--fail",
+  "--show-error", "-L", "--location", "-f", "--fail", "-k", "--insecure",
+  "-I", "--head", "-i", "--include", "-v", "--verbose", "-g", "--globoff",
+  "-N", "--no-buffer", "--compressed",
 ]
+standalone_flags = ["--help", "-h", "--version", "-V"]
 # `-O`/`--remote-name` saves under the URL's own basename, in the directory
 # it was run from. Verified by running it against a file:// URL: the named
 # file appeared in the run directory with no token on the line naming it.
@@ -1974,11 +2026,15 @@ match = ["codex"]
 subcommand_paths = [
   ["mcp", "get"],
   ["mcp", "remove"],
+  ["mcp", "list"],
   ["plugin", "list"],
   ["plugin", "remove"],
+  ["plugin", "marketplace", "list"],
 ]
-value_options = ["-c", "--config", "--enable", "--disable"]
-no_value_options = ["-h", "--help"]
+value_options = ["-c", "--config", "--enable", "--disable", "-C", "--ask-for-approval", "-a", "--sandbox", "-s"]
+no_value_options = ["-h", "--help", "--version", "--json", "--no-alt-screen", "--approve-for-me"]
+standalone_flags = ["-h", "--help", "--version"]
+run_dir_flags = ["-C"]
 case_sensitive_flags = true
 
 [[program.rule]]
@@ -2117,7 +2173,7 @@ match = ["ls", "dir", "stat", "du", "df", "file", "tree", "diff", "cmp", "less",
 match = [
   "ps", "pgrep", "tasklist", "date", "uname", "hostname", "whoami", "id",
   "uptime", "nvidia-smi", "ipconfig", "ifconfig", "netstat", "arp", "dig",
-  "nslookup", "ping", "systeminfo", "free", "top", "wmic",
+  "nslookup", "ping", "systeminfo", "free", "top", "wmic", "lsof",
 ]
 
 # Shell builtins that change only the shell's own state. `cd`, `pushd`, `popd`,
@@ -2290,6 +2346,16 @@ writes = "all_args"
 standalone_flags = ["--version", "-V", "--help", "-h", "--check"]
 no_value_options = ["--check", "-v", "--verbose", "-q", "--quiet"]
 
+# Go code formatter. Formats arguments in place when -w is given.
+[[program]]
+match = ["gofmt"]
+case_sensitive_flags = true
+writes = "flags_only"
+write_flags = ["-w"]
+no_value_options = ["-d", "-e", "-l", "-s", "-w", "-h", "-help", "--help"]
+value_options = ["-r"]
+standalone_flags = ["-h", "-help", "--help"]
+
 # macOS extended attributes utility.
 [[program]]
 match = ["xattr"]
@@ -2304,6 +2370,120 @@ match = ["sw_vers"]
 case_sensitive_flags = true
 standalone_flags = ["-productVersion", "-buildVersion", "-productName", "--help", "-h"]
 no_value_options = ["-productVersion", "-buildVersion", "-productName"]
+
+# Online manual pager and viewer. Reads system documentation; writes nothing.
+[[program]]
+match = ["man"]
+case_sensitive_flags = true
+standalone_flags = ["--help", "-h", "--version", "-V"]
+value_options = [
+  "-P", "--pager", "-M", "--manpath", "-m", "--systems",
+  "-S", "-s", "--sections", "-C", "--config-file", "-p", "--preprocessor",
+  "-B", "-H", "-T", "-X",
+]
+no_value_options = [
+  "-a", "--all", "-c", "--catman", "-d", "--debug", "-D", "--default",
+  "-f", "--whatis", "-k", "--apropos", "-K", "--global-apropos",
+  "-w", "-W", "--where", "--path", "-l", "--local-file", "-u", "--update",
+  "-i", "--ignore-case", "-I", "--match-case", "-E", "-h", "--help",
+  "-V", "--version",
+]
+
+# Filter reverse line feeds from terminal/nroff stream. Pure text filter.
+[[program]]
+match = ["col"]
+case_sensitive_flags = true
+standalone_flags = ["-h", "--help", "-V", "--version"]
+value_options = ["-l"]
+no_value_options = ["-b", "-f", "-p", "-x", "-h", "--help", "-V", "--version"]
+
+# Command runner.
+[[program]]
+match = ["just"]
+case_sensitive_flags = true
+standalone_flags = ["--version", "-V", "--help", "-h", "--list", "-l", "--summary"]
+value_options = ["-f", "--justfile", "-d", "--working-directory", "--set"]
+no_value_options = [
+  "--version", "-V", "--help", "-h", "--list", "-l", "--summary",
+  "-q", "--quiet", "-v", "--verbose",
+]
+
+# Terminal multiplexer.
+[[program]]
+match = ["tmux"]
+case_sensitive_flags = true
+standalone_flags = ["-V", "--help", "-h"]
+value_options = ["-c", "-f", "-L", "-S"]
+no_value_options = ["-2", "-8", "-C", "-u", "-v", "-V", "-h", "--help"]
+
+[[program.rule]]
+guard = "process_control"
+source = "declared: terminating tmux sessions or server"
+subcommand_in = ["kill-session", "kill-server", "kill-window", "kill-pane"]
+
+# Kubernetes cluster management CLI.
+[[program]]
+match = ["kubectl"]
+case_sensitive_flags = true
+standalone_flags = ["--help", "-h", "--version"]
+value_options = [
+  "--context", "-n", "--namespace", "--server", "-s", "--kubeconfig",
+  "--tls-server-name", "--cluster", "--user", "--client-certificate",
+  "--client-key", "--certificate-authority", "--token", "--as",
+  "--as-group", "--request-timeout", "-l", "--selector", "-o", "--output",
+  "-f", "--filename", "--dry-run", "--field-selector", "--sort-by",
+]
+no_value_options = [
+  "--insecure-skip-tls-verify", "-h", "--help", "--version",
+  "-A", "--all-namespaces",
+]
+
+[[program.rule]]
+guard = "remote_execution"
+source = "declared: pod/container command execution"
+subcommand_in = ["exec"]
+
+# Flux CD Kubernetes GitOps operator CLI.
+[[program]]
+match = ["flux"]
+case_sensitive_flags = true
+standalone_flags = ["--help", "-h", "--version", "-v"]
+value_options = [
+  "--context", "-n", "--namespace", "--kubeconfig",
+]
+no_value_options = [
+  "-h", "--help", "-v", "--version", "-s", "--silent",
+]
+
+# Kubernetes package manager CLI.
+[[program]]
+match = ["helm"]
+case_sensitive_flags = true
+standalone_flags = ["--help", "-h"]
+value_options = [
+  "--kube-context", "--kubeconfig", "-n", "--namespace",
+  "-f", "--values", "--set", "--set-string", "--set-file", "--set-json",
+  "--version", "--output-dir", "--show-only",
+]
+no_value_options = [
+  "-h", "--help", "--debug", "--dry-run",
+]
+
+# Secret scanner CLI.
+[[program]]
+match = ["gitleaks"]
+case_sensitive_flags = true
+standalone_flags = ["--help", "-h", "--version"]
+value_options = [
+  "--source", "-s", "--config", "-c", "--report-path", "-r",
+  "--report-format", "-f", "--timeout", "--log-opts", "--exclude-path",
+  "--exit-code",
+]
+no_value_options = [
+  "--no-git", "--redact", "--verbose", "-v", "--no-banner",
+  "--staged", "--help", "-h",
+]
+
 
 # ============================================================================
 # HARNESS TOOLS
@@ -2343,15 +2523,22 @@ match = ["WebFetch", "WebSearch"]
 source = "declared: deliberately out of scope, not gated"
 
 [[tool]]
-match = ["Task", "Agent", "Skill", "Workflow", "SendMessage"]
+match = ["Task", "Agent", "Skill", "Workflow", "SendMessage", "send_message", "followup_task"]
 source = "starts work whose own tool calls are gated, so this does not allow its effects"
 
 [[tool]]
-match = ["TodoWrite", "AskUserQuestion", "ExitPlanMode", "EnterPlanMode", "StructuredOutput", "ReportFindings", "PushNotification"]
+match = [
+  "TodoWrite", "AskUserQuestion", "ExitPlanMode", "EnterPlanMode",
+  "StructuredOutput", "ReportFindings", "PushNotification", "SendFeedback",
+  "SendUserFile",
+]
 source = "talks to the operator or the harness; touches no file"
 
 [[tool]]
-match = ["TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "TaskOutput", "TaskStop", "Monitor", "ScheduleWakeup"]
+match = [
+  "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "TaskOutput", "TaskStop",
+  "Monitor", "ScheduleWakeup", "CronList", "CronCreate", "CronDelete", "BashOutput",
+]
 source = "the harness's own bookkeeping"
 
 [[tool]]
@@ -2364,7 +2551,7 @@ source = "leaves a worktree, and can delete it"
 action = "ask"
 
 [[tool]]
-match = ["Bash"]
+match = ["Bash", "bash"]
 source = "runs the `command` field as bash in the calling session's directory"
 cwd_from_call = true
 [[tool.snippet]]
@@ -2404,7 +2591,7 @@ match = ["update_plan"]
 source = "updates Codex's in-session task plan and touches no project file"
 
 [[tool]]
-match = ["request_user_input"]
+match = ["request_user_input", "request_user_input_async"]
 source = "asks the operator a question and touches no project file"
 
 [[tool]]
@@ -2450,7 +2637,7 @@ match = ["invoke_subagent", "define_subagent", "manage_subagents"]
 source = "starts work whose own tool calls are gated, so this does not allow its effects"
 
 [[tool]]
-match = ["wait", "wait_agent", "list_agents", "ListAgents"]
+match = ["wait", "wait_agent", "list_agents", "ListAgents", "interrupt_agent", "sleep"]
 source = "Codex/Claude agent coordination and status inspection; touches no files"
 
 [[tool]]

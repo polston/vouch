@@ -134,6 +134,118 @@ fn sub_arg_0_anchors_on_the_resolved_verb_index_not_equal_text() {
 }
 
 #[test]
+fn gh_standalone_flags_allow_without_unread_verb() {
+    let cfg = load("[lang.bash]\ndefault = \"allow\"\n").unwrap();
+    for command in ["gh --version", "gh --help", "gh -R repo pr view 123"] {
+        match vouch::engine::decide_bash(&cfg, command) {
+            Decision::Allow(_) => {}
+            other => panic!("expected Allow for `{command}`, got: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn gofmt_modeling_recognises_flags_and_standalone() {
+    let cfg = load("[lang.bash]\ndefault = \"allow\"\n").unwrap();
+    for command in ["gofmt -h", "gofmt --help", "gofmt main.go", "gofmt -s -d main.go"] {
+        match vouch::engine::decide_bash(&cfg, command) {
+            Decision::Allow(_) => {}
+            other => panic!("expected Allow for `{command}`, got: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn standard_python_in_memory_methods_are_modeled() {
+    let cfg = load(
+        "[lang.bash]\ndefault = \"allow\"\n[lang.python]\ndefault = \"allow\"\n",
+    )
+    .unwrap();
+    let snippets = [
+        r#"python3 -c "import pathlib; p = pathlib.Path('foo'); s = p.read_text(); s.splitlines()""#,
+        r#"python3 -c "s = {'a'}; s.add('b')""#,
+        r#"python3 -c "it = reversed([1, 2]); v = next(it)""#,
+        r#"python3 -c "import os; u = os.environ.get('USER', '').lower()""#,
+        r#"python3 -c "d = {'a': 1}; v = d.get('a')""#,
+        r#"python3 -c "import json; d = json.load(open('foo')); v = d.get('a')""#,
+    ];
+    for snippet in snippets {
+        match vouch::engine::decide_bash(&cfg, snippet) {
+            Decision::Allow(_) => {}
+            other => panic!("expected Allow for `{snippet}`, got: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn npx_wraps_commands_and_standalone_flags() {
+    let cfg = load("[lang.bash]\ndefault = \"allow\"\n").unwrap();
+    for command in ["npx --version", "npx -h", "npx --yes echo hi"] {
+        match vouch::engine::decide_bash(&cfg, command) {
+            Decision::Allow(_) => {}
+            other => panic!("expected Allow for `{command}`, got: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn tmux_and_kubectl_and_flux_and_just_are_modeled() {
+    let cfg = load("[lang.bash]\ndefault = \"allow\"\n").unwrap();
+    for command in [
+        "tmux -V",
+        "tmux list-panes",
+        "just --list",
+        "just check",
+        "flux --version",
+        "flux get kustomizations",
+        "kubectl --version",
+        "kubectl --context my-cluster -n kube-system get pods",
+        "curl -s -X POST -H 'Content-Type: application/json' https://api.example.com",
+    ] {
+        match vouch::engine::decide_bash(&cfg, command) {
+            Decision::Allow(_) => {}
+            other => panic!("expected Allow for `{command}`, got: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn kubectl_exec_and_tmux_kill_fire_declared_guards() {
+    let cfg = load("[lang.bash]\ndefault = \"allow\"\n[guards]\nremote_execution = \"deny\"\nprocess_control = \"deny\"\n").unwrap();
+    for (cmd, expected_guard) in [
+        ("kubectl exec -n default my-pod -- bash", "remote_execution"),
+        ("tmux kill-session -t my-session", "process_control"),
+        ("pkill -f my-proc", "process_control"),
+    ] {
+        match vouch::engine::decide_bash(&cfg, cmd) {
+            Decision::Deny(r) => assert!(r.contains(expected_guard), "{cmd}: expected {expected_guard}, got {r}"),
+            other => panic!("expected Deny with {expected_guard} for `{cmd}`, got: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn lsof_and_helm_and_gitleaks_are_modeled() {
+    let cfg = load("[lang.bash]\ndefault = \"allow\"\n").unwrap();
+    for command in [
+        "lsof -nP -iTCP:5432 -sTCP:LISTEN",
+        "lsof -p 1234",
+        "helm --help",
+        "helm template my-chart deploy/chart",
+        "helm show values prometheus-community/kube-prometheus-stack",
+        "gitleaks --version",
+        "gitleaks detect --source . --no-git --redact",
+        "pkill -0 my-proc",
+    ] {
+        match vouch::engine::decide_bash(&cfg, command) {
+            Decision::Allow(_) => {}
+            other => panic!("expected Allow for `{command}`, got: {other:?}"),
+        }
+    }
+}
+
+
+#[test]
 fn verb_readability_is_language_specific() {
     let cfg = load(
         "[lang.powershell]\ndefault = \"allow\"\n[lang.python]\ndefault = \"allow\"\n[guards]\nhistory_rewrite = \"deny\"\n",
