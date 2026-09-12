@@ -834,6 +834,12 @@ fn overlay_is_exhaustive_over_every_program_field() {
         wrap_head_flags: vec!["-FilePath".to_string()],
         wrap_exec_flags: vec!["-exec".to_string()],
         wrap_exec_terminators: vec![";".to_string()],
+        capabilities: vec!["network".to_string()],
+        sub_capability: vec![vouch::guards::SubCapability {
+            subcommand: Some("pull".to_string()),
+            subcommand_in: vec![],
+            capabilities: vec!["network".to_string()],
+        }],
     };
     // The shipped side is otherwise blank, except for the two fields whose
     // documented semantics only show up against a non-empty starting point:
@@ -1044,6 +1050,21 @@ fn overlay_is_exhaustive_over_every_program_field() {
         p.wrap_exec_terminators,
         vec![";".to_string()],
         "wrap_exec_terminators did not arrive"
+    );
+    assert_eq!(
+        p.capabilities,
+        vec!["network".to_string()],
+        "capabilities did not arrive"
+    );
+    assert_eq!(
+        p.sub_capability.len(),
+        1,
+        "sub_capability did not arrive"
+    );
+    assert_eq!(
+        p.sub_capability[0].subcommand.as_deref(),
+        Some("pull"),
+        "sub_capability subcommand mismatch"
     );
 
     // The powershell portion of base's original (unscoped) claim for "p"

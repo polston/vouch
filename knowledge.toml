@@ -76,7 +76,9 @@
 # origin claims.
 # 11 (2026-08-27): `[[program]]` gained structured `subcommand_paths` for
 # exact nested operation recognition.
-version = 13
+# 14 (2026-09-11): host and network capability declarations (capabilities, sub_capability)
+# for structural sandbox demotion (M2.258).
+version = 14
 
 # ============================================================================
 # FROM YOUR EXISTING POLICY — these are rules your current tool already applies
@@ -103,6 +105,14 @@ standalone_flags = ["--version", "-v", "--help", "-h"]
 # (config) differ only by case, and that exactness is load-bearing (M2.119
 # knowledge audit).
 case_sensitive_flags = true
+
+[[program.sub_capability]]
+subcommand_in = ["push", "fetch", "pull", "clone", "remote"]
+capabilities = ["network"]
+
+[[program.sub_capability]]
+subcommand_in = ["commit", "merge", "rebase", "reset", "checkout", "switch", "branch", "tag", "stash", "cherry-pick"]
+capabilities = ["external_paths"]
 
 [[program.rule]]
 guard = "history_rewrite"
@@ -203,6 +213,7 @@ sub_arg_0_in = ["expire"]
 
 [[program]]
 match = ["gh"]
+capabilities = ["network"]
 value_options = ["-R", "--repo"]
 no_value_options = ["--help", "--version"]
 standalone_flags = ["--help", "--version"]
@@ -246,6 +257,7 @@ any_arg_prefix = ["-i."]
 
 [[program]]
 match = ["ssh"]
+capabilities = ["network"]
 # unix, case-sensitive flags (M2.119 knowledge audit).
 case_sensitive_flags = true
 [[program.rule]]
@@ -1643,6 +1655,7 @@ case_sensitive_flags = true
 # local path rules have nothing to say about it.
 [[program]]
 match = ["rsync", "scp"]
+capabilities = ["network"]
 writes = "named"
 write_flags = ["-t", "--target-directory"]
 case_sensitive_flags = true
@@ -1665,6 +1678,7 @@ writes = "of_prefix"
 # current directory) that names no path here.
 [[program]]
 match = ["curl"]
+capabilities = ["network"]
 writes = "flags_only"
 write_flags = ["-o", "--output"]
 case_sensitive_flags = true
@@ -1699,6 +1713,7 @@ unless_flags = ["-o", "--output", "--output-dir"]
 
 [[program]]
 match = ["wget"]
+capabilities = ["network"]
 writes = "flags_only"
 write_flags = ["-O", "--output-document", "-P", "--directory-prefix"]
 case_sensitive_flags = true
@@ -1725,6 +1740,7 @@ unless_flags = ["-O", "--output-document", "-P", "--directory-prefix", "--spider
 
 [[program]]
 match = ["invoke-webrequest", "iwr", "invoke-restmethod", "irm"]
+capabilities = ["network"]
 writes = "flags_only"
 write_flags = ["-outfile"]
 
@@ -2424,6 +2440,7 @@ subcommand_in = ["kill-session", "kill-server", "kill-window", "kill-pane"]
 # Kubernetes cluster management CLI.
 [[program]]
 match = ["kubectl"]
+capabilities = ["network"]
 case_sensitive_flags = true
 standalone_flags = ["--help", "-h", "--version"]
 value_options = [
@@ -2446,6 +2463,7 @@ subcommand_in = ["exec"]
 # Flux CD Kubernetes GitOps operator CLI.
 [[program]]
 match = ["flux"]
+capabilities = ["network"]
 case_sensitive_flags = true
 standalone_flags = ["--help", "-h", "--version", "-v"]
 value_options = [
@@ -2458,6 +2476,7 @@ no_value_options = [
 # Kubernetes package manager CLI.
 [[program]]
 match = ["helm"]
+capabilities = ["network"]
 case_sensitive_flags = true
 standalone_flags = ["--help", "-h"]
 value_options = [

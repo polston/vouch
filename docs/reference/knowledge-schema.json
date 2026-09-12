@@ -154,6 +154,14 @@
             "type": "string"
           }
         },
+        "capabilities": {
+          "description": "Host and environment capabilities this program requires, e.g. \"network\",\n\"daemon\", \"external_paths\".",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
         "case_sensitive_flags": {
           "description": "Whether `write_flags` must match case exactly.\n\nPowerShell parameter names are case-insensitive, so `-Path` is declared\nlowercase and matched loosely. Unix flags are NOT: `tar -C` is the\ndestination directory while `tar -c` means create, and matching them\nloosely would record the token after `-c` as a written path.\n\n`None` means the entry did not say. That differs from `Some(false)` once\ntwo files describe the same program: unset means \"keep what the other\nfile said\", and only an entry that spells it out changes it.",
           "type": [
@@ -329,6 +337,13 @@
           "default": [],
           "items": {
             "type": "string"
+          }
+        },
+        "sub_capability": {
+          "description": "Subcommand-specific capability declarations, written as `[[program.sub_capability]]`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SubCapability"
           }
         },
         "sub_write": {
@@ -563,6 +578,37 @@
         "name",
         "trailing_from"
       ]
+    },
+    "SubCapability": {
+      "description": "Host and environment capabilities required for specific subcommands of a\nprogram — e.g. `git push` requires \"network\", while `git status` requires none.",
+      "type": "object",
+      "properties": {
+        "capabilities": {
+          "description": "Capabilities required by these subcommands: \"network\", \"external_paths\", \"daemon\".",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "subcommand": {
+          "description": "The subcommand this applies to, e.g. \"push\".",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "subcommand_in": {
+          "description": "Subcommands this applies to, e.g. [\"push\", \"fetch\", \"pull\"].",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
     },
     "SubWrite": {
       "description": "A write target that depends on the SUBCOMMAND, not on the program as a\nwhole — `git` writes wherever `clone`, `init` and `worktree add` are\ntold to, and nowhere for `status` or `log`.",

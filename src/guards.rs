@@ -551,6 +551,40 @@ pub struct Program {
     /// file already claimed.
     #[serde(default)]
     pub named_positional: Option<String>,
+    /// Host and environment capabilities this program requires, e.g. "network",
+    /// "daemon", "external_paths".
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    /// Subcommand-specific capability declarations, written as `[[program.sub_capability]]`.
+    #[serde(default)]
+    pub sub_capability: Vec<SubCapability>,
+}
+
+/// Host and environment capabilities required for specific subcommands of a
+/// program — e.g. `git push` requires "network", while `git status` requires none.
+#[derive(Debug, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SubCapability {
+    /// The subcommand this applies to, e.g. "push".
+    #[serde(default)]
+    pub subcommand: Option<String>,
+    /// Subcommands this applies to, e.g. ["push", "fetch", "pull"].
+    #[serde(default)]
+    pub subcommand_in: Vec<String>,
+    /// Capabilities required by these subcommands: "network", "external_paths", "daemon".
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+}
+
+impl SubCapability {
+    pub fn matches(&self, sub: &str) -> bool {
+        if let Some(ref s) = self.subcommand {
+            if s == sub {
+                return true;
+            }
+        }
+        self.subcommand_in.iter().any(|s| s == sub)
+    }
 }
 
 /// A write target that depends on the SUBCOMMAND, not on the program as a
@@ -3040,6 +3074,34 @@ pub fn entry_for_cmd<'k>(kb: &'k Knowledge, cmd: &Cmd, lang: &str) -> Option<&'k
 /// either unrelated externals or nothing at all.
 pub fn is_modeled(kb: &Knowledge, head: &str, lang: &str) -> bool {
     entry_for(kb, head, lang).is_some()
+}
+
+/// Collects all declared capabilities for this command occurrence.
+///
+/// Combines program-level `capabilities` with matching `sub_capability` blocks
+/// for the resolved subcommand (if any).
+pub fn capabilities_for_cmd(kb: &Knowledge, cmd: &Cmd, lang: &str) -> Vec<String> {
+    let mut caps = Vec::new();
+    let sub = subcommand_of_in(kb, cmd, lang);
+    for prog in entries_for_cmd(kb, cmd, lang) {
+        for c in &prog.capabilities {
+            if !caps.contains(c) {
+                caps.push(c.clone());
+            }
+        }
+        if let Some(sub_verb) = sub {
+            for sc in &prog.sub_capability {
+                if sc.matches(sub_verb) {
+                    for c in &sc.capabilities {
+                        if !caps.contains(c) {
+                            caps.push(c.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    caps
 }
 
 /// What `listable_standalone` found: the flags a fresh (or widened)

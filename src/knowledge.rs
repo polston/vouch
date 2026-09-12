@@ -232,6 +232,9 @@ const VALID_CHANGES_DIR: &[&str] = &["no", "stated", "stack", "unstated"];
 /// `guards::Program` for what each value means (M2.128).
 const VALID_NAMED_POSITIONAL: &[&str] = &["first", "last"];
 
+/// The closed set `Program::capabilities` and `SubCapability::capabilities` may hold.
+pub const VALID_CAPABILITIES: &[&str] = &["network", "external_paths", "daemon"];
+
 /// The ASCII parameter-name grammar shared by Python keyword claims.
 fn is_parameter_name(name: &str) -> bool {
     name.chars()
@@ -397,17 +400,11 @@ fn scope_of(languages: &[String]) -> HashSet<String> {
 /// retractable `snippet_args` vector takes it to 12.
 ///
 /// Widening the closed set `wrap_lang` may hold — `awk` and `perl` joining
-/// `javascript` in `UNSCANNED_SNIPPET_LANGUAGES` — takes it to 13. That is a
-/// new VALUE of an existing key rather than a new key, and the distinction
-/// matters to what an old binary reports: a new key trips
-/// `deny_unknown_fields`, the file fails to PARSE, and `GapKind::NewerThanBinary`
-/// gives the precise "your vouch is older than this file" refusal. A new value
-/// parses fine and fails later in `validate_wrap_lang`, so an old binary names
-/// the offending value instead. Still loud, still fail-closed, and still worth
-/// the bump — the rule this constant states is about what the shipped file can
-/// SAY, which a widened set changes — but the refusal is less precise than the
-/// one the gate was built for (M2.244).
-pub const KNOWLEDGE_SCHEMA_VERSION: u32 = 13;
+/// `javascript` in `UNSCANNED_SNIPPET_LANGUAGES` — takes it to 13.
+///
+/// Host and network capability declarations (`capabilities`, `sub_capability`)
+/// take it to 14 (M2.258).
+pub const KNOWLEDGE_SCHEMA_VERSION: u32 = 14;
 
 /// Semantic checks `deny_unknown_fields` cannot express: a `takes` value
 /// outside the closed set, a `run_dir_flags` entry that is not also in
@@ -422,6 +419,36 @@ pub const KNOWLEDGE_SCHEMA_VERSION: u32 = 13;
 /// and neither is a claim nobody checked).
 pub(crate) fn validate(kb: &Knowledge) -> Result<(), String> {
     for prog in &kb.program {
+        for cap in &prog.capabilities {
+            if !VALID_CAPABILITIES.contains(&cap.as_str()) {
+                return Err(format!(
+                    "[[program]] {:?}: capabilities contains {:?}, which must be one of {:?}",
+                    prog.match_names, cap, VALID_CAPABILITIES
+                ));
+            }
+        }
+        for sc in &prog.sub_capability {
+            if sc.subcommand.is_none() && sc.subcommand_in.is_empty() {
+                return Err(format!(
+                    "[[program]] {:?}: sub_capability must specify either `subcommand` or `subcommand_in`",
+                    prog.match_names
+                ));
+            }
+            if sc.capabilities.is_empty() {
+                return Err(format!(
+                    "[[program]] {:?}: sub_capability has no capabilities declared",
+                    prog.match_names
+                ));
+            }
+            for cap in &sc.capabilities {
+                if !VALID_CAPABILITIES.contains(&cap.as_str()) {
+                    return Err(format!(
+                        "[[program]] {:?}: sub_capability has capability {:?}, which must be one of {:?}",
+                        prog.match_names, cap, VALID_CAPABILITIES
+                    ));
+                }
+            }
+        }
         for sw in &prog.sub_write {
             if !VALID_TAKES.contains(&sw.takes.as_str()) {
                 return Err(format!(
@@ -1720,6 +1747,12 @@ fn overlay(base: &mut Program, mine: &Program) {
     }
     if mine.named_positional.is_some() {
         base.named_positional = mine.named_positional.clone();
+    }
+    if !mine.capabilities.is_empty() {
+        base.capabilities = mine.capabilities.clone();
+    }
+    if !mine.sub_capability.is_empty() {
+        base.sub_capability = mine.sub_capability.clone();
     }
     // `languages` is deliberately NOT field-copied here. Which language scope
     // a split-off piece of an overlay ends up with is computed by

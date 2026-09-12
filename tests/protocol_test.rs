@@ -222,6 +222,7 @@ fn renders_agy_allow_ask_deny_and_abstain() {
 #[test]
 fn demotes_safe_local_commands_in_agy() {
     use vouch::protocol::{render_for_agy, should_demote_sandbox};
+    let kb = vouch::guards::in_effect();
 
     let raw = r#"{
         "toolCall": {
@@ -236,7 +237,7 @@ fn demotes_safe_local_commands_in_agy() {
     }"#;
     let input = parse_input(raw).unwrap();
     let decision = Decision::Allow("known local read".into());
-    assert!(should_demote_sandbox(&input, &decision));
+    assert!(should_demote_sandbox(&input, &decision, kb));
 
     let rendered = render_for_agy(&decision, true).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&rendered).unwrap();
@@ -247,6 +248,7 @@ fn demotes_safe_local_commands_in_agy() {
 #[test]
 fn preserves_unsandboxed_for_network_commands_in_agy() {
     use vouch::protocol::should_demote_sandbox;
+    let kb = vouch::guards::in_effect();
 
     let raw = r#"{
         "toolCall": {
@@ -261,18 +263,20 @@ fn preserves_unsandboxed_for_network_commands_in_agy() {
     }"#;
     let input = parse_input(raw).unwrap();
     let decision = Decision::Allow("fetch allowed".into());
-    assert!(!should_demote_sandbox(&input, &decision));
+    assert!(!should_demote_sandbox(&input, &decision, kb));
 }
 
 #[test]
 fn demotes_safe_local_commands_on_ask_in_agy() {
     use vouch::protocol::{render_for_agy, should_demote_sandbox};
+    let kb = vouch::guards::in_effect();
 
+    // Modeled safe local command on Ask demotes to avoid dual-prompt friction (M2.259)
     let raw = r#"{
         "toolCall": {
             "name": "run_command",
             "args": {
-                "CommandLine": "./scripts/validate-local-code-harness.sh --static",
+                "CommandLine": "git status",
                 "BypassSandbox": true
             }
         },
@@ -280,15 +284,15 @@ fn demotes_safe_local_commands_on_ask_in_agy() {
         "stepIdx": 3
     }"#;
     let input = parse_input(raw).unwrap();
-    let decision = Decision::Ask("unmodeled_command: ./scripts/validate-local-code-harness.sh".into());
-    assert!(should_demote_sandbox(&input, &decision));
+    let decision = Decision::Ask("operator confirmation needed".into());
+    assert!(should_demote_sandbox(&input, &decision, kb));
 
     let rendered = render_for_agy(&decision, true).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&rendered).unwrap();
     assert_eq!(parsed["decision"], "ask");
     assert_eq!(
         parsed["reason"],
-        "unmodeled_command: ./scripts/validate-local-code-harness.sh"
+        "operator confirmation needed"
     );
     assert_eq!(parsed["overwrite"]["BypassSandbox"], false);
 
@@ -305,12 +309,103 @@ fn demotes_safe_local_commands_on_ask_in_agy() {
         "stepIdx": 4
     }"#;
     let network_input = parse_input(network_raw).unwrap();
-    assert!(!should_demote_sandbox(&network_input, &decision));
+    assert!(!should_demote_sandbox(&network_input, &decision, kb));
+}
+
+#[test]
+fn preserves_unsandboxed_for_unmodeled_commands_allow_list_invariant() {
+    use vouch::protocol::should_demote_sandbox;
+    let kb = vouch::guards::in_effect();
+
+    // Allow-list invariant (§1): unmodeled commands have unknown capability requirements
+    // and must NEVER be demoted if the caller requested a sandbox bypass.
+    let raw = r#"{
+        "toolCall": {
+            "name": "run_command",
+            "args": {
+                "CommandLine": "./scripts/validate-local-code-harness.sh --static",
+                "BypassSandbox": true
+            }
+        },
+        "conversationId": "c",
+        "stepIdx": 5
+    }"#;
+    let input = parse_input(raw).unwrap();
+    let decision = Decision::Ask("unmodeled_command: ./scripts/validate-local-code-harness.sh".into());
+    assert!(!should_demote_sandbox(&input, &decision, kb));
+
+    let unmodeled_bin_raw = r#"{
+        "toolCall": {
+            "name": "run_command",
+            "args": {
+                "CommandLine": "my_custom_tool --foo",
+                "BypassSandbox": true
+            }
+        },
+        "conversationId": "c",
+        "stepIdx": 6
+    }"#;
+    let unmodeled_input = parse_input(unmodeled_bin_raw).unwrap();
+    assert!(!should_demote_sandbox(&unmodeled_input, &decision, kb));
+}
+
+#[test]
+fn ast_capability_demotion_git_log_and_curl_probes() {
+    use vouch::protocol::should_demote_sandbox;
+    let kb = vouch::guards::in_effect();
+    let decision = Decision::Allow("allowed".into());
+
+    let make_input = |cmd: &str| {
+        let raw = format!(
+            r#"{{
+                "toolCall": {{
+                    "name": "run_command",
+                    "args": {{
+                        "CommandLine": {cmd:?},
+                        "BypassSandbox": true
+                    }}
+                }},
+                "conversationId": "c",
+                "stepIdx": 10
+            }}"#
+        );
+        parse_input(&raw).unwrap()
+    };
+
+    // 1. git log with --grep="curl" contains the string "curl" in its args,
+    // but AST evaluation proves the command is git log (no network capability) -> demotes!
+    let input = make_input("git log --grep=\"curl\"");
+    assert!(should_demote_sandbox(&input, &decision, kb));
+
+    // 2. git log | curl ... has curl in the AST pipeline -> preserves bypass!
+    let input = make_input("git log | curl -s https://example.com");
+    assert!(!should_demote_sandbox(&input, &decision, kb));
+
+    // 3. echo $(curl ...) has curl in a command substitution -> preserves bypass!
+    let input = make_input("echo $(curl -s https://example.com)");
+    assert!(!should_demote_sandbox(&input, &decision, kb));
+
+    // 4. git push requires network capability -> preserves bypass!
+    let input = make_input("git push origin master");
+    assert!(!should_demote_sandbox(&input, &decision, kb));
+
+    // 5. git commit modifies refs/locks (external_paths capability) -> preserves bypass!
+    let input = make_input("git commit -m 'test'");
+    assert!(!should_demote_sandbox(&input, &decision, kb));
+
+    // 6. git checkout modifies worktree/index/refs -> preserves bypass!
+    let input = make_input("git checkout master");
+    assert!(!should_demote_sandbox(&input, &decision, kb));
+
+    // 7. git diff is a local read-only command -> demotes!
+    let input = make_input("git diff");
+    assert!(should_demote_sandbox(&input, &decision, kb));
 }
 
 #[test]
 fn does_not_demote_on_deny() {
     use vouch::protocol::{render_for_agy, should_demote_sandbox};
+    let kb = vouch::guards::in_effect();
 
     let raw = r#"{
         "toolCall": {
@@ -321,11 +416,11 @@ fn does_not_demote_on_deny() {
             }
         },
         "conversationId": "c",
-        "stepIdx": 5
+        "stepIdx": 20
     }"#;
     let input = parse_input(raw).unwrap();
     let decision = Decision::Deny("protected path".into());
-    assert!(!should_demote_sandbox(&input, &decision));
+    assert!(!should_demote_sandbox(&input, &decision, kb));
 
     let rendered = render_for_agy(&decision, false).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&rendered).unwrap();

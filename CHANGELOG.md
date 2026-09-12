@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.23.0 (2026-09-12)
+
+
+### Features
+
+* evaluate host and network capabilities through the AST for Antigravity sandbox demotion
+
 ## 0.22.0 (2026-09-11)
 
 

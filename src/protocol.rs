@@ -7,6 +7,7 @@
 //!   2. Reason text is passed through verbatim, including newlines. The
 //!      self-explaining prompt depends on it arriving whole.
 
+use crate::guards::Knowledge;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -241,37 +242,97 @@ pub fn parse_input(raw: &str) -> Result<HookInput, serde_json::Error> {
     serde_json::from_str(raw)
 }
 
-/// Returns true if a command is a safe local workspace operation that does
-/// not require network access or host escape, and can be safely demoted
-/// from `BypassSandbox: true` to `BypassSandbox: false`.
-pub fn is_local_workspace_command(command: &str) -> bool {
+/// Returns true if a command is structurally proven via AST evaluation to
+/// require zero network access, zero daemon/host-escape access, and to remain
+/// strictly contained within the workspace root.
+pub fn is_demote_eligible(kb: &Knowledge, command: &str, cwd: &str) -> bool {
     let trimmed = command.trim();
     if trimmed.is_empty() {
         return false;
     }
-    let network_or_remote = [
-        "gh", "curl", "wget", "ssh", "scp", "sftp", "rsync", "git push", "git fetch", "git pull",
-        "git clone", "git remote", "git add", "git commit", "git merge", "git rebase",
-        "git reset", "git checkout", "git cherry-pick", "git stash", "git tag",
-        "land-private-release.sh", "publish-mirror.sh", "verify-release-range.sh",
-        "kubectl", "docker", "podman", "nc", "netcat", "telnet",
-        "ping", "traceroute", "dig", "nslookup",
-    ];
-    for bad in network_or_remote {
-        if trimmed == bad
-            || trimmed.starts_with(&format!("{bad} "))
-            || trimmed.contains(&format!(" {bad} "))
-            || trimmed.contains(&format!("| {bad}"))
-            || trimmed.contains(&format!("; {bad}"))
-            || trimmed.contains(&format!("&& {bad}"))
+    let scan = match crate::shell::parse(trimmed) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    if scan.commands.is_empty() {
+        return false;
+    }
+    let all_cmds = crate::guards::expand_wrappers(kb, &scan.commands, "bash");
+    if all_cmds.is_empty() {
+        return false;
+    }
+    let root = crate::route::project_root(cwd).unwrap_or_else(|| cwd.replace('\\', "/"));
+
+    for cmd in &all_cmds {
+        // Allow-list invariant (§1): Every command node in the AST must be
+        // recognized and modeled. Unmodeled or partially modeled commands have
+        // unknown capability requirements and must never be demoted.
+        if !crate::guards::recognises(kb, cmd, "bash", true) {
+            return false;
+        }
+
+        // Host and network capabilities declared in knowledge must not require
+        // network, host escape, daemon, or external filesystem access.
+        let caps = crate::guards::capabilities_for_cmd(kb, cmd, "bash");
+        if caps
+            .iter()
+            .any(|c| c == "network" || c == "external_paths" || c == "daemon")
         {
             return false;
         }
+
+        // Verify written path containment
+        let targets = crate::guards::written_paths_in(kb, cmd, "bash");
+        if !targets.unknowable.is_empty() {
+            return false;
+        }
+        for p in &targets.paths {
+            if !is_path_contained_in_workspace(p, cwd, &root) {
+                return false;
+            }
+        }
     }
+
+    // Verify redirect targets containment
+    for p in &scan.redirect_targets {
+        if !is_path_contained_in_workspace(p, cwd, &root) {
+            return false;
+        }
+    }
+
     true
 }
 
-pub fn should_demote_sandbox(input: &HookInput, d: &Decision) -> bool {
+/// Backwards-compatible convenience wrapper evaluating against builtin knowledge.
+pub fn is_local_workspace_command(command: &str) -> bool {
+    is_demote_eligible(crate::guards::in_effect(), command, "")
+}
+
+/// True if `path` is contained within the workspace root or names a safe bit-bucket sink (`/dev/null`, `NUL`).
+fn is_path_contained_in_workspace(path: &str, cwd: &str, root: &str) -> bool {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let norm_path = crate::paths::normalize(trimmed, "");
+    if norm_path == "/dev/null" || norm_path.eq_ignore_ascii_case("NUL") {
+        return true;
+    }
+    let norm_root = crate::paths::normalize(root, "");
+    let root_clean = norm_root.trim_end_matches('/');
+    if root_clean.is_empty() {
+        return false;
+    }
+    let full = if trimmed.starts_with('/') || (trimmed.len() >= 2 && trimmed.as_bytes()[1] == b':') {
+        trimmed.to_string()
+    } else {
+        format!("{}/{}", cwd.trim_end_matches('/'), trimmed)
+    };
+    let norm_full = crate::paths::normalize(&full, "");
+    norm_full == root_clean || norm_full.starts_with(&format!("{root_clean}/"))
+}
+
+pub fn should_demote_sandbox(input: &HookInput, d: &Decision, kb: &Knowledge) -> bool {
     if !matches!(d, Decision::Allow(_) | Decision::Ask(_)) {
         return false;
     }
@@ -285,7 +346,7 @@ pub fn should_demote_sandbox(input: &HookInput, d: &Decision) -> bool {
         return false;
     }
     if let Some(cmd) = &input.tool_input.command {
-        is_local_workspace_command(cmd)
+        is_demote_eligible(kb, cmd, &input.cwd)
     } else {
         false
     }
