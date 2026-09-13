@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.25.0 (2026-09-13)
+
+
+### Features
+
+* auto-seed clean unsandboxed tool wildcards in Antigravity settings during vouch install
+* recognize PowerShell expressions and extract command heads inside parenthesized subexpressions
+* statically resolve predictable command substitutions for intra-command variable assignments
+* support subcommand-level capability filtering in knowledge schema v15 and demote offline subcommands to sandbox
+* synthesize baseline knowledge overlays from multi-host transcripts and verify candidate rules
+
 ## 0.24.0 (2026-09-13)
 
 

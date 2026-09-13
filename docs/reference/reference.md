@@ -271,6 +271,7 @@ conditions at all fires only via `always`.
 | `any_arg_exact` | array of string | [] | Fires when any argument equals one of these exactly. |
 | `any_arg_prefix` | array of string | [] | Fires when any argument starts with one of these. |
 | `any_flag` | array of string | [] | Fires when any flag on the command is one of these. |
+| `capabilities` | array of string | [] | Host and network capabilities required when this rule fires, e.g. ["network"]. |
 | `grants_execute` | boolean | false | This command hands another program permission to run — e.g. `chmod +x`. Trips `grant_execute` on its own, independent of the other conditions. |
 | `guard` | string | (required) | The guard this rule trips — one of vouch's known guard names (`confidential_output`, `delete_recursive`, `grant_execute`, `history_rewrite`, `publish_outward`, `process_control`, `privilege_escalation`, `disk_or_system`, `in_place_edit`, `local_state_write`, `remote_execution`). |
 | `source` | string | "" | Where this rule came from: `declared` (the operator's own config), `requested` (they asked for it), or `inferred` (a guess). Surfaced in the prompt so the operator always knows whose judgement they are seeing. |
@@ -299,6 +300,7 @@ program — e.g. `git push` requires "network", while `git status` requires none
 | `capabilities` | array of string | [] | Capabilities required by these subcommands: "network", "external_paths", "daemon". |
 | `subcommand` | string (optional) | (unset) | The subcommand this applies to, e.g. "push". |
 | `subcommand_in` | array of string | [] | Subcommands this applies to, e.g. ["push", "fetch", "pull"]. |
+| `subcommand_not_in` | array of string | [] | Subcommands this does NOT apply to; all other subcommands match. |
 
 ### `SubWrite`
 

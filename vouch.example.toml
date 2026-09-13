@@ -146,6 +146,9 @@ type_literal = "ask"
 call_operator = "allow"
 # A method is called on an object.
 method_call = "allow"
+# A PowerShell expression is evaluated rather than a command — vouch cannot say
+# what it evaluates to.
+expression = "ask"
 # Output is written to a file — fires for every redirect, fixed target or
 # not; the resolved target still goes through [write] like any other write.
 redirect = "allow"

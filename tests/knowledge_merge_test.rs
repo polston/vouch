@@ -776,6 +776,7 @@ fn overlay_is_exhaustive_over_every_program_field() {
             any_arg_prefix: vec![],
             grants_execute: false,
             always: false,
+            capabilities: vec![],
         }],
         sub_write: vec![vouch::guards::SubWrite {
             subcommand: "doit".to_string(),
@@ -838,6 +839,7 @@ fn overlay_is_exhaustive_over_every_program_field() {
         sub_capability: vec![vouch::guards::SubCapability {
             subcommand: Some("pull".to_string()),
             subcommand_in: vec![],
+            subcommand_not_in: vec![],
             capabilities: vec!["network".to_string()],
         }],
     };

@@ -631,3 +631,41 @@ pub fn write_file_atomically(path: &std::path::Path, content: &str) -> Result<()
     Ok(())
 }
 
+/// Standard modeled developer tools requiring unsandboxed execution under Antigravity.
+pub const DEFAULT_AGY_UNSANDBOXED_TOOLS: &[&str] = &["cargo*", "gh*", "git*", "curl*", "ssh*"];
+
+/// Reconciles Antigravity settings.json permissions to include clean tool entries.
+pub fn reconcile_agy_permissions(existing: &str, tools: &[&str]) -> Result<String, String> {
+    let mut root: Value = if existing.trim().is_empty() {
+        json!({})
+    } else {
+        serde_json::from_str(existing)
+            .map_err(|e| format!("settings.json is not valid JSON: {e}"))?
+    };
+    if !root.is_object() {
+        return Err("settings.json is not a JSON object".into());
+    }
+    let perms = root
+        .as_object_mut()
+        .unwrap()
+        .entry("permissions")
+        .or_insert_with(|| json!({}));
+    if !perms.is_object() {
+        *perms = json!({});
+    }
+    let allow = perms
+        .as_object_mut()
+        .unwrap()
+        .entry("allow")
+        .or_insert_with(|| json!([]));
+    if let Some(arr) = allow.as_array_mut() {
+        for tool in tools {
+            let entry = Value::String(format!("unsandboxed({tool})"));
+            if !arr.contains(&entry) {
+                arr.push(entry);
+            }
+        }
+    }
+    serde_json::to_string_pretty(&root).map_err(|e| format!("could not render settings.json: {e}"))
+}
+

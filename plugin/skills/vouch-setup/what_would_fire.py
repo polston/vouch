@@ -612,6 +612,234 @@ def emit_toml(data, prefix="", out=None):
     return out
 
 
+# ----------------------------- synthesis & intent verification (M2.15, M2.14)
+
+DANGEROUS_PROGRAMS = {
+    "rm", "rmdir", "del", "unlink", "shred", "format", "dd",
+    "mkfs", "fdisk", "parted", "kill", "killall", "pkill",
+    "shutdown", "reboot", "poweroff", "init", "halt",
+}
+
+DANGEROUS_VERBS = {
+    "delete", "remove", "destroy", "drop", "purge", "erase",
+    "prune", "clean", "reset", "hard", "force", "wipe",
+}
+
+MULTI_VERB_TOOLS = {
+    "git", "docker", "kubectl", "cargo", "npm", "yarn", "pnpm", "go",
+    "helm", "az", "aws", "gcloud", "systemctl", "apt", "brew",
+}
+
+
+def _extract_command_string(row):
+    """Extracts raw command string from a Row object, dict, or string."""
+    if hasattr(row, "input") and isinstance(row.input, dict):
+        cmd = row.input.get("command") or row.input.get("CommandLine")
+    elif isinstance(row, dict):
+        cmd = row.get("command") or row.get("CommandLine")
+    elif isinstance(row, str):
+        cmd = row
+    else:
+        cmd = None
+    return cmd if isinstance(cmd, str) else None
+
+
+def extract_head_and_subcommand(cmd_str):
+    """Parses a command string into (head, subcommand).
+
+    Returns (None, None) if unparseable, unnameable, or empty.
+    """
+    if not cmd_str or not isinstance(cmd_str, str):
+        return None, None
+    tokens = cmd_str.split()
+    head = None
+    sub = None
+    i = 0
+    while i < len(tokens):
+        t = tokens[i].strip("'\"")
+        if not t:
+            i += 1
+            continue
+        if "=" in t and not t.startswith("-") and t.split("=", 1)[0].isidentifier():
+            i += 1
+            continue  # leading environment variable assignment
+        head = t.replace("\\", "/").rstrip("/").split("/")[-1]
+        i += 1
+        break
+
+    if not head or set(head) - NAME_CHARS:
+        return None, None
+
+    # Walk remaining tokens for the first non-flag argument (subcommand)
+    while i < len(tokens):
+        t = tokens[i].strip("'\"")
+        i += 1
+        if not t:
+            continue
+        if t.startswith("-") or t.startswith("/"):
+            continue
+        candidate_sub = t.replace("\\", "/").rstrip("/").split("/")[-1]
+        if (
+            candidate_sub
+            and candidate_sub[0].isalpha()
+            and "." not in candidate_sub
+            and not (set(candidate_sub) - NAME_CHARS)
+        ):
+            sub = candidate_sub
+        break
+
+    return head, sub
+
+
+def synthesize_baseline_knowledge(rows, min_count=1):
+    """Synthesize a sanitized starting my-knowledge.toml overlay from recorded session rows.
+
+    Clusters commands across Claude, Codex, and Antigravity transcripts, filtering out
+    dangerous commands/verbs and ensuring zero PII.
+    Returns (toml_string, summary_dict).
+    """
+    counts = {}  # head -> count
+    subs_by_head = {}  # head -> set of subcommands
+
+    for row in rows:
+        cmd_str = _extract_command_string(row)
+        if not cmd_str:
+            continue
+        head, sub = extract_head_and_subcommand(cmd_str)
+        if not head:
+            continue
+        if head.lower() in DANGEROUS_PROGRAMS:
+            continue
+
+        counts[head] = counts.get(head, 0) + 1
+        if head not in subs_by_head:
+            subs_by_head[head] = set()
+        if sub and sub.lower() not in DANGEROUS_VERBS:
+            subs_by_head[head].add(sub)
+
+    programs = []
+    for head in sorted(counts.keys()):
+        if counts[head] < min_count:
+            continue
+        entry = {
+            "name": head,
+            "description": "Auto-synthesized baseline for %s" % head,
+        }
+        valid_subs = sorted(list(subs_by_head.get(head, set())))
+        if valid_subs:
+            entry["subcommands"] = valid_subs
+        programs.append(entry)
+
+    data = {"program": programs}
+    lines = emit_toml(data)
+    header = [
+        "# Auto-synthesized baseline knowledge overlay",
+        "# Proposes starting knowledge from recorded multi-host sessions.",
+        "# Inspect and edit before adopting.",
+        "",
+    ]
+    toml_text = "\n".join(header + lines) + "\n"
+
+    # Privacy verification: ensure no absolute paths or home directory paths
+    for banned in ["/Users/", "/home/", "C:\\", "C:/", "@", "token", "password"]:
+        if banned in toml_text:
+            raise ValueError("Synthesized TOML contains sensitive pattern: %s" % banned)
+
+    summary = {
+        "total_programs": len(programs),
+        "total_subcommands": sum(len(p.get("subcommands", [])) for p in programs),
+        "programs": [p["name"] for p in programs],
+    }
+    return toml_text, summary
+
+
+def verify_candidate_rule(candidate, rows):
+    """Verifies a candidate knowledge entry against recorded session history.
+
+    Checks:
+    - Positive verification: count how many rows in history match the entry.
+    - Negative verification: warn if the entry is overbroad or matches destructive patterns.
+
+    `candidate` may be a dict with 'name' and optional 'subcommands', or a TOML string.
+    Returns a dict with verification details.
+    """
+    if isinstance(candidate, str):
+        parsed = tomllib.loads(candidate)
+        if "program" in parsed and isinstance(parsed["program"], list) and parsed["program"]:
+            entry = parsed["program"][0]
+        else:
+            entry = parsed
+    else:
+        entry = candidate
+
+    name = entry.get("name")
+    if not name or not isinstance(name, str):
+        return {
+            "valid": False,
+            "intent_verified": False,
+            "error": "Missing or invalid 'name' field in candidate rule",
+        }
+
+    subs = entry.get("subcommands")
+    subs_set = set(subs) if isinstance(subs, list) else None
+
+    warnings = []
+    if name.lower() in DANGEROUS_PROGRAMS:
+        warnings.append("Program '%s' is categorized as dangerous/destructive." % name)
+
+    if subs_set:
+        destructive_subs = [s for s in subs_set if s.lower() in DANGEROUS_VERBS]
+        if destructive_subs:
+            warnings.append(
+                "Subcommands include destructive verbs: %s" % ", ".join(destructive_subs)
+            )
+
+    overbroad = False
+    if name.lower() in MULTI_VERB_TOOLS and (subs_set is None or len(subs_set) == 0):
+        overbroad = True
+        warnings.append(
+            "Tool '%s' is a multi-verb program; omitting subcommands matches all operations."
+            % name
+        )
+
+    matched_rows = 0
+    matched_subs = set()
+    unmatched_rows = 0
+
+    for row in rows:
+        cmd_str = _extract_command_string(row)
+        if not cmd_str:
+            continue
+        head, sub = extract_head_and_subcommand(cmd_str)
+        if not head:
+            continue
+        if head.lower() == name.lower():
+            if subs_set is not None:
+                if sub and sub in subs_set:
+                    matched_rows += 1
+                    matched_subs.add(sub)
+                else:
+                    unmatched_rows += 1
+            else:
+                matched_rows += 1
+                if sub:
+                    matched_subs.add(sub)
+
+    intent_verified = (matched_rows > 0) and (not overbroad) and (len(warnings) == 0)
+
+    return {
+        "valid": True,
+        "name": name,
+        "subcommands": list(subs_set) if subs_set else [],
+        "matched_rows": matched_rows,
+        "matched_subcommands": sorted(list(matched_subs)),
+        "unmatched_rows": unmatched_rows,
+        "overbroad": overbroad,
+        "warnings": warnings,
+        "intent_verified": intent_verified,
+    }
+
+
 # ------------------------------------------------------------------ sentinel
 
 
@@ -1244,6 +1472,20 @@ def parse_args(argv):
         "`vouch doctor` can be pointed at it with VOUCH_STATE_DIR. The merged "
         "journal is harvested command text - delete it when the phase ends.",
     )
+    p.add_argument(
+        "--synthesize-overlay",
+        default=None,
+        dest="synthesize_overlay",
+        help="synthesize a sanitized starting my-knowledge.toml overlay from harvested "
+        "session history and write it to this path (must be absolute and outside git worktrees)",
+    )
+    p.add_argument(
+        "--verify-rule",
+        default=None,
+        dest="verify_rule",
+        help="verify a candidate knowledge rule/entry (JSON or TOML string, or path) "
+        "against harvested session history",
+    )
     return p.parse_args(argv)
 
 
@@ -1252,6 +1494,8 @@ def main(argv):
 
     if args.samples_dest:
         refuse_unsafe_dest(args.samples_dest)
+    if args.synthesize_overlay:
+        refuse_unsafe_dest(args.synthesize_overlay, "--synthesize-overlay")
     if args.samples_source:
         refuse_unsafe_dest(args.samples_source, "--samples-source")
         if not os.path.exists(args.samples_source):
@@ -1355,6 +1599,24 @@ def _run(args, scratch):
             "it is yours to delete once phase 5 has replayed it\n"
             % (len(rows), args.samples_dest)
         )
+
+    if args.synthesize_overlay:
+        toml_text, summary = synthesize_baseline_knowledge(rows)
+        os.makedirs(os.path.dirname(args.synthesize_overlay) or ".", exist_ok=True)
+        with open(args.synthesize_overlay, "w", encoding="utf-8") as f:
+            f.write(toml_text)
+        sys.stderr.write(
+            "synthesized %d baseline program entries (%d subcommands) to %s\n"
+            % (summary["total_programs"], summary["total_subcommands"], args.synthesize_overlay)
+        )
+
+    if args.verify_rule:
+        candidate_text = args.verify_rule
+        if os.path.exists(candidate_text):
+            with open(candidate_text, "r", encoding="utf-8") as f:
+                candidate_text = f.read()
+        res = verify_candidate_rule(candidate_text, rows)
+        print(json.dumps(res, indent=2))
 
     fallback_cwd = os.getcwd()
     joined, refused, failed, stats = replay(rows, args, scratch, fallback_cwd)

@@ -464,3 +464,117 @@ fn nested_block_chain_ids_do_not_collide_with_the_outer_chain() {
     assert_eq!(outer.id, b.id, "a and b share the outer chain");
     assert_eq!(inner.id, d.id, "c and d share the (remapped) inner chain");
 }
+
+// --- M2.20: PowerShell expression mode recognition -------------------------
+
+#[test]
+fn pure_arithmetic_expression_is_not_read_as_a_command() {
+    let p = parse("2 + 2").expect("scans");
+    assert!(
+        p.heads.is_empty(),
+        "2 + 2 is an expression, not a command named 2: {:?}",
+        p.heads
+    );
+    assert_construct("2 + 2", "expression");
+}
+
+#[test]
+fn string_literals_are_not_read_as_commands() {
+    for cmd in [
+        "'no pwsh on PATH'",
+        "\"text=$SomeVariable\"",
+        r#"'err: ' + $_.FullyQualifiedErrorId"#,
+    ] {
+        let p = parse(cmd).expect("scans");
+        assert!(
+            p.heads.is_empty(),
+            "string literal must not be read as a command head: {:?} for `{cmd}`",
+            p.heads
+        );
+        assert_construct(cmd, "expression");
+    }
+}
+
+#[test]
+fn parenthesized_subexpression_finds_nested_command_without_paren_in_head() {
+    let p = parse("(Get-Command Set-Location).ParameterSets").expect("scans");
+    assert!(
+        !p.heads.iter().any(|h| h.contains('(')),
+        "parenthesis must not be part of command head: {:?}",
+        p.heads
+    );
+    assert_eq!(p.heads, vec!["Get-Command"]);
+    assert_eq!(p.commands[0].args, vec!["Set-Location"]);
+    assert_construct("(Get-Command Set-Location).ParameterSets", "expression");
+}
+
+#[test]
+fn method_calls_and_property_accesses_on_expressions_are_classified() {
+    // Property access on a type-cast expression
+    let p1 = parse(r#"([uri]"http://example.com").AbsoluteUri"#).expect("scans");
+    assert!(p1.heads.is_empty(), "heads: {:?}", p1.heads);
+    assert_construct(r#"([uri]"http://example.com").AbsoluteUri"#, "expression");
+    assert_construct(r#"([uri]"http://example.com").AbsoluteUri"#, "type_literal");
+
+    // Method call on a type-cast expression
+    let p2 = parse(r#"([int]"5").ToString()"#).expect("scans");
+    assert!(p2.heads.is_empty(), "heads: {:?}", p2.heads);
+    assert_construct(r#"([int]"5").ToString()"#, "expression");
+    assert_construct(r#"([int]"5").ToString()"#, "method_call");
+    assert_construct(r#"([int]"5").ToString()"#, "type_literal");
+
+    // Method call on a string literal
+    let p3 = parse(r#"'hello'.ToUpper()"#).expect("scans");
+    assert!(p3.heads.is_empty(), "heads: {:?}", p3.heads);
+    assert_construct(r#"'hello'.ToUpper()"#, "expression");
+    assert_construct(r#"'hello'.ToUpper()"#, "method_call");
+}
+
+#[test]
+fn expression_construct_defaults_to_ask_and_can_be_allowed() {
+    let cfg_default = load("version = 1\n[lang.powershell]\ndefault = \"allow\"\n").expect("parses");
+    let d1 = vouch::engine::decide_powershell(&cfg_default, "2 + 2");
+    match &d1 {
+        Decision::Ask(r) => {
+            assert!(
+                r.contains("expression"),
+                "expected ask to name expression construct, got: {r}"
+            );
+            assert!(
+                r.contains("PowerShell expression"),
+                "expected prompt description, got: {r}"
+            );
+        }
+        _ => panic!("expected Ask for unset expression construct, got {d1:?}"),
+    }
+
+    let cfg_allowed = load(
+        "version = 1\n[lang.powershell]\ndefault = \"allow\"\n\
+         [lang.powershell.constructs]\nexpression = \"allow\"\n",
+    )
+    .expect("parses");
+    let d2 = vouch::engine::decide_powershell(&cfg_allowed, "2 + 2");
+    assert!(
+        matches!(d2, Decision::Allow(_)),
+        "expression = allow must allow pure expressions, got {d2:?}"
+    );
+}
+
+#[test]
+fn type_literal_deletion_remains_strictly_guarded() {
+    let cfg = load(
+        "version = 1\n[lang.powershell]\ndefault = \"allow\"\n\
+         [lang.powershell.constructs]\nexpression = \"allow\"\n",
+    )
+    .expect("parses");
+    let d = vouch::engine::decide_powershell(&cfg, r#"[System.IO.File]::Delete("C:\important")"#);
+    match &d {
+        Decision::Ask(r) => {
+            assert!(
+                r.contains("type_literal"),
+                "type literal must continue to ask: {r}"
+            );
+        }
+        _ => panic!("expected Ask on type_literal, got {d:?}"),
+    }
+}

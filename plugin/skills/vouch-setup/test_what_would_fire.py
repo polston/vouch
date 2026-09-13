@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import tempfile
+import tomllib
 import unittest
 
 # Add script directory to sys.path
@@ -199,6 +200,100 @@ class TestMultiHostHarvest(unittest.TestCase):
         r_agy_subagent = [r for r in rows if r.tool_use_id == "call-agy-2"][0]
         self.assertEqual(r_agy_subagent.tool, "write_to_file")
         self.assertTrue(r_agy_subagent.sidechain)
+
+
+class TestSynthesisAndVerification(unittest.TestCase):
+    def test_extract_head_and_subcommand(self):
+        cases = [
+            ("git status", "git", "status"),
+            ("cargo --color=never check", "cargo", "check"),
+            ("VAR=1 python3 script.py", "python3", None),
+            ("/usr/local/bin/kubectl get pods", "kubectl", "get"),
+            (r"C:\tools\git.exe branch -v", "git.exe", "branch"),
+            ("ls -la", "ls", None),
+            ("   ", None, None),
+        ]
+        for cmd, want_head, want_sub in cases:
+            h, s = wwf.extract_head_and_subcommand(cmd)
+            self.assertEqual(h, want_head, "head mismatch for `%s`" % cmd)
+            self.assertEqual(s, want_sub, "subcommand mismatch for `%s`" % cmd)
+
+    def test_synthesize_baseline_knowledge(self):
+        synthetic_rows = [
+            wwf.Row("1", "Bash", {"command": "git status"}, "C:/Users/dev", False, True),
+            wwf.Row("2", "Bash", {"command": "git diff"}, "C:/Users/dev", False, True),
+            wwf.Row("3", "Bash", {"command": "git reset --hard"}, "C:/Users/dev", False, True),
+            wwf.Row("4", "run_command", {"CommandLine": "cargo test"}, "C:/Users/dev", False, True),
+            wwf.Row("5", "run_command", {"CommandLine": "cargo check"}, "C:/Users/dev", False, True),
+            wwf.Row("6", "Bash", {"command": "rm -rf /tmp/scratch"}, "C:/Users/dev", False, True),
+            wwf.Row("7", "Bash", {"command": "kill -9 1234"}, "C:/Users/dev", False, True),
+            wwf.Row("8", "run_command", {"CommandLine": "jq . data.json"}, "C:/Users/dev", False, True),
+        ]
+        toml_text, summary = wwf.synthesize_baseline_knowledge(synthetic_rows)
+        self.assertIn("git", summary["programs"])
+        self.assertIn("cargo", summary["programs"])
+        self.assertIn("jq", summary["programs"])
+        # Dangerous programs must be filtered
+        self.assertNotIn("rm", summary["programs"])
+        self.assertNotIn("kill", summary["programs"])
+
+        parsed = tomllib.loads(toml_text)
+        self.assertIn("program", parsed)
+        programs_by_name = {p["name"]: p for p in parsed["program"]}
+
+        git_entry = programs_by_name["git"]
+        self.assertIn("status", git_entry["subcommands"])
+        self.assertIn("diff", git_entry["subcommands"])
+        # Destructive verb 'reset' must be filtered
+        self.assertNotIn("reset", git_entry["subcommands"])
+
+        cargo_entry = programs_by_name["cargo"]
+        self.assertIn("check", cargo_entry["subcommands"])
+        self.assertIn("test", cargo_entry["subcommands"])
+
+        # jq has no subcommands
+        jq_entry = programs_by_name["jq"]
+        self.assertNotIn("subcommands", jq_entry)
+
+        # Privacy assertion: zero PII / no live paths in generated overlay
+        self.assertNotIn("C:/Users/dev", toml_text)
+        self.assertNotIn("/tmp/scratch", toml_text)
+
+    def test_verify_candidate_rule(self):
+        synthetic_rows = [
+            wwf.Row("1", "Bash", {"command": "cargo test"}, "C:/Users/dev", False, True),
+            wwf.Row("2", "Bash", {"command": "cargo check"}, "C:/Users/dev", False, True),
+            wwf.Row("3", "Bash", {"command": "cargo build"}, "C:/Users/dev", False, True),
+            wwf.Row("4", "Bash", {"command": "git status"}, "C:/Users/dev", False, True),
+        ]
+
+        # Valid candidate with matching subcommands
+        res1 = wwf.verify_candidate_rule({"name": "cargo", "subcommands": ["test", "check"]}, synthetic_rows)
+        self.assertTrue(res1["valid"])
+        self.assertTrue(res1["intent_verified"])
+        self.assertEqual(res1["matched_rows"], 2)
+        self.assertEqual(res1["matched_subcommands"], ["check", "test"])
+        self.assertEqual(res1["unmatched_rows"], 1)  # cargo build
+        self.assertFalse(res1["overbroad"])
+
+        # Overbroad candidate: git with no subcommands
+        res2 = wwf.verify_candidate_rule({"name": "git"}, synthetic_rows)
+        self.assertTrue(res2["valid"])
+        self.assertFalse(res2["intent_verified"])
+        self.assertTrue(res2["overbroad"])
+        self.assertEqual(res2["matched_rows"], 1)
+
+        # Dangerous candidate: rm
+        res3 = wwf.verify_candidate_rule({"name": "rm"}, synthetic_rows)
+        self.assertTrue(res3["valid"])
+        self.assertFalse(res3["intent_verified"])
+        self.assertTrue(any("dangerous" in w for w in res3["warnings"]))
+
+        # Dangerous subcommand: git reset
+        res4 = wwf.verify_candidate_rule({"name": "git", "subcommands": ["reset"]}, synthetic_rows)
+        self.assertTrue(res4["valid"])
+        self.assertFalse(res4["intent_verified"])
+        self.assertTrue(any("destructive" in w for w in res4["warnings"]))
 
 
 if __name__ == "__main__":

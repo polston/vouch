@@ -347,6 +347,23 @@ fn preserves_unsandboxed_for_unmodeled_commands_allow_list_invariant() {
     }"#;
     let unmodeled_input = parse_input(unmodeled_bin_raw).unwrap();
     assert!(!should_demote_sandbox(&unmodeled_input, &decision, kb));
+
+    // A shell executing an external script file runs unmodeled internal code
+    // and must NEVER be demoted (runs_file)
+    let script_raw = r#"{
+        "toolCall": {
+            "name": "run_command",
+            "args": {
+                "CommandLine": "bash scripts/verify.sh",
+                "BypassSandbox": true
+            }
+        },
+        "conversationId": "c",
+        "stepIdx": 7
+    }"#;
+    let script_input = parse_input(script_raw).unwrap();
+    let allow_decision = Decision::Allow("lang.bash.default = allow".into());
+    assert!(!should_demote_sandbox(&script_input, &allow_decision, kb));
 }
 
 #[test]
@@ -426,5 +443,57 @@ fn does_not_demote_on_deny() {
     let parsed: serde_json::Value = serde_json::from_str(&rendered).unwrap();
     assert_eq!(parsed["decision"], "deny");
     assert!(parsed.get("overwrite").is_none());
+}
+
+#[test]
+fn subcommand_capability_and_standalone_flags_demotion() {
+    use vouch::protocol::should_demote_sandbox;
+    let kb = vouch::guards::in_effect();
+    let decision = Decision::Allow("allowed".into());
+
+    let make_input = |cmd: &str| {
+        let raw = format!(
+            r#"{{
+                "toolCall": {{
+                    "name": "run_command",
+                    "args": {{
+                        "CommandLine": {cmd:?},
+                        "BypassSandbox": true
+                    }}
+                }},
+                "conversationId": "c",
+                "stepIdx": 10
+            }}"#
+        );
+        parse_input(&raw).unwrap()
+    };
+
+    // 1. gh --help is a standalone flags run -> demotes to sandbox!
+    let input = make_input("gh --help");
+    assert!(should_demote_sandbox(&input, &decision, kb));
+
+    // 2. gh --version is a standalone flags run -> demotes to sandbox!
+    let input = make_input("gh --version");
+    assert!(should_demote_sandbox(&input, &decision, kb));
+
+    // 3. gh completion is an offline subcommand -> demotes to sandbox!
+    let input = make_input("gh completion -s bash");
+    assert!(should_demote_sandbox(&input, &decision, kb));
+
+    // 4. gh pr view requires network -> preserves BypassSandbox: true!
+    let input = make_input("gh pr view 42");
+    assert!(!should_demote_sandbox(&input, &decision, kb));
+
+    // 5. gh run view requires network -> preserves BypassSandbox: true!
+    let input = make_input("gh run view 12345");
+    assert!(!should_demote_sandbox(&input, &decision, kb));
+
+    // 6. curl --help is a standalone flags run -> demotes to sandbox!
+    let input = make_input("curl --help");
+    assert!(should_demote_sandbox(&input, &decision, kb));
+
+    // 7. curl to a URL requires network -> preserves BypassSandbox: true!
+    let input = make_input("curl https://example.com");
+    assert!(!should_demote_sandbox(&input, &decision, kb));
 }
 

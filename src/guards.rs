@@ -110,6 +110,9 @@ pub struct Rule {
     /// needed.
     #[serde(default)]
     pub always: bool,
+    /// Host and network capabilities required when this rule fires, e.g. ["network"].
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
 
 /// One indexed argument vector a parsed snippet receives from its enclosing
@@ -571,6 +574,9 @@ pub struct SubCapability {
     /// Subcommands this applies to, e.g. ["push", "fetch", "pull"].
     #[serde(default)]
     pub subcommand_in: Vec<String>,
+    /// Subcommands this does NOT apply to; all other subcommands match.
+    #[serde(default)]
+    pub subcommand_not_in: Vec<String>,
     /// Capabilities required by these subcommands: "network", "external_paths", "daemon".
     #[serde(default)]
     pub capabilities: Vec<String>,
@@ -583,7 +589,13 @@ impl SubCapability {
                 return true;
             }
         }
-        self.subcommand_in.iter().any(|s| s == sub)
+        if self.subcommand_in.iter().any(|s| s == sub) {
+            return true;
+        }
+        if !self.subcommand_not_in.is_empty() && !self.subcommand_not_in.iter().any(|s| s == sub) {
+            return true;
+        }
+        false
     }
 }
 
@@ -3079,11 +3091,15 @@ pub fn is_modeled(kb: &Knowledge, head: &str, lang: &str) -> bool {
 /// Collects all declared capabilities for this command occurrence.
 ///
 /// Combines program-level `capabilities` with matching `sub_capability` blocks
-/// for the resolved subcommand (if any).
+/// for the resolved subcommand (if any) and matching `rule` capability declarations.
+/// Pure standalone flag runs (`--help`, `--version`) require no capabilities.
 pub fn capabilities_for_cmd(kb: &Knowledge, cmd: &Cmd, lang: &str) -> Vec<String> {
     let mut caps = Vec::new();
     let sub = subcommand_of_in(kb, cmd, lang);
     for prog in entries_for_cmd(kb, cmd, lang) {
+        if standalone_run(prog, cmd, sub, true) {
+            continue;
+        }
         for c in &prog.capabilities {
             if !caps.contains(c) {
                 caps.push(c.clone());
@@ -3096,6 +3112,15 @@ pub fn capabilities_for_cmd(kb: &Knowledge, cmd: &Cmd, lang: &str) -> Vec<String
                         if !caps.contains(c) {
                             caps.push(c.clone());
                         }
+                    }
+                }
+            }
+        }
+        for rule in &prog.rule {
+            if !rule.capabilities.is_empty() && rule_match_in(rule, cmd, prog, lang).matched {
+                for c in &rule.capabilities {
+                    if !caps.contains(c) {
+                        caps.push(c.clone());
                     }
                 }
             }

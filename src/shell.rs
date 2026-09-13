@@ -2280,6 +2280,78 @@ struct PendingHeredoc {
     fd: i32,
 }
 
+fn evaluate_predictable_substitution(body: &str) -> Option<String> {
+    let trimmed = body.trim().trim_end_matches(';').trim();
+    if trimmed == "pwd" {
+        return Some("$PWD".to_string());
+    }
+    if let Some(rest) = trimmed.strip_prefix("echo ") {
+        let rest = rest.trim();
+        if !rest.starts_with('-') && !has_command_substitution(rest) {
+            let unquoted = crate::paths::unquote(rest);
+            return Some(unquoted.to_string());
+        }
+    }
+    None
+}
+
+/// Statically resolves a closed set of value-predictable substitutions in an
+/// assignment value (M2.59). `$(pwd)` and `pwd` resolve to `$PWD`; `echo <lit>`
+/// resolves to the literal. If any substitution is dynamic or cannot be
+/// predicted, returns `None` (fail-closed, poisoned).
+fn resolve_predictable_substitutions(value: &str) -> Option<String> {
+    let text = strip_line_continuations(value);
+    let cs: Vec<(usize, char)> = text.char_indices().collect();
+    let mut quoting = Quoting::default();
+    let mut memo = Memo::new();
+    let mut result = String::new();
+    let mut last_end = 0;
+    let mut i = 0;
+    let mut found_any = false;
+
+    while i < cs.len() {
+        if let Some(next) = quoting.step_expanding(&cs, i) {
+            i = next;
+            continue;
+        }
+        match cs[i].1 {
+            '$' if cs.get(i + 1).is_some_and(|&(_, n)| n == '(') => {
+                let dollar = i;
+                let (reading, next) = read_substitution(&cs, &text, dollar, 0, &mut memo)?;
+                match reading {
+                    Reading::Body(span) => {
+                        let repl = evaluate_predictable_substitution(span)?;
+                        result.push_str(&text[last_end..cs[dollar].0]);
+                        result.push_str(&repl);
+                        last_end = if next < cs.len() { cs[next].0 } else { text.len() };
+                        i = next;
+                        found_any = true;
+                    }
+                    Reading::Arithmetic(_) => return None,
+                }
+            }
+            '`' => {
+                let next = skip_backquotes(&cs, i)?;
+                let span = collapse_backquote_escapes(&text[cs[i].0 + 1..cs[next - 1].0]);
+                let repl = evaluate_predictable_substitution(&span)?;
+                result.push_str(&text[last_end..cs[i].0]);
+                result.push_str(&repl);
+                last_end = if next < cs.len() { cs[next].0 } else { text.len() };
+                i = next;
+                found_any = true;
+            }
+            _ => i += 1,
+        }
+    }
+
+    if !found_any {
+        return None;
+    }
+    result.push_str(&text[last_end..]);
+    let unescaped = unescape_unquoted(&result);
+    Some(crate::paths::unquote(&unescaped).to_string())
+}
+
 /// `is_suffix` distinguishes `dd if=x of=y` (arguments that merely look like
 /// assignments) from `PY=x cmd` (environment set for the command).
 fn walk_items(
@@ -2376,7 +2448,7 @@ fn walk_items(
                         // separate outcome for "shaped like a substitution but
                         // actually literal".
                         let recorded = if has_command_substitution(&w.value) {
-                            None
+                            resolve_predictable_substitutions(value)
                         } else {
                             let unescaped = unescape_unquoted(value);
                             Some(crate::paths::unquote(&unescaped).to_string())

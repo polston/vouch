@@ -69,6 +69,7 @@ fn describe(name: &str) -> &'static str {
         "type_literal" => "a .NET type is referenced, e.g. [System.IO.File]::Delete — vouch cannot follow what the type does",
         "call_operator" => "& is used to invoke something, and vouch may not be able to resolve what",
         "method_call" => "a method is called on an object",
+        "expression" => "this is a PowerShell expression, not a command; vouch cannot say what it evaluates to",
         "redirect" => "output is written to a file",
         "assignment" => "a variable is assigned",
         "env_assignment" => "an environment variable is assigned",
@@ -542,9 +543,11 @@ fn assignments_in_effect(
 fn resolve_with_assignments(
     raw: &str,
     assigned: &std::collections::HashMap<String, Option<String>>,
+    pwd: Option<&str>,
 ) -> String {
     let lookup = |name: &str| match assigned.get(name) {
         Some(value) => value.clone(),
+        None if name == "PWD" => pwd.map(str::to_string),
         None => std::env::var(name).ok(),
     };
     let mut text = crate::paths::unquote(raw).to_string();
@@ -615,7 +618,7 @@ fn judge_once(
     // resolved this way since 2026-07-25; heads were not, so the same command
     // got two different answers depending on which half you looked at.
     for c in scan.commands.iter_mut() {
-        c.head = resolve_with_assignments(&c.head, &assigned);
+        c.head = resolve_with_assignments(&c.head, &assigned, start.known_dir());
     }
 
     // 1. Guards — what the command DOES. Same set for every language.
@@ -684,7 +687,7 @@ fn judge_once(
     //
     // (`assigned` is built once above, before heads are resolved, and is the
     // same map used here — one resolution rule for names and paths.)
-    let resolve = |raw: &str| resolve_with_assignments(raw, &assigned);
+    let resolve = |raw: &str| resolve_with_assignments(raw, &assigned, start.known_dir());
 
     // Where a RELATIVE write actually lands.
     //
@@ -1173,7 +1176,8 @@ fn judge_once(
             // constructor absorbs), so the Nowhere arm never truncates a
             // sibling; an absolute target composes identically from every
             // member and is pushed once via the dedup.
-            let resolved = resolve(t);
+            let r_pwd = redirect_base.single_known().or_else(|| start.known_dir());
+            let resolved = resolve_with_assignments(t, &assigned, r_pwd);
             // The redirect's own occurrence, when it has one: the owning
             // command's language, exactly as every other per-occurrence
             // lookup here resolves it. An unowned redirect (a compound's own,
@@ -1255,7 +1259,8 @@ fn judge_once(
             }
 
             let here_set = timeline.base_set_at(i, &all_cmds);
-            let paths: Vec<String> = wt.paths.iter().map(|p| resolve(p)).collect();
+            let here_pwd = here_set.single_known().or_else(|| start.known_dir());
+            let paths: Vec<String> = wt.paths.iter().map(|p| resolve_with_assignments(p, &assigned, here_pwd)).collect();
             // A run-dir flag only has to resolve when something depends on
             // it. `git -C a -C b status` writes nothing, and a read must
             // never gain a standing prompt.
@@ -3382,7 +3387,7 @@ pub fn measure_program_locations(
     // wins, poisoned writes do not fall through, absent names may use the
     // judging process's environment, and expansion is bounded to four passes.
     let assigned = assignments_in_effect(&scan.assignments);
-    let resolve = |raw: &str| resolve_with_assignments(raw, &assigned);
+    let resolve = |raw: &str| resolve_with_assignments(raw, &assigned, cwd);
     for command in &mut scan.commands {
         command.head = resolve(&command.head);
     }
@@ -3553,6 +3558,15 @@ enum CdState {
     /// written, which is what vouch did before working directories were
     /// plumbed through.
     NoDirectory,
+}
+
+impl CdState {
+    fn known_dir(&self) -> Option<&str> {
+        match self {
+            CdState::Known(d) => Some(d.as_str()),
+            _ => None,
+        }
+    }
 }
 
 /// Why a path-spelled command head could not become filesystem evidence for
@@ -4486,6 +4500,13 @@ impl BaseSet {
         match self.states.as_slice() {
             [one] => one.clone(),
             _ => CdState::Unknown(PLURAL_BASES.to_string()),
+        }
+    }
+
+    fn single_known(&self) -> Option<&str> {
+        match self.states.as_slice() {
+            [CdState::Known(d)] => Some(d.as_str()),
+            _ => None,
         }
     }
 }

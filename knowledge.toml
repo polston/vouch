@@ -111,7 +111,7 @@ subcommand_in = ["push", "fetch", "pull", "clone", "remote"]
 capabilities = ["network"]
 
 [[program.sub_capability]]
-subcommand_in = ["commit", "merge", "rebase", "reset", "checkout", "switch", "branch", "tag", "stash", "cherry-pick"]
+subcommand_in = ["commit", "merge", "rebase", "reset", "checkout", "switch", "branch", "tag", "stash", "cherry-pick", "worktree"]
 capabilities = ["external_paths"]
 
 [[program.rule]]
@@ -213,12 +213,15 @@ sub_arg_0_in = ["expire"]
 
 [[program]]
 match = ["gh"]
-capabilities = ["network"]
 value_options = ["-R", "--repo"]
 no_value_options = ["--help", "--version"]
 standalone_flags = ["--help", "--version"]
 # unix CLI, case-sensitive flags (M2.119 knowledge audit).
 case_sensitive_flags = true
+
+[[program.sub_capability]]
+subcommand_not_in = ["completion", "config", "alias", "help", "version"]
+capabilities = ["network"]
 
 [[program.rule]]
 guard = "publish_outward"

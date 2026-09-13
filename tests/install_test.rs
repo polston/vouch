@@ -702,4 +702,31 @@ fn write_file_atomically_creates_parent_dirs_and_writes() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn reconciles_agy_permissions_cleanly() {
+    use vouch::install::{reconcile_agy_permissions, DEFAULT_AGY_UNSANDBOXED_TOOLS};
+
+    let existing = r#"{
+      "permissions": {
+        "allow": ["command(bash*)", "unsandboxed(git*)"]
+      }
+    }"#;
+
+    let reconciled = reconcile_agy_permissions(existing, DEFAULT_AGY_UNSANDBOXED_TOOLS).unwrap();
+    let root: serde_json::Value = serde_json::from_str(&reconciled).unwrap();
+    let allow = root["permissions"]["allow"].as_array().unwrap();
+
+    // Preserved existing
+    assert!(allow.contains(&serde_json::Value::String("command(bash*)".into())));
+    assert!(allow.contains(&serde_json::Value::String("unsandboxed(git*)".into())));
+
+    // Added new modeled tools
+    assert!(allow.contains(&serde_json::Value::String("unsandboxed(cargo*)".into())));
+    assert!(allow.contains(&serde_json::Value::String("unsandboxed(gh*)".into())));
+
+    // Idempotent: running again produces identical output
+    let reconciled2 = reconcile_agy_permissions(&reconciled, DEFAULT_AGY_UNSANDBOXED_TOOLS).unwrap();
+    assert_eq!(reconciled, reconciled2);
+}
+
 

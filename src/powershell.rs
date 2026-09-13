@@ -20,6 +20,7 @@ pub const KNOWN_CONSTRUCTS: &[&str] = &[
     "type_literal",
     "call_operator",
     "method_call",
+    "expression",
     "redirect",
     "assignment",
     "env_assignment",
@@ -148,6 +149,59 @@ fn inner_blocks(src: &str) -> Vec<String> {
     let b: Vec<char> = src.chars().collect();
     let mut i = 0;
     while i < b.len() {
+        if b[i] == '\'' {
+            let mut j = i + 1;
+            while j < b.len() {
+                if b[j] == '\'' {
+                    if j + 1 < b.len() && b[j + 1] == '\'' {
+                        j += 2;
+                        continue;
+                    }
+                    break;
+                }
+                j += 1;
+            }
+            i = j + 1;
+            continue;
+        }
+        if b[i] == '"' {
+            let mut j = i + 1;
+            while j < b.len() {
+                if b[j] == '`' && j + 1 < b.len() {
+                    j += 2;
+                    continue;
+                }
+                if b[j] == '$' && j + 1 < b.len() && b[j + 1] == '(' {
+                    let start = j + 1;
+                    let mut depth = 1;
+                    let mut k = start + 1;
+                    while k < b.len() && depth > 0 {
+                        if b[k] == '(' {
+                            depth += 1;
+                        } else if b[k] == ')' {
+                            depth -= 1;
+                        }
+                        k += 1;
+                    }
+                    if depth == 0 && k > start + 2 {
+                        out.push(b[start + 1..k - 1].iter().collect());
+                    }
+                    j = k;
+                    continue;
+                }
+                if b[j] == '"' {
+                    if j + 1 < b.len() && b[j + 1] == '"' {
+                        j += 2;
+                        continue;
+                    }
+                    break;
+                }
+                j += 1;
+            }
+            i = j + 1;
+            continue;
+        }
+
         let open_at = if b[i] == '{' {
             Some(i)
         } else if b[i] == '$' && i + 1 < b.len() && b[i + 1] == '(' {
@@ -180,6 +234,66 @@ fn inner_blocks(src: &str) -> Vec<String> {
         i += 1;
     }
     out
+}
+
+/// Finds the byte index of the matching closing parenthesis `)` for a leading `(`,
+/// respecting strings and nested parentheses.
+fn find_matching_paren(s: &str) -> Option<usize> {
+    if !s.starts_with('(') {
+        return None;
+    }
+    let mut depth = 0i32;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut chars = s.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if in_double && c == '`' {
+            chars.next();
+            continue;
+        }
+        if c == '\'' && !in_double {
+            in_single = !in_single;
+            continue;
+        }
+        if c == '"' && !in_single {
+            in_double = !in_double;
+            continue;
+        }
+        if !in_single && !in_double {
+            if c == '(' {
+                depth += 1;
+            } else if c == ')' {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Finds the byte index of the closing quote for a string starting with `'` or `"`.
+fn find_matching_quote(s: &str) -> Option<usize> {
+    let quote = s.chars().next()?;
+    if quote != '\'' && quote != '"' {
+        return None;
+    }
+    let mut chars = s.char_indices().skip(1).peekable();
+    while let Some((i, c)) = chars.next() {
+        if quote == '"' && c == '`' {
+            chars.next();
+            continue;
+        }
+        if c == quote {
+            if chars.peek().map(|(_, n)| *n) == Some(quote) {
+                chars.next();
+                continue;
+            }
+            return Some(i);
+        }
+    }
+    None
 }
 
 /// Sentinel separator characters `split_statements_with_sep` reports
@@ -643,6 +757,61 @@ pub fn parse(src: &str) -> Result<Parsed, String> {
             continue;
         }
         if body.starts_with('$') {
+            continue;
+        }
+
+        // Parenthesized expression: `(cmd ...)` or `(expr)`
+        if body.starts_with('(') {
+            out.note("expression");
+            if let Some(close_idx) = find_matching_paren(body) {
+                let inner = body[1..close_idx].trim();
+                let rest = body[close_idx + 1..].trim();
+                if rest.starts_with('.') && rest.contains('(') {
+                    out.note("method_call");
+                }
+                if !inner.is_empty() {
+                    if let Ok(inner_scan) = parse(inner) {
+                        out.absorb(inner_scan);
+                    }
+                }
+            }
+            continue;
+        }
+
+        // Array subexpression `@(...)`, hashtable `@{...}`, or here-strings `@'...'@`, `@"..."@`
+        if body.starts_with("@(") || body.starts_with("@{") || body.starts_with("@'") || body.starts_with("@\"") {
+            out.note("expression");
+            if body.starts_with("@(") {
+                if let Some(close_idx) = find_matching_paren(&body[1..]) {
+                    let inner = body[2..1 + close_idx].trim();
+                    if !inner.is_empty() {
+                        if let Ok(inner_scan) = parse(inner) {
+                            out.absorb(inner_scan);
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+
+        // String literal expression: `'...'` or `"..."`
+        if body.starts_with('\'') || body.starts_with('"') {
+            out.note("expression");
+            if let Some(close_idx) = find_matching_quote(body) {
+                let rest = body[close_idx + 1..].trim();
+                if rest.starts_with('.') && rest.contains('(') {
+                    out.note("method_call");
+                }
+            }
+            continue;
+        }
+
+        // Numeric literal / arithmetic expression: e.g. `2 + 2`
+        if body.chars().next().is_some_and(|c| c.is_ascii_digit() || (c == '+' && body.len() > 1 && body[1..].chars().next().is_some_and(|c2| c2.is_ascii_digit()))) {
+            out.note("expression");
+            if body.contains('.') && body.contains('(') {
+                out.note("method_call");
+            }
             continue;
         }
 

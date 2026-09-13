@@ -1160,3 +1160,17 @@ fn a_scoped_entry_missed_by_every_known_candidate_says_outside_not_unprovable() 
         "widening only_under IS the remedy here: {reason}"
     );
 }
+
+#[test]
+fn a_variable_assignment_in_place_scoped_write_resolves_and_judges() {
+    let (verdict, reason) = hook_at(
+        "scoped_var_wall",
+        DESCRIBED_SCOPED_MINE,
+        DESCRIBED_SCOPED_CFG,
+        "C:/work",
+        "OUT=\"D:/wall/x.txt\" && probe-tool --out \"$OUT\"",
+    );
+    assert_eq!(verdict, "deny", "variable assigned write target must be caught: {reason}");
+    assert!(reason.contains("write.deny_paths"), "{reason}");
+    assert!(reason.contains("D:/wall/x.txt"), "{reason}");
+}

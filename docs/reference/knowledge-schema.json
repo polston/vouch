@@ -504,6 +504,14 @@
             "type": "string"
           }
         },
+        "capabilities": {
+          "description": "Host and network capabilities required when this rule fires, e.g. [\"network\"].",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
         "grants_execute": {
           "description": "This command hands another program permission to run — e.g. `chmod\n+x`. Trips `grant_execute` on its own, independent of the other\nconditions.",
           "type": "boolean",
@@ -601,6 +609,14 @@
         },
         "subcommand_in": {
           "description": "Subcommands this applies to, e.g. [\"push\", \"fetch\", \"pull\"].",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "subcommand_not_in": {
+          "description": "Subcommands this does NOT apply to; all other subcommands match.",
           "type": "array",
           "default": [],
           "items": {

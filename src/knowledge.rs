@@ -428,9 +428,9 @@ pub(crate) fn validate(kb: &Knowledge) -> Result<(), String> {
             }
         }
         for sc in &prog.sub_capability {
-            if sc.subcommand.is_none() && sc.subcommand_in.is_empty() {
+            if sc.subcommand.is_none() && sc.subcommand_in.is_empty() && sc.subcommand_not_in.is_empty() {
                 return Err(format!(
-                    "[[program]] {:?}: sub_capability must specify either `subcommand` or `subcommand_in`",
+                    "[[program]] {:?}: sub_capability must specify `subcommand`, `subcommand_in`, or `subcommand_not_in`",
                     prog.match_names
                 ));
             }
@@ -668,6 +668,14 @@ pub(crate) fn validate(kb: &Knowledge) -> Result<(), String> {
                          firing, so a rule naming it and nothing else can never fire at all"
                     }
                 ));
+            }
+            for cap in &rule.capabilities {
+                if !VALID_CAPABILITIES.contains(&cap.as_str()) {
+                    return Err(format!(
+                        "[[program.rule]] {:?}: rule has capability {:?}, which must be one of {:?}",
+                        prog.match_names, cap, VALID_CAPABILITIES
+                    ));
+                }
             }
         }
         // `runs_file` is the same position spelling and gets the same check,

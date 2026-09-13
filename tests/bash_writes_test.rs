@@ -3,7 +3,7 @@
 //! outright because [write] only applied to the Write/Edit tools.
 
 use vouch::config::load;
-use vouch::engine::decide_command_in;
+use vouch::engine::{decide_command_at, decide_command_in};
 use vouch::protocol::Decision;
 
 const HOME: &str = "C:/Users/dev";
@@ -792,6 +792,7 @@ redirect = "allow"
 assignment = "allow"
 env_assignment = "allow"
 method_call = "allow"
+expression = "allow"
 [write]
 default = "ask"
 allow_paths = ["C:/work/**"]
@@ -1016,5 +1017,72 @@ allow_paths = ["C:/work/**"]
         // Rule 1 (both languages): a glob expands before `cd` runs, so the
         // literal spelling is not the directory `cd` actually lands in.
         assert_asks("bash", "cd 'b*ld'; echo hi > probe.txt");
+    }
+}
+
+#[test]
+fn same_command_assignment_relative_path_resolves_and_judges_against_write_rules() {
+    let cfg = load(r#"
+version = 1
+[lang.bash]
+default = "allow"
+[lang.bash.constructs]
+unmodeled_command = "allow"
+[guards]
+delete_recursive = "allow"
+[write]
+default = "ask"
+allow_paths = ["C:/work/**"]
+"#).expect("parses");
+
+    // Inside allowed area: DIR="./dist" with cwd="C:/work" resolves to "C:/work/dist"
+    let d1 = decide_command_at(&cfg, "bash", "DIR=\"./dist\" && rm -rf \"$DIR\"", Some(HOME), None, Some("C:/work"));
+    assert!(matches!(d1, Decision::Allow(_)), "expected allow, got {d1:?}");
+
+    // Outside allowed area: DIR="C:/Windows/temp" resolves and asks because it is not in allow_paths
+    let d2 = decide_command_at(&cfg, "bash", "DIR=\"C:/Windows/temp\" && rm -rf \"$DIR\"", Some(HOME), None, Some("C:/work"));
+    assert!(matches!(d2, Decision::Ask(_)), "expected ask for outside path, got {d2:?}");
+}
+
+#[test]
+fn predictable_command_substitutions_resolve_against_cwd() {
+    let cfg = load(r#"
+version = 1
+[lang.bash]
+default = "allow"
+[lang.bash.constructs]
+unmodeled_command = "allow"
+subshell = "allow"
+[guards]
+delete_recursive = "allow"
+[write]
+default = "ask"
+allow_paths = ["C:/work/**"]
+"#).expect("parses");
+
+    // $(pwd) resolves to C:/work, so "$DIR" resolves to "C:/work/dist"
+    let d1 = decide_command_at(&cfg, "bash", "DIR=\"$(pwd)/dist\" && rm -rf \"$DIR\"", Some(HOME), None, Some("C:/work"));
+    assert!(matches!(d1, Decision::Allow(_)), "expected allow for $(pwd), got {d1:?}");
+
+    // $PWD resolves to C:/work, so "$DIR" resolves to "C:/work/dist"
+    let d2 = decide_command_at(&cfg, "bash", "DIR=\"$PWD/dist\" && rm -rf \"$DIR\"", Some(HOME), None, Some("C:/work"));
+    assert!(matches!(d2, Decision::Allow(_)), "expected allow for $PWD, got {d2:?}");
+
+    // $(echo dist) resolves to dist, so "./$DIR" resolves to "C:/work/dist"
+    let d3 = decide_command_at(&cfg, "bash", "DIR=\"$(echo dist)\" && rm -rf \"./$DIR\"", Some(HOME), None, Some("C:/work"));
+    assert!(matches!(d3, Decision::Allow(_)), "expected allow for $(echo dist), got {d3:?}");
+
+    // Negative control: dynamic/unpredictable command substitution fails closed to unresolved_path
+    let d4 = decide_command_at(&cfg, "bash", "DIR=\"$(whoami)/dist\" && rm -rf \"$DIR\"", Some(HOME), None, Some("C:/work"));
+    match d4 {
+        Decision::Ask(ref r) => assert!(r.contains("unresolved_path"), "expected unresolved_path for dynamic sub, got {r}"),
+        other => panic!("expected Ask naming unresolved_path, got {other:?}"),
+    }
+
+    // Negative control: no cwd provided, so $(pwd)/$PWD cannot resolve to a known dir and fails closed to unresolved_path
+    let d5 = decide_command_at(&cfg, "bash", "DIR=\"$(pwd)/dist\" && rm -rf \"$DIR\"", Some(HOME), None, None);
+    match d5 {
+        Decision::Ask(ref r) => assert!(r.contains("unresolved_path"), "expected unresolved_path with no cwd, got {r}"),
+        other => panic!("expected Ask naming unresolved_path, got {other:?}"),
     }
 }

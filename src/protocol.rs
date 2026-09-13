@@ -274,6 +274,18 @@ pub fn is_demote_eligible(kb: &Knowledge, command: &str, cwd: &str) -> bool {
             return false;
         }
 
+        // If the command runs an unmodeled external script file or evaluates unread input,
+        // its internal execution effects and capability requirements are unmodeled.
+        let (runs_file, _) = crate::guards::runs_file_positional(kb, cmd);
+        if runs_file {
+            return false;
+        }
+        let (evaluates_input, _, _) =
+            crate::guards::evaluates_input_in(kb, cmd, "bash", false, false, false);
+        if evaluates_input {
+            return false;
+        }
+
         // Host and network capabilities declared in knowledge must not require
         // network, host escape, daemon, or external filesystem access.
         let caps = crate::guards::capabilities_for_cmd(kb, cmd, "bash");
