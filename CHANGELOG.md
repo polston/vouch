@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.26.0 (2026-09-13)
+
+
+### Features
+
+* evaluate argument paths and script files for Antigravity sandbox containment
+* reconcile vouch and git tool permissions in Antigravity settings
+
 ## 0.25.0 (2026-09-13)
 
 

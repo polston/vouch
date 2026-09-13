@@ -632,7 +632,15 @@ pub fn write_file_atomically(path: &std::path::Path, content: &str) -> Result<()
 }
 
 /// Standard modeled developer tools requiring unsandboxed execution under Antigravity.
-pub const DEFAULT_AGY_UNSANDBOXED_TOOLS: &[&str] = &["cargo*", "gh*", "git*", "curl*", "ssh*"];
+pub const DEFAULT_AGY_UNSANDBOXED_TOOLS: &[&str] = &[
+    "cargo*",
+    "gh*",
+    "git*",
+    "curl*",
+    "ssh*",
+    "vouch*",
+    "GIT_CONFIG_GLOBAL=*",
+];
 
 /// Reconciles Antigravity settings.json permissions to include clean tool entries.
 pub fn reconcile_agy_permissions(existing: &str, tools: &[&str]) -> Result<String, String> {

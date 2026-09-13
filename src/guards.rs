@@ -2192,14 +2192,40 @@ pub fn runs_file_positional(kb: &Knowledge, cmd: &Cmd) -> (bool, Option<String>)
     (false, None)
 }
 
+/// Identifies the script file target if this command runs a file via `runs_file` or `runs_file_flags`.
+/// Returns `Some(Ok(path))` when the target is determined, `Some(Err(()))` when `runs_file` applies but
+/// the target is unknowable (e.g. unreadable flag cluster or undescribed flag), or `None` if it does not run a file.
+pub fn runs_file_target(kb: &Knowledge, cmd: &Cmd) -> Option<Result<String, ()>> {
+    let head = base(&cmd.head);
+    for prog in &kb.program {
+        if !receiver_gate_holds(kb, prog, &cmd.receiver_origin) {
+            continue;
+        }
+        if !prog.match_names.iter().any(|n| n.to_ascii_lowercase() == head) {
+            continue;
+        }
+        if prog.runs_file.is_empty() && prog.runs_file_flags.is_empty() {
+            continue;
+        }
+        if let Some(target) = runs_file_target_in(prog, &cmd.args) {
+            return Some(target);
+        }
+    }
+    None
+}
+
 fn runs_file_in(prog: &Program, args: &[String]) -> bool {
+    runs_file_target_in(prog, args).is_some()
+}
+
+fn runs_file_target_in(prog: &Program, args: &[String]) -> Option<Result<String, ()>> {
     let want = prog.runs_file.strip_prefix("arg_").and_then(|n| n.parse::<usize>().ok());
     let vocab = crate::flags::vocab_for(prog, wrap_abbrev(prog));
     let mut walk = crate::flags::ArgWalk::new(&vocab);
     let mut skip_next = false;
     let mut options_ended = false;
     let mut operand = 0usize;
-    for raw in args {
+    for (idx, raw) in args.iter().enumerate() {
         // A token already spoken for as a flag's value is not itself an
         // operand, and must not be fed to the walk either — its text could be
         // `--`, which would end an option scan that never started.
@@ -2222,23 +2248,29 @@ fn runs_file_in(prog: &Program, args: &[String]) -> bool {
                 if matches!(crate::flags::spells(f, raw, &vocab), crate::flags::Spell::Yes(_))
                     || matches!(cluster_switch(prog, f, raw), ClusterHit::Yes)
                 {
-                    return false;
+                    return None;
                 }
                 if matches!(cluster_switch(prog, f, raw), ClusterHit::Unreadable) {
-                    return true;
+                    return Some(Err(()));
                 }
             }
         }
         match class {
             crate::flags::Class::Value { ref flag, ref attached } => {
                 if prog.runs_file_flags.iter().any(|f| f == flag) {
-                    return true;
+                    if let Some(att) = attached {
+                        return Some(Ok(att.clone()));
+                    } else if let Some(next) = args.get(idx + 1) {
+                        return Some(Ok(next.clone()));
+                    } else {
+                        return Some(Err(()));
+                    }
                 }
                 if attached.is_none() {
                     skip_next = true;
                 }
             }
-            crate::flags::Class::Undescribed { .. } | crate::flags::Class::RefusedAbbrev { .. } => return true,
+            crate::flags::Class::Undescribed { .. } | crate::flags::Class::RefusedAbbrev { .. } => return Some(Err(())),
             crate::flags::Class::NotFlag => {
                 // A lone `-` is the standard-input spelling in every shell
                 // this key describes, never a filename — `evaluates_input`
@@ -2248,19 +2280,19 @@ fn runs_file_in(prog: &Program, args: &[String]) -> bool {
                 // than becoming the script-file operand.
                 if raw == "-" {
                     if prog.snippet_args.as_ref().is_some_and(|declarations| !declarations.is_empty()) {
-                        return false;
+                        return None;
                     }
                     continue;
                 }
                 if want == Some(operand) {
-                    return true;
+                    return Some(Ok(raw.clone()));
                 }
                 operand += 1;
             }
             crate::flags::Class::Bool { .. } | crate::flags::Class::EndOfOptions => {}
         }
     }
-    false
+    None
 }
 
 /// Whether `cmd` matches an entry declaring `callback_args` AND hands one of

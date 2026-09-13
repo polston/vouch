@@ -1484,6 +1484,37 @@ fn main() {
                     for n in &p.notes {
                         eprintln!("# - {n}");
                     }
+                    if options.host == Host::Agy {
+                        let agy_settings_path =
+                            std::path::PathBuf::from(home()).join(".gemini/antigravity-cli/settings.json");
+                        let agy_dir = std::path::PathBuf::from(home()).join(".gemini/antigravity-cli");
+                        if agy_settings_path.exists() || agy_dir.exists() {
+                            let existing_agy =
+                                std::fs::read_to_string(&agy_settings_path).unwrap_or_default();
+                            match vouch::install::reconcile_agy_permissions(
+                                &existing_agy,
+                                vouch::install::DEFAULT_AGY_UNSANDBOXED_TOOLS,
+                            ) {
+                                Ok(merged_agy) => {
+                                    if let Err(e) =
+                                        vouch::install::write_file_atomically(&agy_settings_path, &merged_agy)
+                                    {
+                                        eprintln!(
+                                            "# warning: could not update Antigravity settings.json: {e}"
+                                        );
+                                    } else {
+                                        eprintln!(
+                                            "# reconciled Antigravity permissions in: {}",
+                                            agy_settings_path.display()
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("# warning: could not reconcile Antigravity permissions: {e}")
+                                }
+                            }
+                        }
+                    }
                 } else {
                     println!(
                         "{}",
@@ -1496,6 +1527,11 @@ fn main() {
                     eprintln!("\n# --- what this changes ---");
                     for n in &p.notes {
                         eprintln!("# - {n}");
+                    }
+                    if options.host == Host::Agy {
+                        eprintln!(
+                            "# note: `install --write` also reconciles tool wildcards in ~/.gemini/antigravity-cli/settings.json"
+                        );
                     }
                     if options.hooks_only {
                         eprintln!(

@@ -497,3 +497,88 @@ fn subcommand_capability_and_standalone_flags_demotion() {
     assert!(!should_demote_sandbox(&input, &decision, kb));
 }
 
+#[test]
+fn m2_264_read_path_and_external_argument_scoping() {
+    use vouch::protocol::should_demote_sandbox;
+    let kb = vouch::guards::in_effect();
+    let decision = Decision::Allow("allowed".into());
+
+    let make_input = |cmd: &str| {
+        let raw = format!(
+            r#"{{
+                "toolCall": {{
+                    "name": "run_command",
+                    "args": {{
+                        "CommandLine": {cmd:?},
+                        "BypassSandbox": true
+                    }}
+                }},
+                "conversationId": "c-m2-264",
+                "stepIdx": 1,
+                "cwd": "/workspace/project",
+                "workspacePaths": ["/workspace/project"]
+            }}"#
+        );
+        parse_input(&raw).unwrap()
+    };
+
+    // 1. Reading home files (e.g. ~/.gemini/settings.json) must NOT demote (preserves BypassSandbox: true)
+    let input = make_input("cat ~/.gemini/settings.json");
+    assert!(!should_demote_sandbox(&input, &decision, kb));
+
+    // 2. Reading workspace-internal files demotes cleanly to sandbox
+    let input = make_input("cat ./README.md");
+    assert!(should_demote_sandbox(&input, &decision, kb));
+
+    let input = make_input("cat src/main.rs");
+    assert!(should_demote_sandbox(&input, &decision, kb));
+
+    // 3. Absolute path outside workspace (e.g. /tmp or /etc/hosts) must NOT demote
+    let input = make_input("ls /tmp");
+    assert!(!should_demote_sandbox(&input, &decision, kb));
+
+    let input = make_input("grep 'pattern' /etc/hosts");
+    assert!(!should_demote_sandbox(&input, &decision, kb));
+
+    // 4. Directory traversal escaping workspace must NOT demote
+    let input = make_input("head -n 10 ../sibling/file");
+    assert!(!should_demote_sandbox(&input, &decision, kb));
+
+    // 5. Normal workspace directory listing demotes cleanly
+    let input = make_input("ls target/debug");
+    assert!(should_demote_sandbox(&input, &decision, kb));
+
+    // 6. Safe bit-bucket sink /dev/null demotes cleanly
+    let input = make_input("cat /dev/null");
+    assert!(should_demote_sandbox(&input, &decision, kb));
+
+    // 7. Non-path arguments containing slashes or dots must not be falsely classified as external paths
+    let input = make_input("echo 'hello/world'");
+    assert!(should_demote_sandbox(&input, &decision, kb));
+
+    let input = make_input("git log origin/master..master");
+    assert!(should_demote_sandbox(&input, &decision, kb));
+
+    // 8. Flag with external path value (e.g. --config=~/.config/vouch/config.toml) must NOT demote
+    let input = make_input("cat --config=~/.config/vouch/config.toml");
+    assert!(!should_demote_sandbox(&input, &decision, kb));
+
+    // 9. Script files contained within workspace demote cleanly to sandbox
+    let input = make_input("bash ./scripts/test.sh");
+    assert!(should_demote_sandbox(&input, &decision, kb));
+
+    let input = make_input("bash scripts/githooks/test-hooks.sh && bash scripts/test-uninstall.sh");
+    assert!(should_demote_sandbox(&input, &decision, kb));
+
+    // 10. Script files targeting external paths must NOT demote (preserves BypassSandbox: true)
+    let input = make_input("bash /tmp/test.sh");
+    assert!(!should_demote_sandbox(&input, &decision, kb));
+
+    let input = make_input("bash ~/.config/evil.sh");
+    assert!(!should_demote_sandbox(&input, &decision, kb));
+
+    // 11. Script file with unknowable target (undescribed options) must NOT demote
+    let input = make_input("bash --unknown-option test.sh");
+    assert!(!should_demote_sandbox(&input, &decision, kb));
+}
+

@@ -274,11 +274,19 @@ pub fn is_demote_eligible(kb: &Knowledge, command: &str, cwd: &str) -> bool {
             return false;
         }
 
-        // If the command runs an unmodeled external script file or evaluates unread input,
-        // its internal execution effects and capability requirements are unmodeled.
-        let (runs_file, _) = crate::guards::runs_file_positional(kb, cmd);
-        if runs_file {
-            return false;
+        // If the command runs a script file, verify that the script target is known
+        // and strictly contained within the workspace. External or unknowable script targets
+        // must refuse demotion.
+        match crate::guards::runs_file_target(kb, cmd) {
+            Some(Ok(ref target)) => {
+                if !is_path_contained_in_workspace(target, cwd, &root) {
+                    return false;
+                }
+            }
+            Some(Err(())) => {
+                return false;
+            }
+            None => {}
         }
         let (evaluates_input, _, _) =
             crate::guards::evaluates_input_in(kb, cmd, "bash", false, false, false);
@@ -306,6 +314,21 @@ pub fn is_demote_eligible(kb: &Knowledge, command: &str, cwd: &str) -> bool {
                 return false;
             }
         }
+
+        // Verify argument path containment (reads, configs, and positional targets)
+        for arg in &cmd.args {
+            let a = arg.trim().trim_matches(|c| c == '\'' || c == '"');
+            let candidate = if a.starts_with("--") && a.contains('=') {
+                a.split_once('=').map(|(_, v)| v).unwrap_or(a)
+            } else {
+                a
+            };
+            if is_external_path_candidate(candidate) {
+                if !is_path_contained_in_workspace(candidate, cwd, &root) {
+                    return false;
+                }
+            }
+        }
     }
 
     // Verify redirect targets containment
@@ -318,6 +341,38 @@ pub fn is_demote_eligible(kb: &Knowledge, command: &str, cwd: &str) -> bool {
     true
 }
 
+/// Returns true if a token represents an absolute path, home path, or directory traversal candidate.
+fn is_external_path_candidate(token: &str) -> bool {
+    let t = token.trim().trim_matches(|c| c == '\'' || c == '"');
+    if t.is_empty() || t.starts_with('-') {
+        return false;
+    }
+    // Absolute Unix path
+    if t.starts_with('/') {
+        return true;
+    }
+    // Home directory path (~ or ~/...)
+    if t == "~" || t.starts_with("~/") || t.starts_with("~\\") {
+        return true;
+    }
+    // Windows drive path (e.g. C:\ or C:/)
+    if t.len() >= 2 && t.as_bytes()[1] == b':' && (t.starts_with("C:") || t.as_bytes()[0].is_ascii_alphabetic()) {
+        return true;
+    }
+    // Explicit directory traversal component (avoid matching git ranges like master..branch)
+    if t == ".."
+        || t.starts_with("../")
+        || t.starts_with("..\\")
+        || t.contains("/../")
+        || t.contains("\\..\\")
+        || t.ends_with("/..")
+        || t.ends_with("\\..")
+    {
+        return true;
+    }
+    false
+}
+
 /// Backwards-compatible convenience wrapper evaluating against builtin knowledge.
 pub fn is_local_workspace_command(command: &str) -> bool {
     is_demote_eligible(crate::guards::in_effect(), command, "")
@@ -325,7 +380,7 @@ pub fn is_local_workspace_command(command: &str) -> bool {
 
 /// True if `path` is contained within the workspace root or names a safe bit-bucket sink (`/dev/null`, `NUL`).
 fn is_path_contained_in_workspace(path: &str, cwd: &str, root: &str) -> bool {
-    let trimmed = path.trim();
+    let trimmed = path.trim().trim_matches(|c| c == '\'' || c == '"');
     if trimmed.is_empty() {
         return false;
     }
@@ -333,17 +388,29 @@ fn is_path_contained_in_workspace(path: &str, cwd: &str, root: &str) -> bool {
     if norm_path == "/dev/null" || norm_path.eq_ignore_ascii_case("NUL") {
         return true;
     }
-    let norm_root = crate::paths::normalize(root, "");
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default();
+    let norm_root = crate::paths::normalize(root, &home);
     let root_clean = norm_root.trim_end_matches('/');
     if root_clean.is_empty() {
         return false;
     }
-    let full = if trimmed.starts_with('/') || (trimmed.len() >= 2 && trimmed.as_bytes()[1] == b':') {
+    let full = if trimmed == "~" || trimmed.starts_with("~/") || trimmed.starts_with("~\\") {
+        if home.is_empty() {
+            return false;
+        }
+        format!(
+            "{}/{}",
+            home.trim_end_matches('/'),
+            trimmed[1..].trim_start_matches(|c| c == '/' || c == '\\')
+        )
+    } else if trimmed.starts_with('/') || (trimmed.len() >= 2 && trimmed.as_bytes()[1] == b':') {
         trimmed.to_string()
     } else {
         format!("{}/{}", cwd.trim_end_matches('/'), trimmed)
     };
-    let norm_full = crate::paths::normalize(&full, "");
+    let norm_full = crate::paths::normalize(&full, &home);
     norm_full == root_clean || norm_full.starts_with(&format!("{root_clean}/"))
 }
 
