@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.26.1 (2026-09-13)
+
+
+### Bug Fixes
+
+* enforce command head containment and preserve host execution for script files
+* seed standard shell and Python interpreter permissions in Antigravity settings
+
 ## 0.26.0 (2026-09-13)
 
 

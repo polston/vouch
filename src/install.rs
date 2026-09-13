@@ -640,6 +640,10 @@ pub const DEFAULT_AGY_UNSANDBOXED_TOOLS: &[&str] = &[
     "ssh*",
     "vouch*",
     "GIT_CONFIG_GLOBAL=*",
+    "bash*",
+    "sh*",
+    "python*",
+    "python3*",
 ];
 
 /// Reconciles Antigravity settings.json permissions to include clean tool entries.

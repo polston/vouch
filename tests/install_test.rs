@@ -725,6 +725,7 @@ fn reconciles_agy_permissions_cleanly() {
     assert!(allow.contains(&serde_json::Value::String("unsandboxed(gh*)".into())));
     assert!(allow.contains(&serde_json::Value::String("unsandboxed(vouch*)".into())));
     assert!(allow.contains(&serde_json::Value::String("unsandboxed(GIT_CONFIG_GLOBAL=*)".into())));
+    assert!(allow.contains(&serde_json::Value::String("unsandboxed(bash*)".into())));
 
     // Idempotent: running again produces identical output
     let reconciled2 = reconcile_agy_permissions(&reconciled, DEFAULT_AGY_UNSANDBOXED_TOOLS).unwrap();

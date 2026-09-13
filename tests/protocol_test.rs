@@ -563,12 +563,12 @@ fn m2_264_read_path_and_external_argument_scoping() {
     let input = make_input("cat --config=~/.config/vouch/config.toml");
     assert!(!should_demote_sandbox(&input, &decision, kb));
 
-    // 9. Script files contained within workspace demote cleanly to sandbox
+    // 9. Script files cannot be demoted because their internal effects are unmodeled (§1)
     let input = make_input("bash ./scripts/test.sh");
-    assert!(should_demote_sandbox(&input, &decision, kb));
+    assert!(!should_demote_sandbox(&input, &decision, kb));
 
     let input = make_input("bash scripts/githooks/test-hooks.sh && bash scripts/test-uninstall.sh");
-    assert!(should_demote_sandbox(&input, &decision, kb));
+    assert!(!should_demote_sandbox(&input, &decision, kb));
 
     // 10. Script files targeting external paths must NOT demote (preserves BypassSandbox: true)
     let input = make_input("bash /tmp/test.sh");
@@ -580,5 +580,20 @@ fn m2_264_read_path_and_external_argument_scoping() {
     // 11. Script file with unknowable target (undescribed options) must NOT demote
     let input = make_input("bash --unknown-option test.sh");
     assert!(!should_demote_sandbox(&input, &decision, kb));
+
+    // 12. Command head targeting external path must NOT demote (preserves BypassSandbox: true)
+    let input = make_input("~/.config/vouch/bin/vouch --version");
+    assert!(!should_demote_sandbox(&input, &decision, kb));
+
+    let input = make_input("/opt/bin/tool --help");
+    assert!(!should_demote_sandbox(&input, &decision, kb));
+
+    let input = make_input("../sibling/bin/tool --version");
+    assert!(!should_demote_sandbox(&input, &decision, kb));
+
+    // 13. Command head targeting workspace-contained path demotes cleanly
+    let input = make_input("/workspace/project/bin/git --version");
+    assert!(should_demote_sandbox(&input, &decision, kb));
 }
+
 

@@ -274,19 +274,20 @@ pub fn is_demote_eligible(kb: &Knowledge, command: &str, cwd: &str) -> bool {
             return false;
         }
 
-        // If the command runs a script file, verify that the script target is known
-        // and strictly contained within the workspace. External or unknowable script targets
-        // must refuse demotion.
-        match crate::guards::runs_file_target(kb, cmd) {
-            Some(Ok(ref target)) => {
-                if !is_path_contained_in_workspace(target, cwd, &root) {
-                    return false;
-                }
-            }
-            Some(Err(())) => {
+        // Verify command head path containment: if the binary or executable is an
+        // explicit path candidate, it must reside strictly within the workspace root.
+        // Running binaries outside the workspace root requires host access.
+        if is_external_path_candidate(&cmd.head) {
+            if !is_path_contained_in_workspace(&cmd.head, cwd, &root) {
                 return false;
             }
-            None => {}
+        }
+
+        // If the command runs a script file, its internal effects and capability
+        // requirements are unmodeled. Commands with unmodeled effects must never be
+        // demoted (allow-list invariant §1).
+        if crate::guards::runs_file_target(kb, cmd).is_some() {
+            return false;
         }
         let (evaluates_input, _, _) =
             crate::guards::evaluates_input_in(kb, cmd, "bash", false, false, false);
