@@ -289,9 +289,24 @@ fn expand_pattern_resolves_home_and_project_root() {
     use vouch::paths::expand_pattern;
     assert_eq!(expand_pattern("~/x", "C:/Users/dev", None).as_deref(), Some("C:/Users/dev/x"));
     assert_eq!(expand_pattern("$PROJECT_ROOT/x", "C:/Users/dev", None), None);
+    assert_eq!(expand_pattern("${PROJECT_ROOT}/x", "C:/Users/dev", None), None);
+    assert_eq!(expand_pattern("$WORKSPACE_ROOT/x", "C:/Users/dev", None), None);
+    assert_eq!(expand_pattern("${WORKSPACE_ROOT}/x", "C:/Users/dev", None), None);
     assert_eq!(
         expand_pattern("$PROJECT_ROOT/x", "C:/Users/dev", Some("C:/workspace/vouch-dev")).as_deref(),
         Some("C:/workspace/vouch-dev/x")
+    );
+    assert_eq!(
+        expand_pattern("${PROJECT_ROOT}/x", "C:/Users/dev", Some("C:/workspace/vouch-dev")).as_deref(),
+        Some("C:/workspace/vouch-dev/x")
+    );
+    assert_eq!(
+        expand_pattern("$WORKSPACE_ROOT/scripts/**", "C:/Users/dev", Some("C:/workspace/vouch-dev")).as_deref(),
+        Some("C:/workspace/vouch-dev/scripts/**")
+    );
+    assert_eq!(
+        expand_pattern("${WORKSPACE_ROOT}/scripts/**", "C:/Users/dev", Some("C:/workspace/vouch-dev")).as_deref(),
+        Some("C:/workspace/vouch-dev/scripts/**")
     );
 }
 

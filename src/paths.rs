@@ -366,7 +366,7 @@ pub fn resolve_links(p: &str) -> String {
 /// measurements can classify the cause without copying machine paths.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExistingPathError {
-    /// `$PROJECT_ROOT` was written but this decision has no project root.
+    /// `$PROJECT_ROOT` or `$WORKSPACE_ROOT` was written but this decision has no project root.
     CannotExpandPattern,
     /// The complete path does not exist (a broken link counts as missing).
     Missing,
@@ -526,11 +526,13 @@ pub fn paths_eq(a: &str, b: &str) -> bool {
 }
 
 /// A configured pattern with this machine's own directories filled in: every
-/// home shorthand via `normalize`, plus `$PROJECT_ROOT`.
+/// home shorthand via `normalize`, plus `$PROJECT_ROOT` or `$WORKSPACE_ROOT`
+/// (and their `${...}` bracketed forms).
 ///
-/// `None` when the pattern names `$PROJECT_ROOT` and the caller has no project
-/// root to put there. A pattern that cannot be expanded matches NOTHING — never
-/// everything — which is why the absence is returned rather than the raw text.
+/// `None` when the pattern names `$PROJECT_ROOT` or `$WORKSPACE_ROOT` and the
+/// caller has no project or workspace root to put there. A pattern that cannot
+/// be expanded matches NOTHING — never everything — which is why the absence
+/// is returned rather than the raw text.
 ///
 /// It lives here, and not in `engine`, because three different kinds of rule
 /// now write patterns in this one grammar: `[write]` path rules and
@@ -539,8 +541,18 @@ pub fn paths_eq(a: &str, b: &str) -> bool {
 /// expansion written beside the third one would be a second grammar the moment
 /// either changed.
 pub fn expand_pattern(pattern: &str, home: &str, project_root: Option<&str>) -> Option<String> {
-    let p = if pattern.contains("$PROJECT_ROOT") {
-        pattern.replace("$PROJECT_ROOT", project_root?)
+    let needs_root = pattern.contains("$PROJECT_ROOT")
+        || pattern.contains("${PROJECT_ROOT}")
+        || pattern.contains("$WORKSPACE_ROOT")
+        || pattern.contains("${WORKSPACE_ROOT}");
+
+    let p = if needs_root {
+        let root = project_root?;
+        pattern
+            .replace("${PROJECT_ROOT}", root)
+            .replace("$PROJECT_ROOT", root)
+            .replace("${WORKSPACE_ROOT}", root)
+            .replace("$WORKSPACE_ROOT", root)
     } else {
         pattern.to_string()
     };

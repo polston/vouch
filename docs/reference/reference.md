@@ -80,8 +80,8 @@ never searches PATH. Recognition only; guards and write rules still apply.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `name_patterns` | array of string | (required) | Logical executable names, either exact or a non-empty literal prefix followed by one terminal `*`. The platform `.exe` suffix is removed before matching; path separators and `*` alone are refused. |
-| `under` | array of string | (required) | Exact executable paths or executable trees ending in `/**`. `~` and `$PROJECT_ROOT` expand at decision time. Unlike every other `under` key, this names where the PROGRAM FILE lives, not where it runs. |
+| `name_patterns` | array of string | (required) | Logical executable names: either exact, wildcard `*`, or a non-empty literal prefix followed by one terminal `*`. The platform `.exe` suffix is removed before matching; path separators are refused. |
+| `under` | array of string | (required) | Exact executable paths or executable trees ending in `/**`. `~`, `$PROJECT_ROOT`, and `$WORKSPACE_ROOT` expand at decision time. Unlike every other `under` key, this names where the PROGRAM FILE lives, not where it runs. |
 
 ### `ProtectedSection`
 

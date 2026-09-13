@@ -73,6 +73,10 @@ pub struct HookInput {
     pub turn_id: String,
     #[serde(default)]
     pub cwd: String,
+    /// Absolute paths to active workspace roots, passed by host environments
+    /// like Antigravity.
+    #[serde(default, alias = "workspacePaths")]
+    pub workspace_paths: Vec<String>,
     /// The effective permission mode of THIS call, as the harness reports it
     /// — a per-call fact: an agent definition with a pinned mode overrides
     /// the session's. Empty when the caller did not supply it, which matches
@@ -144,11 +148,8 @@ pub fn parse_input(raw: &str) -> Result<HookInput, serde_json::Error> {
                 } else {
                     session_id.clone()
                 };
-                let default_cwd = agy
-                    .workspace_paths
-                    .as_ref()
-                    .and_then(|w| w.first().cloned())
-                    .unwrap_or_default();
+                let workspace_paths = agy.workspace_paths.clone().unwrap_or_default();
+                let default_cwd = workspace_paths.first().cloned().unwrap_or_default();
 
                 let is_terminal = agy.tool_response.is_some()
                     || agy.tool_result.is_some()
@@ -178,6 +179,7 @@ pub fn parse_input(raw: &str) -> Result<HookInput, serde_json::Error> {
                         session_id,
                         turn_id,
                         cwd: default_cwd,
+                        workspace_paths,
                         permission_mode: String::new(),
                         tool_name,
                         tool_input: ToolInput::default(),
@@ -226,6 +228,7 @@ pub fn parse_input(raw: &str) -> Result<HookInput, serde_json::Error> {
                         session_id,
                         turn_id,
                         cwd,
+                        workspace_paths,
                         permission_mode: String::new(),
                         tool_name: tc.name,
                         tool_input: ToolInput {

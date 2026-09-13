@@ -175,14 +175,14 @@
       "type": "object",
       "properties": {
         "name_patterns": {
-          "description": "Logical executable names, either exact or a non-empty literal prefix\nfollowed by one terminal `*`. The platform `.exe` suffix is removed\nbefore matching; path separators and `*` alone are refused.",
+          "description": "Logical executable names: either exact, wildcard `*`, or a non-empty\nliteral prefix followed by one terminal `*`. The platform `.exe` suffix\nis removed before matching; path separators are refused.",
           "type": "array",
           "items": {
             "type": "string"
           }
         },
         "under": {
-          "description": "Exact executable paths or executable trees ending in `/**`. `~` and\n`$PROJECT_ROOT` expand at decision time. Unlike every other `under`\nkey, this names where the PROGRAM FILE lives, not where it runs.",
+          "description": "Exact executable paths or executable trees ending in `/**`. `~`,\n`$PROJECT_ROOT`, and `$WORKSPACE_ROOT` expand at decision time. Unlike\nevery other `under` key, this names where the PROGRAM FILE lives, not\nwhere it runs.",
           "type": "array",
           "items": {
             "type": "string"

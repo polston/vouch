@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.24.0 (2026-09-13)
+
+
+### Features
+
+* support $WORKSPACE_ROOT expansion in program location trust rules
+* support wildcard name_patterns in program location trust rules
+
 ## 0.23.0 (2026-09-12)
 
 

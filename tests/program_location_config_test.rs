@@ -87,7 +87,8 @@ fn under_accepts_only_exact_paths_or_one_trailing_tree_glob() {
 #[test]
 fn name_patterns_refuse_every_shape_outside_exact_or_literal_prefix() {
     for bad in [
-        "*",
+        "**",
+        "*probe",
         "pro*be",
         "probe**",
         "probe-*-x",
@@ -104,6 +105,16 @@ fn name_patterns_refuse_every_shape_outside_exact_or_literal_prefix() {
         let e = config::load(&rule(r#""C:/build/**""#, &format!(r#""{bad}""#))).unwrap_err();
         assert!(e.contains("name_patterns") && e.contains(bad), "{e}");
     }
+}
+
+#[test]
+fn wildcard_name_pattern_is_accepted_and_matches_any_filename() {
+    let cfg = config::load(&rule(r#""$WORKSPACE_ROOT/scripts/**""#, r#""*""#)).unwrap();
+    assert_eq!(cfg.run.trust_program.len(), 1);
+    assert_eq!(cfg.run.trust_program[0].name_patterns, vec!["*"]);
+    assert!(config::program_name_pattern_matches("*", "deploy.sh"));
+    assert!(config::program_name_pattern_matches("*", "run"));
+    assert!(config::program_name_pattern_matches("*", "any_file.py"));
 }
 
 #[test]

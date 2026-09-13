@@ -63,8 +63,59 @@ pub fn project_root(cwd: &str) -> Option<String> {
     }
 }
 
+/// Project or workspace root for this invocation.
+///
+/// Tries `project_root(cwd)` first (finding `.git`). If `None` (for example, in
+/// non-git workspaces or when running outside the git boundary), resolves
+/// against existing absolute directories in `workspace_paths` (prioritizing one
+/// that contains or equals `cwd`).
+pub fn project_root_for(cwd: &str, workspace_paths: &[String]) -> Option<String> {
+    if let Some(root) = project_root(cwd) {
+        return Some(root);
+    }
+    let norm_cwd = if cwd.is_empty() {
+        None
+    } else {
+        Some(cwd.replace('\\', "/"))
+    };
+    // 1. Try finding a workspace path that contains or equals cwd
+    if let Some(ref c) = norm_cwd {
+        for wp in workspace_paths {
+            let s = wp.replace('\\', "/");
+            let trimmed = s.trim_end_matches('/');
+            let norm_wp = if trimmed.is_empty() && s.starts_with('/') {
+                "/".to_string()
+            } else {
+                trimmed.to_string()
+            };
+            let p = std::path::Path::new(&norm_wp);
+            if p.is_absolute()
+                && p.is_dir()
+                && (c == &norm_wp || c.starts_with(&format!("{norm_wp}/")))
+            {
+                return Some(norm_wp);
+            }
+        }
+    }
+    // 2. Fall back to the first existing absolute directory in workspace_paths
+    for wp in workspace_paths {
+        let s = wp.replace('\\', "/");
+        let trimmed = s.trim_end_matches('/');
+        let norm_wp = if trimmed.is_empty() && s.starts_with('/') {
+            "/".to_string()
+        } else {
+            trimmed.to_string()
+        };
+        let p = std::path::Path::new(&norm_wp);
+        if p.is_absolute() && p.is_dir() {
+            return Some(norm_wp);
+        }
+    }
+    None
+}
+
 pub fn decide(cfg: &Config, kb: &Knowledge, home: &str, input: &HookInput) -> RouteOutcome {
-    let root = project_root(&input.cwd);
+    let root = project_root_for(&input.cwd, &input.workspace_paths);
     // Every tool call, Bash and PowerShell included, flows through the same
     // declared-snippet/write-path decision flow (M2.5 task 8): `Bash` and
     // `PowerShell` are `[[tool]]` entries declaring `command` as a bash or

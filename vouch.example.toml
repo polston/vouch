@@ -316,12 +316,12 @@ rebound_name = "ask"
 # This covers the whole matching program, not one verb. A bare/PATH name, a
 # missing file, an unknown run directory, or a symlink escape grants nothing.
 # Recognition only: guards, write rules, protected paths and constructs still
-# apply. `*` is allowed only once at the end of a non-empty literal prefix.
-# Observe the declared source target and a real rebuild before choosing a
-# stable prefix; never copy a one-build suffix into this rule.
+# apply. `*` alone matches any filename; otherwise a terminal `*` matches a
+# non-empty literal prefix. Both `$PROJECT_ROOT` and `$WORKSPACE_ROOT` expand
+# at evaluation time.
 # [[run.trust_program]]
-# under = ["$PROJECT_ROOT/target/release/**"]
-# name_patterns = ["probe-tool", "probe-tool-*"]
+# under = ["$WORKSPACE_ROOT/scripts/**"]
+# name_patterns = ["*"]
 
 # place-scoped guard override. Every key except `under` must name a known
 # guard; anything else refuses the load. An override may be STRICTER or

@@ -640,3 +640,108 @@ fn decisions_recheck_file_metadata_but_do_not_hash_contents() {
     // metadata, but no content hash or execution-time file handle is retained.
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn workspace_root_relative_script_trust_matches_any_script_in_scripts_dir() {
+    let root = scratch("workspace-root-scripts");
+    let scripts = root.join("scripts");
+    fs::create_dir(&scripts).unwrap();
+    let deploy_script = scripts.join("deploy.sh");
+    fs::write(&deploy_script, b"#!/bin/sh\necho ok").unwrap();
+
+    let cfg = cfg("$WORKSPACE_ROOT/scripts/**", &["*"]);
+
+    // Relative invocation from workspace root
+    let decision = vouch::engine::decide_command_at(
+        &cfg,
+        "bash",
+        "./scripts/deploy.sh run",
+        None,
+        Some(&path(&root)),
+        Some(&path(&root)),
+    );
+
+    match decision {
+        Decision::Allow(reason) => {
+            assert!(reason.contains("[[run.trust_program]] #1"), "{reason}");
+            assert!(reason.contains('*'), "{reason}");
+            assert!(reason.contains("$WORKSPACE_ROOT/scripts/**"), "{reason}");
+        }
+        other => panic!("expected Allow for workspace script, got {other:?}"),
+    }
+
+    // Traversal escaping workspace root fails closed
+    let outside_root = scratch("outside-workspace");
+    let outside_script = outside_root.join("outside.sh");
+    fs::write(&outside_script, b"#!/bin/sh\necho escaped").unwrap();
+
+    let outside_decision = vouch::engine::decide_command_at(
+        &cfg,
+        "bash",
+        &format!("{} run", path(&outside_script)),
+        None,
+        Some(&path(&root)),
+        Some(&path(&root)),
+    );
+    assert!(
+        matches!(outside_decision, Decision::Ask(_)),
+        "outside workspace script must not be trusted: {outside_decision:?}"
+    );
+
+    // Non-existent script fails canonicalization
+    let missing_decision = vouch::engine::decide_command_at(
+        &cfg,
+        "bash",
+        "./scripts/missing.sh run",
+        None,
+        Some(&path(&root)),
+        Some(&path(&root)),
+    );
+    assert!(
+        matches!(missing_decision, Decision::Ask(_)),
+        "non-existent script must not be trusted: {missing_decision:?}"
+    );
+
+    fs::remove_dir_all(outside_root).unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn host_workspace_paths_fallback_resolves_workspace_root_outside_git() {
+    let root = scratch("non-git-workspace");
+    let scripts = root.join("scripts");
+    fs::create_dir(&scripts).unwrap();
+    let task_script = scripts.join("task.sh");
+    fs::write(&task_script, b"#!/bin/sh\necho task").unwrap();
+
+    let cfg = cfg("$WORKSPACE_ROOT/scripts/**", &["*"]);
+    let kb = vouch::guards::in_effect();
+
+    let root_str = path(&root);
+
+    // Create a HookInput with workspace_paths pointing to our non-git root
+    let raw = format!(r#"{{
+        "toolCall": {{
+            "name": "run_command",
+            "args": {{
+                "CommandLine": "./scripts/task.sh --flag",
+                "Cwd": "{root_str}"
+            }}
+        }},
+        "workspacePaths": ["{root_str}"],
+        "conversationId": "c",
+        "stepIdx": 1
+    }}"#);
+    let input = vouch::protocol::parse_input(&raw).unwrap();
+
+    let outcome = vouch::route::decide(&cfg, kb, "C:/Users/dev", &input);
+    match outcome.decision {
+        Decision::Allow(reason) => {
+            assert!(reason.contains("[[run.trust_program]] #1"), "{reason}");
+            assert!(reason.contains("$WORKSPACE_ROOT/scripts/**"), "{reason}");
+        }
+        other => panic!("expected Allow via workspace_paths fallback, got {other:?}"),
+    }
+
+    fs::remove_dir_all(root).unwrap();
+}

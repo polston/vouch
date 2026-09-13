@@ -141,13 +141,14 @@ pub struct GuardOverride {
 #[derive(Debug, Deserialize, Clone, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProgramLocationTrust {
-    /// Exact executable paths or executable trees ending in `/**`. `~` and
-    /// `$PROJECT_ROOT` expand at decision time. Unlike every other `under`
-    /// key, this names where the PROGRAM FILE lives, not where it runs.
+    /// Exact executable paths or executable trees ending in `/**`. `~`,
+    /// `$PROJECT_ROOT`, and `$WORKSPACE_ROOT` expand at decision time. Unlike
+    /// every other `under` key, this names where the PROGRAM FILE lives, not
+    /// where it runs.
     pub under: Vec<String>,
-    /// Logical executable names, either exact or a non-empty literal prefix
-    /// followed by one terminal `*`. The platform `.exe` suffix is removed
-    /// before matching; path separators and `*` alone are refused.
+    /// Logical executable names: either exact, wildcard `*`, or a non-empty
+    /// literal prefix followed by one terminal `*`. The platform `.exe` suffix
+    /// is removed before matching; path separators are refused.
     pub name_patterns: Vec<String>,
 }
 
@@ -155,13 +156,15 @@ pub struct ProgramLocationTrust {
 ///
 /// The comparison follows filesystem path equality, because this is the
 /// filename component of a proven path: exact on a case-sensitive host and
-/// folded where `paths::fold_case` folds. `*` is valid only as the final byte
-/// after a non-empty literal prefix; load-time validation guarantees that
-/// shape, while this helper still treats any other spelling as exact rather
-/// than widening it.
+/// folded where `paths::fold_case` folds. `*` alone matches any filename;
+/// otherwise a terminal `*` matches any filename beginning with that non-empty
+/// literal prefix.
 pub fn program_name_pattern_matches(pattern: &str, logical_name: &str) -> bool {
     let pattern = crate::paths::fold_case(pattern);
     let logical_name = crate::paths::fold_case(logical_name);
+    if pattern == "*" {
+        return true;
+    }
     match pattern.strip_suffix('*') {
         Some(prefix) if !prefix.is_empty() => logical_name.starts_with(prefix),
         _ => logical_name == pattern,
@@ -724,14 +727,13 @@ fn validate(cfg: &Config) -> Result<(), String> {
             let star_count = pattern.chars().filter(|&c| c == '*').count();
             let literal = pattern.strip_suffix('*').unwrap_or(pattern);
             let bad = pattern.is_empty()
-                || pattern == "*"
-                || star_count > usize::from(pattern.ends_with('*'))
+                || (pattern != "*" && star_count > usize::from(pattern.ends_with('*')))
                 || pattern.contains(['/', '\\', '?', '[', ']', '$', '\'', '"'])
                 || pattern.chars().any(char::is_whitespace)
-                || literal.to_ascii_lowercase().ends_with(".exe");
+                || (pattern != "*" && literal.to_ascii_lowercase().ends_with(".exe"));
             if bad {
                 return Err(format!(
-                    "{label} `name_patterns` contains '{pattern}' — use an exact logical name or one non-empty literal prefix followed by terminal `*` (without `.exe`)"
+                    "{label} `name_patterns` contains '{pattern}' — use an exact logical name, wildcard '*', or literal prefix followed by terminal `*` (without `.exe`)"
                 ));
             }
             let normalized = crate::paths::fold_case(pattern);
@@ -1176,6 +1178,9 @@ fn program_pattern_contains(
 fn name_pattern_contains(outer: &str, inner: &str) -> bool {
     let outer = crate::paths::fold_case(outer);
     let inner = crate::paths::fold_case(inner);
+    if outer == "*" {
+        return true;
+    }
     match outer.strip_suffix('*') {
         Some(prefix) => inner.strip_suffix('*').unwrap_or(&inner).starts_with(prefix),
         None => !inner.ends_with('*') && outer == inner,

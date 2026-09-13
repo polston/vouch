@@ -2266,8 +2266,8 @@ fn judge_once(
                          what that means: this command is outside every tree vouch could \
                          locate, but a pattern that names no directory on this machine cannot \
                          be proven outside, and a rule that restricts applies until it is\n  \
-                         to stop asking here, spell that pattern so it resolves ($PROJECT_ROOT \
-                         needs a repository) or remove it from run.trust_nothing_under",
+                         to stop asking here, spell that pattern so it resolves ($PROJECT_ROOT or $WORKSPACE_ROOT \
+                          needs a repository or workspace) or remove it from run.trust_nothing_under",
                         distrust.unresolved.join(", ")
                     )),
                     None => None,
@@ -2793,8 +2793,8 @@ fn judge_once(
                              this machine — so the entry applies nowhere, wherever this command \
                              runs"
                         ),
-                        "to recognise it, spell that tree so it resolves ($PROJECT_ROOT needs a \
-                         repository) in that entry's `only_under`"
+                        "to recognise it, spell that tree so it resolves ($PROJECT_ROOT or $WORKSPACE_ROOT needs a \
+                          repository or workspace) in that entry's `only_under`"
                             .to_string(),
                     ),
                     ScopedMiss::Unproven(cause) => (
