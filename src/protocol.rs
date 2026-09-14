@@ -305,15 +305,13 @@ pub fn is_demote_eligible(kb: &Knowledge, command: &str, cwd: &str) -> bool {
             return false;
         }
 
-        // Verify written path containment
+        // Verify written path containment: in read-only sandbox environments (such
+        // as Antigravity's macOS Seatbelt sandbox), subprocess file writes are denied
+        // by default. Commands performing file modifications must preserve BypassSandbox: true
+        // when requested rather than demoting to a sandbox that will reject the write.
         let targets = crate::guards::written_paths_in(kb, cmd, "bash");
-        if !targets.unknowable.is_empty() {
+        if !targets.unknowable.is_empty() || !targets.paths.is_empty() {
             return false;
-        }
-        for p in &targets.paths {
-            if !is_path_contained_in_workspace(p, cwd, &root) {
-                return false;
-            }
         }
 
         // Verify argument path containment (reads, configs, and positional targets)
@@ -332,11 +330,10 @@ pub fn is_demote_eligible(kb: &Knowledge, command: &str, cwd: &str) -> bool {
         }
     }
 
-    // Verify redirect targets containment
-    for p in &scan.redirect_targets {
-        if !is_path_contained_in_workspace(p, cwd, &root) {
-            return false;
-        }
+    // Verify redirect targets containment: shell redirections write to files,
+    // which requires host write privileges in read-only sandboxes.
+    if !scan.redirect_targets.is_empty() {
+        return false;
     }
 
     true

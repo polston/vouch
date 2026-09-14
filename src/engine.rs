@@ -258,28 +258,32 @@ fn action_word(a: Action) -> &'static str {
 /// would hand the operator an off-switch that does not switch anything off
 /// (CLAUDE.md §5).
 fn guard_reason(hit: &crate::guards::Hit, a: Action, overrode: Option<&str>) -> String {
-    format!(
-        "vouch stopped on: {} (guard)\n  \
-         command: {}\n  \
-         rule source: {}\n  \
-         guards ask every time on purpose — approving this once does not create a rule\n  \
-         {}",
-        hit.guard,
-        hit.detail,
+    let mut lines = Vec::new();
+    lines.push(format!("vouch stopped on: {} (guard)", hit.guard));
+    lines.push(format!("  command: {}", hit.detail));
+    if let Some(resolved) = &hit.resolved_target {
+        lines.push(format!("  resolved: {}", resolved));
+    } else if let Some(unres) = &hit.unresolvable_target {
+        lines.push(format!("  {}", unres));
+    }
+    lines.push(format!(
+        "  rule source: {}",
         if hit.source.trim().is_empty() {
             "unspecified"
         } else {
             hit.source.as_str()
-        },
-        match overrode {
-            Some(s) => format!("setting: {s}"),
-            None => format!(
-                "setting: guards.{} (currently \"{}\")",
-                hit.guard,
-                action_word(a)
-            ),
         }
-    )
+    ));
+    lines.push("  guards ask every time on purpose — approving this once does not create a rule".to_string());
+    lines.push(match overrode {
+        Some(s) => format!("  setting: {s}"),
+        None => format!(
+            "  setting: guards.{} (currently \"{}\")",
+            hit.guard,
+            action_word(a)
+        ),
+    });
+    lines.join("\n")
 }
 
 /// The whole decision, for any language.
@@ -348,6 +352,226 @@ pub fn decide_command_in_unknown_dir(
         project_root,
         CdState::Unknown(cause.to_string()),
     )
+}
+
+/// Traces command execution through all six stages of the decision pipeline:
+/// 1. Syntax & Tokenization
+/// 2. Working Directory Context
+/// 3. Protected File Boundary
+/// 4. Guard Rules & Target Resolution
+/// 5. Filesystem Write Verification
+/// 6. Program Recognition & Verdict
+pub fn trace_command_at(
+    cfg: &Config,
+    lang: &str,
+    src: &str,
+    home: Option<&str>,
+    project_root: Option<&str>,
+    cwd: Option<&str>,
+) -> DecisionTrace {
+    let decision = decide_command_at(cfg, lang, src, home, project_root, cwd);
+    let mut steps = Vec::new();
+
+    let scanner = match crate::syntax::scanner_for(lang) {
+        Some(s) => s,
+        None => {
+            steps.push(PipelineStep {
+                name: "Syntax & Tokenization",
+                title: format!("unsupported language: {lang}"),
+                details: vec!["vouch does not have a parser registered for this language".to_string()],
+            });
+            return DecisionTrace {
+                steps,
+                decision,
+                evaluations: Vec::new(),
+            };
+        }
+    };
+
+    let mut scan = match scanner.scan(src) {
+        Ok(s) => s,
+        Err(e) => {
+            steps.push(PipelineStep {
+                name: "Syntax & Tokenization",
+                title: format!("syntax parse error ({e})"),
+                details: vec![format!("error: {e}"), format!("setting: lang.{lang}.constructs.parse_failure")],
+            });
+            return DecisionTrace {
+                steps,
+                decision,
+                evaluations: Vec::new(),
+            };
+        }
+    };
+
+    let assigned = assignments_in_effect(&scan.assignments);
+    let start = start_state(cwd);
+    for c in scan.commands.iter_mut() {
+        c.head = resolve_with_assignments(&c.head, &assigned, start.known_dir());
+    }
+
+    let kb = crate::guards::in_effect();
+    let caps = |l: &str| cfg.lang(l).and_then(|lc| lc.wrap_depth).unwrap_or(4);
+    let mut fork = crate::guards::ForkCursor::new(&[]);
+    let expanded = collect_expanded(kb, &scan, lang, &caps, &mut fork);
+
+    // Step 1: Syntax & Tokenization
+    let mut step1_details = Vec::new();
+    step1_details.push(format!("language: {lang}"));
+    step1_details.push(format!("raw text: {}", src.trim()));
+    step1_details.push(format!("top-level commands: {}", scan.commands.len()));
+    step1_details.push(format!("expanded execution commands: {}", expanded.cmds.len()));
+    for (idx, cmd) in expanded.cmds.iter().enumerate() {
+        let head = crate::guards::base(&cmd.head);
+        step1_details.push(format!("  [{}] {} {}", idx + 1, head, cmd.args.join(" ")));
+    }
+    if !assigned.is_empty() {
+        let mut ass_keys: Vec<_> = assigned.keys().collect();
+        ass_keys.sort();
+        step1_details.push(format!("assignments: {}", ass_keys.iter().map(|k| format!("${k}")).collect::<Vec<_>>().join(", ")));
+    }
+    steps.push(PipelineStep {
+        name: "Syntax & Tokenization",
+        title: format!("parsed {} execution command(s)", expanded.cmds.len()),
+        details: step1_details,
+    });
+
+    // Step 2: Working Directory Context
+    let resolve = |raw: &str| resolve_with_assignments(raw, &assigned, start.known_dir());
+    let timeline = scoped_cd_timelines(
+        &expanded.cmds,
+        &expanded.execution_sites,
+        &expanded.scope_parents,
+        &expanded.langs,
+        &expanded.inherited_run_dir,
+        &resolve,
+        home,
+        false,
+        &start,
+    );
+    let mut step2_details = Vec::new();
+    let initial_dir = start.known_dir().unwrap_or("none (process working dir)");
+    step2_details.push(format!("initial working directory: {initial_dir}"));
+    for (idx, cmd) in expanded.cmds.iter().enumerate() {
+        let base_set = timeline.base_set_at(idx, &expanded.cmds);
+        let place = base_set.single_known().unwrap_or("unresolved directory");
+        let head = crate::guards::base(&cmd.head);
+        step2_details.push(format!("  [{}] {head} running in: {place}", idx + 1));
+    }
+    steps.push(PipelineStep {
+        name: "Working Directory Context",
+        title: format!("tracked execution locations for {} command(s)", expanded.cmds.len()),
+        details: step2_details,
+    });
+
+    // Step 3: Protected File Boundary
+    let mut step3_details = Vec::new();
+    let mut protected_hit = false;
+    if let Some(h) = home {
+        for site in &expanded.snippets {
+            if let Some(hit) = mentions_protected(cfg, h, project_root, &site.src) {
+                protected_hit = true;
+                step3_details.push(format!("snippet mentions protected path: {hit}"));
+            }
+        }
+        for (idx, c) in expanded.cmds.iter().enumerate() {
+            let here_set = timeline.base_set_at(idx, &expanded.cmds);
+            let here_pwd = here_set.single_known().or_else(|| start.known_dir());
+            for arg in &c.args {
+                let resolved = resolve_with_assignments(arg, &assigned, here_pwd);
+                if let Some(hit) = mentions_protected(cfg, h, project_root, &resolved) {
+                    protected_hit = true;
+                    step3_details.push(format!("command argument mentions protected path: {hit}"));
+                }
+            }
+        }
+    }
+    if !protected_hit {
+        step3_details.push("no vouch configuration or protected paths referenced".to_string());
+    }
+    steps.push(PipelineStep {
+        name: "Protected File Boundary",
+        title: if protected_hit { "protected configuration path referenced".to_string() } else { "cleared (no protected paths)".to_string() },
+        details: step3_details,
+    });
+
+    // Step 4: Guard Rules & Target Resolution
+    let mut step4_details = Vec::new();
+    let hits = crate::guards::check_each_in(kb, &expanded.cmds, &expanded.langs);
+    let mut resolved_hits = Vec::new();
+    for (i, mut hit) in hits {
+        let base_set = timeline.base_set_at(i, &expanded.cmds);
+        let here_pwd = base_set.single_known().or_else(|| start.known_dir());
+        let (res_target, unres_target) = resolve_guard_target_for(&expanded.cmds[i], &assigned, here_pwd);
+        hit.resolved_target = res_target;
+        hit.unresolvable_target = unres_target;
+        step4_details.push(format!("guard tripped: {}", hit.guard));
+        step4_details.push(format!("  command: {}", hit.detail));
+        if let Some(r) = &hit.resolved_target {
+            step4_details.push(format!("  resolved: {r}"));
+        } else if let Some(u) = &hit.unresolvable_target {
+            step4_details.push(format!("  {u}"));
+        }
+        let action = cfg.guard_action(&hit.guard);
+        resolved_hits.push((i, hit, action, None));
+    }
+    if resolved_hits.is_empty() {
+        step4_details.push("all commands cleared guard rule checks".to_string());
+    }
+    steps.push(PipelineStep {
+        name: "Guard Rules & Target Resolution",
+        title: if resolved_hits.is_empty() { "cleared (0 guard rules tripped)".to_string() } else { format!("{} guard rule(s) tripped", resolved_hits.len()) },
+        details: step4_details,
+    });
+
+    // Step 5: Filesystem Write Verification
+    let mut step5_details = Vec::new();
+    if scan.redirect_targets.is_empty() {
+        step5_details.push("no redirection or file write streams".to_string());
+    } else {
+        for target in &scan.redirect_targets {
+            step5_details.push(format!("redirect destination: {target}"));
+        }
+    }
+    steps.push(PipelineStep {
+        name: "Filesystem Write Verification",
+        title: if scan.redirect_targets.is_empty() { "read-only / no redirection writes".to_string() } else { format!("{} redirect write destination(s)", scan.redirect_targets.len()) },
+        details: step5_details,
+    });
+
+    // Step 6: Program Recognition & Verdict
+    let mut step6_details = Vec::new();
+    let unmodeled_items: Vec<UnmodeledItem> = Vec::new();
+    let evals = compute_command_accounting(
+        &scan.commands,
+        &expanded.top_level_owner,
+        &expanded.langs,
+        &resolved_hits,
+        &unmodeled_items,
+        kb,
+        cfg,
+        lang,
+    );
+    for (idx, ev) in evals.iter().enumerate() {
+        step6_details.push(format!("command #{}: {} -> {}", idx + 1, ev.summary, ev.status));
+    }
+    let outcome_title = match &decision {
+        Decision::Allow(_) => "verdict: ALLOW",
+        Decision::Ask(_) => "verdict: ASK",
+        Decision::Deny(_) => "verdict: DENY",
+        Decision::Abstain => "verdict: ABSTAIN",
+    };
+    steps.push(PipelineStep {
+        name: "Program Recognition & Verdict",
+        title: outcome_title.to_string(),
+        details: step6_details,
+    });
+
+    DecisionTrace {
+        steps,
+        decision,
+        evaluations: evals,
+    }
 }
 
 /// The directory a command line STARTS in, before any directory change in it.
@@ -561,6 +785,155 @@ fn resolve_with_assignments(
     crate::paths::unquote(&text).to_string()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandEvaluation {
+    pub head: String,
+    pub summary: String,
+    pub status: String,
+    pub action: Action,
+}
+
+#[derive(Debug, Clone)]
+pub struct PipelineStep {
+    pub name: &'static str,
+    pub title: String,
+    pub details: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DecisionTrace {
+    pub steps: Vec<PipelineStep>,
+    pub decision: Decision,
+    pub evaluations: Vec<CommandEvaluation>,
+}
+
+fn contains_variable_syntax(s: &str) -> bool {
+    let ch: Vec<char> = s.chars().collect();
+    for i in 0..ch.len() {
+        if ch[i] == '$' {
+            if i + 1 < ch.len()
+                && (ch[i + 1].is_ascii_alphanumeric() || ch[i + 1] == '_' || ch[i + 1] == '{')
+            {
+                return true;
+            }
+        }
+        if ch[i] == '%' {
+            if let Some(end) = (i + 1..ch.len()).find(|&j| ch[j] == '%') {
+                let name: String = ch[i + 1..end].iter().collect();
+                if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn extract_variable_names(raw: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let ch: Vec<char> = raw.chars().collect();
+    let mut i = 0;
+    while i < ch.len() {
+        if ch[i] == '%' {
+            if let Some(end) = (i + 1..ch.len()).find(|&j| ch[j] == '%') {
+                let name: String = ch[i + 1..end].iter().collect();
+                if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                    names.push(name);
+                    i = end + 1;
+                    continue;
+                }
+            }
+        }
+        if ch[i] == '$' {
+            let is_dollar_env = ch.len() >= i + 5
+                && ch[i + 1].to_ascii_lowercase() == 'e'
+                && ch[i + 2].to_ascii_lowercase() == 'n'
+                && ch[i + 3].to_ascii_lowercase() == 'v'
+                && ch[i + 4] == ':';
+            if is_dollar_env {
+                let start = i + 5;
+                let end = (start..ch.len())
+                    .find(|&j| !(ch[j].is_ascii_alphanumeric() || ch[j] == '_'))
+                    .unwrap_or(ch.len());
+                let name: String = ch[start..end].iter().collect();
+                if !name.is_empty() {
+                    names.push(name);
+                    i = end;
+                    continue;
+                }
+            } else if ch.get(i + 1) == Some(&'{') {
+                if let Some(end) = (i + 2..ch.len()).find(|&j| ch[j] == '}') {
+                    let name: String = ch[i + 2..end].iter().collect();
+                    if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                        names.push(name);
+                        i = end + 1;
+                        continue;
+                    }
+                }
+            } else {
+                let start = i + 1;
+                let end = (start..ch.len())
+                    .find(|&j| !(ch[j].is_ascii_alphanumeric() || ch[j] == '_'))
+                    .unwrap_or(ch.len());
+                let name: String = ch[start..end].iter().collect();
+                if !name.is_empty() {
+                    names.push(name);
+                    i = end;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    names
+}
+
+fn resolve_guard_target_for(
+    cmd: &crate::syntax::Cmd,
+    assigned: &std::collections::HashMap<String, Option<String>>,
+    pwd: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let lookup = |name: &str| match assigned.get(name) {
+        Some(value) => value.clone(),
+        None if name == "PWD" => pwd.map(str::to_string),
+        None => std::env::var(name).ok(),
+    };
+
+    let mut has_var = false;
+    let mut unresolvable: Option<String> = None;
+
+    for arg in &cmd.args {
+        if contains_variable_syntax(arg) {
+            has_var = true;
+            let names = extract_variable_names(arg);
+            for n in names {
+                if lookup(&n).is_none() {
+                    if unresolvable.is_none() {
+                        unresolvable = Some(format!("vouch could not work out what ${n} is"));
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(unres) = unresolvable {
+        return (None, Some(unres));
+    }
+
+    if has_var {
+        let resolved_args: Vec<String> = cmd
+            .args
+            .iter()
+            .map(|a| resolve_with_assignments(a, assigned, pwd))
+            .collect();
+        let head = crate::guards::base(&cmd.head);
+        let joined = format!("{} {}", head, resolved_args.join(" "));
+        return (Some(joined.chars().take(200).collect()), None);
+    }
+
+    (None, None)
+}
+
 /// The whole decision, under ONE reading of every ambiguous wrapper.
 ///
 /// `picks` selects a reading at each fork the walk meets, in visit order; an
@@ -650,6 +1023,7 @@ fn judge_once(
         parse_failures,
         constructs: expansion_constructs,
         inherited_run_dir: all_inherited,
+        top_level_owner: _,
     } = collect_expanded(kb, &scan, lang, &caps, &mut fork);
 
     // Heredocs captured in THIS text that the locator (inside
@@ -920,14 +1294,18 @@ fn judge_once(
     // one rule deciding what two rules decided.
     let mut grants: Vec<String> = Vec::new();
     let mut resolved: Vec<(usize, crate::guards::Hit, Action, Option<String>)> = Vec::new();
-    for (i, hit) in crate::guards::check_each_in(kb, &all_cmds, &all_langs) {
+    for (i, mut hit) in crate::guards::check_each_in(kb, &all_cmds, &all_langs) {
+        let base_set = timeline.base_set_at(i, &all_cmds);
+        let here_pwd = base_set.single_known().or_else(|| start.known_dir());
+        let (res_target, unres_target) = resolve_guard_target_for(&all_cmds[i], &assigned, here_pwd);
+        hit.resolved_target = res_target;
+        hit.unresolvable_target = unres_target;
         // Where this one command runs: its position in the line, then its own
         // run-dir flag. Same call the write pass and the recognition pass make
         // — one command, one run place.
         // One walk of the timeline, read both ways: `base_at` IS
         // `base_set_at(..).collapse()`, so asking for both walked the same
         // position twice on every command of every tool call.
-        let base_set = timeline.base_set_at(i, &all_cmds);
         let base = base_set.collapse();
         let clang = occurrence_lang(&all_langs, i, lang);
         let (state, _) = run_dir_place(
@@ -2887,6 +3265,73 @@ fn judge_once(
     (verdict, fork.points().to_vec())
 }
 
+fn compute_command_accounting(
+    scan_cmds: &[crate::shell::Cmd],
+    owner_map: &[usize],
+    all_langs: &[String],
+    resolved_hits: &[(usize, crate::guards::Hit, Action, Option<String>)],
+    unmodeled_items: &[UnmodeledItem],
+    _kb: &crate::guards::Knowledge,
+    cfg: &Config,
+    outer_lang: &str,
+) -> Vec<CommandEvaluation> {
+    let mut evals = Vec::new();
+    for (i, c) in scan_cmds.iter().enumerate() {
+        let clang = occurrence_lang(all_langs, i, outer_lang);
+        let head = crate::guards::base(&c.head);
+        let summary = format!("{} {}", head, c.args.join(" "))
+            .chars()
+            .take(80)
+            .collect::<String>();
+
+        // 1. Did this command or any expanded child trip a guard?
+        let hit = resolved_hits.iter().find(|(idx, _, _, _)| {
+            owner_map.get(*idx).copied().unwrap_or(*idx) == i
+        });
+        if let Some((_, h, a, _)) = hit {
+            let mut status = format!("{} on {} (guard", action_word(*a), h.guard);
+            if let Some(r) = &h.resolved_target {
+                status.push_str(&format!(", resolved: {r}"));
+            } else if let Some(u) = &h.unresolvable_target {
+                status.push_str(&format!(", {u}"));
+            }
+            status.push(')');
+            evals.push(CommandEvaluation {
+                head: head.to_string(),
+                summary,
+                status,
+                action: *a,
+            });
+            continue;
+        }
+
+        // 2. Was it or any expanded child unmodeled?
+        let unmod = unmodeled_items.iter().find(|it| {
+            owner_map.get(it.occurrence).copied().unwrap_or(it.occurrence) == i
+        });
+        if let Some(_) = unmod {
+            let (a, _) = construct_action_for(cfg, clang, "unmodeled_command");
+            evals.push(CommandEvaluation {
+                head: head.to_string(),
+                summary,
+                status: format!("{} on unmodeled_command", action_word(a)),
+                action: a,
+            });
+            continue;
+        }
+
+        // 3. Otherwise, recognized and clean
+        let prog = crate::guards::base_name(&c.head);
+        evals.push(CommandEvaluation {
+            head: head.to_string(),
+            summary,
+            status: format!("allow ({prog})"),
+            action: Action::Allow,
+        });
+    }
+    evals
+}
+
 /// One line's commands after wrapper expansion, in parallel vectors plus the
 /// snippets. Parallel and not a vector of structs because that is how the
 /// passes downstream read them: `cd_timeline` takes the slices, and every
@@ -2965,6 +3410,8 @@ struct Expanded {
     /// Parallel to `cmds`: the directory a WRAPPER's own run-dir flag sent
     /// this occurrence to, before its own flags are read.
     inherited_run_dir: Vec<Option<String>>,
+    /// Parallel to `cmds`: which top-level command in `scan.commands` produced each occurrence.
+    top_level_owner: Vec<usize>,
 }
 
 /// One wrapped snippet, and every position it can be judged at.
@@ -3062,6 +3509,7 @@ fn collect_expanded(
         constructs: Vec::new(),
         inherited_run_dir: Vec::new(),
         scope_table: vec![0],
+        top_level_owner: Vec::new(),
     };
     // Scanner scopes first, parent-before-child (the walk allocates them in
     // that order), so every engine scope a wrapper expansion adds below sits
@@ -3199,6 +3647,7 @@ fn collect_expanded(
             out.inherited_run_dir.push(einherited);
             out.args_from_input.push(efrom_input);
             out.args_complete.push(ecomplete);
+            out.top_level_owner.push(i);
         }
         // The wrapper command `c` (index `i`) is the fallback owner for a
         // snippet with no scope of its own — carry ITS `cmd_scope` entry and

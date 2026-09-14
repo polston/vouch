@@ -596,4 +596,69 @@ fn m2_264_read_path_and_external_argument_scoping() {
     assert!(should_demote_sandbox(&input, &decision, kb));
 }
 
+#[test]
+fn m2_265_workspace_write_containment_and_robust_sandbox_execution() {
+    use vouch::protocol::should_demote_sandbox;
+    let kb = vouch::guards::in_effect();
+    let decision = Decision::Allow("allowed".into());
+
+    let make_input = |cmd: &str| {
+        let raw = format!(
+            r#"{{
+                "toolCall": {{
+                    "name": "run_command",
+                    "args": {{
+                        "CommandLine": {cmd:?},
+                        "BypassSandbox": true
+                    }}
+                }},
+                "conversationId": "c-m2-265",
+                "stepIdx": 1,
+                "cwd": "/workspace/project",
+                "workspacePaths": ["/workspace/project"]
+            }}"#
+        );
+        parse_input(&raw).unwrap()
+    };
+
+    // 1. git add modifies index and creates lock file -> preserves BypassSandbox: true
+    let input = make_input("git add .");
+    assert!(!should_demote_sandbox(&input, &decision, kb));
+
+    let input = make_input("git add src/main.rs");
+    assert!(!should_demote_sandbox(&input, &decision, kb));
+
+    // 2. git rm and git clean modify worktree/index -> preserves BypassSandbox: true
+    let input = make_input("git rm file.rs");
+    assert!(!should_demote_sandbox(&input, &decision, kb));
+
+    let input = make_input("git clean -fd");
+    assert!(!should_demote_sandbox(&input, &decision, kb));
+
+    // 3. Shell redirection write targets -> preserves BypassSandbox: true
+    let input = make_input("echo 'hello' > output.txt");
+    assert!(!should_demote_sandbox(&input, &decision, kb));
+
+    let input = make_input("cargo check > build.log");
+    assert!(!should_demote_sandbox(&input, &decision, kb));
+
+    // 4. File-mutating commands (touch, rm) -> preserves BypassSandbox: true
+    let input = make_input("touch src/new_file.rs");
+    assert!(!should_demote_sandbox(&input, &decision, kb));
+
+    let input = make_input("rm src/temp.rs");
+    assert!(!should_demote_sandbox(&input, &decision, kb));
+
+    // 5. Pure read-only commands continue to demote to sandbox cleanly
+    let input = make_input("git status");
+    assert!(should_demote_sandbox(&input, &decision, kb));
+
+    let input = make_input("git diff");
+    assert!(should_demote_sandbox(&input, &decision, kb));
+
+    let input = make_input("git log -n 5");
+    assert!(should_demote_sandbox(&input, &decision, kb));
+}
+
+
 

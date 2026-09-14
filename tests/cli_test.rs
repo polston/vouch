@@ -1957,3 +1957,74 @@ fn a_merged_shape_set_aside_prints_the_true_banner() {
         "must say the shipped knowledge still applies: {text}"
     );
 }
+
+#[test]
+fn why_renders_six_stage_pipeline_trace_and_evaluations() {
+    let home = pinned_home();
+    let (base, config) = project_root_program_location_cli_fixture("why-trace");
+    let out = Command::new(bin())
+        .args(["why", "--cwd"])
+        .arg(portable_fixture_path(&base))
+        .arg("echo first && git status")
+        .env("VOUCH_CONFIG", &config)
+        .env("VOUCH_STATE_DIR", base.join("state"))
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(text.contains("pipeline trace:"), "{text}");
+    assert!(text.contains("[step 1/6] Syntax & Tokenization"), "{text}");
+    assert!(text.contains("[step 2/6] Working Directory Context"), "{text}");
+    assert!(text.contains("[step 3/6] Protected File Boundary"), "{text}");
+    assert!(text.contains("[step 4/6] Guard Rules & Target Resolution"), "{text}");
+    assert!(text.contains("[step 5/6] Filesystem Write Verification"), "{text}");
+    assert!(text.contains("[step 6/6] Program Recognition & Verdict"), "{text}");
+    assert!(text.contains("commands on this line:"), "{text}");
+    assert!(text.contains("1. echo first: allow (echo)"), "{text}");
+    assert!(text.contains("2. git status: allow (git)"), "{text}");
+
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn guard_target_resolution_prints_resolved_or_unresolvable() {
+    let home = pinned_home();
+    let (base, config) = project_root_program_location_cli_fixture("guard-res");
+
+    // Case 1: Assigned variable resolves cleanly
+    let out = Command::new(bin())
+        .args(["why", "--cwd"])
+        .arg(portable_fixture_path(&base))
+        .arg("echo start && DIR=/tmp/target && rm -rf \"$DIR\"")
+        .env("VOUCH_CONFIG", &config)
+        .env("VOUCH_STATE_DIR", base.join("state"))
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(text.contains("resolved: rm -rf /tmp/target"), "{text}");
+    assert!(text.contains("commands on this line:"), "{text}");
+
+    // Case 2: Unset variable reports unresolvable notice
+    let out2 = Command::new(bin())
+        .args(["why", "--cwd"])
+        .arg(portable_fixture_path(&base))
+        .arg("rm -rf \"$UNSET_SECRET_DIR_VAR\"")
+        .env("VOUCH_CONFIG", &config)
+        .env("VOUCH_STATE_DIR", base.join("state2"))
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+        .unwrap();
+    let text2 = String::from_utf8_lossy(&out2.stdout);
+    assert!(out2.status.success(), "{}", String::from_utf8_lossy(&out2.stderr));
+    assert!(text2.contains("vouch could not work out what $UNSET_SECRET_DIR_VAR is"), "{text2}");
+
+    std::fs::remove_dir_all(base).unwrap();
+}
+

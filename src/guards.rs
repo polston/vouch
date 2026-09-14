@@ -41,6 +41,11 @@ pub struct Hit {
     /// guard action: unread syntax is a promptable limit, not proof of the
     /// guarded effect.
     pub unread_verb: Option<String>,
+    /// Concrete resolved command/target if arguments carried variables that were
+    /// successfully resolved.
+    pub resolved_target: Option<String>,
+    /// Notice when arguments carried variables that could not be resolved.
+    pub unresolvable_target: Option<String>,
 }
 
 /// One `[[program.rule]]`: the shape that trips a guard. A rule fires when
@@ -1000,7 +1005,7 @@ pub fn notes() -> &'static [String] {
     &loaded().notes
 }
 
-fn base(head: &str) -> String {
+pub(crate) fn base(head: &str) -> String {
     // Backslash is a path separator to fold only for the one shape where
     // that is unambiguous: a Windows-rooted path (`C:\...`, `C:/...`, or a
     // `\\host\share` UNC form) — the powershell/cmd spelling of an
@@ -1871,6 +1876,8 @@ pub fn check_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> Vec<Hit> {
                     source: rule.source.clone(),
                     detail: format!("{} {}", head, cmd.args.join(" ")).chars().take(200).collect(),
                     unread_verb: outcome.unread_verb,
+                    resolved_target: None,
+                    unresolvable_target: None,
                 });
             }
         }

@@ -767,17 +767,28 @@ fn main() {
             let root = project_root(&here);
             println!("command: {cmd}");
             println!("judged from: {here}");
-            let d = with_banner(
-                vouch::engine::decide_command_at(
-                    &cfg,
-                    lang,
-                    &cmd,
-                    Some(&home()),
-                    root.as_deref(),
-                    Some(&here),
-                ),
-                notice.as_deref(),
+            let trace = vouch::engine::trace_command_at(
+                &cfg,
+                lang,
+                &cmd,
+                Some(&home()),
+                root.as_deref(),
+                Some(&here),
             );
+            println!("pipeline trace:");
+            for (idx, step) in trace.steps.iter().enumerate() {
+                println!("  [step {}/6] {}: {}", idx + 1, step.name, step.title);
+                for detail in &step.details {
+                    println!("    - {detail}");
+                }
+            }
+            if trace.evaluations.len() > 1 {
+                println!("commands on this line:");
+                for (idx, ev) in trace.evaluations.iter().enumerate() {
+                    println!("  {}. {}: {}", idx + 1, ev.summary, ev.status);
+                }
+            }
+            let d = with_banner(trace.decision, notice.as_deref());
             print_decision(&d);
             std::process::exit(0);
         }
@@ -805,16 +816,27 @@ fn main() {
                 let cwd = if rec.cwd.is_empty() { None } else { Some(rec.cwd.as_str()) };
                 let root = cwd.and_then(project_root);
                 match cwd {
-                    Some(dir) => print!("re-decided now, from {dir}: "),
+                    Some(dir) => println!("re-decided now, from {dir}:"),
                     None => println!("re-decided now (no directory was recorded)"),
                 }
-                let d = with_banner(
-                    vouch::engine::decide_command_at(
-                        &cfg, lang, &rec.cmd, Some(&home()),
-                        root.as_deref(), cwd,
-                    ),
-                    notice.as_deref(),
+                let trace = vouch::engine::trace_command_at(
+                    &cfg, lang, &rec.cmd, Some(&home()),
+                    root.as_deref(), cwd,
                 );
+                println!("pipeline trace:");
+                for (idx, step) in trace.steps.iter().enumerate() {
+                    println!("  [step {}/6] {}: {}", idx + 1, step.name, step.title);
+                    for detail in &step.details {
+                        println!("    - {detail}");
+                    }
+                }
+                if trace.evaluations.len() > 1 {
+                    println!("commands on this line:");
+                    for (idx, ev) in trace.evaluations.iter().enumerate() {
+                        println!("  {}. {}: {}", idx + 1, ev.summary, ev.status);
+                    }
+                }
+                let d = with_banner(trace.decision, notice.as_deref());
                 print_decision(&d);
             }
             None => println!("no decisions recorded yet"),

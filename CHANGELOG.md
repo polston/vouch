@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.27.0 (2026-09-14)
+
+
+### Features
+
+* add token-normalized shape extraction with PII and literal sanitization to vouch-setup
+* expose six-stage pipeline visualizer in vouch why output
+* itemize per-command breakdown on multi-command lines in diagnostic traces
+* resolve variable targets in guard diagnostic prompts and report unresolvable variable notices
+
+
+### Bug Fixes
+
+* preserve host execution permissions for workspace file writes and redirections to prevent sandbox denial
+
 ## 0.26.3 (2026-09-14)
 
 

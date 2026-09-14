@@ -40,6 +40,8 @@ import itertools
 import json
 import os
 import pathlib
+import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -689,6 +691,168 @@ def extract_head_and_subcommand(cmd_str):
         break
 
     return head, sub
+
+
+def normalize_token(t):
+    """Normalize a single token to structural placeholder while preserving flags/keywords."""
+    if not t:
+        return ""
+    inner = t.strip("'\"")
+    if not inner:
+        return "<STR>"
+
+    # 1. Flag with value: --flag=val
+    if t.startswith("--") and "=" in t:
+        flag_name, flag_val = t.split("=", 1)
+        norm_val = normalize_token(flag_val)
+        return f"{flag_name}={norm_val}"
+
+    # 2. Flag without value: --flag or -f
+    if t.startswith("--") or (t.startswith("-") and len(t) > 1 and not inner.lstrip("-").isdigit()):
+        return t
+
+    # 3. Numbers
+    if inner.isdigit():
+        return "<NUM>"
+
+    # 4. Environment variable: $FOO, ${FOO}, %FOO%
+    if inner.startswith("$") or (inner.startswith("%") and inner.endswith("%")):
+        return "<VAR>"
+
+    # 5. URLs
+    if (
+        inner.startswith("http://")
+        or inner.startswith("https://")
+        or inner.startswith("ftp://")
+        or inner.startswith("git@")
+        or inner.startswith("ssh://")
+    ):
+        return "<URL>"
+
+    # 6. Quoted string literals or tokens with spaces (multi-word arguments)
+    if " " in inner or (t.startswith('"') and t.endswith('"')) or (t.startswith("'") and t.endswith("'")):
+        return "<STR>"
+
+    # 7. Slashes, Windows paths, dots, common file extensions -> <PATH>
+    file_extensions = (
+        ".rs", ".py", ".toml", ".json", ".yaml", ".yml", ".md", ".txt", ".sh",
+        ".js", ".ts", ".jsx", ".tsx", ".c", ".cpp", ".h", ".go", ".html", ".css",
+        ".lock", ".log", ".gz", ".tar", ".zip"
+    )
+    if (
+        "/" in inner
+        or "\\" in inner
+        or inner.startswith(".")
+        or inner.startswith("~")
+        or any(inner.endswith(ext) for ext in file_extensions)
+    ):
+        return "<PATH>"
+
+    # 8. Known common CLI subcommands and actions to preserve
+    known_verbs = {
+        "status", "diff", "log", "commit", "push", "pull", "fetch", "checkout",
+        "branch", "switch", "restore", "add", "rm", "mv", "reset", "rebase",
+        "merge", "tag", "stash", "show", "remote", "clone", "init", "submodule",
+        "build", "test", "check", "run", "clean", "clippy", "fmt", "install",
+        "update", "metadata", "publish", "tree", "bench", "doc", "view",
+        "create", "list", "get", "describe", "logs", "apply", "delete", "exec"
+    }
+    if inner.lower() in known_verbs:
+        return inner.lower()
+
+    # 9. Key=Value argument
+    if "=" in inner and not inner.startswith("-"):
+        k, v = inner.split("=", 1)
+        return f"{k}=<VAL>"
+
+    # 10. Fallback generic positional argument
+    return "<VAL>"
+
+
+def normalize_command_line(cmd_str):
+    """Tokenize and normalize a command line, preserving shell operator structure.
+
+    Returns (normalized_shape_string, primary_head).
+    """
+    if not cmd_str or not cmd_str.strip():
+        return "", ""
+
+    parts = re.split(r"(\s*(?:&&|\|\||;|\|)\s*)", cmd_str.strip())
+    norm_parts = []
+    primary_head = ""
+
+    for i, part in enumerate(parts):
+        # Odd indices are operators (&&, ||, ;, |)
+        if i % 2 == 1:
+            norm_parts.append(part)
+            continue
+
+        stripped = part.strip()
+        if not stripped:
+            continue
+
+        try:
+            tokens = shlex.split(stripped)
+        except ValueError:
+            tokens = stripped.split()
+
+        if not tokens:
+            continue
+
+        head = tokens[0]
+        # Clean path-spelled head to base name
+        if "/" in head or "\\" in head:
+            head_clean = head.replace("\\", "/").rstrip("/").split("/")[-1]
+        else:
+            head_clean = head
+
+        if not primary_head:
+            primary_head = head_clean
+
+        norm_tokens = [head_clean]
+        for t in tokens[1:]:
+            norm_tokens.append(normalize_token(t))
+
+        norm_parts.append(" ".join(norm_tokens))
+
+    shape = "".join(norm_parts).strip()
+    return shape, primary_head
+
+
+def extract_shapes(rows):
+    """Extract AST command shapes from session history with literal/PII sanitization.
+
+    Returns a sorted list of shape dicts:
+    [{"shape": ..., "count": ..., "head": ...}, ...]
+    sorted by frequency descending.
+    """
+    counts = {}
+    heads = {}
+
+    for row in rows:
+        cmd_str = _extract_command_string(row)
+        if not cmd_str:
+            continue
+        shape, head = normalize_command_line(cmd_str)
+        if not shape:
+            continue
+        counts[shape] = counts.get(shape, 0) + 1
+        heads[shape] = head
+
+    sorted_shapes = sorted(counts.keys(), key=lambda s: (-counts[s], s))
+    result = []
+    for s in sorted_shapes:
+        # Zero PII verification
+        for banned in ["/Users/", "/home/", "C:\\", "C:/", "@", "token", "password"]:
+            if banned in s:
+                raise ValueError("Extracted shape contains sensitive pattern %r: %s" % (banned, s))
+        result.append({
+            "shape": s,
+            "head": heads[s],
+            "count": counts[s],
+        })
+
+    return result
 
 
 def synthesize_baseline_knowledge(rows, min_count=1):
@@ -1422,10 +1586,10 @@ def parse_args(argv):
         description="Counts-only decision replay of this machine's recorded "
         "session history against a candidate vouch config."
     )
-    p.add_argument("--binary", required=True, help="ABSOLUTE path to vouch (never cargo)")
-    p.add_argument("--config", required=True)
-    p.add_argument("--knowledge", required=True)
-    p.add_argument("--my-knowledge", required=True, dest="my_knowledge")
+    p.add_argument("--binary", default=None, help="ABSOLUTE path to vouch (never cargo)")
+    p.add_argument("--config", default=None)
+    p.add_argument("--knowledge", default=None)
+    p.add_argument("--my-knowledge", default=None, dest="my_knowledge")
     p.add_argument(
         "--host",
         choices=["all", "claude", "codex", "agy"],
@@ -1486,6 +1650,15 @@ def parse_args(argv):
         help="verify a candidate knowledge rule/entry (JSON or TOML string, or path) "
         "against harvested session history",
     )
+    p.add_argument(
+        "--extract-shapes",
+        nargs="?",
+        const="stdout",
+        default=None,
+        dest="extract_shapes",
+        help="extract AST command shapes from session history with literal/PII sanitization "
+        "(pass a file destination outside git worktrees, or 'stdout' to print)",
+    )
     return p.parse_args(argv)
 
 
@@ -1506,16 +1679,22 @@ def main(argv):
             "set being replayed; pass one or the other"
         )
 
-    if not os.path.isabs(args.binary):
-        sys.exit("--binary must be an absolute path - never invoke vouch through cargo")
-    for label, path in (
-        ("--binary", args.binary),
-        ("--config", args.config),
-        ("--knowledge", args.knowledge),
-        ("--my-knowledge", args.my_knowledge),
-    ):
-        if not os.path.exists(path):
-            sys.exit("%s does not exist: %s" % (label, path))
+    if args.extract_shapes and args.extract_shapes != "stdout":
+        refuse_unsafe_dest(args.extract_shapes, "--extract-shapes")
+
+    if not args.extract_shapes:
+        if not args.binary or not args.config or not args.knowledge or not args.my_knowledge:
+            sys.exit("--binary, --config, --knowledge, and --my-knowledge are required for replay")
+        if not os.path.isabs(args.binary):
+            sys.exit("--binary must be an absolute path - never invoke vouch through cargo")
+        for label, path in (
+            ("--binary", args.binary),
+            ("--config", args.config),
+            ("--knowledge", args.knowledge),
+            ("--my-knowledge", args.my_knowledge),
+        ):
+            if not os.path.exists(path):
+                sys.exit("%s does not exist: %s" % (label, path))
 
     scratch = args.scratch or os.path.join(tempfile.gettempdir(), "vouch-setup")
     os.makedirs(scratch, exist_ok=True)
@@ -1542,8 +1721,9 @@ def main(argv):
 
 
 def _run(args, scratch):
-    # Before any number is reported.
-    sentinel(args, scratch)
+    if not args.extract_shapes:
+        # Before any number is reported.
+        sentinel(args, scratch)
 
     if args.samples_source:
         # Phase 5: replay the row set phase 3 snapshotted, never a re-harvest.
@@ -1617,6 +1797,20 @@ def _run(args, scratch):
                 candidate_text = f.read()
         res = verify_candidate_rule(candidate_text, rows)
         print(json.dumps(res, indent=2))
+
+    if args.extract_shapes:
+        shapes = extract_shapes(rows)
+        if args.extract_shapes == "stdout":
+            print(json.dumps(shapes, indent=2))
+        else:
+            os.makedirs(os.path.dirname(args.extract_shapes) or ".", exist_ok=True)
+            with open(args.extract_shapes, "w", encoding="utf-8") as f:
+                json.dump(shapes, f, indent=2)
+            sys.stderr.write(
+                "extracted %d distinct command shapes to %s\n"
+                % (len(shapes), args.extract_shapes)
+            )
+        return 0
 
     fallback_cwd = os.getcwd()
     joined, refused, failed, stats = replay(rows, args, scratch, fallback_cwd)

@@ -296,5 +296,72 @@ class TestSynthesisAndVerification(unittest.TestCase):
         self.assertTrue(any("destructive" in w for w in res4["warnings"]))
 
 
+class TestShapeExtraction(unittest.TestCase):
+    def test_normalize_token_varieties(self):
+        # Flags
+        self.assertEqual(wwf.normalize_token("--release"), "--release")
+        self.assertEqual(wwf.normalize_token("-rf"), "-rf")
+        self.assertEqual(wwf.normalize_token("--grep=curl"), "--grep=<VAL>")
+        self.assertEqual(wwf.normalize_token("--out=src/main.rs"), "--out=<PATH>")
+
+        # Numbers
+        self.assertEqual(wwf.normalize_token("42"), "<NUM>")
+
+        # Variables
+        self.assertEqual(wwf.normalize_token("$FOO"), "<VAR>")
+        self.assertEqual(wwf.normalize_token("%USERPROFILE%"), "<VAR>")
+
+        # URLs
+        self.assertEqual(wwf.normalize_token("https://example.com/api"), "<URL>")
+
+        # Quoted strings
+        self.assertEqual(wwf.normalize_token('"commit message"'), "<STR>")
+        self.assertEqual(wwf.normalize_token("'quoted text'"), "<STR>")
+
+        # Paths
+        self.assertEqual(wwf.normalize_token("src/lib.rs"), "<PATH>")
+        self.assertEqual(wwf.normalize_token("C:\\Users\\dev\\file.txt"), "<PATH>")
+        self.assertEqual(wwf.normalize_token("./scripts/verify.sh"), "<PATH>")
+
+        # Common verbs
+        self.assertEqual(wwf.normalize_token("status"), "status")
+        self.assertEqual(wwf.normalize_token("commit"), "commit")
+        self.assertEqual(wwf.normalize_token("test"), "test")
+
+    def test_normalize_command_line(self):
+        shape, head = wwf.normalize_command_line("git log -n 5 --grep=fix src/main.rs")
+        self.assertEqual(head, "git")
+        self.assertEqual(shape, "git log -n <NUM> --grep=<VAL> <PATH>")
+
+        # Chained commands with operators
+        chained = 'echo "hello world" && rm -rf "$TARGET_DIR"'
+        shape, head = wwf.normalize_command_line(chained)
+        self.assertEqual(head, "echo")
+        self.assertEqual(shape, "echo <STR> && rm -rf <VAR>")
+
+    def test_extract_shapes_dedup_and_privacy(self):
+        rows = [
+            wwf.Row("1", "Bash", {"command": "git status"}, "C:/Users/dev", False, True),
+            wwf.Row("2", "Bash", {"command": "git status"}, "C:/Users/dev", False, True),
+            wwf.Row("3", "Bash", {"command": "cargo test --release"}, "C:/Users/dev", False, True),
+            wwf.Row("4", "Bash", {"command": "curl -s https://private.corp.internal/token=abc12345"}, "C:/Users/dev", False, True),
+            wwf.Row("5", "Bash", {"command": "python /Users/secretuser/project/script.py --id=123"}, "C:/Users/dev", False, True),
+        ]
+
+        shapes = wwf.extract_shapes(rows)
+        self.assertEqual(len(shapes), 4)
+
+        # Most frequent first
+        self.assertEqual(shapes[0]["shape"], "git status")
+        self.assertEqual(shapes[0]["count"], 2)
+
+        # Ensure all shapes contain ZERO PII / live secrets
+        all_shapes_str = json.dumps(shapes)
+        self.assertNotIn("/Users/secretuser", all_shapes_str)
+        self.assertNotIn("private.corp.internal", all_shapes_str)
+        self.assertNotIn("abc12345", all_shapes_str)
+        self.assertNotIn("C:/Users/dev", all_shapes_str)
+
+
 if __name__ == "__main__":
     unittest.main()

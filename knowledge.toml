@@ -111,7 +111,7 @@ subcommand_in = ["push", "fetch", "pull", "clone", "remote"]
 capabilities = ["network"]
 
 [[program.sub_capability]]
-subcommand_in = ["commit", "merge", "rebase", "reset", "checkout", "switch", "branch", "tag", "stash", "cherry-pick", "worktree"]
+subcommand_in = ["commit", "merge", "rebase", "reset", "checkout", "switch", "branch", "tag", "stash", "cherry-pick", "worktree", "add", "rm", "mv", "clean", "restore", "apply"]
 capabilities = ["external_paths"]
 
 [[program.rule]]
