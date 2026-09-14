@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.26.3 (2026-09-14)
+
+
+### Bug Fixes
+
+* restore standard cargo target directory layout for cross-platform release builds
+
 ## 0.26.2 (2026-09-14)
 
 

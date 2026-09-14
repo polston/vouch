@@ -30,9 +30,6 @@
 # The installed binary never sees any of this: cargo is not involved when the
 # harness runs the hook. Cargo finds this file by walking up from the working
 # directory, so `--manifest-path` from OUTSIDE the repo does not get it.
-[build]
-target-dir = "/tmp/vouch-target"
-
 [env]
 VOUCH_KNOWLEDGE = { value = "knowledge.toml", relative = true, force = true }
 VOUCH_MY_KNOWLEDGE = { value = "target/test-my-knowledge.toml", relative = true, force = true }
