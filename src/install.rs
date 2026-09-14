@@ -644,9 +644,37 @@ pub const DEFAULT_AGY_UNSANDBOXED_TOOLS: &[&str] = &[
     "sh*",
     "python*",
     "python3*",
+    "kubectl*",
+    "grep*",
+    "file*",
+    "find*",
+    "cat*",
+    "head*",
+    "tail*",
+    "ls*",
+    "node*",
+    "npm*",
+    "npx*",
+    "bun*",
+    "pnpm*",
+    "docker*",
+    "jq*",
+    "just*",
+    "uv*",
+    "stat*",
+    "strings*",
+    "which*",
 ];
 
 /// Reconciles Antigravity settings.json permissions to include clean tool entries.
+///
+/// Antigravity evaluates permissions by tokenizing command strings on whitespace
+/// and matching each token as an anchored word (`^(?:pattern)$`). Bare rules without
+/// arguments (e.g. `command(git)`) only match zero-argument invocations, while
+/// arguments require an explicit second token wildcard (e.g. `command(git *)`).
+/// Legacy `unsandboxed(...)` rules are deprecated by Antigravity and ignored,
+/// so both modern `command(...)` forms and compatibility `unsandboxed(...)` forms
+/// are emitted for both bare and multi-token execution.
 pub fn reconcile_agy_permissions(existing: &str, tools: &[&str]) -> Result<String, String> {
     let mut root: Value = if existing.trim().is_empty() {
         json!({})
@@ -671,13 +699,171 @@ pub fn reconcile_agy_permissions(existing: &str, tools: &[&str]) -> Result<Strin
         .entry("allow")
         .or_insert_with(|| json!([]));
     if let Some(arr) = allow.as_array_mut() {
+        let mut candidates = Vec::new();
         for tool in tools {
-            let entry = Value::String(format!("unsandboxed({tool})"));
-            if !arr.contains(&entry) {
-                arr.push(entry);
+            candidates.push((*tool).to_string());
+        }
+
+        // Also harvest existing tool rules so legacy unspaced rules (e.g. `command(kubectl*)`)
+        // are upgraded with the correct multi-token spaced wildcard entries.
+        for item in arr.iter() {
+            if let Some(s) = item.as_str() {
+                let inner = if let Some(stripped) = s.strip_prefix("command(").and_then(|r| r.strip_suffix(')')) {
+                    Some(stripped)
+                } else if let Some(stripped) = s.strip_prefix("unsandboxed(").and_then(|r| r.strip_suffix(')')) {
+                    Some(stripped)
+                } else {
+                    None
+                };
+                if let Some(inner) = inner {
+                    if inner.ends_with('*') && !inner.contains(' ') && !inner.contains('/') {
+                        candidates.push(inner.to_string());
+                    }
+                }
+            }
+        }
+
+        for cand in candidates {
+            let is_env = cand.contains('=');
+            let base = if is_env {
+                cand.as_str()
+            } else {
+                cand.strip_suffix('*').unwrap_or(&cand)
+            };
+
+            let entries = if is_env {
+                vec![
+                    format!("command({base})"),
+                    format!("command({base} *)"),
+                    format!("unsandboxed({base})"),
+                    format!("unsandboxed({base} *)"),
+                ]
+            } else {
+                vec![
+                    format!("command({base})"),
+                    format!("command({base} *)"),
+                    format!("unsandboxed({base})"),
+                    format!("unsandboxed({base} *)"),
+                    format!("unsandboxed({base}*)"),
+                ]
+            };
+
+            for entry in entries {
+                let val = Value::String(entry);
+                if !arr.contains(&val) {
+                    arr.push(val);
+                }
+            }
+        }
+
+        // Standard git subcommands that Antigravity requires explicit prefix rules for
+        let git_subcommands = [
+            "add", "commit", "status", "diff", "log", "show", "branch", "checkout",
+            "switch", "restore", "tag", "stash", "merge", "rebase", "reset",
+            "rev-parse", "clean", "rm", "mv", "fetch", "pull", "push", "clone",
+            "worktree", "config", "remote",
+        ];
+        for sub in git_subcommands {
+            for pattern in [
+                format!("command(git {sub})"),
+                format!("command(git {sub}*)"),
+                format!("command(git {sub} *)"),
+                format!("unsandboxed(git {sub})"),
+                format!("unsandboxed(git {sub}*)"),
+                format!("unsandboxed(git {sub} *)"),
+            ] {
+                let val = Value::String(pattern);
+                if !arr.contains(&val) {
+                    arr.push(val);
+                }
+            }
+        }
+
+        // Standard cargo subcommands
+        let cargo_subcommands = [
+            "build", "test", "check", "clippy", "run", "clean", "update", "metadata", "install",
+        ];
+        for sub in cargo_subcommands {
+            for pattern in [
+                format!("command(cargo {sub})"),
+                format!("command(cargo {sub}*)"),
+                format!("command(cargo {sub} *)"),
+                format!("unsandboxed(cargo {sub})"),
+                format!("unsandboxed(cargo {sub}*)"),
+                format!("unsandboxed(cargo {sub} *)"),
+            ] {
+                let val = Value::String(pattern);
+                if !arr.contains(&val) {
+                    arr.push(val);
+                }
+            }
+        }
+
+        // Standard developer workflow patterns: workspace scripts and scoped multi-argument commands
+        let standard_patterns = [
+            "command(bash scripts/**)",
+            "command(bash scripts/*)",
+            "command(sh scripts/**)",
+            "command(sh scripts/*)",
+            "command(./scripts/**)",
+            "command(./scripts/*)",
+            "command(bash ./scripts/**)",
+            "command(bash ./scripts/*)",
+            "command(sh ./scripts/**)",
+            "command(sh ./scripts/*)",
+            "command(bash ./**)",
+            "command(sh ./**)",
+            "command(./*)",
+            "command(./**)",
+            "command(./target/debug/*)",
+            "command(./target/debug/* *)",
+            "command(target/debug/*)",
+            "command(target/debug/* *)",
+            "command(./target/release/*)",
+            "command(./target/release/* *)",
+            "command(target/release/*)",
+            "command(target/release/* *)",
+            "command(target/debug/vouch)",
+            "command(target/debug/vouch *)",
+            "command(./target/debug/vouch)",
+            "command(./target/debug/vouch *)",
+            "command(kubectl -n * exec *)",
+            "command(kubectl exec *)",
+            "command(kubectl -n * get *)",
+            "command(kubectl get *)",
+            "command(kubectl -n * describe *)",
+            "command(kubectl describe *)",
+            "command(kubectl -n * logs *)",
+            "command(kubectl logs *)",
+            "command(kubectl -n * apply *)",
+            "command(kubectl apply *)",
+            "command(kubectl -n * delete *)",
+            "command(kubectl delete *)",
+            "command(kubectl -n * rollout *)",
+            "command(kubectl rollout *)",
+            "unsandboxed(bash scripts/**)",
+            "unsandboxed(bash scripts/*)",
+            "unsandboxed(sh scripts/**)",
+            "unsandboxed(sh scripts/*)",
+            "unsandboxed(./scripts/**)",
+            "unsandboxed(./scripts/*)",
+            "unsandboxed(./*)",
+            "unsandboxed(./**)",
+        ];
+        for pattern in standard_patterns {
+            let val = Value::String(pattern.to_string());
+            if !arr.contains(&val) {
+                arr.push(val);
             }
         }
     }
+
+    // When vouch is installed as the gate, Antigravity should not prompt with
+    // duplicate sandbox bypass modals for tool operations vouch evaluates.
+    let obj = root.as_object_mut().unwrap();
+    obj.insert("toolPermission".to_string(), json!("always-proceed"));
+    obj.insert("enableTerminalSandbox".to_string(), json!(false));
+
     serde_json::to_string_pretty(&root).map_err(|e| format!("could not render settings.json: {e}"))
 }
 

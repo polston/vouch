@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.26.2 (2026-09-14)
+
+
+### Bug Fixes
+
+* auto-seed Git and Cargo subcommand permissions and disable redundant sandbox prompts during Antigravity installation
+* model Python os.environ.copy, os.getenv, os.listdir, and os.scandir in shipped knowledge
+
 ## 0.26.1 (2026-09-13)
 
 

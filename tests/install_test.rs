@@ -727,6 +727,39 @@ fn reconciles_agy_permissions_cleanly() {
     assert!(allow.contains(&serde_json::Value::String("unsandboxed(GIT_CONFIG_GLOBAL=*)".into())));
     assert!(allow.contains(&serde_json::Value::String("unsandboxed(bash*)".into())));
 
+    // Added spaced token rules for bare and multi-token execution under Antigravity
+    assert!(allow.contains(&serde_json::Value::String("command(cargo)".into())));
+    assert!(allow.contains(&serde_json::Value::String("command(cargo *)".into())));
+    assert!(allow.contains(&serde_json::Value::String("command(git)".into())));
+    assert!(allow.contains(&serde_json::Value::String("command(git *)".into())));
+    assert!(allow.contains(&serde_json::Value::String("command(kubectl)".into())));
+    assert!(allow.contains(&serde_json::Value::String("command(kubectl *)".into())));
+    assert!(allow.contains(&serde_json::Value::String("command(grep)".into())));
+    assert!(allow.contains(&serde_json::Value::String("command(grep *)".into())));
+    assert!(allow.contains(&serde_json::Value::String("command(file)".into())));
+    assert!(allow.contains(&serde_json::Value::String("command(file *)".into())));
+    assert!(allow.contains(&serde_json::Value::String("command(vouch)".into())));
+    assert!(allow.contains(&serde_json::Value::String("command(vouch *)".into())));
+    assert!(allow.contains(&serde_json::Value::String("command(bash)".into())));
+    assert!(allow.contains(&serde_json::Value::String("command(bash *)".into())));
+    assert!(allow.contains(&serde_json::Value::String("command(GIT_CONFIG_GLOBAL=*)".into())));
+    assert!(allow.contains(&serde_json::Value::String("command(GIT_CONFIG_GLOBAL=* *)".into())));
+
+    // Sets toolPermission to always-proceed and disables the duplicate terminal sandbox so vouch remains the sole gate
+    assert_eq!(root["toolPermission"], "always-proceed");
+    assert_eq!(root["enableTerminalSandbox"], false);
+
+    // Added workspace script and kubectl execution patterns
+    assert!(allow.contains(&serde_json::Value::String("command(bash scripts/**)".into())));
+    assert!(allow.contains(&serde_json::Value::String("command(./scripts/**)".into())));
+    assert!(allow.contains(&serde_json::Value::String("command(target/debug/*)".into())));
+    assert!(allow.contains(&serde_json::Value::String("command(target/debug/vouch)".into())));
+    // Added git and cargo subcommands
+    assert!(allow.contains(&serde_json::Value::String("command(git add*)".into())));
+    assert!(allow.contains(&serde_json::Value::String("command(git commit*)".into())));
+    assert!(allow.contains(&serde_json::Value::String("command(cargo build*)".into())));
+    assert!(allow.contains(&serde_json::Value::String("command(cargo test*)".into())));
+
     // Idempotent: running again produces identical output
     let reconciled2 = reconcile_agy_permissions(&reconciled, DEFAULT_AGY_UNSANDBOXED_TOOLS).unwrap();
     assert_eq!(reconciled, reconciled2);

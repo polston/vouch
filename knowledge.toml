@@ -1301,6 +1301,7 @@ produces = ["data"]
 # are its only real receivers and both return a converted COPY — no write,
 # no directory change, no process start.
 
+
 [[program]]
 match = ["python:.read", "python:.readline", "python:.readlines"]
 receiver_from = ["file_handle"]
@@ -1321,7 +1322,7 @@ produces = ["data"]
 # os.environ is a mapping populated once at process start; reading it is an
 # in-memory dict lookup, not a filesystem or subprocess access.
 [[program]]
-match = ["python:os.environ.get"]
+match = ["python:os.environ.get", "python:os.environ.copy", "python:os.getenv"]
 produces = ["data"]
 
 # Pure construction of Path objects in memory. No filesystem access, process movement, or execution.
@@ -1408,6 +1409,8 @@ match = [
   "python:os.path.islink",
   "python:glob.glob",
   "python:os.access",
+  "python:os.listdir",
+  "python:os.scandir",
   "python:tempfile.gettempdir",
   "python:hashlib.md5",
   "python:datetime.date.today",
