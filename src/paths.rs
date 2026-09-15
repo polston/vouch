@@ -204,8 +204,129 @@ pub fn expand_env(raw: &str) -> String {
     expand_env_with(raw, &|n| std::env::var(n).ok())
 }
 
-/// Canonical textual form. Does NOT touch the filesystem.
-pub fn normalize(raw: &str, home: &str) -> String {
+/// A mount point alias mapping a POSIX or shell prefix to a canonical host path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MountEntry {
+    pub alias: String,
+    pub canonical: String,
+}
+
+impl MountEntry {
+    pub fn new(alias: &str, canonical: &str) -> Self {
+        let clean_alias = alias.replace('\\', "/").trim_end_matches('/').to_string();
+        let mut clean_canon = canonical.replace('\\', "/").trim_end_matches('/').to_string();
+        if clean_canon.len() >= 2 && clean_canon.as_bytes()[1] == b':' {
+            clean_canon = format!("{}{}", clean_canon[..1].to_uppercase(), &clean_canon[1..]);
+        }
+        Self {
+            alias: clean_alias,
+            canonical: clean_canon,
+        }
+    }
+}
+
+/// A collection of shell mount points for canonicalizing paths across
+/// virtualized or emulated environments (such as Git Bash / MSYS2 on Windows,
+/// container bind mounts, or system root symlinks on macOS/Unix).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MountTable {
+    entries: Vec<MountEntry>,
+}
+
+impl MountTable {
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    pub fn from_entries(mut entries: Vec<MountEntry>) -> Self {
+        entries.sort_by(|a, b| b.alias.len().cmp(&a.alias.len()));
+        Self { entries }
+    }
+
+    pub fn add(&mut self, alias: &str, canonical: &str) {
+        let entry = MountEntry::new(alias, canonical);
+        if !entry.alias.is_empty() && !entry.canonical.is_empty() {
+            self.entries.retain(|e| !paths_eq(&e.alias, &entry.alias));
+            self.entries.push(entry);
+            self.entries.sort_by(|a, b| b.alias.len().cmp(&a.alias.len()));
+        }
+    }
+
+    pub fn entries(&self) -> &[MountEntry] {
+        &self.entries
+    }
+
+    pub fn resolve<'a>(&'a self, path: &'a str) -> std::borrow::Cow<'a, str> {
+        if self.entries.is_empty() {
+            return std::borrow::Cow::Borrowed(path);
+        }
+        let norm_path = path.replace('\\', "/");
+        for entry in &self.entries {
+            if paths_eq(&norm_path, &entry.alias) {
+                return std::borrow::Cow::Owned(entry.canonical.clone());
+            }
+            let prefix = format!("{}/", entry.alias);
+            if norm_path.len() >= prefix.len() {
+                let candidate_prefix = &norm_path[..prefix.len()];
+                if paths_eq(candidate_prefix, &prefix) {
+                    let rest = &norm_path[prefix.len()..];
+                    return std::borrow::Cow::Owned(format!("{}/{}", entry.canonical, rest));
+                }
+            }
+        }
+        std::borrow::Cow::Borrowed(path)
+    }
+
+    pub fn detect() -> Self {
+        let mut table = Self::new();
+
+        // 1. Explicit override via VOUCH_MOUNT_TABLE or VOUCH_TEMP_DIR
+        if let Ok(v) = std::env::var("VOUCH_MOUNT_TABLE") {
+            for pair in v.split([';', ',']) {
+                if let Some((alias, target)) = pair.split_once('=') {
+                    table.add(alias.trim(), target.trim());
+                }
+            }
+        }
+        if let Ok(temp) = std::env::var("VOUCH_TEMP_DIR") {
+            table.add("/tmp", temp.trim());
+        }
+
+        // 2. Windows MSYS/Git Bash temp directory mapping
+        #[cfg(windows)]
+        {
+            if let Ok(temp) = std::env::var("TEMP").or_else(|_| std::env::var("TMP")) {
+                table.add("/tmp", &temp);
+            }
+        }
+
+        // 3. Unix system mount symlinks (e.g. macOS /tmp -> /private/tmp, /var -> /private/var)
+        #[cfg(unix)]
+        {
+            for sym in ["/tmp", "/var", "/etc"] {
+                if let Ok(target) = std::fs::canonicalize(sym) {
+                    let target_str = target.to_string_lossy();
+                    let target_clean = target_str.trim_end_matches('/');
+                    if !target_clean.is_empty() && target_clean != sym {
+                        table.add(sym, target_clean);
+                    }
+                }
+            }
+        }
+
+        table
+    }
+
+    pub fn system() -> &'static MountTable {
+        static SYSTEM_MOUNTS: std::sync::OnceLock<MountTable> = std::sync::OnceLock::new();
+        SYSTEM_MOUNTS.get_or_init(MountTable::detect)
+    }
+}
+
+/// Canonical textual form resolving through a specified mount table. Does NOT touch the filesystem.
+pub fn normalize_with_mounts(raw: &str, home: &str, mounts: &MountTable) -> String {
     let mut s = raw.replace('\\', "/");
 
     // Home shorthands. All of these name the SAME directory; a rule written
@@ -253,7 +374,23 @@ pub fn normalize(raw: &str, home: &str) -> String {
         s = format!("{}{}", s[..1].to_uppercase(), &s[1..]);
     }
 
-    collapse(&s)
+    s = collapse(&s);
+
+    let resolved = mounts.resolve(&s);
+    if resolved != s {
+        s = resolved.into_owned();
+        if s.len() >= 2 && s.as_bytes()[1] == b':' {
+            s = format!("{}{}", s[..1].to_uppercase(), &s[1..]);
+        }
+        s = collapse(&s);
+    }
+
+    s
+}
+
+/// Canonical textual form. Resolves against the system mount table. Does NOT touch the filesystem.
+pub fn normalize(raw: &str, home: &str) -> String {
+    normalize_with_mounts(raw, home, MountTable::system())
 }
 
 fn collapse(s: &str) -> String {

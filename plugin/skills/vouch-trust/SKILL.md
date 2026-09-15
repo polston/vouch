@@ -56,6 +56,8 @@ fields are only what the harness actually declares (rule 6 below).
    prefix, propose `[[run.trust_program]]`. This is whole-program recognition,
    not verb-scoped knowledge. A single observed filename is not evidence of a
    family, and a bare or PATH-resolved name cannot use this grant.
+   **Rule 2c — whole-program recognition for self-contained developer utilities:**
+   For self-contained developer tools that do not accept arbitrary destructive verbs (e.g. `vouch` itself, inspect tools, linters, static analyzers), whole-program coverage (`all_subcommands = true` or `subcommands = None`) is appropriate and avoids repetitive prompt friction on standard subcommands and flags (e.g. `--version`, `--help`, inspect subcommands). Contrast this with multi-verb or stateful tools (`kubectl`, `docker`, `git`) where verbs carry widely differing blast radii and must remain verb-scoped per Rule 2.
 3. **Destructive operations get an entry too — what they do not get is an
    allow.** If the command's point is deleting, force-pushing, or rewriting
    state, describe it and propose the rule that makes it ask by NAMING that

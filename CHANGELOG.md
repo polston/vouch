@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.30.0 (2026-09-15)
+
+
+### Features
+
+* resolve shell mount points to canonical host destinations during path normalization
+
 ## 0.29.1 (2026-09-15)
 
 
