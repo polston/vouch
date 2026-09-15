@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.28.0 (2026-09-15)
+
+
+### Features
+
+* enable operator subcommands in user knowledge to refine whole-program recognition
+
+
+### Bug Fixes
+
+* avoid early pipe termination on changelog diff during mirror publish
+
 ## 0.27.0 (2026-09-14)
 
 

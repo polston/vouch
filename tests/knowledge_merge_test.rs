@@ -1566,16 +1566,40 @@ fn overlay_is_exhaustive_over_every_tool_field() {
 // the bare empty spelling (spec §4, the inert-entry refusal).
 
 #[test]
-fn a_verb_list_laid_over_a_whole_program_entry_does_not_narrow_it() {
-    // base None x mine Some(list): mine cannot narrow a shipped
-    // whole-program entry (spec §3; the round-2 adversarial cell).
+fn a_verb_list_laid_over_a_whole_program_entry_refines_it() {
+    // base None x mine Some(list): operator subcommands refine and override
+    // a shipped whole-program entry.
     let base = kb("[[program]]\nmatch = [\"zz\"]\n");
     let mine = kb("[[program]]\nmatch = [\"zz\"]\nsubcommands = [\"go\"]\n");
     let merged = merge(base, mine);
     assert_eq!(
         prog(&merged, "zz").subcommands,
-        None,
-        "a verb list narrowed a shipped whole-program entry"
+        Some(vec!["go".to_string()]),
+        "an operator verb list did not refine a shipped whole-program entry"
+    );
+}
+
+#[test]
+fn operator_subcommands_and_paths_refine_whole_program_recognition() {
+    let base = kb("[[program]]\nmatch = [\"kubectl\"]\n");
+    let mine = kb(
+        "[[program]]\nmatch = [\"kubectl\"]\nsubcommands = [\"get\", \"logs\"]\nsubcommand_paths = [[\"config\", \"view\"]]\n",
+    );
+    let merged = merge(base, mine);
+    let p = prog(&merged, "kubectl");
+    assert_eq!(p.subcommands, Some(vec!["get".to_string(), "logs".to_string()]));
+    assert_eq!(p.subcommand_paths, Some(vec![vec!["config".to_string(), "view".to_string()]]));
+    assert!(
+        recognises(&merged, &cmd("kubectl", &["get", "pods"]), "bash", true),
+        "operator subcommand should be recognised"
+    );
+    assert!(
+        recognises(&merged, &cmd("kubectl", &["config", "view"]), "bash", true),
+        "operator subcommand path should be recognised"
+    );
+    assert!(
+        !recognises(&merged, &cmd("kubectl", &["kustomize", "dir"]), "bash", true),
+        "unlisted verb should not be recognised under refined scope"
     );
 }
 

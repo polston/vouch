@@ -1880,7 +1880,7 @@ fn doctor_prints_the_narrowing_notes() {
     .unwrap();
     std::fs::write(
         &my_knowledge,
-        "[[program]]\nmatch = [\"totallymadeupnotesprog\"]\nsubcommands = [\"build\"]\n",
+        "[[program]]\nmatch = [\"totallymadeupnotesprog\"]\nsubcommands = []\ncase_sensitive_flags = true\nstandalone_flags = [\"-h\"]\n",
     )
     .unwrap();
 

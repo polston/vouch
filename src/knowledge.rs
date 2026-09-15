@@ -1771,16 +1771,12 @@ fn overlay(base: &mut Program, mine: &Program) {
     // copying `mine.languages` here would silently erase the shipped claim's
     // powershell coverage instead of splitting it off. See `overlay_all`.
 
-    // Recognition widens, never narrows — the scope merge matrix
-    // (spec 2026-08-20 §3), pinned cell by cell in
-    // tests/knowledge_merge_test.rs (Task 2): a base `None` (whole program)
-    // is never narrowed by any `mine` value, list or explicit empty; a base
-    // `Some` list left unset by `mine` (key-absent, `None`) is a no-op; two
-    // `Some`s union, which makes an empty `mine` list a no-op union (the
-    // wider, shipped side stands) and an empty `base` list widen to
-    // whatever `mine` states. Nested path vectors obey the same union. Both
-    // scope keys absent is the whole-program state; `all_subcommands = true`
-    // clears both keys back to it.
+    // Scope merge matrix:
+    // When `mine.all_subcommands` is set, clears back to whole program.
+    // When both sides are scoped, their subcommands and paths union.
+    // When `base` was whole-program (`subcommands` and `subcommand_paths` are None),
+    // an operator's explicit non-empty subcommands or paths refine and override the
+    // shipped whole-program scope (an explicit empty list unions with nothing).
     if mine.all_subcommands {
         base.subcommands = None;
         base.subcommand_paths = None;
@@ -1802,6 +1798,13 @@ fn overlay(base: &mut Program, mine: &Program) {
                         base_paths.push(path.clone());
                     }
                 }
+            }
+        } else {
+            let has_subcommands = mine.subcommands.as_ref().is_some_and(|v| !v.is_empty());
+            let has_paths = mine.subcommand_paths.as_ref().is_some_and(|v| !v.is_empty());
+            if has_subcommands || has_paths {
+                base.subcommands = mine.subcommands.clone();
+                base.subcommand_paths = mine.subcommand_paths.clone();
             }
         }
     }
@@ -2238,19 +2241,22 @@ fn narrowing_noops(base: &Knowledge, own: &Knowledge) -> Vec<String> {
             {
                 let base_is_whole = b.subcommands.is_none() && b.subcommand_paths.is_none();
                 if base_is_whole {
-                    let mut stated = Vec::new();
-                    if let Some(value) = &m.subcommands {
-                        stated.push(format!("subcommands = {value:?}"));
+                    // Non-empty subcommands/paths refine whole-program coverage and are applied.
+                    // Only an explicit empty list is discarded as unioning with nothing.
+                    if m.subcommands.as_ref().is_some_and(Vec::is_empty) {
+                        notes.push(format!(
+                            "[[program]] {n:?}: your subcommands = [] is discarded by the merge \
+                             — the shipped whole-program coverage still stands (an empty list \
+                             unions with nothing)"
+                        ));
                     }
-                    if let Some(value) = &m.subcommand_paths {
-                        stated.push(format!("subcommand_paths = {value:?}"));
+                    if m.subcommand_paths.as_ref().is_some_and(Vec::is_empty) {
+                        notes.push(format!(
+                            "[[program]] {n:?}: your subcommand_paths = [] is discarded by the \
+                             merge — the shipped whole-program coverage still stands (an empty list \
+                             unions with nothing)"
+                        ));
                     }
-                    notes.push(format!(
-                        "[[program]] {n:?}: your {} is discarded by the merge — the shipped \
-                         whole-program coverage still stands (recognition scopes never narrow \
-                         below the whole program)",
-                        stated.join(" and ")
-                    ));
                     continue;
                 }
                 if m.subcommands.as_ref().is_some_and(Vec::is_empty)

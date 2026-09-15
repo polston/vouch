@@ -206,7 +206,7 @@ fn path_scope_validation_refuses_empty_paths_and_inert_empty_scopes() {
 }
 
 #[test]
-fn overlay_paths_union_and_never_narrow_whole_program_coverage() {
+fn overlay_paths_union_and_operator_paths_refine_whole_program_coverage() {
     let base =
         load("[[program]]\nmatch = [\"tool\"]\nsubcommand_paths = [[\"group\", \"list\"]]\n")
             .unwrap();
@@ -238,12 +238,32 @@ fn overlay_paths_union_and_never_narrow_whole_program_coverage() {
     ));
 
     let whole = load("[[program]]\nmatch = [\"wide\"]\n").unwrap();
-    let attempted_narrow =
+    let operator_paths =
         load("[[program]]\nmatch = [\"wide\"]\nsubcommand_paths = [[\"group\", \"list\"]]\n")
             .unwrap();
-    let merged = merge(whole, attempted_narrow);
+    let merged = merge(whole.clone(), operator_paths);
     assert!(recognises(
         &merged,
+        &common::cmd("wide", &["group", "list"]),
+        "bash",
+        true
+    ));
+    assert!(!recognises(
+        &merged,
+        &common::cmd("wide", &["anything", "else"]),
+        "bash",
+        true
+    ));
+
+    // An explicit empty list unions with nothing and leaves whole-program coverage.
+    let empty_paths = load(
+        "[[program]]\nmatch = [\"wide\"]\nsubcommand_paths = []\n\
+         case_sensitive_flags = true\nstandalone_flags = [\"--version\"]\n",
+    )
+    .unwrap();
+    let merged_empty = merge(whole, empty_paths);
+    assert!(recognises(
+        &merged_empty,
         &common::cmd("wide", &["anything", "else"]),
         "bash",
         true

@@ -1739,12 +1739,9 @@ fn a_discarded_narrowing_produces_a_note_not_silence() {
     );
     let loaded = load_files(&shipped, &mine);
     assert!(loaded.gaps.is_empty(), "none of these three should fail the load: {:?}", loaded.gaps);
-    assert_eq!(loaded.notes.len(), 3, "expected one note per discarded narrowing: {:?}", loaded.notes);
-    assert!(
-        loaded.notes.iter().any(|n| n.contains("aa") && n.contains("whole-program")),
-        "{:?}",
-        loaded.notes
-    );
+    assert_eq!(loaded.notes.len(), 2, "expected notes for empty discarded narrowings: {:?}", loaded.notes);
+    let aa = loaded.kb.program.iter().find(|p| p.match_names.iter().any(|n| n == "aa")).unwrap();
+    assert_eq!(aa.subcommands, Some(vec!["go".to_string()]), "aa's non-empty subcommands refined whole-program entry");
     assert!(
         loaded.notes.iter().any(|n| n.contains("bb") && n.contains("whole-program")),
         "{:?}",
