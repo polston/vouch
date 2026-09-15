@@ -407,7 +407,7 @@ pub fn trace_command_at(
     let assigned = assignments_in_effect(&scan.assignments);
     let start = start_state(cwd);
     for c in scan.commands.iter_mut() {
-        c.head = resolve_with_assignments(&c.head, &assigned, start.known_dir());
+        c.head = resolve_with_assignments(&c.head, &c.env_assigns, start.known_dir());
     }
 
     let kb = crate::guards::in_effect();
@@ -437,7 +437,7 @@ pub fn trace_command_at(
     });
 
     // Step 2: Working Directory Context
-    let resolve = |raw: &str| resolve_with_assignments(raw, &assigned, start.known_dir());
+    let resolve = |c: &crate::shell::Cmd, raw: &str| resolve_with_assignments(raw, &c.env_assigns, start.known_dir());
     let timeline = scoped_cd_timelines(
         &expanded.cmds,
         &expanded.execution_sites,
@@ -478,7 +478,7 @@ pub fn trace_command_at(
             let here_set = timeline.base_set_at(idx, &expanded.cmds);
             let here_pwd = here_set.single_known().or_else(|| start.known_dir());
             for arg in &c.args {
-                let resolved = resolve_with_assignments(arg, &assigned, here_pwd);
+                let resolved = resolve_with_assignments(arg, &c.env_assigns, here_pwd);
                 if let Some(hit) = mentions_protected(cfg, h, project_root, &resolved) {
                     protected_hit = true;
                     step3_details.push(format!("command argument mentions protected path: {hit}"));
@@ -502,7 +502,7 @@ pub fn trace_command_at(
     for (i, mut hit) in hits {
         let base_set = timeline.base_set_at(i, &expanded.cmds);
         let here_pwd = base_set.single_known().or_else(|| start.known_dir());
-        let (res_target, unres_target) = resolve_guard_target_for(&expanded.cmds[i], &assigned, here_pwd);
+        let (res_target, unres_target) = resolve_guard_target_for(&expanded.cmds[i], &expanded.cmds[i].env_assigns, here_pwd);
         hit.resolved_target = res_target;
         hit.unresolvable_target = unres_target;
         step4_details.push(format!("guard tripped: {}", hit.guard));
@@ -991,7 +991,7 @@ fn judge_once(
     // resolved this way since 2026-07-25; heads were not, so the same command
     // got two different answers depending on which half you looked at.
     for c in scan.commands.iter_mut() {
-        c.head = resolve_with_assignments(&c.head, &assigned, start.known_dir());
+        c.head = resolve_with_assignments(&c.head, &c.env_assigns, start.known_dir());
     }
 
     // 1. Guards — what the command DOES. Same set for every language.
@@ -1061,7 +1061,7 @@ fn judge_once(
     //
     // (`assigned` is built once above, before heads are resolved, and is the
     // same map used here — one resolution rule for names and paths.)
-    let resolve = |raw: &str| resolve_with_assignments(raw, &assigned, start.known_dir());
+    let resolve = |c: &crate::shell::Cmd, raw: &str| resolve_with_assignments(raw, &c.env_assigns, start.known_dir());
 
     // Where a RELATIVE write actually lands.
     //
@@ -1228,6 +1228,7 @@ fn judge_once(
                 injected_redirect_scope.push(placed);
             }
             scan.redirect_targets.extend(inner.redirect_targets);
+            scan.redirect_env.extend(inner.redirect_env);
             for c in inner.constructs {
                 snippet_constructs.push((plang.clone(), c));
             }
@@ -1272,6 +1273,11 @@ fn judge_once(
         scan.redirect_chain.len(),
         "redirect_chain fell out of lockstep with redirect_targets in the snippet fold"
     );
+    debug_assert_eq!(
+        scan.redirect_targets.len(),
+        scan.redirect_env.len(),
+        "redirect_env fell out of lockstep with redirect_targets in the snippet fold"
+    );
     // The fifth channel, added by M2.225 and read by index against the same
     // four. It is a parallel array, which this file's own comments warn about,
     // and this is the check that makes a desync loud instead of silent.
@@ -1297,7 +1303,7 @@ fn judge_once(
     for (i, mut hit) in crate::guards::check_each_in(kb, &all_cmds, &all_langs) {
         let base_set = timeline.base_set_at(i, &all_cmds);
         let here_pwd = base_set.single_known().or_else(|| start.known_dir());
-        let (res_target, unres_target) = resolve_guard_target_for(&all_cmds[i], &assigned, here_pwd);
+        let (res_target, unres_target) = resolve_guard_target_for(&all_cmds[i], &all_cmds[i].env_assigns, here_pwd);
         hit.resolved_target = res_target;
         hit.unresolvable_target = unres_target;
         // Where this one command runs: its position in the line, then its own
@@ -1314,7 +1320,7 @@ fn judge_once(
             clang,
             &base,
             inherited_at(&all_inherited, i),
-            &resolve,
+            &|raw| resolve(&all_cmds[i], raw),
         );
         let (a, overrode) = if hit.unread_verb.is_some() {
             let lang = occurrence_lang(&all_langs, i, lang);
@@ -1362,7 +1368,7 @@ fn judge_once(
                         clang,
                         member,
                         inherited_at(&all_inherited, i),
-                        &resolve,
+                        &|raw| resolve(&all_cmds[i], raw),
                     );
                     let candidate = resolve_guard_action(
                         cfg,
@@ -1555,7 +1561,8 @@ fn judge_once(
             // sibling; an absolute target composes identically from every
             // member and is pushed once via the dedup.
             let r_pwd = redirect_base.single_known().or_else(|| start.known_dir());
-            let resolved = resolve_with_assignments(t, &assigned, r_pwd);
+            let red_env = scan.redirect_env.get(i).unwrap_or(&assigned);
+            let resolved = resolve_with_assignments(t, red_env, r_pwd);
             // The redirect's own occurrence, when it has one: the owning
             // command's language, exactly as every other per-occurrence
             // lookup here resolves it. An unowned redirect (a compound's own,
@@ -1638,7 +1645,7 @@ fn judge_once(
 
             let here_set = timeline.base_set_at(i, &all_cmds);
             let here_pwd = here_set.single_known().or_else(|| start.known_dir());
-            let paths: Vec<String> = wt.paths.iter().map(|p| resolve_with_assignments(p, &assigned, here_pwd)).collect();
+            let paths: Vec<String> = wt.paths.iter().map(|p| resolve_with_assignments(p, &c.env_assigns, here_pwd)).collect();
             // A run-dir flag only has to resolve when something depends on
             // it. `git -C a -C b status` writes nothing, and a read must
             // never gain a standing prompt.
@@ -1666,7 +1673,7 @@ fn judge_once(
                         clang,
                         member,
                         inherited_at(&all_inherited, i),
-                        &resolve,
+                        &|raw| resolve(c, raw),
                     );
                     states.push(state);
                     prov = p;
@@ -2559,7 +2566,7 @@ fn judge_once(
             clang,
             &base,
             inherited_at(&all_inherited, i),
-            &resolve,
+            &|raw| resolve(c, raw),
         );
         let place = place_of(&state, here_home);
         // The same question asked of every candidate the position could be in
@@ -2603,7 +2610,7 @@ fn judge_once(
                     clang,
                     member,
                     inherited_at(&all_inherited, i),
-                    &resolve,
+                    &|raw| resolve(c, raw),
                 );
                 causes.push(unproven_cause(&member_state).to_string());
                 places.push(place_of(&member_state, here_home));
@@ -3732,7 +3739,7 @@ pub fn count_unknown_run_place_commands(lang: &str, src: &str) -> usize {
     // a fallback in the first place, so the two converge on the same answer.
     let assigned: std::collections::HashMap<String, Option<String>> =
         scan.assignments.iter().cloned().collect();
-    let resolve = |raw: &str| -> String {
+    let resolve = |_c: &crate::shell::Cmd, raw: &str| -> String {
         let mut t = crate::paths::unquote(raw).to_string();
         for _ in 0..4 {
             let next = crate::paths::expand_env_with(&t, &|n| assigned.get(n).cloned().flatten());
@@ -3836,9 +3843,9 @@ pub fn measure_program_locations(
     // wins, poisoned writes do not fall through, absent names may use the
     // judging process's environment, and expansion is bounded to four passes.
     let assigned = assignments_in_effect(&scan.assignments);
-    let resolve = |raw: &str| resolve_with_assignments(raw, &assigned, cwd);
+    let resolve = |c: &crate::shell::Cmd, raw: &str| resolve_with_assignments(raw, &c.env_assigns, cwd);
     for command in &mut scan.commands {
-        command.head = resolve(&command.head);
+        command.head = resolve(command, &command.head);
     }
 
     let kb = crate::guards::in_effect();
@@ -3891,7 +3898,7 @@ pub fn measure_program_locations(
             occurrence_lang,
             &base,
             inherited_at(&inherited_run_dir, index),
-            &resolve,
+            &|raw| resolve(command, raw),
         );
         let location = program_location_from_state(&command.head, &state, home);
         match &location {
@@ -5175,7 +5182,7 @@ fn scoped_cd_timelines(
     scope_parents: &[ScopeParent],
     langs: &[String],
     inherited_run_dir: &[Option<String>],
-    resolve: &dyn Fn(&str) -> String,
+    resolve: &dyn Fn(&crate::shell::Cmd, &str) -> String,
     home: Option<&str>,
     cdpath_bound: bool,
     start: &CdState,
@@ -5452,7 +5459,7 @@ fn scoped_cd_timelines(
                                         lang,
                                         member,
                                         inherited_at(inherited_run_dir, *parent),
-                                        resolve,
+                                        &|arg| resolve(command, arg),
                                     )
                                     .0
                                 })
@@ -6144,7 +6151,7 @@ fn cd_timeline(
     sites: &[ExpandedExecutionSite],
     scope: usize,
     langs: &[String],
-    resolve: &dyn Fn(&str) -> String,
+    resolve: &dyn Fn(&crate::shell::Cmd, &str) -> String,
     home: Option<&str>,
     // Whether this line visibly binds CDPATH (prefix or earlier same-line
     // assignment): a relative, un-dotted destination is then a SEARCH KEY,
@@ -6352,7 +6359,7 @@ fn cd_timeline(
             .iter()
             .enumerate()
             .filter(|(index, _)| !effective.padding.contains(index))
-            .map(|(_, arg)| resolve(arg))
+            .map(|(_, arg)| resolve(c, arg))
             .collect();
         // ONE candidate walk per directory change, stored with the event —
         // it builds a merged option list and classifies every token, so

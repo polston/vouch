@@ -676,6 +676,7 @@ fn cmd(head: &str, args: &[&str]) -> vouch::syntax::Cmd {
         prefix_assigns: vec![],
         receiver_origin: vouch::syntax::ValueOrigin::Unknown,
         by_reference: false,
+        env_assigns: Default::default(),
     }
 }
 

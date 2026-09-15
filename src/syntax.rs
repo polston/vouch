@@ -51,6 +51,19 @@ pub struct Cmd {
     /// commands from allow to ask). Every scanner-built and CLI-probe `Cmd`
     /// leaves this `false`.
     pub by_reference: bool,
+    /// Environment variable assignments in effect when this command runs,
+    /// including prior intra-line exports and this command's prefix assignments.
+    pub env_assigns: std::collections::HashMap<String, Option<String>>,
+}
+
+impl Cmd {
+    pub fn resolve_arg(&self, raw: &str, pwd: Option<&str>) -> String {
+        crate::paths::resolve_with_assignments(raw, &self.env_assigns, pwd)
+    }
+
+    pub fn resolved_args(&self, pwd: Option<&str>) -> Vec<String> {
+        self.args.iter().map(|a| self.resolve_arg(a, pwd)).collect()
+    }
 }
 
 /// A scanner's language-neutral account of where a runtime value came from.
@@ -415,6 +428,8 @@ pub struct Scan {
     pub cmd_scope: Vec<Option<usize>>,
     /// Parallel to `redirect_targets`, same `None` semantics.
     pub redirect_scope: Vec<Option<usize>>,
+    /// Environment variable assignments in effect for each redirect (parallel to `redirect_targets`).
+    pub redirect_env: Vec<std::collections::HashMap<String, Option<String>>>,
     /// The chain membership of the command a redirect hangs off, parallel to
     /// `redirect_targets`. `None` = the redirect is not a chain member, the
     /// same answer `Cmd::chain` gives for a lone statement.
@@ -464,6 +479,7 @@ impl Scan {
         chain: Option<ChainPos>,
         prefix_assigns: Vec<String>,
         scope: Option<usize>,
+        env_assigns: std::collections::HashMap<String, Option<String>>,
     ) {
         if head.is_empty() {
             return;
@@ -479,6 +495,7 @@ impl Scan {
             prefix_assigns,
             receiver_origin: ValueOrigin::Unknown,
             by_reference: false,
+            env_assigns,
         });
         self.order.push(order);
         self.input_source.push(input_source);
@@ -581,6 +598,7 @@ impl Scan {
             c
         }));
         self.redirect_targets.extend(other.redirect_targets);
+        self.redirect_env.extend(other.redirect_env);
         self.order
             .extend(std::iter::repeat(Order::Unordered).take(n_cmds));
         self.redirect_order

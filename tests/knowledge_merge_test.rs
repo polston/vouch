@@ -22,6 +22,7 @@ fn cmd(head: &str, args: &[&str]) -> Cmd {
         callable_args: Default::default(),
         chain: None,
         prefix_assigns: vec![],
+        env_assigns: Default::default(),
         receiver_origin: vouch::syntax::ValueOrigin::Unknown,
         by_reference: false,
     }

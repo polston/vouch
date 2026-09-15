@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.29.0 (2026-09-15)
+
+
+### Features
+
+* track intra-line environment variable exports in compound shell commands
+
 ## 0.28.0 (2026-09-15)
 
 

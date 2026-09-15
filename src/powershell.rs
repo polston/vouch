@@ -640,6 +640,7 @@ pub fn parse(src: &str) -> Result<Parsed, String> {
                     out.redirect_targets.push(tok);
                     out.redirect_order.push(order.clone());
                     out.redirect_scope.push(Some(0));
+                    out.redirect_env.push(out.assignments.iter().cloned().collect());
                     // The statement's own chain, which this walk already
                     // computed for the command — a PowerShell redirect is
                     // always part of the statement it is written on, so the
@@ -742,6 +743,7 @@ pub fn parse(src: &str) -> Result<Parsed, String> {
                     chain,
                     vec![],
                     Some(0),
+                    out.assignments.iter().cloned().collect(),
                 );
             }
             continue;
@@ -837,6 +839,7 @@ pub fn parse(src: &str) -> Result<Parsed, String> {
                 chain,
                 vec![],
                 Some(0),
+                out.assignments.iter().cloned().collect(),
             );
         }
     }

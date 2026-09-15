@@ -32,7 +32,7 @@ fn absorb_restamps_scope_ids_past_the_absorbing_scans_own() {
         anchor_chain: None,
     });
     inner.push_cmd("pwd".into(), vec![], Order::Unordered,
-        vouch::syntax::InputSource::Unknown, true, None, vec![], Some(1));
+        vouch::syntax::InputSource::Unknown, true, None, vec![], Some(1), Default::default());
     let outer_scopes = outer.scan_scopes.len();
     outer.absorb(inner);
     // The absorbed command's scope id is offset past the outer scan's own
@@ -239,7 +239,7 @@ fn absorb_restamps_scope_ids_past_a_nonzero_existing_offset() {
         anchor_chain: None,
     });
     outer.push_cmd("echo".into(), vec!["hi".into()], Order::Unordered,
-        vouch::syntax::InputSource::Unknown, true, None, vec![], Some(1));
+        vouch::syntax::InputSource::Unknown, true, None, vec![], Some(1), Default::default());
 
     let mut inner = vouch::syntax::Scan::default();
     inner.scan_scopes.push(vouch::syntax::ScanScope {
@@ -250,7 +250,7 @@ fn absorb_restamps_scope_ids_past_a_nonzero_existing_offset() {
         anchor_chain: None,
     });
     inner.push_cmd("pwd".into(), vec![], Order::Unordered,
-        vouch::syntax::InputSource::Unknown, true, None, vec![], Some(1));
+        vouch::syntax::InputSource::Unknown, true, None, vec![], Some(1), Default::default());
 
     let outer_scopes = outer.scan_scopes.len();
     outer.absorb(inner);

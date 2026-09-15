@@ -585,6 +585,30 @@ pub fn under_any(globs: &[String], dir: &str) -> bool {
     globs.iter().any(|g| glob_match(g, dir))
 }
 
+/// Resolve one scanner token exactly as the decision path does: the last
+/// same-line assignment wins (including an unreadable poisoned value), absent
+/// names may use the process environment, and recursive expansion is bounded.
+pub fn resolve_with_assignments(
+    raw: &str,
+    assigned: &std::collections::HashMap<String, Option<String>>,
+    pwd: Option<&str>,
+) -> String {
+    let lookup = |name: &str| match assigned.get(name) {
+        Some(value) => value.clone(),
+        None if name == "PWD" => pwd.map(str::to_string),
+        None => std::env::var(name).ok(),
+    };
+    let mut text = unquote(raw).to_string();
+    for _ in 0..4 {
+        let next = expand_env_with(&text, &lookup);
+        if next == text {
+            break;
+        }
+        text = next;
+    }
+    unquote(&text).to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

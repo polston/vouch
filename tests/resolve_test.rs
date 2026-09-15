@@ -444,3 +444,43 @@ fn a_download_destination_is_checked_like_any_other_write() {
         Decision::Allow(_)
     ));
 }
+
+#[test]
+fn export_in_compound_command_resolves_write_target() {
+    assert!(matches!(
+        decide(r#"export DIR=/c/work && echo x > "$DIR/out.txt""#),
+        Decision::Allow(_)
+    ));
+    assert!(matches!(
+        decide(r#"DIR=/c/work && echo x > "$DIR/out.txt""#),
+        Decision::Allow(_)
+    ));
+    assert!(matches!(
+        decide(r#"echo x > "$DIR/out.txt""#),
+        Decision::Ask(_)
+    ));
+}
+
+#[test]
+fn subshell_environment_is_isolated_from_subsequent_write() {
+    match decide(r#"(export DIR=/c/work); echo x > "$DIR/out.txt""#) {
+        Decision::Ask(r) => assert!(r.contains("unresolved_path"), "{r}"),
+        other => panic!("expected Ask for unresolved_path, got {other:?}"),
+    }
+}
+
+#[test]
+fn prefix_assignment_is_isolated_from_subsequent_write() {
+    match decide(r#"DIR=/c/work true && echo x > "$DIR/out.txt""#) {
+        Decision::Ask(r) => assert!(r.contains("unresolved_path"), "{r}"),
+        other => panic!("expected Ask for unresolved_path, got {other:?}"),
+    }
+}
+
+#[test]
+fn chained_environment_assignments_resolve_write_target() {
+    assert!(matches!(
+        decide(r#"BASE=/c/work && SUB="$BASE/out.txt" && echo x > "$SUB""#),
+        Decision::Allow(_)
+    ));
+}

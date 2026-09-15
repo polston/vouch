@@ -1558,6 +1558,7 @@ impl Walk {
             None,
             vec![],
             Some(0),
+            Default::default(),
         );
         if let Some(cmd) = self.out.commands.last_mut() {
             cmd.unread_args = unread_args;

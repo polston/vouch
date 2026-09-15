@@ -620,3 +620,76 @@ fn a_backslash_inside_double_quotes_is_left_alone_but_the_boundary_tracks() {
     let p = parse(r#"echo "a\"b" tail"#).unwrap();
     assert_eq!(p.commands[0].args, vec![r#""a\"b""#.to_string(), "tail".to_string()]);
 }
+
+// ============================================================================
+// Intra-line environment variable export tracking (Goal 2.2)
+// ============================================================================
+
+#[test]
+fn export_builtin_records_env_for_sibling_commands() {
+    let p = parse("export FOO=bar && echo $FOO").unwrap();
+    assert_eq!(p.commands.len(), 2);
+    assert_eq!(p.commands[0].head, "export");
+    assert_eq!(p.commands[0].env_assigns.get("FOO").cloned().flatten(), Some("bar".to_string()));
+    assert_eq!(p.commands[1].head, "echo");
+    assert_eq!(p.commands[1].env_assigns.get("FOO").cloned().flatten(), Some("bar".to_string()));
+}
+
+#[test]
+fn bare_assignment_records_env_for_sibling_commands() {
+    let p = parse("FOO=bar && echo $FOO").unwrap();
+    assert_eq!(p.commands.len(), 1);
+    assert_eq!(p.commands[0].head, "echo");
+    assert_eq!(p.commands[0].env_assigns.get("FOO").cloned().flatten(), Some("bar".to_string()));
+}
+
+#[test]
+fn subshell_environment_does_not_leak_to_outer_scope() {
+    let p = parse("(export FOO=bar; echo $FOO); echo $FOO").unwrap();
+    assert_eq!(p.commands.len(), 3);
+    // Command 0: export FOO=bar (inside subshell)
+    assert_eq!(p.commands[0].env_assigns.get("FOO").cloned().flatten(), Some("bar".to_string()));
+    // Command 1: echo $FOO (inside subshell)
+    assert_eq!(p.commands[1].env_assigns.get("FOO").cloned().flatten(), Some("bar".to_string()));
+    // Command 2: echo $FOO (outside subshell)
+    assert_eq!(p.commands[2].env_assigns.get("FOO"), None);
+}
+
+#[test]
+fn pipeline_environment_is_isolated_between_stages() {
+    let p = parse("export FOO=bar | echo $FOO").unwrap();
+    assert_eq!(p.commands.len(), 2);
+    assert_eq!(p.commands[0].head, "export");
+    assert_eq!(p.commands[0].env_assigns.get("FOO").cloned().flatten(), Some("bar".to_string()));
+    assert_eq!(p.commands[1].head, "echo");
+    assert_eq!(p.commands[1].env_assigns.get("FOO"), None);
+}
+
+#[test]
+fn prefix_assignment_is_isolated_to_its_command() {
+    let p = parse("FOO=bar echo hi; echo $FOO").unwrap();
+    assert_eq!(p.commands.len(), 2);
+    assert_eq!(p.commands[0].head, "echo");
+    assert_eq!(p.commands[0].env_assigns.get("FOO").cloned().flatten(), Some("bar".to_string()));
+    assert_eq!(p.commands[1].head, "echo");
+    assert_eq!(p.commands[1].env_assigns.get("FOO"), None);
+}
+
+#[test]
+fn suffix_assignments_do_not_leak_as_env_exports() {
+    let p = parse("dd if=input of=output; echo $if").unwrap();
+    assert_eq!(p.commands.len(), 2);
+    assert_eq!(p.commands[0].head, "dd");
+    assert_eq!(p.commands[1].head, "echo");
+    assert_eq!(p.commands[1].env_assigns.get("if"), None);
+    assert_eq!(p.commands[1].env_assigns.get("of"), None);
+}
+
+#[test]
+fn chained_variable_assignment_in_compound_command() {
+    let p = parse(r#"A=hello && B="$A world" && echo "$B""#).unwrap();
+    assert_eq!(p.commands.len(), 1);
+    assert_eq!(p.commands[0].head, "echo");
+    assert_eq!(p.commands[0].env_assigns.get("A").cloned().flatten(), Some("hello".to_string()));
+    assert_eq!(p.commands[0].env_assigns.get("B").cloned().flatten(), Some("hello world".to_string()));
+}

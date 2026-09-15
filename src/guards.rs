@@ -4086,6 +4086,7 @@ fn after_exec_commands(prog: &Program, args: &[String]) -> (Vec<Cmd>, Vec<String
                 prefix_assigns: vec![],
                 receiver_origin: crate::syntax::ValueOrigin::Unknown,
                 by_reference: false,
+                env_assigns: Default::default(),
             }),
             None => unlocated.push(format!(
                 "`{a}` is followed straight by its terminator, so vouch cannot tell what it \
@@ -4977,6 +4978,7 @@ pub fn expand_wrappers_forking(
                                     prefix_assigns: walk.assigns,
                                     receiver_origin: crate::syntax::ValueOrigin::Unknown,
                                     by_reference: false,
+                                    env_assigns: cmd.env_assigns.clone(),
                                 }],
                                 args_complete: vec![own_args_complete],
                                 ..SnippetScan::default()
@@ -5198,6 +5200,7 @@ pub fn expand_wrappers_forking(
                                             prefix_assigns: vec![],
                                             receiver_origin: crate::syntax::ValueOrigin::Unknown,
                                             by_reference: false,
+                                            env_assigns: cmd.env_assigns.clone(),
                                         };
                                         out.snippet_located[self_idx] = true;
                                         next_lang = prog.wrap_lang.clone();
@@ -5230,6 +5233,7 @@ pub fn expand_wrappers_forking(
                                         prefix_assigns: vec![],
                                         receiver_origin: crate::syntax::ValueOrigin::Unknown,
                                         by_reference: false,
+                                        env_assigns: cmd.env_assigns.clone(),
                                     };
                                     out.snippet_located[self_idx] = true;
                                     next_lang = prog.wrap_lang.clone();
@@ -5295,6 +5299,7 @@ pub fn expand_wrappers_forking(
                                         prefix_assigns: vec![],
                                         receiver_origin: crate::syntax::ValueOrigin::Unknown,
                                         by_reference: false,
+                                        env_assigns: cmd.env_assigns.clone(),
                                     }],
                                     args_complete: vec![own_args_complete],
                                     ..SnippetScan::default()
@@ -5335,6 +5340,12 @@ pub fn expand_wrappers_forking(
                     _ => SnippetScan::default(),
                 };
                 if !inner.cmds.is_empty() {
+                    let mut inner = inner;
+                    for inner_cmd in &mut inner.cmds {
+                        for (k, v) in &cmd.env_assigns {
+                            inner_cmd.env_assigns.entry(k.clone()).or_insert_with(|| v.clone());
+                        }
+                    }
                     // Bound here, outside the branch, so these outlive the
                     // `go()` call below — a `Vec` produced inside the
                     // `if inner.parsed` arm would be dropped at the end of
@@ -5460,6 +5471,12 @@ pub fn expand_wrappers_forking(
                         );
                     }
                     if !scan.cmds.is_empty() {
+                        let mut scan = scan;
+                        for inner_cmd in &mut scan.cmds {
+                            for (k, v) in &cmd.env_assigns {
+                                inner_cmd.env_assigns.entry(k.clone()).or_insert_with(|| v.clone());
+                            }
+                        }
                         // Allocated exactly like the parsed-wrapper arm above:
                         // a consumed here-document body is a snippet with its
                         // own scan, so its own compounds get their own scopes

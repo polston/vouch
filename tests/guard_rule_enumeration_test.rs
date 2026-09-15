@@ -59,6 +59,7 @@ fn firing_cmd(head: &str, rule: &Rule) -> Cmd {
         prefix_assigns: vec![],
         receiver_origin: vouch::syntax::ValueOrigin::Unknown,
         by_reference: false,
+        env_assigns: Default::default(),
     }
 }
 
@@ -73,6 +74,7 @@ fn bare(head: &str) -> Cmd {
         prefix_assigns: vec![],
         receiver_origin: vouch::syntax::ValueOrigin::Unknown,
         by_reference: false,
+        env_assigns: Default::default(),
     }
 }
 
