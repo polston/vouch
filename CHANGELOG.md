@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.29.1 (2026-09-15)
+
+
+### Bug Fixes
+
+* emit force_ask for Antigravity so Ask decisions prompt unconditionally
+
 ## 0.29.0 (2026-09-15)
 
 

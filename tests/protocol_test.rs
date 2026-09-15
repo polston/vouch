@@ -210,7 +210,7 @@ fn renders_agy_allow_ask_deny_and_abstain() {
 
     let ask_out = render_for(Host::Agy, &Decision::Ask("unmodeled command".into())).unwrap();
     let parsed_ask: serde_json::Value = serde_json::from_str(&ask_out).unwrap();
-    assert_eq!(parsed_ask["decision"], "ask");
+    assert_eq!(parsed_ask["decision"], "force_ask");
     assert_eq!(parsed_ask["reason"], "unmodeled command");
 
     let deny_out = render_for(Host::Agy, &Decision::Deny("protected path".into())).unwrap();
@@ -289,7 +289,7 @@ fn demotes_safe_local_commands_on_ask_in_agy() {
 
     let rendered = render_for_agy(&decision, true).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&rendered).unwrap();
-    assert_eq!(parsed["decision"], "ask");
+    assert_eq!(parsed["decision"], "force_ask");
     assert_eq!(
         parsed["reason"],
         "operator confirmation needed"

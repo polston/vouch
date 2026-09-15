@@ -437,14 +437,14 @@ pub fn render_for_agy(d: &Decision, demote_sandbox: bool) -> Option<String> {
     let (verdict, reason) = match d {
         Decision::Abstain => return None,
         Decision::Allow(r) => ("allow", r),
-        Decision::Ask(r) => ("ask", r),
+        Decision::Ask(r) => ("force_ask", r),
         Decision::Deny(r) => ("deny", r),
     };
     let mut body = serde_json::json!({
         "decision": verdict,
         "reason": reason,
     });
-    if (verdict == "allow" || verdict == "ask") && demote_sandbox {
+    if (verdict == "allow" || verdict == "force_ask") && demote_sandbox {
         body["overwrite"] = serde_json::json!({
             "BypassSandbox": false
         });
