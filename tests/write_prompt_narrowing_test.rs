@@ -43,20 +43,28 @@ fn test_decide_file_prompts_narrow_rules() {
     let mut cfg = Config::nothing_configured();
     cfg.write.default = vouch::config::Action::Ask;
 
-    let res = decide_file(&cfg, "/home/user", Some("/home/user/project"), "/root_file.txt");
+    let (root_target, nested_target) = if cfg!(windows) {
+        ("C:/root_file.txt", "C:/nested/path/file.txt")
+    } else {
+        ("/root_file.txt", "/nested/path/file.txt")
+    };
+
+    let res = decide_file(&cfg, "C:/Users/dev", Some("C:/Users/dev/project"), root_target);
     match res {
         Decision::Ask(msg) => {
-            assert!(msg.contains("to allow this permanently, add to write.allow_paths: \"/root_file.txt\""), "got: {msg}");
-            assert!(!msg.contains("\"/**\""), "must not suggest /**: {msg}");
+            assert!(msg.contains(&format!("to allow this permanently, add to write.allow_paths: \"{root_target}\"")), "got: {msg}");
+            assert!(!msg.contains("\"/**\"") && !msg.contains("\"C:/**\""), "must not suggest /**: {msg}");
+            assert!(msg.contains("(note: allowing the containing directory would open the entire filesystem or drive to writes)"), "got: {msg}");
         }
         other => panic!("expected Ask, got {other:?}"),
     }
 
-    let res2 = decide_file(&cfg, "/home/user", Some("/home/user/project"), "/nested/path/file.txt");
+    let res2 = decide_file(&cfg, "C:/Users/dev", Some("C:/Users/dev/project"), nested_target);
     match res2 {
         Decision::Ask(msg) => {
-            assert!(msg.contains("to allow this permanently, add to write.allow_paths: \"/nested/path/file.txt\""), "got: {msg}");
-            assert!(msg.contains("or to allow this directory: \"/nested/path/**\""), "got: {msg}");
+            assert!(msg.contains(&format!("to allow this permanently, add to write.allow_paths: \"{nested_target}\"")), "got: {msg}");
+            let dir_rule = if cfg!(windows) { "C:/nested/path/**" } else { "/nested/path/**" };
+            assert!(msg.contains(&format!("or to allow this directory: \"{dir_rule}\"")), "got: {msg}");
         }
         other => panic!("expected Ask, got {other:?}"),
     }
