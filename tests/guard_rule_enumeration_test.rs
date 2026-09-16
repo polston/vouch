@@ -60,6 +60,7 @@ fn firing_cmd(head: &str, rule: &Rule) -> Cmd {
         receiver_origin: vouch::syntax::ValueOrigin::Unknown,
         by_reference: false,
         env_assigns: Default::default(),
+        is_intra_command_function: false,
     }
 }
 
@@ -75,6 +76,7 @@ fn bare(head: &str) -> Cmd {
         receiver_origin: vouch::syntax::ValueOrigin::Unknown,
         by_reference: false,
         env_assigns: Default::default(),
+        is_intra_command_function: false,
     }
 }
 

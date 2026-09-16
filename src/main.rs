@@ -1076,6 +1076,7 @@ fn main() {
                     receiver_origin: vouch::syntax::ValueOrigin::Unknown,
                     by_reference: false,
                     env_assigns: Default::default(),
+                    is_intra_command_function: false,
                 };
                 let claimed = if subs.is_empty() {
                     program.clone()
@@ -1105,6 +1106,7 @@ fn main() {
                         receiver_origin: vouch::syntax::ValueOrigin::Unknown,
                         by_reference: false,
                         env_assigns: Default::default(),
+                        is_intra_command_function: false,
                     };
                     vouch::guards::recognises(&loaded.kb, &flag_probe, "bash", true)
                         && (subs.is_empty()

@@ -72,6 +72,7 @@ fn a_cli_is_not_one_operation() {
         receiver_origin: vouch::syntax::ValueOrigin::Unknown,
         by_reference: false,
         env_assigns: Default::default(),
+        is_intra_command_function: false,
     };
 
     // Hand-built probes, so the argument record is complete and closed by
@@ -102,6 +103,7 @@ fn an_entry_with_no_subcommands_covers_the_whole_program() {
             receiver_origin: vouch::syntax::ValueOrigin::Unknown,
             by_reference: false,
             env_assigns: Default::default(),
+            is_intra_command_function: false,
         },
         "bash",
         true

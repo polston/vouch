@@ -54,6 +54,9 @@ pub struct Cmd {
     /// Environment variable assignments in effect when this command runs,
     /// including prior intra-line exports and this command's prefix assignments.
     pub env_assigns: std::collections::HashMap<String, Option<String>>,
+    /// True when this command's head refers to an intra-command function
+    /// defined earlier in the same execution scope.
+    pub is_intra_command_function: bool,
 }
 
 impl Cmd {
@@ -469,6 +472,7 @@ impl Scan {
         id
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn push_cmd(
         &mut self,
         head: String,
@@ -480,6 +484,7 @@ impl Scan {
         prefix_assigns: Vec<String>,
         scope: Option<usize>,
         env_assigns: std::collections::HashMap<String, Option<String>>,
+        is_intra_command_function: bool,
     ) {
         if head.is_empty() {
             return;
@@ -496,6 +501,7 @@ impl Scan {
             receiver_origin: ValueOrigin::Unknown,
             by_reference: false,
             env_assigns,
+            is_intra_command_function,
         });
         self.order.push(order);
         self.input_source.push(input_source);

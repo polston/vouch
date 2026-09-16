@@ -1221,8 +1221,9 @@ pub fn parse(cmd: &str) -> Result<Parsed, String> {
     // both start at zero for every parse.
     let mut walk = WalkState::default();
     let mut env: std::collections::HashMap<String, Option<String>> = std::collections::HashMap::new();
+    let mut fns: std::collections::HashSet<String> = std::collections::HashSet::new();
     for cc in &program.complete_commands {
-        walk_compound_list(cc, &mut out, &mut counter, false, &mut walk, 0, &mut env, cmd);
+        walk_compound_list(cc, &mut out, &mut counter, false, &mut walk, 0, &mut env, &mut fns, cmd);
     }
     Ok(out)
 }
@@ -1288,6 +1289,7 @@ fn walk_compound_list(
     walk: &mut WalkState,
     scope: usize,
     env: &mut std::collections::HashMap<String, Option<String>>,
+    fns: &mut std::collections::HashSet<String>,
     src: &str,
 ) {
     for item in &list.0 {
@@ -1295,9 +1297,10 @@ fn walk_compound_list(
         if async_item {
             out.note("background");
             let mut async_env = env.clone();
-            walk_and_or_list(&item.0, out, counter, unordered, walk, scope, async_item, &mut async_env, src);
+            let mut async_fns = fns.clone();
+            walk_and_or_list(&item.0, out, counter, unordered, walk, scope, async_item, &mut async_env, &mut async_fns, src);
         } else {
-            walk_and_or_list(&item.0, out, counter, unordered, walk, scope, async_item, env, src);
+            walk_and_or_list(&item.0, out, counter, unordered, walk, scope, async_item, env, fns, src);
         }
     }
 }
@@ -1326,6 +1329,7 @@ fn walk_and_or_list(
     scope: usize,
     async_list: bool,
     env: &mut std::collections::HashMap<String, Option<String>>,
+    fns: &mut std::collections::HashSet<String>,
     src: &str,
 ) {
     let mut unordered = base_unordered;
@@ -1369,7 +1373,7 @@ fn walk_and_or_list(
         and_run_from,
         negated: list.first.bang,
     });
-    walk_pipeline(&list.first, out, counter, unordered, first_pos, walk, scope, boundary_for(idx), env, src);
+    walk_pipeline(&list.first, out, counter, unordered, first_pos, walk, scope, boundary_for(idx), env, fns, src);
     idx += 1;
     for ao in &list.additional {
         match ao {
@@ -1380,11 +1384,11 @@ fn walk_and_or_list(
                 unordered = true;
                 and_run_from = idx;
                 let pos = id.map(|id| crate::syntax::ChainPos { id, idx, and_run_from, negated: p.bang });
-                walk_pipeline(p, out, counter, unordered, pos, walk, scope, boundary_for(idx), env, src);
+                walk_pipeline(p, out, counter, unordered, pos, walk, scope, boundary_for(idx), env, fns, src);
             }
             ast::AndOr::And(p) => {
                 let pos = id.map(|id| crate::syntax::ChainPos { id, idx, and_run_from, negated: p.bang });
-                walk_pipeline(p, out, counter, unordered, pos, walk, scope, boundary_for(idx), env, src);
+                walk_pipeline(p, out, counter, unordered, pos, walk, scope, boundary_for(idx), env, fns, src);
             }
         }
         idx += 1;
@@ -1408,6 +1412,7 @@ fn walk_pipeline(
     scope: usize,
     async_boundary: Option<crate::syntax::ScopeKind>,
     env: &mut std::collections::HashMap<String, Option<String>>,
+    fns: &mut std::collections::HashSet<String>,
     src: &str,
 ) {
     if let Some(kind) = async_boundary {
@@ -1419,7 +1424,8 @@ fn walk_pipeline(
         let wrapper = alloc_scope(out, scope, kind, class, anchor, chain);
         let mut local_counter = 0u32;
         let mut async_env = env.clone();
-        walk_pipeline(p, out, &mut local_counter, false, chain, walk, wrapper, None, &mut async_env, src);
+        let mut async_fns = fns.clone();
+        walk_pipeline(p, out, &mut local_counter, false, chain, walk, wrapper, None, &mut async_env, &mut async_fns, src);
         return;
     }
     // A pipeline runs its members concurrently; with more than one member
@@ -1443,15 +1449,16 @@ fn walk_pipeline(
             let member_scope = alloc_scope(out, scope, kind, class, anchor.clone(), chain);
             let mut local_counter = 0u32;
             let mut stage_env = env.clone();
+            let mut stage_fns = fns.clone();
             // Only members AFTER the first read the pipe; the first member's
             // own standard input is whatever the pipeline as a whole was
             // given. Every piped stage shares the SAME `chain` value — they
             // are one chain member, not several (`ChainPos` doc).
-            walk_command(cmd, out, &mut local_counter, false, i > 0, chain, walk, member_scope, &mut stage_env, src);
+            walk_command(cmd, out, &mut local_counter, false, i > 0, chain, walk, member_scope, &mut stage_env, &mut stage_fns, src);
         }
     } else {
         for (i, cmd) in p.seq.iter().enumerate() {
-            walk_command(cmd, out, counter, base_unordered, i > 0, chain, walk, scope, env, src);
+            walk_command(cmd, out, counter, base_unordered, i > 0, chain, walk, scope, env, fns, src);
         }
     }
 }
@@ -1466,11 +1473,12 @@ fn walk_command(
     walk: &mut WalkState,
     scope: usize,
     env: &mut std::collections::HashMap<String, Option<String>>,
+    fns: &mut std::collections::HashSet<String>,
     src: &str,
 ) {
     match cmd {
         ast::Command::Simple(sc) => {
-            walk_simple(sc, out, counter, unordered, pipe_input, chain, walk, scope, env, src)
+            walk_simple(sc, out, counter, unordered, pipe_input, chain, walk, scope, env, fns, src)
         }
         ast::Command::Compound(cc, redirects) => {
             // The construct's own position in ITS enclosing scope, captured
@@ -1484,7 +1492,7 @@ fn walk_command(
                 anchor_order: anchor_order.clone(),
                 anchor_chain: chain,
             };
-            let range = walk_compound(cc, out, walk, scoping, env, src);
+            let range = walk_compound(cc, out, walk, scoping, env, fns, src);
             let mut own_stdin: Option<crate::syntax::InputSource> = None;
             if let Some(list) = redirects {
                 for r in &list.0 {
@@ -1516,6 +1524,7 @@ fn walk_command(
                         chain,
                         src,
                         env,
+                        fns,
                     )
                     {
                         own_stdin = Some(claimed);
@@ -1533,13 +1542,15 @@ fn walk_command(
         }
         ast::Command::Function(f) => {
             out.note("function_def");
+            let fn_name = unescape_unquoted(&f.fname.value);
+            fns.insert(fn_name);
             // A definition's body can never know its future caller's standard
             // input, so the blanking is unconditional — but it blanks the same
             // positions the compound arm does, leaving any command that
             // resolved a source of its OWN untouched. It is not a body/process
             // boundary of its own — `Passthrough` walks it straight into the
             // scope the definition itself sits in, unchanged from today.
-            let range = walk_compound(&f.body.0, out, walk, BodyScoping::Passthrough { scope }, env, src);
+            let range = walk_compound(&f.body.0, out, walk, BodyScoping::Passthrough { scope }, env, fns, src);
             blank_inherited_input(out, range);
             // The definition's OWN redirect list (`f() { :; } > $(…)`) is
             // performed at every future call, exactly as unplaceable as the
@@ -1551,7 +1562,7 @@ fn walk_command(
             // substitution inside it was judged.
             if let Some(list) = &f.body.1 {
                 for r in &list.0 {
-                    walk_redirect(r, out, Order::Unordered, None, walk, scope, None, src, env);
+                    walk_redirect(r, out, Order::Unordered, None, walk, scope, None, src, env, fns);
                 }
             }
         }
@@ -1572,14 +1583,14 @@ fn walk_command(
             // closed rather than guessing which side of `||` bash would
             // evaluate (design §2.2, "Positions bash evaluates conditionally
             // are judged anyway").
-            visit_test_words(&test.expr, out, scope, &order, chain, walk, env);
+            visit_test_words(&test.expr, out, scope, &order, chain, walk, env, fns);
             if let Some(list) = redirects {
                 for r in &list.0 {
                     // An extended-test expression has no landing `Cmd` of its
                     // own either — same `None` as the compound-body arm above.
                     // It pushes no commands, so whatever its redirects claim
                     // about standard input has no occurrence to belong to.
-                    walk_redirect(r, out, order.clone(), None, walk, scope, chain, src, env);
+                    walk_redirect(r, out, order.clone(), None, walk, scope, chain, src, env, fns);
                 }
             }
         }
@@ -1602,21 +1613,22 @@ fn visit_test_words(
     chain: Option<crate::syntax::ChainPos>,
     walk: &mut WalkState,
     env: &std::collections::HashMap<String, Option<String>>,
+    fns: &std::collections::HashSet<String>,
 ) {
     match expr {
         ast::ExtendedTestExpr::And(a, b) | ast::ExtendedTestExpr::Or(a, b) => {
-            visit_test_words(a, out, scope, order, chain, walk, env);
-            visit_test_words(b, out, scope, order, chain, walk, env);
+            visit_test_words(a, out, scope, order, chain, walk, env, fns);
+            visit_test_words(b, out, scope, order, chain, walk, env, fns);
         }
         ast::ExtendedTestExpr::Not(e) | ast::ExtendedTestExpr::Parenthesized(e) => {
-            visit_test_words(e, out, scope, order, chain, walk, env);
+            visit_test_words(e, out, scope, order, chain, walk, env, fns);
         }
         ast::ExtendedTestExpr::UnaryTest(_, w) => {
-            visit_substitutions(&w.value, out, scope, order, chain, walk, env);
+            visit_substitutions(&w.value, out, scope, order, chain, walk, env, fns);
         }
         ast::ExtendedTestExpr::BinaryTest(_, a, b) => {
-            visit_substitutions(&a.value, out, scope, order, chain, walk, env);
-            visit_substitutions(&b.value, out, scope, order, chain, walk, env);
+            visit_substitutions(&a.value, out, scope, order, chain, walk, env, fns);
+            visit_substitutions(&b.value, out, scope, order, chain, walk, env, fns);
         }
     }
 }
@@ -1729,9 +1741,10 @@ fn visit_compound_word(
     scoping: &BodyScoping,
     walk: &mut WalkState,
     env: &std::collections::HashMap<String, Option<String>>,
+    fns: &std::collections::HashSet<String>,
 ) {
     let (parent, order, chain) = scoping.boundary();
-    visit_substitutions(raw, out, parent, &order, chain, walk, env);
+    visit_substitutions(raw, out, parent, &order, chain, walk, env, fns);
 }
 
 /// Every compound body — subshells, loops, if/case branches, brace groups,
@@ -1754,6 +1767,7 @@ fn walk_compound(
     walk: &mut WalkState,
     scoping: BodyScoping,
     env: &mut std::collections::HashMap<String, Option<String>>,
+    fns: &mut std::collections::HashSet<String>,
     src: &str,
 ) -> std::ops::Range<usize> {
     let start = out.commands.len();
@@ -1762,10 +1776,10 @@ fn walk_compound(
         ast::CompoundCommand::BraceGroup(bg) => {
             let s = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::Brace));
             let mut counter = 0u32;
-            walk_compound_list(&bg.list, out, &mut counter, unordered, walk, s, env, src);
+            walk_compound_list(&bg.list, out, &mut counter, unordered, walk, s, env, fns, src);
         }
         ast::CompoundCommand::Subshell(sub) => {
-            walk_subshell(std::iter::once(&sub.list), out, walk, scoping, unordered, env, src);
+            walk_subshell(std::iter::once(&sub.list), out, walk, scoping, unordered, env, fns, src);
         }
         ast::CompoundCommand::ForClause(f) => {
             // The words after `in` are classified where they stand (M2.155).
@@ -1796,11 +1810,11 @@ fn walk_compound(
                 if matches!(expand_braces(&w.value), Braces::Rewritten) {
                     out.note(BRACE_EXPANSION);
                 }
-                visit_compound_word(&w.value, out, &scoping, walk, env);
+                visit_compound_word(&w.value, out, &scoping, walk, env, fns);
             }
             let s = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::LoopBody));
             let mut counter = 0u32;
-            walk_compound_list(&f.body.list, out, &mut counter, unordered, walk, s, env, src);
+            walk_compound_list(&f.body.list, out, &mut counter, unordered, walk, s, env, fns, src);
         }
         ast::CompoundCommand::CaseClause(c) => {
             // The subject and every pattern word can carry a substitution
@@ -1809,45 +1823,45 @@ fn walk_compound(
             // closed rather than guessing which clause bash would pick
             // (design §2.2, "Positions bash evaluates conditionally are
             // judged anyway").
-            visit_compound_word(&c.value.value, out, &scoping, walk, env);
+            visit_compound_word(&c.value.value, out, &scoping, walk, env, fns);
             for item in &c.cases {
                 for pat in &item.patterns {
-                    visit_compound_word(&pat.value, out, &scoping, walk, env);
+                    visit_compound_word(&pat.value, out, &scoping, walk, env, fns);
                 }
                 if let Some(body) = &item.cmd {
                     let s = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::BranchBody));
                     let mut counter = 0u32;
-                    walk_compound_list(body, out, &mut counter, unordered, walk, s, env, src);
+                    walk_compound_list(body, out, &mut counter, unordered, walk, s, env, fns, src);
                 }
             }
         }
         ast::CompoundCommand::IfClause(i) => {
             let cond_scope = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::CondList));
             let mut cond_counter = 0u32;
-            walk_compound_list(&i.condition, out, &mut cond_counter, unordered, walk, cond_scope, env, src);
+            walk_compound_list(&i.condition, out, &mut cond_counter, unordered, walk, cond_scope, env, fns, src);
             let then_scope = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::ThenBody));
             let mut then_counter = 0u32;
-            walk_compound_list(&i.then, out, &mut then_counter, unordered, walk, then_scope, env, src);
+            walk_compound_list(&i.then, out, &mut then_counter, unordered, walk, then_scope, env, fns, src);
             if let Some(elses) = &i.elses {
                 for e in elses {
                     if let Some(cond) = &e.condition {
                         let s = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::ElifCond));
                         let mut counter = 0u32;
-                        walk_compound_list(cond, out, &mut counter, unordered, walk, s, env, src);
+                        walk_compound_list(cond, out, &mut counter, unordered, walk, s, env, fns, src);
                     }
                     let s = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::BranchBody));
                     let mut counter = 0u32;
-                    walk_compound_list(&e.body, out, &mut counter, unordered, walk, s, env, src);
+                    walk_compound_list(&e.body, out, &mut counter, unordered, walk, s, env, fns, src);
                 }
             }
         }
         ast::CompoundCommand::WhileClause(w) | ast::CompoundCommand::UntilClause(w) => {
             let cond_scope = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::LoopCond));
             let mut cond_counter = 0u32;
-            walk_compound_list(&w.0, out, &mut cond_counter, unordered, walk, cond_scope, env, src);
+            walk_compound_list(&w.0, out, &mut cond_counter, unordered, walk, cond_scope, env, fns, src);
             let body_scope = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::LoopBody));
             let mut body_counter = 0u32;
-            walk_compound_list(&w.1.list, out, &mut body_counter, unordered, walk, body_scope, env, src);
+            walk_compound_list(&w.1.list, out, &mut body_counter, unordered, walk, body_scope, env, fns, src);
         }
         ast::CompoundCommand::Coprocess(c) => {
             out.note("background");
@@ -1861,7 +1875,8 @@ fn walk_compound(
             let s = scoping.enter(out, crate::syntax::ScopeKind::ProcessBoundary, None);
             let mut counter = 0u32;
             let mut coproc_env = env.clone();
-            walk_command(&c.body, out, &mut counter, unordered, false, None, walk, s, &mut coproc_env, src);
+            let mut coproc_fns = fns.clone();
+            walk_command(&c.body, out, &mut counter, unordered, false, None, walk, s, &mut coproc_env, &mut coproc_fns, src);
             blank_inherited_input(out, start..out.commands.len());
         }
         ast::CompoundCommand::Arithmetic(a) => {
@@ -1889,6 +1904,7 @@ fn walk_compound(
                         scoping,
                         unordered,
                         env,
+                        fns,
                         &a.expr.value,
                     ),
                     // Spelled as a nested subshell and not parseable as one.
@@ -1909,7 +1925,7 @@ fn walk_compound(
                     if e.is_empty() {
                         out.note("parse_failure");
                     } else {
-                        visit_compound_word(e, out, &scoping, walk, env);
+                        visit_compound_word(e, out, &scoping, walk, env, fns);
                     }
                 }
                 // The source did not say. Fail closed rather than pick one.
@@ -1930,7 +1946,7 @@ fn walk_compound(
             // order matching run order — the same reason the `ForClause` arm
             // above visits its value words before entering the loop body.
             for e in [&f.initializer, &f.condition, &f.updater].into_iter().flatten() {
-                visit_compound_word(&e.value, out, &scoping, walk, env);
+                visit_compound_word(&e.value, out, &scoping, walk, env, fns);
             }
             // The body holds real commands and is walked exactly as a plain
             // `for` body is — the same `LoopBody` class, the same fresh local
@@ -1941,7 +1957,7 @@ fn walk_compound(
             // indistinguishable from there being nothing to report.
             let s = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::LoopBody));
             let mut counter = 0u32;
-            walk_compound_list(&f.body.list, out, &mut counter, unordered, walk, s, env, src);
+            walk_compound_list(&f.body.list, out, &mut counter, unordered, walk, s, env, fns, src);
         }
     }
     start..out.commands.len()
@@ -1965,14 +1981,16 @@ fn walk_subshell<'a>(
     scoping: BodyScoping,
     unordered: bool,
     env: &std::collections::HashMap<String, Option<String>>,
+    fns: &std::collections::HashSet<String>,
     src: &str,
 ) {
     out.note("subshell");
     let s = scoping.enter(out, crate::syntax::ScopeKind::ProcessBoundary, None);
     let mut counter = 0u32;
     let mut sub_env = env.clone();
+    let mut sub_fns = fns.clone();
     for list in lists {
-        walk_compound_list(list, out, &mut counter, unordered, walk, s, &mut sub_env, src);
+        walk_compound_list(list, out, &mut counter, unordered, walk, s, &mut sub_env, &mut sub_fns, src);
     }
 }
 
@@ -2027,8 +2045,9 @@ fn visit_substitutions(
     anchor_chain: Option<crate::syntax::ChainPos>,
     walk: &mut WalkState,
     env: &std::collections::HashMap<String, Option<String>>,
+    fns: &std::collections::HashSet<String>,
 ) {
-    visit_bodies(substitution_bodies(raw), out, parent_scope, anchor_order, anchor_chain, walk, env);
+    visit_bodies(substitution_bodies(raw), out, parent_scope, anchor_order, anchor_chain, walk, env, fns);
 }
 
 /// What a `Bodies` reading MEANS to the walk, in one place: text the reader
@@ -2047,12 +2066,13 @@ fn visit_bodies(
     anchor_chain: Option<crate::syntax::ChainPos>,
     walk: &mut WalkState,
     env: &std::collections::HashMap<String, Option<String>>,
+    fns: &std::collections::HashSet<String>,
 ) {
     if read.unreadable {
         out.note("parse_failure");
     }
     for body in read.bodies {
-        walk_substitution_body(&body, out, parent_scope, anchor_order, anchor_chain, walk, env);
+        walk_substitution_body(&body, out, parent_scope, anchor_order, anchor_chain, walk, env, fns);
     }
 }
 
@@ -2064,6 +2084,7 @@ fn walk_substitution_body(
     anchor_chain: Option<crate::syntax::ChainPos>,
     walk: &mut WalkState,
     env: &std::collections::HashMap<String, Option<String>>,
+    fns: &std::collections::HashSet<String>,
 ) {
     out.note("subshell");
     if walk.depth >= SUBSTITUTION_DEPTH_CAP {
@@ -2092,6 +2113,7 @@ fn walk_substitution_body(
         anchor_chain,
         walk,
         env,
+        fns,
         body,
     );
     walk.depth = enclosing;
@@ -2121,6 +2143,7 @@ fn walk_boundary_child<'a>(
     anchor_chain: Option<crate::syntax::ChainPos>,
     walk: &mut WalkState,
     env: &std::collections::HashMap<String, Option<String>>,
+    fns: &std::collections::HashSet<String>,
     src: &str,
 ) {
     let scope = alloc_scope(
@@ -2133,8 +2156,9 @@ fn walk_boundary_child<'a>(
     );
     let mut counter = 0u32;
     let mut child_env = env.clone();
+    let mut child_fns = fns.clone();
     for list in lists {
-        walk_compound_list(list, out, &mut counter, false, walk, scope, &mut child_env, src);
+        walk_compound_list(list, out, &mut counter, false, walk, scope, &mut child_env, &mut child_fns, src);
     }
 }
 
@@ -2152,6 +2176,7 @@ fn walk_simple(
     walk: &mut WalkState,
     scope: usize,
     env: &mut std::collections::HashMap<String, Option<String>>,
+    fns: &std::collections::HashSet<String>,
     src: &str,
 ) {
     let mut cmd = Cmd::default();
@@ -2219,15 +2244,16 @@ fn walk_simple(
     // command's own position, before the prefix and suffix are walked so
     // that `cmd.head` and `cmd.chain` are already final (design §2.2).
     if let Some(w) = &sc.word_or_name {
-        visit_substitutions(&w.value, out, scope, &order, cmd.chain, walk, &cmd.env_assigns);
+        visit_substitutions(&w.value, out, scope, &order, cmd.chain, walk, &cmd.env_assigns, fns);
     }
     if let Some(prefix) = &sc.prefix {
-        walk_items(&prefix.0, out, &mut cmd, false, order.clone(), &mut landing, walk, scope, env, src);
+        walk_items(&prefix.0, out, &mut cmd, false, order.clone(), &mut landing, walk, scope, env, fns, src);
     }
     if let Some(suffix) = &sc.suffix {
-        walk_items(&suffix.0, out, &mut cmd, true, order.clone(), &mut landing, walk, scope, env, src);
+        walk_items(&suffix.0, out, &mut cmd, true, order.clone(), &mut landing, walk, scope, env, fns, src);
     }
     if !cmd.head.is_empty() {
+        cmd.is_intra_command_function = fns.contains(&cmd.head);
         // `landing.stdin` already carries the correct, final
         // `InputSource::Heredoc(id)` when a pending record claimed
         // descriptor 0 — the id was stamped once, at `alloc_heredoc_id`, and
@@ -2255,6 +2281,7 @@ fn walk_simple(
             cmd.prefix_assigns.clone(),
             Some(scope),
             cmd.env_assigns.clone(),
+            cmd.is_intra_command_function,
         );
         // Stamp and flush: the index this command actually landed at. The
         // heredoc's own identity (`h.id`) was already stamped at capture —
@@ -2400,6 +2427,7 @@ fn walk_items(
     walk: &mut WalkState,
     scope: usize,
     env: &mut std::collections::HashMap<String, Option<String>>,
+    fns: &std::collections::HashSet<String>,
     src: &str,
 ) {
     for item in items {
@@ -2409,7 +2437,7 @@ fn walk_items(
                 // consume it; otherwise it keeps the construct note.
                 let records = (!cmd.head.is_empty()).then_some(&mut landing.pending);
                 if let Some(claimed) =
-                    walk_redirect(r, out, order.clone(), records, walk, scope, cmd.chain, src, &cmd.env_assigns)
+                    walk_redirect(r, out, order.clone(), records, walk, scope, cmd.chain, src, &cmd.env_assigns, fns)
                 {
                     // The LAST redirect resolving to descriptor 0 wins, which is
                     // the shell's own rule.
@@ -2437,6 +2465,7 @@ fn walk_items(
                     cmd.chain,
                     walk,
                     &cmd.env_assigns,
+                    fns,
                     src,
                 );
             }
@@ -2445,7 +2474,7 @@ fn walk_items(
             // count, and both are now walked as the command list they run
             // (design §2.1–§2.2), anchored at this command's own position.
             ast::CommandPrefixOrSuffixItem::Word(w) => {
-                visit_substitutions(&w.value, out, scope, &order, cmd.chain, walk, &cmd.env_assigns);
+                visit_substitutions(&w.value, out, scope, &order, cmd.chain, walk, &cmd.env_assigns, fns);
                 push_word(out, cmd, &w.value);
                 if is_suffix && is_export_like(&cmd.head) {
                     if let Some((name, value)) = w.value.split_once('=') {
@@ -2467,7 +2496,7 @@ fn walk_items(
                 }
             }
             ast::CommandPrefixOrSuffixItem::AssignmentWord(_, w) => {
-                visit_substitutions(&w.value, out, scope, &order, cmd.chain, walk, &cmd.env_assigns);
+                visit_substitutions(&w.value, out, scope, &order, cmd.chain, walk, &cmd.env_assigns, fns);
                 if is_suffix {
                     // An assignment-shaped word AFTER the command name is an
                     // argument, and bash brace-expands it (`of={a,b}` becomes
@@ -2575,8 +2604,9 @@ fn visit_redirect_word(
     walk: &mut WalkState,
     note_braces: bool,
     env: &std::collections::HashMap<String, Option<String>>,
+    fns: &std::collections::HashSet<String>,
 ) {
-    visit_substitutions(&w.value, out, scope, order, chain, walk, env);
+    visit_substitutions(&w.value, out, scope, order, chain, walk, env, fns);
     if note_braces {
         note_target_braces(out, &w.value);
     }
@@ -2679,6 +2709,7 @@ fn walk_redirect(
     chain: Option<crate::syntax::ChainPos>,
     src: &str,
     active_env: &std::collections::HashMap<String, Option<String>>,
+    fns: &std::collections::HashSet<String>,
 ) -> Option<crate::syntax::InputSource> {
     use crate::syntax::InputSource;
     let mut claims_stdin = None;
@@ -2724,7 +2755,7 @@ fn walk_redirect(
                 ast::IoFileRedirectTarget::Filename(w) => {
                     // Visited before the target is classified, so the walk
                     // runs whether or not this turns out to be a write.
-                    visit_redirect_word(w, out, scope, &order, chain, walk, true, active_env);
+                    visit_redirect_word(w, out, scope, &order, chain, walk, true, active_env, fns);
                     // `<` READS the file. Recording it as a written path made
                     // `wc -l < hosts` prompt about writing a file it only reads
                     // — and that fired on real traffic, not just in a probe.
@@ -2755,6 +2786,7 @@ fn walk_redirect(
                         chain,
                         walk,
                         active_env,
+                        fns,
                         src,
                     );
                 }
@@ -2769,7 +2801,7 @@ fn walk_redirect(
                     // Same reasoning as `Filename` above: `>&$(…)` expands the
                     // substitution before bash decides whether the word names
                     // a descriptor or a file.
-                    visit_redirect_word(w, out, scope, &order, chain, walk, true, active_env);
+                    visit_redirect_word(w, out, scope, &order, chain, walk, true, active_env, fns);
                     let v = unescape_unquoted(&w.value);
                     let names_a_descriptor =
                         v == "-" || (!v.is_empty() && v.chars().all(|c| c.is_ascii_digit()));
@@ -2803,7 +2835,7 @@ fn walk_redirect(
             // before this task.
             if doc.requires_expansion {
                 let read = heredoc_substitution_bodies(&doc.doc.value);
-                visit_bodies(read, out, scope, &order, chain, walk, active_env);
+                visit_bodies(read, out, scope, &order, chain, walk, active_env, fns);
             }
             match pending {
                 Some(records) => {
@@ -2843,7 +2875,7 @@ fn walk_redirect(
         // locator to consume — so it is a stream, never a `Heredoc(i)` pointing
         // into a list that holds nothing for it.
         ast::IoRedirect::HereString(fd, w) => {
-            visit_redirect_word(w, out, scope, &order, chain, walk, false, active_env);
+            visit_redirect_word(w, out, scope, &order, chain, walk, false, active_env, fns);
             if fd.unwrap_or(0) == 0 {
                 claims_stdin = Some(InputSource::Stream);
             }
@@ -2853,7 +2885,7 @@ fn walk_redirect(
         // descriptors 1 and 2 and never standard input, so nothing is read for
         // it and it claims nothing.
         ast::IoRedirect::OutputAndError(w, _) => {
-            visit_redirect_word(w, out, scope, &order, chain, walk, true, active_env);
+            visit_redirect_word(w, out, scope, &order, chain, walk, true, active_env, fns);
             if is_dynamic(&w.value) {
                 out.note("dynamic_redirect");
             }

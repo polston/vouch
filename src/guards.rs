@@ -3540,6 +3540,9 @@ pub fn recognition_at(
     place: RecognitionPlace<'_>,
     standalone_eligible: bool,
 ) -> Recognised {
+    if cmd.is_intra_command_function {
+        return Recognised::Yes;
+    }
     for p in entries_for_cmd(kb, cmd, lang) {
         let mut at_place: Option<&String> = None;
         if let Some(globs) = &p.only_under {
@@ -4087,6 +4090,7 @@ fn after_exec_commands(prog: &Program, args: &[String]) -> (Vec<Cmd>, Vec<String
                 receiver_origin: crate::syntax::ValueOrigin::Unknown,
                 by_reference: false,
                 env_assigns: Default::default(),
+                is_intra_command_function: false,
             }),
             None => unlocated.push(format!(
                 "`{a}` is followed straight by its terminator, so vouch cannot tell what it \
@@ -4979,6 +4983,7 @@ pub fn expand_wrappers_forking(
                                     receiver_origin: crate::syntax::ValueOrigin::Unknown,
                                     by_reference: false,
                                     env_assigns: cmd.env_assigns.clone(),
+                                    is_intra_command_function: false,
                                 }],
                                 args_complete: vec![own_args_complete],
                                 ..SnippetScan::default()
@@ -5201,6 +5206,7 @@ pub fn expand_wrappers_forking(
                                             receiver_origin: crate::syntax::ValueOrigin::Unknown,
                                             by_reference: false,
                                             env_assigns: cmd.env_assigns.clone(),
+                                            is_intra_command_function: false,
                                         };
                                         out.snippet_located[self_idx] = true;
                                         next_lang = prog.wrap_lang.clone();
@@ -5234,6 +5240,7 @@ pub fn expand_wrappers_forking(
                                         receiver_origin: crate::syntax::ValueOrigin::Unknown,
                                         by_reference: false,
                                         env_assigns: cmd.env_assigns.clone(),
+                                        is_intra_command_function: false,
                                     };
                                     out.snippet_located[self_idx] = true;
                                     next_lang = prog.wrap_lang.clone();
@@ -5300,6 +5307,7 @@ pub fn expand_wrappers_forking(
                                         receiver_origin: crate::syntax::ValueOrigin::Unknown,
                                         by_reference: false,
                                         env_assigns: cmd.env_assigns.clone(),
+                                        is_intra_command_function: false,
                                     }],
                                     args_complete: vec![own_args_complete],
                                     ..SnippetScan::default()

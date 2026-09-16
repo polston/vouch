@@ -305,6 +305,7 @@ pub fn cmd(head: &str, args: &[&str]) -> vouch::syntax::Cmd {
         env_assigns: Default::default(),
         receiver_origin: vouch::syntax::ValueOrigin::Unknown,
         by_reference: false,
+        is_intra_command_function: false,
     }
 }
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.31.0 (2026-09-16)
+
+
+### Features
+
+* recognize shell functions defined within the same command as non-programs rather than unmodeled binaries
+
 ## 0.30.0 (2026-09-15)
 
 

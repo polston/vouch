@@ -744,6 +744,7 @@ pub fn parse(src: &str) -> Result<Parsed, String> {
                     vec![],
                     Some(0),
                     out.assignments.iter().cloned().collect(),
+                    false,
                 );
             }
             continue;
@@ -840,6 +841,7 @@ pub fn parse(src: &str) -> Result<Parsed, String> {
                 vec![],
                 Some(0),
                 out.assignments.iter().cloned().collect(),
+                false,
             );
         }
     }

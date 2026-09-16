@@ -25,6 +25,7 @@ fn cmd(head: &str, args: &[&str]) -> Cmd {
         env_assigns: Default::default(),
         receiver_origin: vouch::syntax::ValueOrigin::Unknown,
         by_reference: false,
+        is_intra_command_function: false,
     }
 }
 fn prog<'a>(k: &'a Knowledge, name: &str) -> &'a vouch::guards::Program {
