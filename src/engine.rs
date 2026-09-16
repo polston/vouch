@@ -1920,6 +1920,42 @@ fn judge_once(
         }
     }
 
+    // 1c2. Command file reads: check operands against [read] ask_paths / deny_paths
+    if let (Some(home), true) = (home, !all_cmds.is_empty()) {
+        for (i, c) in all_cmds.iter().enumerate() {
+            let clang = occurrence_lang(&all_langs, i, lang);
+            let read_paths = crate::guards::read_targets_in(kb, c, clang);
+            if read_paths.is_empty() {
+                continue;
+            }
+            let here_set = timeline.base_set_at(i, &all_cmds);
+            let here_pwd = here_set.single_known().or_else(|| start.known_dir());
+            for p in read_paths {
+                let resolved = if is_relative(&p) {
+                    match here_pwd {
+                        Some(d) => format!("{}/{}", d.trim_end_matches('/'), p),
+                        None => p,
+                    }
+                } else {
+                    p
+                };
+                match decide_read(cfg, home, project_root, &resolved) {
+                    Decision::Ask(r) => {
+                        if wins_reason_slot(Action::Ask, &r, &worst) {
+                            worst = Some((Action::Ask, r));
+                        }
+                    }
+                    Decision::Deny(r) => {
+                        if wins_reason_slot(Action::Deny, &r, &worst) {
+                            worst = Some((Action::Deny, r));
+                        }
+                    }
+                    Decision::Allow(_) | Decision::Abstain => {}
+                }
+            }
+        }
+    }
+
     // 1d. Commands that run text obtained at execution time. The code is not
     // in what vouch was handed — EXCEPT where it is: an occurrence whose
     // standard input vouch HOLDS (a here-document the locator consumed and
@@ -6906,11 +6942,11 @@ fn decide_file_for_by(
             .iter()
             .any(|pat| expand(pat, home, project_root).is_some_and(|p| glob_match(&p, &real)));
         if appeared && !really {
-            let real_parent = real.rsplit_once('/').map(|(d, _)| d).unwrap_or(&real);
+            let advice = suggest_write_advice(&real);
             return Decision::Ask(format!(
                 "vouch stopped on: link target outside allowed area\n  \
                  written as: {textual}\n  actually:   {real}\n  \
-                 to allow this permanently, add to write.allow_paths: \"{real_parent}/**\""
+                 {advice}"
             ));
         }
     }
@@ -6923,12 +6959,91 @@ fn decide_file_for_by(
         }
     }
 
-    let parent = real.rsplit_once('/').map(|(d, _)| d).unwrap_or(&real);
+    let advice = suggest_write_advice(&real);
     act(
         cfg.write.default,
         format!(
             "vouch stopped on: path outside every allowed area\n  {real}\n  \
-             to allow this permanently, add to write.allow_paths: \"{parent}/**\""
+             {advice}"
+        ),
+    )
+}
+
+fn is_root_parent(parent: &str) -> bool {
+    let p = parent.trim_end_matches('/');
+    if p.is_empty() {
+        return true;
+    }
+    if p.len() == 2 && p.as_bytes()[0].is_ascii_alphabetic() && p.as_bytes()[1] == b':' {
+        return true;
+    }
+    false
+}
+
+pub fn suggest_write_advice(real: &str) -> String {
+    let parent = real.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+    if is_root_parent(parent) {
+        format!(
+            "to allow this permanently, add to write.allow_paths: \"{real}\"\n  \
+             (note: allowing the containing directory would open the entire filesystem or drive to writes)"
+        )
+    } else {
+        format!(
+            "to allow this permanently, add to write.allow_paths: \"{real}\"\n  \
+             or to allow this directory: \"{parent}/**\""
+        )
+    }
+}
+
+pub fn decide_read(
+    cfg: &Config,
+    home: &str,
+    project_root: Option<&str>,
+    target: &str,
+) -> Decision {
+    let textual = normalize(target, home);
+    let real = normalize(&resolve_links(&textual), home);
+
+    // 1. Check read.deny_paths first
+    for pat in &cfg.read.deny_paths {
+        if let Some(p) = expand(pat, home, project_root) {
+            if glob_match(&p, &real) || glob_match(&p, &textual) {
+                return Decision::Deny(format!(
+                    "vouch stopped on: read of sensitive file\n  \
+                     {real}\n  \
+                     read.deny_paths covers this tree ({pat}) — reading is refused outright\n  \
+                     the only way to change that is to remove the entry from read.deny_paths in your config"
+                ));
+            }
+        }
+    }
+
+    // 2. Check read.ask_paths second
+    for pat in &cfg.read.ask_paths {
+        if let Some(p) = expand(pat, home, project_root) {
+            if glob_match(&p, &real) || glob_match(&p, &textual) {
+                return Decision::Ask(format!(
+                    "vouch stopped on: read of sensitive file\n  \
+                     {real}\n  \
+                     read.ask_paths covers this tree ({pat}) — reading this file exposes credentials to the transcript\n  \
+                     to allow reading this permanently, remove the pattern from read.ask_paths in your config"
+                ));
+            }
+        }
+    }
+
+    // 3. Fallback to read.default
+    act(
+        cfg.read.default,
+        format!(
+            "vouch stopped on: read not allowed by default\n  \
+             {real}\n  \
+             read.default is set to '{}' in your config",
+            match cfg.read.default {
+                Action::Allow => "allow",
+                Action::Ask => "ask",
+                Action::Deny => "deny",
+            }
         ),
     )
 }

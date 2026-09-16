@@ -380,6 +380,37 @@ pub struct FileConfig {
     pub scope: Vec<WriteScope>,
 }
 
+/// The `[read]` table: what vouch does about reading files, and which confidential
+/// paths are protected from silent exposure into transcripts.
+#[derive(Debug, Deserialize, Clone, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReadConfig {
+    /// Fallback action when a read is not on a listed protected path.
+    /// Default: "allow".
+    #[serde(default = "default_allow")]
+    pub default: Action,
+    /// Protected read paths whose inspection requires operator approval.
+    #[serde(default)]
+    pub ask_paths: Vec<String>,
+    /// Protected read paths whose inspection is refused outright.
+    #[serde(default)]
+    pub deny_paths: Vec<String>,
+}
+
+fn default_allow() -> Action {
+    Action::Allow
+}
+
+impl Default for ReadConfig {
+    fn default() -> Self {
+        Self {
+            default: Action::Allow,
+            ask_paths: Vec::new(),
+            deny_paths: Vec::new(),
+        }
+    }
+}
+
 /// The `[protected]` table: paths no `allow_paths` entry can ever open,
 /// however broadly it is written. Checked before every allow rule, by
 /// identity rather than by folder.
@@ -455,6 +486,15 @@ struct Raw {
     /// `[shadow]`: mode-keyed shadow (design 2026-08-16).
     #[serde(default)]
     shadow: Option<ShadowSection>,
+    /// Decision when hook input from an agent harness or tool snippet cannot
+    /// be parsed into structured payload. Allowed: "ask" (default) or "deny".
+    /// "allow" is refused.
+    #[serde(default)]
+    unparseable_snippet: Option<Action>,
+    /// `[read]`: what vouch does about reading files, and which confidential
+    /// paths are protected from silent exposure into transcripts.
+    #[serde(default)]
+    read: ReadConfig,
 }
 
 #[derive(Debug, Default)]
@@ -466,6 +506,8 @@ pub struct Config {
     pub protected: Vec<String>,
     pub tools: HashMap<String, Action>,
     pub shadow: Option<ShadowSection>,
+    pub unparseable_snippet: Option<Action>,
+    pub read: ReadConfig,
     /// True only for `Config::nothing_configured()` — there is no config file
     /// on disk at all. Distinguishes that from a real, loaded config that
     /// simply names no tools yet (`tools` empty either way, so `tools` alone
@@ -650,6 +692,8 @@ pub fn load(text: &str) -> Result<Config, String> {
         protected: raw.protected.paths,
         tools: raw.tools,
         shadow: raw.shadow,
+        unparseable_snippet: raw.unparseable_snippet,
+        read: raw.read,
         no_config_file: false,
     };
     validate(&cfg)?;
@@ -781,6 +825,16 @@ fn validate(cfg: &Config) -> Result<(), String> {
                      things about one tree; fix it (the vouch-reconcile skill guides this)"
                 ));
             }
+        }
+    }
+    if cfg.unparseable_snippet == Some(Action::Allow) {
+        return Err("unparseable_snippet cannot be 'allow'; must be 'ask' or 'deny'".into());
+    }
+    for pa in &cfg.read.ask_paths {
+        if cfg.read.deny_paths.iter().any(|pb| fold(pa) == fold(pb)) {
+            return Err(format!(
+                "'{pa}' appears in both read.ask_paths and read.deny_paths"
+            ));
         }
     }
     // [shadow] — mode-keyed shadow. Every refusal is about the feature's own

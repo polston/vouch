@@ -165,30 +165,55 @@ fn decide_tool(
         e.snippet.is_some() || e.write_path_field.is_some() || e.write_path.is_some()
     });
     let Some(declared) = declared else {
-        // 3. and 4.: an entry with nothing declared, or no entry at all. The
-        //    existing branches decide, UNCHANGED — the entry's own `action`
-        //    has already been consulted there, by `shipped_tool_action`, and
-        //    only in the branch where the shipped description is in play.
-        //    Capping here would answer past the branch that decided: an entry
-        //    set to deny would deny even when the config governing OTHER tools
-        //    was what produced the ask, and even when there is no config file
-        //    at all — the second of those printing "set tools.X = allow" about
-        //    a file that does not exist. The cap belongs to the declared path,
-        //    where there are snippet verdicts to cap.
-        let decision = undeclared(cfg, entry, tool, action, why);
-        // The one claim those branches cannot express: a whole-server stop
-        // covers every tool the server exposes, and an exact entry claiming
-        // bare recognition must not silently override it (spec §Server entry
-        // rule 4). Confined to `Described`, the branch where the shipped
-        // description is what decided — never over a config-driven verdict.
-        // `Unmodeled` means no entry was found at all, so there is no server
-        // entry to cap with either.
-        let decision =
-            if why == ToolReason::Described { cap(decision, server, tool) } else { decision };
-        return RouteOutcome { decision, snippets: Vec::new() };
+        let mut decision = undeclared(cfg, entry, tool, action, why);
+        if let Some(target) = extract_read_target(entry, &input.tool_input) {
+            let cwd = if entry.is_some_and(|e| e.cwd_from_call == Some(true)) {
+                Some(input.cwd.as_str()).filter(|d| !d.is_empty())
+            } else {
+                None
+            };
+            let resolved = if is_absolute(&target) {
+                target
+            } else {
+                match cwd {
+                    Some(dir) => format!("{}/{}", dir.replace('\\', "/").trim_end_matches('/'), target),
+                    None => target,
+                }
+            };
+            let read_dec = crate::engine::decide_read(cfg, home, root, &resolved);
+            decision = worse(Some(decision), read_dec).unwrap();
+        }
+        let decision = if why == ToolReason::Described {
+            cap(decision, server, tool)
+        } else {
+            decision
+        };
+        return RouteOutcome {
+            decision,
+            snippets: Vec::new(),
+        };
     };
 
     let (mut decision, snippets) = decide_declared(cfg, home, input, root, tool, declared);
+
+    // Protected read gating: if a read target is present, check against [read] policy
+    if let Some(target) = extract_read_target(entry, &input.tool_input) {
+        let cwd = if entry.is_some_and(|e| e.cwd_from_call == Some(true)) {
+            Some(input.cwd.as_str()).filter(|d| !d.is_empty())
+        } else {
+            None
+        };
+        let resolved = if is_absolute(&target) {
+            target
+        } else {
+            match cwd {
+                Some(dir) => format!("{}/{}", dir.replace('\\', "/").trim_end_matches('/'), target),
+                None => target,
+            }
+        };
+        let read_dec = crate::engine::decide_read(cfg, home, root, &resolved);
+        decision = worse(Some(decision), read_dec).unwrap();
+    }
 
     // The entry's own `action` caps the best verdict its declarations can
     // reach: "vouch knows what this is and stops anyway" has to keep meaning
@@ -199,6 +224,39 @@ fn decide_tool(
     decision = cap(decision, entry, tool);
     decision = cap(decision, server, tool);
     RouteOutcome { decision, snippets }
+}
+
+fn extract_read_target(entry: Option<&Tool>, input: &ToolInput) -> Option<String> {
+    if let Some(e) = entry {
+        if let Some(field) = &e.read_path_field {
+            let fields = merged_fields(input);
+            if let Some(Value::String(s)) = fields.get(field) {
+                if !s.trim().is_empty() {
+                    return Some(s.replace('\\', "/"));
+                }
+            }
+        }
+    }
+    if let Some(s) = &input.file_path {
+        if !s.trim().is_empty() {
+            return Some(s.replace('\\', "/"));
+        }
+    }
+    for key in [
+        "path",
+        "AbsolutePath",
+        "SearchPath",
+        "notebook_path",
+        "DirectoryPath",
+        "SearchDirectory",
+    ] {
+        if let Some(Value::String(s)) = input.extra.get(key) {
+            if !s.trim().is_empty() {
+                return Some(s.replace('\\', "/"));
+            }
+        }
+    }
+    None
 }
 
 /// Decide one call on everything its entry declares. Every declaration is

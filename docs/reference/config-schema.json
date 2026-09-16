@@ -22,6 +22,10 @@
       "description": "`[protected]`: paths no `allow_paths` entry can ever open.",
       "$ref": "#/$defs/ProtectedSection"
     },
+    "read": {
+      "description": "`[read]`: what vouch does about reading files, and which confidential\npaths are protected from silent exposure into transcripts.",
+      "$ref": "#/$defs/ReadConfig"
+    },
     "run": {
       "description": "`[run]`: run-place zones, executable-place program trust, and\nplace-scoped guard overrides.",
       "$ref": "#/$defs/RunSection"
@@ -43,6 +47,17 @@
       "additionalProperties": {
         "$ref": "#/$defs/Action"
       }
+    },
+    "unparseable_snippet": {
+      "description": "Decision when hook input from an agent harness or tool snippet cannot\nbe parsed into structured payload. Allowed: \"ask\" (default) or \"deny\".\n\"allow\" is refused.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Action"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "version": {
       "description": "Accepted as a top-level key but not yet consumed; reserved for future\nversioning of the config format.",
@@ -201,6 +216,33 @@
       "properties": {
         "paths": {
           "description": "The protected paths themselves — vouch's own config and the hook\nregistration, by default. This list IS the setting: removing a path\nfrom it is the only way to unprotect that path.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ReadConfig": {
+      "description": "The `[read]` table: what vouch does about reading files, and which confidential\npaths are protected from silent exposure into transcripts.",
+      "type": "object",
+      "properties": {
+        "ask_paths": {
+          "description": "Protected read paths whose inspection requires operator approval.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "default": {
+          "description": "Fallback action when a read is not on a listed protected path.\nDefault: \"allow\".",
+          "$ref": "#/$defs/Action"
+        },
+        "deny_paths": {
+          "description": "Protected read paths whose inspection is refused outright.",
           "type": "array",
           "default": [],
           "items": {

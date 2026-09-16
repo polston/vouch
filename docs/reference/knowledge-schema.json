@@ -269,6 +269,11 @@
             "type": "string"
           }
         },
+        "reads": {
+          "description": "Which arguments this program reads from: \"all_args\", \"from_second_arg\",\n\"last_arg\", or \"arg_<N>\". Empty means it is not declared to read files.",
+          "type": "string",
+          "default": ""
+        },
         "rebinds_name_flags": {
           "description": "Flags in which this program BINDS a name to something else — `hash -p\n<path> <name>` installs `<path>` under `<name>` in the shell's own\nlookup table, so a later `<name>` on the line runs that path\n(verified by running). The name-side twin of `[[env_name]]`'s\n`\"lookup\"` effect: there a variable the shell reads is assigned, here\na program is told to change the table directly. Raises\n`rebound_name`.",
           "type": "array",
@@ -687,6 +692,14 @@
           "items": {
             "type": "string"
           }
+        },
+        "read_path_field": {
+          "description": "The `tool_input` field whose value is the path this tool reads.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         },
         "server": {
           "description": "A whole-server grant, said out loud (spec 2026-08-05 §Schema): matches\n`<server>__<tool>` for every tool that server exposes, instead of one\ntool by name. Mutually exclusive with a non-empty `match` — checked in\n`knowledge::validate_tool`.",

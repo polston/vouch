@@ -124,6 +124,25 @@ pub fn record_from_host(host: Host, input: &HookInput, d: &Decision, mode: &str)
     }
 }
 
+pub fn record_unparseable(host: Host, raw: &str, d: &Decision) -> Record {
+    let (verdict, reason) = verdict_and_reason(d);
+    Record {
+        id: String::new(),
+        ts: now_epoch_secs(),
+        session: String::new(),
+        tool: "unparseable".into(),
+        cmd: raw.chars().take(200).collect(),
+        verdict: verdict.to_string(),
+        reason,
+        mode: "enforce".into(),
+        cwd: String::new(),
+        outcome: Outcome::Pending,
+        lang: String::new(),
+        permission_mode: String::new(),
+        host: host.as_str().into(),
+    }
+}
+
 /// One `Record` per extracted snippet, sharing the call's `tool_use_id` and
 /// everything else `record_from` would have put in a single record — `cmd`
 /// is the snippet TEXT and `lang` is the language it was decided in. Nothing

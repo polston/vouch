@@ -139,13 +139,13 @@ not json
     assert_eq!(statuses.len(), 3, "one status per input: {statuses:?}");
     assert_eq!(statuses[0]["status"], "processed");
     assert_eq!(statuses[0]["emitted"], true);
-    assert_eq!(statuses[1]["status"], "refused");
-    assert_eq!(statuses[1]["emitted"], false);
+    assert_eq!(statuses[1]["status"], "processed");
+    assert_eq!(statuses[1]["emitted"], true);
     assert_eq!(statuses[2]["status"], "processed");
     assert_eq!(statuses[2]["emitted"], false);
 
     let journal = std::fs::read_to_string(state.join("journal.jsonl")).unwrap();
-    assert_eq!(journal.lines().count(), 1, "the refused row must not journal");
+    assert_eq!(journal.lines().count(), 2, "the unparseable payload is journaled");
     assert!(state.join("outcomes.jsonl").is_file());
     let _ = std::fs::remove_dir_all(state);
 }

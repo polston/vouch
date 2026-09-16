@@ -170,6 +170,10 @@ pub struct Program {
     /// write anything.
     #[serde(default)]
     pub writes: String,
+    /// Which arguments this program reads from: "all_args", "from_second_arg",
+    /// "last_arg", or "arg_<N>". Empty means it is not declared to read files.
+    #[serde(default)]
+    pub reads: String,
     /// How this program runs ANOTHER command: "rest", "after_c", "after_exec",
     /// "after_flag", or "arg_<N>" naming one numbered positional argument as
     /// the wrapped snippet (see `arg_names`).
@@ -795,6 +799,9 @@ pub struct Tool {
     /// `Write` and `Edit` were hardcoded to do.
     #[serde(default)]
     pub write_path_field: Option<String>,
+    /// The `tool_input` field whose value is the path this tool reads.
+    #[serde(default)]
+    pub read_path_field: Option<String>,
     /// Structured write declarations. This is a list so one tool can carry
     /// multiple independent path-bearing fields; every declaration is
     /// evaluated and the worst result governs the call.
@@ -6082,6 +6089,69 @@ fn mode_says_write(prog: &Program, eff: &[String], padding: &HashSet<usize>, bas
     } else {
         true // present but unreadable → a write cannot be ruled out
     }
+}
+
+/// Paths this command reads from, per the knowledge file.
+pub fn read_targets_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for prog in entries_for_cmd(kb, cmd, lang) {
+        if prog.reads.is_empty() {
+            continue;
+        }
+        let effective = effective_args(prog, cmd);
+        let eff = effective.values;
+        let padding = effective.padding;
+        let mut non_flags: Vec<&String> = Vec::new();
+        let mut has_pattern_flag = false;
+        let mut skip_next = false;
+        for (i, a) in eff.iter().enumerate() {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            if !eff_position_occupied(&eff, &padding, i) {
+                continue;
+            }
+            if is_flag(a, &prog.flag_prefix) {
+                if a == "-e" || a == "-f" || a == "--regexp" || a == "--file" {
+                    has_pattern_flag = true;
+                }
+                if prog.value_options.iter().any(|v| v == a) {
+                    skip_next = true;
+                }
+                continue;
+            }
+            non_flags.push(a);
+        }
+
+        match prog.reads.as_str() {
+            "all_args" => {
+                for a in non_flags {
+                    out.push(a.clone());
+                }
+            }
+            "from_second_arg" => {
+                let start_idx = if has_pattern_flag { 0 } else { 1 };
+                for a in non_flags.into_iter().skip(start_idx) {
+                    out.push(a.clone());
+                }
+            }
+            "last_arg" => {
+                if let Some(last) = non_flags.last() {
+                    out.push((*last).clone());
+                }
+            }
+            s if s.starts_with("arg_") => {
+                if let Ok(n) = s[4..].parse::<usize>() {
+                    if let Some(arg) = non_flags.get(n) {
+                        out.push((*arg).clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Paths this command writes to, per the knowledge file. Empty when the program

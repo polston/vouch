@@ -731,6 +731,7 @@ fn overlay_is_exhaustive_over_every_program_field() {
         run_dir_flags: vec!["--work-dir".to_string()],
         no_value_options: vec!["--flag".to_string()],
         writes: "all_args".to_string(),
+        reads: "all_args".to_string(),
         wraps: "rest".to_string(),
         write_flags: vec!["--out".to_string()],
         case_sensitive_flags: Some(true),
@@ -898,6 +899,7 @@ fn overlay_is_exhaustive_over_every_program_field() {
         "no_value_options did not arrive"
     );
     assert_eq!(p.writes, "all_args", "writes did not arrive");
+    assert_eq!(p.reads, "all_args", "reads did not arrive");
     assert_eq!(p.wraps, "rest", "wraps did not arrive");
     assert_eq!(
         p.write_flags,
@@ -1496,6 +1498,7 @@ fn overlay_is_exhaustive_over_every_tool_field() {
             language_values: None,
         }]),
         write_path_field: None,
+        read_path_field: Some("path".to_string()),
         write_path: Some(vec![ToolWritePath {
             field: "patch".to_string(),
             format: ToolWritePathFormat::ApplyPatch,
@@ -1543,6 +1546,11 @@ fn overlay_is_exhaustive_over_every_tool_field() {
     assert!(
         t.write_path_field.is_none(),
         "write_path_field should remain absent"
+    );
+    assert_eq!(
+        t.read_path_field.as_deref(),
+        Some("path"),
+        "read_path_field did not arrive"
     );
     let write_path = t.write_path.as_ref().expect("write_path did not arrive");
     assert_eq!(write_path[0].field, "patch");

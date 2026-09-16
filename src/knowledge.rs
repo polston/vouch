@@ -1228,6 +1228,11 @@ fn validate_tool(t: &Tool) -> Result<(), String> {
             ));
         }
     }
+    if let Some(field) = &t.read_path_field {
+        if field.trim().is_empty() {
+            return Err(format!("[[tool]] {ident}: read_path_field is empty"));
+        }
+    }
 
     Ok(())
 }
@@ -1651,6 +1656,9 @@ fn overlay(base: &mut Program, mine: &Program) {
     if !mine.writes.is_empty() {
         base.writes = mine.writes.clone();
     }
+    if !mine.reads.is_empty() {
+        base.reads = mine.reads.clone();
+    }
     if !mine.wraps.is_empty() {
         base.wraps = mine.wraps.clone();
     }
@@ -1902,6 +1910,9 @@ fn overlay_tool(base: &mut Tool, mine: &Tool) {
     if mine.write_path.is_some() {
         base.write_path = mine.write_path.clone();
         base.write_path_field = None;
+    }
+    if mine.read_path_field.is_some() {
+        base.read_path_field = mine.read_path_field.clone();
     }
     if mine.cwd_from_call.is_some() {
         base.cwd_from_call = mine.cwd_from_call;

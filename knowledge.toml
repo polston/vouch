@@ -2107,10 +2107,21 @@ sub_arg_0_in = ["list", "remove"]
 # correct as a floor, and not a place a program in regular use should stay.
 # ============================================================================
 
+# File inspection commands: reading files and standard input
+[[program]]
+match = ["cat", "head", "tail", "less", "more", "bat"]
+reads = "all_args"
+value_options = ["-n", "-c", "-s", "--lines", "--bytes", "--pid"]
+
+[[program]]
+match = ["grep", "egrep", "fgrep", "rg"]
+reads = "from_second_arg"
+value_options = ["-e", "-f", "--regexp", "--file", "-m", "-A", "-B", "-C", "--context"]
+
 # Text in, text out. None of these open a file for writing.
 [[program]]
 match = [
-  "echo", "printf", "cat", "head", "tail", "grep", "egrep", "fgrep", "rg",
+  "echo", "printf",
   "uniq", "wc", "cut", "tr", "comm", "paste", "join",
   "jq", "yq", "strings", "base64", "shasum", "sha256sum", "md5sum", "cksum",
   "rev", "fold", "nl", "expand", "unexpand", "column", "seq", "yes", "bc",
@@ -2536,8 +2547,22 @@ no_value_options = [
 # ============================================================================
 
 [[tool]]
-match = ["Read", "Grep", "Glob", "NotebookRead"]
+match = ["Read", "ReadFile"]
 source = "reads the filesystem, writes nothing"
+cwd_from_call = true
+read_path_field = "file_path"
+
+[[tool]]
+match = ["NotebookRead"]
+source = "reads a notebook, writes nothing"
+cwd_from_call = true
+read_path_field = "notebook_path"
+
+[[tool]]
+match = ["Grep", "Glob"]
+source = "reads the filesystem, writes nothing"
+cwd_from_call = true
+read_path_field = "path"
 
 [[tool]]
 match = ["ListMcpResourcesTool", "ReadMcpResourceTool", "ReadMcpResourceDirTool", "ToolSearch"]
@@ -2642,8 +2667,28 @@ cwd_from_call = true
 write_path_field = "TargetFile"
 
 [[tool]]
-match = ["view_file", "list_dir", "grep_search", "find_by_name"]
+match = ["view_file"]
 source = "reads the filesystem, writes nothing"
+cwd_from_call = true
+read_path_field = "AbsolutePath"
+
+[[tool]]
+match = ["grep_search"]
+source = "reads the filesystem, writes nothing"
+cwd_from_call = true
+read_path_field = "SearchPath"
+
+[[tool]]
+match = ["find_by_name"]
+source = "reads the filesystem, writes nothing"
+cwd_from_call = true
+read_path_field = "SearchDirectory"
+
+[[tool]]
+match = ["list_dir"]
+source = "reads the filesystem, writes nothing"
+cwd_from_call = true
+read_path_field = "DirectoryPath"
 
 [[tool]]
 match = ["read_url_content", "search_web"]

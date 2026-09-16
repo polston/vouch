@@ -13,6 +13,11 @@
 
 version = 1
 
+# Decision when hook input from an agent harness or a tool snippet cannot be
+# parsed into a structured payload. Allowed: "ask" (default) or "deny".
+# "allow" is rejected at config load time.
+# unparseable_snippet = "ask"
+
 [lang.bash]
 # Verdict when no construct objected.
 default = "allow"
@@ -346,6 +351,19 @@ rebound_name = "ask"
 # [[run.guards]]
 # under = ["C:/scratch/**"]
 # delete_recursive = "allow"    # looser here — applies only on a PROVEN place
+
+# [read]
+# default = "allow"
+# ask_paths = [
+#   "$HOME/.ssh/**",
+#   "$HOME/.aws/**",
+#   "**/.env",
+#   "**/.env.*",
+#   "**/*_rsa",
+# ]
+# deny_paths = [
+#   "/secret/**",
+# ]
 
 [write]
 default = "ask"

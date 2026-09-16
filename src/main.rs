@@ -12,7 +12,6 @@ fn home() -> String {
 }
 
 enum HookCall {
-    Refused,
     Processed(Option<String>),
 }
 
@@ -32,7 +31,24 @@ fn run_hook_call(
     let host = hook_options.host;
     let mut input = match parse_input(raw) {
         Ok(input) => input,
-        Err(_) => return HookCall::Refused,
+        Err(err) => {
+            let action = cfg.unparseable_snippet.unwrap_or(vouch::config::Action::Ask);
+            let reason = format!(
+                "vouch stopped on: unparseable hook payload\n  \
+                 error: {err}\n  \
+                 to configure this behavior, set unparseable_snippet = \"ask\" | \"deny\" in config.toml"
+            );
+            let decision = match action {
+                vouch::config::Action::Deny => Decision::Deny(reason),
+                _ => Decision::Ask(reason),
+            };
+            let rec = journal::record_unparseable(host, raw, &decision);
+            let _ = journal::append(state_dir, &rec);
+            if shadow {
+                return HookCall::Processed(None);
+            }
+            return HookCall::Processed(render_for(host, &decision));
+        }
     };
     if host == Host::Codex
         && hook_options.shell == Some(vouch::cli::InstallShell::PowerShell)
@@ -496,7 +512,8 @@ fn redirected_files() -> Option<String> {
          which files to read.\n",
     );
     for (var, value, what) in &set {
-        msg.push_str(&format!("  {var} = {value}\n    which vouch reads as: {what}\n"));
+        let formatted_val = vouch::knowledge::display_path(std::path::Path::new(value));
+        msg.push_str(&format!("  {var} = {formatted_val}\n    which vouch reads as: {what}\n"));
     }
     msg.push_str(&format!(
         "  {} used to mean YOUR OWN file and now means the shipped one. If it was set \
@@ -1235,7 +1252,7 @@ fn main() {
         let dir = journal::state_dir();
         let recs = journal::all(&dir);
         if recs.is_empty() {
-            println!("no decisions recorded yet ({})", dir.display());
+            println!("no decisions recorded yet ({})", vouch::knowledge::display_path(&dir));
             std::process::exit(0);
         }
         // Re-scan the recorded commands against the CURRENT knowledge rather
@@ -1505,7 +1522,7 @@ fn main() {
                         eprintln!("install failed: {e}");
                         std::process::exit(1);
                     }
-                    eprintln!("# written to: {}", settings_path.display());
+                    eprintln!("# written to: {}", vouch::knowledge::display_path(&settings_path));
                     eprintln!("\n# --- what this changed ---");
                     for n in &p.notes {
                         eprintln!("# - {n}");
@@ -1531,7 +1548,7 @@ fn main() {
                                     } else {
                                         eprintln!(
                                             "# reconciled Antigravity permissions in: {}",
-                                            agy_settings_path.display()
+                                            vouch::knowledge::display_path(&agy_settings_path)
                                         );
                                     }
                                 }
@@ -1564,7 +1581,7 @@ fn main() {
                             "# hooks view only - redirect the bare form to a file to save the whole document"
                         );
                     }
-                    eprintln!("# target: {}", settings_path.display());
+                    eprintln!("# target: {}", vouch::knowledge::display_path(&settings_path));
                     eprintln!("# nothing was written. Use --write to write directly.");
                 }
             }
@@ -1594,14 +1611,14 @@ fn main() {
         if !settings_path.exists() {
             eprintln!(
                 "# target {} does not exist; nothing to uninstall.",
-                settings_path.display()
+                vouch::knowledge::display_path(&settings_path)
             );
             std::process::exit(0);
         }
         let existing = match std::fs::read_to_string(&settings_path) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("uninstall failed: could not read {}: {e}", settings_path.display());
+                eprintln!("uninstall failed: could not read {}: {e}", vouch::knowledge::display_path(&settings_path));
                 std::process::exit(1);
             }
         };
@@ -1617,7 +1634,7 @@ fn main() {
                         eprintln!("uninstall failed: {e}");
                         std::process::exit(1);
                     }
-                    eprintln!("# uninstalled from: {}", settings_path.display());
+                    eprintln!("# uninstalled from: {}", vouch::knowledge::display_path(&settings_path));
                     eprintln!("\n# --- what this changed ---");
                     for n in &p.notes {
                         eprintln!("# - {n}");
@@ -1628,7 +1645,7 @@ fn main() {
                     for n in &p.notes {
                         eprintln!("# - {n}");
                     }
-                    eprintln!("# target: {}", settings_path.display());
+                    eprintln!("# target: {}", vouch::knowledge::display_path(&settings_path));
                     eprintln!("# nothing was written. Use --write to write directly.");
                 }
             }
@@ -1743,7 +1760,6 @@ fn main() {
                 &state_dir,
                 &home_dir,
             ) {
-                HookCall::Refused => ("refused", false),
                 HookCall::Processed(output) => ("processed", output.is_some()),
             };
             println!(

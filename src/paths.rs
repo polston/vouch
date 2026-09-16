@@ -704,12 +704,94 @@ pub fn expand_pattern(pattern: &str, home: &str, project_root: Option<&str>) -> 
 /// Moved out of `engine` alongside `expand_pattern` for the same reason: the
 /// place-scoped rules compare directories against globs, and a mirrored copy
 /// of these five lines would be a second answer to "is this path in that tree".
+fn wildcard_match(pat: &[u8], text: &[u8]) -> bool {
+    let mut p_idx = 0;
+    let mut t_idx = 0;
+    let mut star_idx = None;
+    let mut match_idx = 0;
+
+    while t_idx < text.len() {
+        if p_idx < pat.len() && (pat[p_idx] == b'?' || pat[p_idx] == text[t_idx]) {
+            p_idx += 1;
+            t_idx += 1;
+        } else if p_idx < pat.len() && pat[p_idx] == b'*' {
+            star_idx = Some(p_idx);
+            p_idx += 1;
+            match_idx = t_idx;
+        } else if let Some(s) = star_idx {
+            p_idx = s + 1;
+            match_idx += 1;
+            t_idx = match_idx;
+        } else {
+            return false;
+        }
+    }
+
+    while p_idx < pat.len() && pat[p_idx] == b'*' {
+        p_idx += 1;
+    }
+
+    p_idx == pat.len()
+}
+
+fn match_segs(pat_segs: &[&str], path_segs: &[&str]) -> bool {
+    if pat_segs.is_empty() {
+        return path_segs.is_empty();
+    }
+    if pat_segs == ["**"] {
+        return true;
+    }
+    if pat_segs[0] == "**" {
+        if match_segs(&pat_segs[1..], path_segs) {
+            return true;
+        }
+        if !path_segs.is_empty() && match_segs(pat_segs, &path_segs[1..]) {
+            return true;
+        }
+        return false;
+    }
+    if path_segs.is_empty() {
+        return false;
+    }
+    if wildcard_match(pat_segs[0].as_bytes(), path_segs[0].as_bytes()) {
+        return match_segs(&pat_segs[1..], &path_segs[1..]);
+    }
+    false
+}
+
+fn glob_match_advanced(pattern: &str, path: &str) -> bool {
+    let pat_slash = pattern.replace('\\', "/");
+    let path_slash = path.replace('\\', "/");
+
+    let pat_anchored_root = pat_slash.starts_with('/');
+    let path_anchored_root = path_slash.starts_with('/');
+
+    if pat_anchored_root && !path_anchored_root {
+        return false;
+    }
+    let pat_has_drive = pat_slash.len() >= 2 && pat_slash.as_bytes()[1] == b':';
+    let path_has_drive = path_slash.len() >= 2 && path_slash.as_bytes()[1] == b':';
+    if pat_has_drive != path_has_drive && !pat_slash.starts_with("**") {
+        return false;
+    }
+
+    let pat_segs: Vec<&str> = pat_slash.split('/').filter(|s| !s.is_empty()).collect();
+    let path_segs: Vec<&str> = path_slash.split('/').filter(|s| !s.is_empty()).collect();
+
+    match_segs(&pat_segs, &path_segs)
+}
+
 pub fn glob_match(pattern: &str, path: &str) -> bool {
     let (pattern, path) = (fold_case(pattern), fold_case(path));
-    if let Some(prefix) = pattern.strip_suffix("/**") {
-        return path == prefix || path.starts_with(&format!("{prefix}/"));
+    if pattern == path {
+        return true;
     }
-    pattern == path
+    if let Some(prefix) = pattern.strip_suffix("/**") {
+        if !prefix.contains('*') {
+            return path == prefix || path.starts_with(&format!("{prefix}/"));
+        }
+    }
+    glob_match_advanced(&pattern, &path)
 }
 
 /// True when `dir` is under any one of these ALREADY-EXPANDED globs. An empty

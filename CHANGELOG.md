@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.32.0 (2026-09-16)
+
+
+### Features
+
+* configurable gated read paths prevent sensitive files and credentials from silent exposure in transcripts
+* diagnostics and environment redirection notices format filesystem paths with canonical forward slashes
+* unparseable hook input and tool snippets emit explicit configurable decisions rather than silently abstaining
+* write rule suggestions in prompts narrow to specific files and leaf directories rather than root drives
+
 ## 0.31.0 (2026-09-16)
 
 

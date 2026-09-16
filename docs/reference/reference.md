@@ -17,9 +17,11 @@ setting must never become permission.
 | `guards` | map of string to Action | (none) | What commands DO, written as `[guards]`. Shared across every language: a guard fires the same way whichever scanner recognised the command that tripped it. Every key must be one of vouch's known guard names (`bypass_enforcement`, `confidential_output`, `delete_recursive`, `grant_execute`, `history_rewrite`, `publish_outward`, `process_control`, `privilege_escalation`, `disk_or_system`, `in_place_edit`, `local_state_write`, `remote_execution`); an unset guard always resolves to `ask`. |
 | `lang` | map of string to LangConfig | (none) | Every language section, written as `[lang.<name>]` — `bash`, `powershell`, and `python` ship with vouch. One map, so a new scanner needs no new key here. |
 | `protected` | ProtectedSection | (none) | `[protected]`: paths no `allow_paths` entry can ever open. |
+| `read` | ReadConfig | (none) | `[read]`: what vouch does about reading files, and which confidential paths are protected from silent exposure into transcripts. |
 | `run` | RunSection | (none) | `[run]`: run-place zones, executable-place program trust, and place-scoped guard overrides. |
 | `shadow` | ShadowSection (optional) | (none) | `[shadow]`: mode-keyed shadow (design 2026-08-16). |
 | `tools` | map of string to Action | (none) | Per-tool actions, written as `[tools]`. vouch used to say NOTHING about any tool it had no scanner for — 46.5% of recorded tool calls — which is the same "unknown means allowed" inversion as unmodelled programs, one level up. Naming a FIRST tool here makes this section govern every tool, not only the one named; see `Config::tool_decision`. |
+| `unparseable_snippet` | Action (optional) | (none) | Decision when hook input from an agent harness or tool snippet cannot be parsed into structured payload. Allowed: "ask" (default) or "deny". "allow" is refused. |
 | `version` | integer (optional) | (unset) | Accepted as a top-level key but not yet consumed; reserved for future versioning of the config format. |
 | `write` | FileConfig | (none) | `[write]`: what vouch does about a write it can see, and where it is allowed to land. |
 
@@ -92,6 +94,17 @@ identity rather than by folder.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `paths` | array of string | [] | The protected paths themselves — vouch's own config and the hook registration, by default. This list IS the setting: removing a path from it is the only way to unprotect that path. |
+
+### `ReadConfig`
+
+The `[read]` table: what vouch does about reading files, and which confidential
+paths are protected from silent exposure into transcripts.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `ask_paths` | array of string | [] | Protected read paths whose inspection requires operator approval. |
+| `default` | Action | (none) | Fallback action when a read is not on a listed protected path. Default: "allow". |
+| `deny_paths` | array of string | [] | Protected read paths whose inspection is refused outright. |
 
 ### `RunSection`
 
@@ -232,6 +245,7 @@ name.
 | `no_value_options` | array of string | [] | Options that take NO following token — needed so a destination walk does not mistake the option itself for a positional argument, or the token after it for the option's value. |
 | `only_under` | array of string (optional) | (unset) | Place-scoped recognition: this entry is trusted only when the command runs under one of these globs. For the OPERATOR's own programs only — `knowledge::validate_place_scopes` refuses it on a name the shipped knowledge already describes, and refuses a scoped name split across more than one of the operator's own entries, so the overlay never has to decide what "unset means keep" means for a field that in practice never collides (spec 2026-08-06 §Refused shapes).  `None` means the entry did not say — same `Option` merge rule as `changes_dir` and `case_sensitive_flags`. Read by `recognises_at` for the verdict, and by `place_scopes` for the prompt that has to name an entry the run place put out of reach. |
 | `produces` | array of string (optional) | (unset) | Origin tags this call's return value is known to produce. Tags are policy vocabulary declared by knowledge, not a closed set in code. A call that occupies one of this entry's declared `callback_args` withholds these tags because the callback may customize the result. `None` means this entry is silent; `Some([])` explicitly retracts a shipped producer claim during an overlay. |
+| `reads` | string | "" | Which arguments this program reads from: "all_args", "from_second_arg", "last_arg", or "arg_<N>". Empty means it is not declared to read files. |
 | `rebinds_name_flags` | array of string | [] | Flags in which this program BINDS a name to something else — `hash -p <path> <name>` installs `<path>` under `<name>` in the shell's own lookup table, so a later `<name>` on the line runs that path (verified by running). The name-side twin of `[[env_name]]`'s `"lookup"` effect: there a variable the shell reads is assigned, here a program is told to change the table directly. Raises `rebound_name`. |
 | `receiver_from` | array of string (optional) | (unset) | Origin tags required of a method call's receiver before any claim on this entry applies. `None` leaves the entry unconditional; `Some([])` explicitly removes a shipped receiver gate during an overlay. |
 | `remote_dest` | boolean | false | This program's destination may be on ANOTHER MACHINE — `scp f host:d`, `rsync a host:/b`. A `[user@]host:path` destination from such an entry is not a local file, so the local path rules have nothing to say about it and it is skipped rather than judged.  Per ENTRY, never globally (M2.131.4): the same `host:path` shape written for `cp` is a local file with a colon in its name — on NTFS, an alternate data stream of the file before the colon — and skipping it there means a real write goes unjudged. |
@@ -324,6 +338,7 @@ A harness tool vouch has no scanner for, and what is claimed about it.
 | `action` | Action (optional) | (none) | What to do about it. Unset means allow: being listed at all is the recognition claim.  "ask" is the interesting case. It says vouch knows exactly what this tool is and is stopping anyway — a different sentence from "vouch has never heard of this", and the prompt says which. |
 | `cwd_from_call` | boolean (optional) | (unset) | This tool executes its snippet (or writes its path) in the calling session's own working directory. Only when true does a relative target get resolved against the hook's cwd; absent or false leaves it unresolvable, which asks (fail closed). |
 | `match` | array of string | [] | Optional, unlike `Program::match_names` — a `server` entry (spec 2026-08-05 §Schema) names no individual tool at all, and without `default` here `deny_unknown_fields` would refuse it with "missing field `match`" before `knowledge::validate_tool` ever got to say why a match-less, server-less entry is wrong. |
+| `read_path_field` | string (optional) | (unset) | The `tool_input` field whose value is the path this tool reads. |
 | `server` | string (optional) | (unset) | A whole-server grant, said out loud (spec 2026-08-05 §Schema): matches `<server>__<tool>` for every tool that server exposes, instead of one tool by name. Mutually exclusive with a non-empty `match` — checked in `knowledge::validate_tool`. |
 | `snippet` | array of ToolSnippet (optional) | (none) | Which named `tool_input` fields carry a script vouch should decide on. `None` means "keep what the shipped entry declares" — the same `Option` merge rule every other per-entry claim in this file follows. `Some(vec![])` is a load error (`knowledge::validate_tool`): there is no legitimate "explicitly no snippets" spelling, because that reading would let one silent my-knowledge line turn off snippet inspection for a shipped entry it only meant to add a `source` to. The actual off-switch is `tools.<name>` in config. |
 | `source` | string | "" | Why this tool is described. Shown in `vouch doctor` and in the prompt, and it is the claim someone has to stand behind. |
