@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.33.0 (2026-09-16)
+
+
+### Features
+
+* add positional-count-dependent write thresholds for program entries
+* redact secret shapes and exclude active sessions in the corpus builder
+
+
+### Bug Fixes
+
+* display canonical resolved paths in shell redirection diagnostic prompts
+* preserve explicit zero when overriding subcommand positional write thresholds
+* validate run-dir and wrap-head flags against merged knowledge options
+
 ## 0.32.0 (2026-09-16)
 
 

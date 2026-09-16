@@ -232,6 +232,10 @@ const VALID_CHANGES_DIR: &[&str] = &["no", "stated", "stack", "unstated"];
 /// `guards::Program` for what each value means (M2.128).
 const VALID_NAMED_POSITIONAL: &[&str] = &["first", "last"];
 
+/// The closed set `Program::positional_write_takes` may hold, unset excepted
+/// (unset reads as `"last"`).
+const VALID_POSITIONAL_WRITE_TAKES: &[&str] = &["first", "last"];
+
 /// The closed set `Program::capabilities` and `SubCapability::capabilities` may hold.
 pub const VALID_CAPABILITIES: &[&str] = &["network", "external_paths", "daemon"];
 
@@ -564,6 +568,14 @@ pub(crate) fn validate(kb: &Knowledge) -> Result<(), String> {
                 return Err(format!(
                     "[[program]] {:?}: named_positional = {:?}, which must be one of \"first\", \"last\"",
                     prog.match_names, np
+                ));
+            }
+        }
+        if let Some(pwt) = &prog.positional_write_takes {
+            if !VALID_POSITIONAL_WRITE_TAKES.contains(&pwt.as_str()) {
+                return Err(format!(
+                    "[[program]] {:?}: positional_write_takes = {:?}, which must be one of \"first\", \"last\"",
+                    prog.match_names, pwt
                 ));
             }
         }
@@ -1764,6 +1776,12 @@ fn overlay(base: &mut Program, mine: &Program) {
     if mine.named_positional.is_some() {
         base.named_positional = mine.named_positional.clone();
     }
+    if mine.min_positional_write.is_some() {
+        base.min_positional_write = mine.min_positional_write;
+    }
+    if mine.positional_write_takes.is_some() {
+        base.positional_write_takes = mine.positional_write_takes.clone();
+    }
     if !mine.capabilities.is_empty() {
         base.capabilities = mine.capabilities.clone();
     }
@@ -1849,8 +1867,8 @@ fn overlay(base: &mut Program, mine: &Program) {
                 if !m.takes.is_empty() {
                     sw.takes = m.takes.clone();
                 }
-                if m.min_positional != 0 {
-                    sw.min_positional = m.min_positional;
+                if let Some(min_pos) = m.min_positional {
+                    sw.min_positional = Some(min_pos);
                 }
                 laid.push(sw);
             }
@@ -2294,6 +2312,29 @@ fn narrowing_noops(base: &Knowledge, own: &Knowledge) -> Vec<String> {
     notes
 }
 
+pub(crate) fn validate_merged_knowledge(kb: &Knowledge) -> Result<(), String> {
+    validate(kb)?;
+    for prog in &kb.program {
+        for f in &prog.run_dir_flags {
+            if !prog.value_options.iter().any(|v| v == f) {
+                return Err(format!(
+                    "[[program]] {:?}: run_dir_flags contains {:?}, which is not in merged value_options {:?}",
+                    prog.match_names, f, prog.value_options
+                ));
+            }
+        }
+        for f in &prog.wrap_head_flags {
+            if !prog.value_options.iter().any(|v| v == f) {
+                return Err(format!(
+                    "[[program]] {:?}: wrap_head_flags contains {:?}, which is not in merged value_options {:?}",
+                    prog.match_names, f, prog.value_options
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// REFUSED is not ABSENT (spec §7, rev 4).
 ///
 /// A shipped file that does not exist leaves `base` empty and my-knowledge
@@ -2418,7 +2459,10 @@ pub fn load_files(knowledge: &Path, mine: &Path) -> Loaded {
             // and key, not an ambiguity between the two files at large.
             notes = narrowing_noops(&base, &o);
             let merged = merge(base.clone(), o);
-            match validate_verb_vocab(&merged).and_then(|()| validate_standalone_in_effect(&merged)) {
+            match validate_verb_vocab(&merged)
+                .and_then(|()| validate_standalone_in_effect(&merged))
+                .and_then(|()| validate_merged_knowledge(&merged))
+            {
                 Ok(()) => merged,
                 Err(e) => {
                     gaps.push(Gap {

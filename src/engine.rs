@@ -1580,9 +1580,9 @@ fn judge_once(
                     }
                     Placed::Nowhere(cause) => {
                         unplaced.push(Unplaced {
-                            generic: where_it_lands(rlang, &cause, Some(t)),
+                            generic: where_it_lands(rlang, &cause, Some(&resolved)),
                             cause,
-                            what: Some(t.clone()),
+                            what: Some(resolved.clone()),
                             by: None,
                             lang: rlang,
                         });

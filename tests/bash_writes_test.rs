@@ -1086,3 +1086,17 @@ allow_paths = ["C:/work/**"]
         other => panic!("expected Ask naming unresolved_path, got {other:?}"),
     }
 }
+
+#[test]
+fn redirection_unplaced_prompt_displays_resolved_destination() {
+    // When a redirect cannot be placed due to an indeterminate working directory,
+    // the unplaced prompt must name the resolved path (expanding variables),
+    // rather than the raw unresolved token text.
+    match at(r#"TARGET=out.txt; cd "-" && echo x > "$TARGET""#, "C:/work") {
+        Decision::Ask(r) => {
+            assert!(r.contains("the relative path: out.txt"), "prompt did not name resolved destination: {r}");
+            assert!(!r.contains("$TARGET"), "prompt still leaked raw token syntax: {r}");
+        }
+        d => panic!("expected ask, got {d:?}"),
+    }
+}

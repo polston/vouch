@@ -675,9 +675,63 @@ min_positional = 2
     assert_eq!(p.sub_write.len(), 1);
     assert_eq!(p.sub_write[0].takes, "first", "an explicit takes must win");
     assert_eq!(
-        p.sub_write[0].min_positional, 2,
+        p.sub_write[0].min_positional, Some(2),
         "an explicit min_positional must win"
     );
+}
+
+#[test]
+fn an_operator_can_explicitly_override_min_positional_to_zero() {
+    let base = r#"
+[[program]]
+match = ["vcs"]
+[[program.sub_write]]
+subcommand = "clone"
+takes = "last"
+min_positional = 2
+"#;
+    let mine = r#"
+[[program]]
+match = ["vcs"]
+[[program.sub_write]]
+subcommand = "clone"
+min_positional = 0
+"#;
+    let merged = merge(kb(base), kb(mine));
+    let p = prog(&merged, "vcs");
+    assert_eq!(p.sub_write.len(), 1);
+    assert_eq!(
+        p.sub_write[0].min_positional, Some(0),
+        "an explicit min_positional = 0 must override shipped nonzero"
+    );
+    assert_eq!(p.sub_write[0].takes, "last", "shipped takes is preserved");
+}
+
+#[test]
+fn an_omitted_min_positional_preserves_shipped_value() {
+    let base = r#"
+[[program]]
+match = ["vcs"]
+[[program.sub_write]]
+subcommand = "clone"
+takes = "last"
+min_positional = 2
+"#;
+    let mine = r#"
+[[program]]
+match = ["vcs"]
+[[program.sub_write]]
+subcommand = "clone"
+takes = "first"
+"#;
+    let merged = merge(kb(base), kb(mine));
+    let p = prog(&merged, "vcs");
+    assert_eq!(p.sub_write.len(), 1);
+    assert_eq!(
+        p.sub_write[0].min_positional, Some(2),
+        "omitted min_positional must preserve shipped value"
+    );
+    assert_eq!(p.sub_write[0].takes, "first", "explicit takes must win");
 }
 
 #[test]
@@ -713,7 +767,7 @@ min_positional = 2
     assert!(
         p.sub_write
             .iter()
-            .any(|s| s.subcommand == "clone" && s.min_positional == 2),
+            .any(|s| s.subcommand == "clone" && s.min_positional == Some(2)),
         "the new one was lost"
     );
 }
@@ -784,7 +838,7 @@ fn overlay_is_exhaustive_over_every_program_field() {
         sub_write: vec![vouch::guards::SubWrite {
             subcommand: "doit".to_string(),
             then: String::new(),
-            min_positional: 2,
+            min_positional: Some(2),
             takes: "last".to_string(),
         }],
         subcommands: Some(vec!["describe".to_string()]),
@@ -828,6 +882,8 @@ fn overlay_is_exhaustive_over_every_program_field() {
         // `named_positional` follows the same Option pattern (Task 6,
         // M2.128).
         named_positional: Some("first".to_string()),
+        min_positional_write: Some(2),
+        positional_write_takes: Some("first".to_string()),
         // `leading_args` follows the same Option pattern; `wrap_exec_flags`
         // and `wrap_exec_terminators` follow the `value_options`
         // non-empty-replaces one (Task 9, the wrapper walk). The three keys
@@ -1039,6 +1095,16 @@ fn overlay_is_exhaustive_over_every_program_field() {
         Some("first"),
         "named_positional did not arrive"
     );
+    assert_eq!(
+        p.min_positional_write,
+        Some(2),
+        "min_positional_write did not arrive"
+    );
+    assert_eq!(
+        p.positional_write_takes.as_deref(),
+        Some("first"),
+        "positional_write_takes did not arrive"
+    );
     // leading_args / wrap_exec_flags / wrap_exec_terminators: Task 9, the
     // wrapper walk (knowledge schema v6).
     assert_eq!(p.leading_args, Some(1), "leading_args did not arrive");
@@ -1131,6 +1197,14 @@ fn overlay_is_exhaustive_over_every_program_field() {
     assert!(
         leftover.named_positional.is_none(),
         "mine's named_positional leaked into the scope mine never addressed"
+    );
+    assert!(
+        leftover.min_positional_write.is_none(),
+        "mine's min_positional_write leaked into the scope mine never addressed"
+    );
+    assert!(
+        leftover.positional_write_takes.is_none(),
+        "mine's positional_write_takes leaked into the scope mine never addressed"
     );
 }
 
@@ -1754,4 +1828,125 @@ fn two_explicit_empty_lists_stay_empty() {
         Some(Vec::<String>::new()),
         "two explicit empty lists did not stay empty"
     );
+}
+
+#[test]
+fn post_merge_validation_catches_run_dir_flags_missing_from_merged_value_options() {
+    let dir = std::env::temp_dir().join(format!("vouch_post_merge_test_1_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let shipped = dir.join("knowledge.toml");
+    let mine = dir.join("my-knowledge.toml");
+    std::fs::write(
+        &shipped,
+        r#"
+version = 14
+[[program]]
+match = ["tool"]
+value_options = ["-C"]
+"#,
+    )
+    .unwrap();
+    // In isolation, mine has empty value_options, so validate() ignores run_dir_flags.
+    std::fs::write(
+        &mine,
+        r#"
+version = 14
+[[program]]
+match = ["tool"]
+run_dir_flags = ["--dir"]
+"#,
+    )
+    .unwrap();
+
+    let loaded = vouch::knowledge::load_files(&shipped, &mine);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        loaded.gaps.len(),
+        1,
+        "the invalid merged shape should be set aside as a gap"
+    );
+    assert_eq!(loaded.gaps[0].kind, vouch::knowledge::GapKind::MergedShape);
+    assert!(
+        loaded.gaps[0].why.contains("run_dir_flags contains \"--dir\""),
+        "gap description should name the offending flag: {}",
+        loaded.gaps[0].why
+    );
+}
+
+#[test]
+fn post_merge_validation_passes_when_flag_present_in_merged_value_options() {
+    let dir = std::env::temp_dir().join(format!("vouch_post_merge_test_2_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let shipped = dir.join("knowledge.toml");
+    let mine = dir.join("my-knowledge.toml");
+    std::fs::write(
+        &shipped,
+        r#"
+version = 14
+[[program]]
+match = ["tool"]
+value_options = ["-C"]
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        &mine,
+        r#"
+version = 14
+[[program]]
+match = ["tool"]
+value_options = ["-C", "--dir"]
+run_dir_flags = ["--dir"]
+"#,
+    )
+    .unwrap();
+
+    let loaded = vouch::knowledge::load_files(&shipped, &mine);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(loaded.gaps.len(), 0, "valid merged knowledge should have 0 gaps: {:?}", loaded.gaps);
+    assert_eq!(
+        prog(&loaded.kb, "tool").run_dir_flags,
+        vec!["--dir".to_string()]
+    );
+}
+
+#[test]
+fn an_operator_can_explicitly_override_min_positional_write_to_zero() {
+    let shipped = kb(r#"
+version = 14
+[[program]]
+match = ["tool"]
+writes = "positional"
+min_positional_write = 2
+"#);
+    let mine = kb(r#"
+version = 14
+[[program]]
+match = ["tool"]
+min_positional_write = 0
+"#);
+    let merged = merge(shipped, mine);
+    let p = prog(&merged, "tool");
+    assert_eq!(p.min_positional_write, Some(0));
+}
+
+#[test]
+fn an_omitted_min_positional_write_preserves_shipped_value() {
+    let shipped = kb(r#"
+version = 14
+[[program]]
+match = ["tool"]
+writes = "positional"
+min_positional_write = 2
+"#);
+    let mine = kb(r#"
+version = 14
+[[program]]
+match = ["tool"]
+"#);
+    let merged = merge(shipped, mine);
+    let p = prog(&merged, "tool");
+    assert_eq!(p.min_positional_write, Some(2));
 }

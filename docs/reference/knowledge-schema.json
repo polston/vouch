@@ -231,6 +231,16 @@
             "type": "string"
           }
         },
+        "min_positional_write": {
+          "description": "Minimum positional arguments required before a positional argument is\ntreated as a write destination.\n\n`None` means 1 (any positional argument qualifies).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
         "named_positional": {
           "description": "For `writes = \"named\"`'s POSITIONAL FALLBACK only — never consulted\nwhen a `write_flags` member actually matched. Which positional names\nthe destination when none did: `\"first\"` or `\"last\"` (the default).\n\nPowerShell's `Set-Content [-Path] <string[]> [-Value] <Object[]>`\nputs the destination FIRST and the written CONTENT second, while\n`Copy-Item <source> <destination>` puts the destination LAST — one\nprogram-wide fallback that always picked \"last\" read `Set-Content f\nx` as writing to `x`, when `f` is the file that gets `x` written into\nit (M2.128).\n\n`None` means the entry did not say (reads as \"last\"). Same `Option`\nmerge rule as `case_sensitive_flags`: unset keeps whatever the other\nfile already claimed.",
           "type": [
@@ -257,6 +267,14 @@
           "items": {
             "type": "string"
           }
+        },
+        "positional_write_takes": {
+          "description": "Which positional argument is the write destination when positional\nwrite extraction applies: \"last\" (the default) or \"first\".\n\n`None` means the entry did not say (reads as \"last\").",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         },
         "produces": {
           "description": "Origin tags this call's return value is known to produce. Tags are\npolicy vocabulary declared by knowledge, not a closed set in code.\nA call that occupies one of this entry's declared `callback_args`\nwithholds these tags because the callback may customize the result.\n`None` means this entry is silent; `Some([])` explicitly retracts a\nshipped producer claim during an overlay.",
@@ -450,7 +468,7 @@
           }
         },
         "writes": {
-          "description": "Which arguments this program writes to: \"last_arg\", \"all_args\",\n\"of_prefix\", \"named\", \"flags_only\", or \"arg_<N>\" naming one numbered\npositional argument (see `arg_names`). Empty means it is not known to\nwrite anything.",
+          "description": "Which arguments this program writes to: \"last_arg\", \"all_args\",\n\"of_prefix\", \"named\", \"flags_only\", \"positional\", or \"arg_<N>\" naming one numbered\npositional argument (see `arg_names`). Empty means it is not known to\nwrite anything.",
           "type": "string",
           "default": ""
         },
@@ -637,9 +655,12 @@
       "properties": {
         "min_positional": {
           "description": "How many non-flag arguments must follow the subcommand before one of\nthem is a destination. `git clone <url>` writes to a directory named\nafter the URL — unknowable — so it needs two.",
-          "type": "integer",
+          "type": [
+            "integer",
+            "null"
+          ],
           "format": "uint",
-          "default": 0,
+          "default": null,
           "minimum": 0
         },
         "subcommand": {

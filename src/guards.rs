@@ -165,7 +165,7 @@ pub struct Program {
     #[serde(default)]
     pub no_value_options: Vec<String>,
     /// Which arguments this program writes to: "last_arg", "all_args",
-    /// "of_prefix", "named", "flags_only", or "arg_<N>" naming one numbered
+    /// "of_prefix", "named", "flags_only", "positional", or "arg_<N>" naming one numbered
     /// positional argument (see `arg_names`). Empty means it is not known to
     /// write anything.
     #[serde(default)]
@@ -563,6 +563,18 @@ pub struct Program {
     /// file already claimed.
     #[serde(default)]
     pub named_positional: Option<String>,
+    /// Minimum positional arguments required before a positional argument is
+    /// treated as a write destination.
+    ///
+    /// `None` means 1 (any positional argument qualifies).
+    #[serde(default)]
+    pub min_positional_write: Option<usize>,
+    /// Which positional argument is the write destination when positional
+    /// write extraction applies: "last" (the default) or "first".
+    ///
+    /// `None` means the entry did not say (reads as "last").
+    #[serde(default)]
+    pub positional_write_takes: Option<String>,
     /// Host and environment capabilities this program requires, e.g. "network",
     /// "daemon", "external_paths".
     #[serde(default)]
@@ -623,7 +635,7 @@ pub struct SubWrite {
     /// them is a destination. `git clone <url>` writes to a directory named
     /// after the URL — unknowable — so it needs two.
     #[serde(default)]
-    pub min_positional: usize,
+    pub min_positional: Option<usize>,
     /// Which of those arguments is the destination: "last" (the default) or
     /// "first".
     ///
@@ -6248,8 +6260,16 @@ pub fn written_paths_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> WriteTargets {
         }
         match prog.writes.as_str() {
             "last_arg" => {
-                if let Some(last) = non_flags_paths.last() {
-                    push_write_target(&mut out, last);
+                let min_pos = prog.min_positional_write.unwrap_or(1);
+                if non_flags_paths.len() >= min_pos {
+                    let pick = if prog.positional_write_takes.as_deref() == Some("first") {
+                        non_flags_paths.first()
+                    } else {
+                        non_flags_paths.last()
+                    };
+                    if let Some(last) = pick {
+                        push_write_target(&mut out, last);
+                    }
                 } else if cmd.by_reference {
                     // A by-reference invocation, judged with no arguments
                     // (task 4 review C4), still claims a write here; report
@@ -6260,6 +6280,21 @@ pub fn written_paths_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> WriteTargets {
                     // silent, exactly as before this fix (task 4 review
                     // round 3, CRITICAL: `eff.is_empty()` could not tell the
                     // two cases apart).
+                    push_write_target(&mut out, crate::python::MARKER);
+                }
+            }
+            "positional" => {
+                let min_pos = prog.min_positional_write.unwrap_or(1);
+                if non_flags_paths.len() >= min_pos {
+                    let pick = if prog.positional_write_takes.as_deref() == Some("first") {
+                        non_flags_paths.first()
+                    } else {
+                        non_flags_paths.last()
+                    };
+                    if let Some(target) = pick {
+                        push_write_target(&mut out, target);
+                    }
+                } else if cmd.by_reference {
                     push_write_target(&mut out, crate::python::MARKER);
                 }
             }
@@ -6335,14 +6370,19 @@ pub fn written_paths_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> WriteTargets {
                 // [-Value]` puts it first, `Copy-Item <src> <dest>` puts it
                 // last — the default, when the entry does not say.
                 if !found && prog.writes == "named" {
-                    let pick = if prog.named_positional.as_deref() == Some("first") {
-                        non_flags_paths.first()
-                    } else {
-                        non_flags_paths.last()
-                    };
-                    if let Some(p) = pick {
-                        push_write_target(&mut out, p);
-                        found = true;
+                    let min_pos = prog.min_positional_write.unwrap_or(1);
+                    if non_flags_paths.len() >= min_pos {
+                        let pick = if prog.positional_write_takes.as_deref() == Some("first")
+                            || prog.named_positional.as_deref() == Some("first")
+                        {
+                            non_flags_paths.first()
+                        } else {
+                            non_flags_paths.last()
+                        };
+                        if let Some(p) = pick {
+                            push_write_target(&mut out, p);
+                            found = true;
+                        }
                     }
                 }
                 // A by-reference call finds neither a flag's value nor a
@@ -6506,7 +6546,8 @@ pub fn written_paths_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> WriteTargets {
                         }
                         continue;
                     }
-                    if positionals.len() >= sw.min_positional.max(1) {
+                    let min_pos = sw.min_positional.unwrap_or(0);
+                    if positionals.len() >= min_pos.max(1) {
                         let pick = if sw.takes == "first" {
                             positionals.first()
                         } else {
