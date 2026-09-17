@@ -26,7 +26,7 @@ fn cmd(head: &str, args: &[&str]) -> Cmd {
 #[test]
 fn positional_writes_with_min_threshold() {
     let k = kb(r#"
-version = 14
+version = 15
 [[program]]
 match = ["myfilter"]
 writes = "positional"
@@ -52,7 +52,7 @@ min_positional_write = 2
 #[test]
 fn positional_writes_takes_first() {
     let k = kb(r#"
-version = 14
+version = 15
 [[program]]
 match = ["myconverter"]
 writes = "positional"
@@ -74,7 +74,7 @@ positional_write_takes = "first"
 #[test]
 fn last_arg_writes_respects_min_positional_write() {
     let k = kb(r#"
-version = 14
+version = 15
 [[program]]
 match = ["xxd_like"]
 writes = "last_arg"
@@ -93,7 +93,7 @@ min_positional_write = 2
 #[test]
 fn named_writes_positional_fallback_respects_min_positional_write() {
     let k = kb(r#"
-version = 14
+version = 15
 [[program]]
 match = ["named_tool"]
 writes = "named"
@@ -121,7 +121,7 @@ min_positional_write = 2
 #[test]
 fn invalid_positional_write_takes_is_rejected() {
     let res = vouch::knowledge::validate_text(r#"
-version = 14
+version = 15
 [[program]]
 match = ["bad_tool"]
 writes = "positional"

@@ -119,8 +119,8 @@ fn creating_an_archive_does_not_prompt_about_its_inputs() {
     // Matching `-C` case-insensitively made `-c` record the next token as a
     // written path.
     for cmd in [
-        "tar -cf out.tar /c/work/src",
-        "tar -c -f out.tar /c/work/src",
+        "tar -cf /c/work/out.tar /c/work/src",
+        "tar -c -f /c/work/out.tar /c/work/src",
         "tar -tf p.tar",
     ] {
         assert!(

@@ -901,6 +901,12 @@ fn overlay_is_exhaustive_over_every_program_field() {
             subcommand_not_in: vec![],
             capabilities: vec!["network".to_string()],
         }],
+        conditional_write: vec![vouch::guards::ConditionalWrite {
+            when_flags: vec!["-c".to_string()],
+            unless_flags: vec![],
+            takes_flag: Some("-f".to_string()),
+            takes_flags: vec![],
+        }],
     };
     // The shipped side is otherwise blank, except for the two fields whose
     // documented semantics only show up against a non-empty starting point:
@@ -1137,6 +1143,16 @@ fn overlay_is_exhaustive_over_every_program_field() {
         p.sub_capability[0].subcommand.as_deref(),
         Some("pull"),
         "sub_capability subcommand mismatch"
+    );
+    assert_eq!(
+        p.conditional_write.len(),
+        1,
+        "conditional_write did not arrive"
+    );
+    assert_eq!(p.conditional_write[0].when_flags, vec!["-c".to_string()]);
+    assert_eq!(
+        p.conditional_write[0].takes_flag.as_deref(),
+        Some("-f"),
     );
 
     // The powershell portion of base's original (unscoped) claim for "p"
@@ -1840,7 +1856,7 @@ fn post_merge_validation_catches_run_dir_flags_missing_from_merged_value_options
     std::fs::write(
         &shipped,
         r#"
-version = 14
+version = 15
 [[program]]
 match = ["tool"]
 value_options = ["-C"]
@@ -1851,7 +1867,7 @@ value_options = ["-C"]
     std::fs::write(
         &mine,
         r#"
-version = 14
+version = 15
 [[program]]
 match = ["tool"]
 run_dir_flags = ["--dir"]
@@ -1884,7 +1900,7 @@ fn post_merge_validation_passes_when_flag_present_in_merged_value_options() {
     std::fs::write(
         &shipped,
         r#"
-version = 14
+version = 15
 [[program]]
 match = ["tool"]
 value_options = ["-C"]
@@ -1894,7 +1910,7 @@ value_options = ["-C"]
     std::fs::write(
         &mine,
         r#"
-version = 14
+version = 15
 [[program]]
 match = ["tool"]
 value_options = ["-C", "--dir"]
@@ -1915,14 +1931,14 @@ run_dir_flags = ["--dir"]
 #[test]
 fn an_operator_can_explicitly_override_min_positional_write_to_zero() {
     let shipped = kb(r#"
-version = 14
+version = 15
 [[program]]
 match = ["tool"]
 writes = "positional"
 min_positional_write = 2
 "#);
     let mine = kb(r#"
-version = 14
+version = 15
 [[program]]
 match = ["tool"]
 min_positional_write = 0
@@ -1935,14 +1951,14 @@ min_positional_write = 0
 #[test]
 fn an_omitted_min_positional_write_preserves_shipped_value() {
     let shipped = kb(r#"
-version = 14
+version = 15
 [[program]]
 match = ["tool"]
 writes = "positional"
 min_positional_write = 2
 "#);
     let mine = kb(r#"
-version = 14
+version = 15
 [[program]]
 match = ["tool"]
 "#);

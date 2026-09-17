@@ -78,7 +78,8 @@
 # exact nested operation recognition.
 # 14 (2026-09-11): host and network capability declarations (capabilities, sub_capability)
 # for structural sandbox demotion (M2.258).
-version = 14
+# 15 (2026-09-17): conditional program write destinations (`conditional_write`) (M2.139).
+version = 15
 
 # ============================================================================
 # FROM YOUR EXISTING POLICY — these are rules your current tool already applies
@@ -1792,6 +1793,11 @@ no_value_options = [
 [[program.here_write]]
 when_flags = ["-x", "--extract", "--get"]
 unless_flags = ["-C", "--directory"]
+
+# Archive creation writes the archive file specified by `-f`/`--file`.
+[[program.conditional_write]]
+when_flags = ["-c", "--create"]
+takes_flags = ["-f", "--file"]
 
 [[program]]
 match = ["unzip"]

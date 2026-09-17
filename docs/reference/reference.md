@@ -176,6 +176,17 @@ through, stop and ask the operator, or refuse it outright.
 - `ask` — Stop and show the operator what was recognised, before it runs.
 - `deny` — Refuse it outright, with no prompt.
 
+### `ConditionalWrite`
+
+A shape that derives an output write destination when specific mode flags are present.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `takes_flag` | string (optional) | (unset) | The flag whose value is the written target (e.g. `"-f"`). |
+| `takes_flags` | array of string | [] | The flags whose value is the written target (e.g. `["-f", "--file"]`). |
+| `unless_flags` | array of string | [] | Flags that suppress write target derivation (e.g. listing or extraction modes). |
+| `when_flags` | array of string | [] | Flags indicating archive creation or output generation mode (e.g. `["-c", "--create"]`). |
+
 ### `EnvName`
 
 An environment-variable name the SHELL ITSELF reads — not data the
@@ -234,6 +245,7 @@ name.
 | `capabilities` | array of string | [] | Host and environment capabilities this program requires, e.g. "network", "daemon", "external_paths". |
 | `case_sensitive_flags` | boolean (optional) | (unset) | Whether `write_flags` must match case exactly.  PowerShell parameter names are case-insensitive, so `-Path` is declared lowercase and matched loosely. Unix flags are NOT: `tar -C` is the destination directory while `tar -c` means create, and matching them loosely would record the token after `-c` as a written path.  `None` means the entry did not say. That differs from `Some(false)` once two files describe the same program: unset means "keep what the other file said", and only an entry that spells it out changes it. |
 | `changes_dir` | string (optional) | (unset) | The dir-change kind: what the walk can KNOW about where the shell goes after this program runs. One of `"no"`, `"stated"`, `"stack"`, `"unstated"` — a closed set, checked in `knowledge::validate`.  `"no"` exists so an operator can RETRACT a shipped claim: without it, a false "this moves the shell" has no operator-side fix.  `None` means the entry did not say. That differs from `Some("no")` once two files describe the same program: unset means "keep what the other file said", and only an entry that spells it out changes it — the same rule `case_sensitive_flags` follows. |
+| `conditional_write` | array of ConditionalWrite | (none) | Shapes in which this program writes an output file conditionally based on mode flags (e.g. creating an archive with `tar -cf <archive>`), written as `[[program.conditional_write]]`. |
 | `dest_dir_flags` | array of string | [] | Options that consume the following token AND that token is the destination the SHELL moves to for everything after this command — sibling of `run_dir_flags` (where THIS command runs) but for where the shell goes next. |
 | `evaluates_input` | string | "" | This program runs text it obtains at execution time, so the thing that actually runs is not in the command vouch was given — unless vouch can prove it IS: a here-document on the same command, consumed and scanned, satisfies the "stdin" claim, because then the code is in the command after all.   "always" — e.g. Invoke-Expression, whatever its argument turns out to be   "stdin"  — a shell with no script and no -c snippet is reading code              from its standard input, as in `curl … \| bash` |
 | `flag_prefix` | array of string | [] | How this program spells flags. cmd.exe uses `/s`, not `-s`; without this its flags read as paths and its paths read as flags, so both the guard rules and the written-path list come out wrong.  A list, because one name can belong to two languages: `del /s` is cmd, `del -Recurse` is the PowerShell alias for Remove-Item. Empty means "-". |

@@ -408,7 +408,9 @@ fn scope_of(languages: &[String]) -> HashSet<String> {
 ///
 /// Host and network capability declarations (`capabilities`, `sub_capability`)
 /// take it to 14 (M2.258).
-pub const KNOWLEDGE_SCHEMA_VERSION: u32 = 14;
+///
+/// Conditional program write destinations (`conditional_write`) take it to 15 (M2.139).
+pub const KNOWLEDGE_SCHEMA_VERSION: u32 = 15;
 
 /// Semantic checks `deny_unknown_fields` cannot express: a `takes` value
 /// outside the closed set, a `run_dir_flags` entry that is not also in
@@ -642,6 +644,20 @@ pub(crate) fn validate(kb: &Knowledge) -> Result<(), String> {
             {
                 return Err(format!(
                     "[[program.here_write]] on {:?}: an entry with no when_flags, unless_flags,                      subcommand or operands claims this program writes where it stands in EVERY                      invocation — name the shape it is true of",
+                    prog.match_names
+                ));
+            }
+        }
+        for cw in &prog.conditional_write {
+            if cw.when_flags.is_empty() {
+                return Err(format!(
+                    "[[program.conditional_write]] on {:?}: `when_flags` cannot be empty — specify the flags under which output is written",
+                    prog.match_names
+                ));
+            }
+            if cw.takes_flag.is_none() && cw.takes_flags.is_empty() {
+                return Err(format!(
+                    "[[program.conditional_write]] on {:?}: must specify `takes_flag` or `takes_flags`",
                     prog.match_names
                 ));
             }
@@ -1710,6 +1726,9 @@ fn overlay(base: &mut Program, mine: &Program) {
     if !mine.here_write.is_empty() {
         base.here_write = mine.here_write.clone();
     }
+    if !mine.conditional_write.is_empty() {
+        base.conditional_write = mine.conditional_write.clone();
+    }
     if mine.remote_dest {
         base.remote_dest = true;
     }
@@ -2329,6 +2348,16 @@ pub(crate) fn validate_merged_knowledge(kb: &Knowledge) -> Result<(), String> {
                     "[[program]] {:?}: wrap_head_flags contains {:?}, which is not in merged value_options {:?}",
                     prog.match_names, f, prog.value_options
                 ));
+            }
+        }
+        for cw in &prog.conditional_write {
+            for f in cw.all_takes_flags() {
+                if !prog.value_options.iter().any(|v| v == f) {
+                    return Err(format!(
+                        "[[program]] {:?}: conditional_write takes flag {:?}, which is not in merged value_options {:?}",
+                        prog.match_names, f, prog.value_options
+                    ));
+                }
             }
         }
     }

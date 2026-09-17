@@ -292,6 +292,11 @@ pub struct Program {
     /// without naming a destination, written as `[[program.here_write]]`.
     #[serde(default)]
     pub here_write: Vec<HereWrite>,
+    /// Shapes in which this program writes an output file conditionally based
+    /// on mode flags (e.g. creating an archive with `tar -cf <archive>`),
+    /// written as `[[program.conditional_write]]`.
+    #[serde(default)]
+    pub conditional_write: Vec<ConditionalWrite>,
     /// This program's destination may be on ANOTHER MACHINE — `scp f
     /// host:d`, `rsync a host:/b`. A `[user@]host:path` destination from
     /// such an entry is not a local file, so the local path rules have
@@ -738,6 +743,40 @@ pub struct HereWrite {
     #[serde(default)]
     pub operands: Option<usize>,
 }
+
+/// A shape that derives an output write destination when specific mode flags are present.
+#[derive(Debug, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConditionalWrite {
+    /// Flags indicating archive creation or output generation mode (e.g. `["-c", "--create"]`).
+    #[serde(default)]
+    pub when_flags: Vec<String>,
+    /// Flags that suppress write target derivation (e.g. listing or extraction modes).
+    #[serde(default)]
+    pub unless_flags: Vec<String>,
+    /// The flag whose value is the written target (e.g. `"-f"`).
+    #[serde(default)]
+    pub takes_flag: Option<String>,
+    /// The flags whose value is the written target (e.g. `["-f", "--file"]`).
+    #[serde(default)]
+    pub takes_flags: Vec<String>,
+}
+
+impl ConditionalWrite {
+    pub fn all_takes_flags(&self) -> Vec<&str> {
+        let mut res = Vec::new();
+        if let Some(ref f) = self.takes_flag {
+            res.push(f.as_str());
+        }
+        for f in &self.takes_flags {
+            if !res.contains(&f.as_str()) {
+                res.push(f.as_str());
+            }
+        }
+        res
+    }
+}
+
 
 /// An environment-variable name the SHELL ITSELF reads — not data the
 /// command happens to be handed, but a name that changes which program a
@@ -5669,6 +5708,117 @@ fn here_write_applies(prog: &Program, cmd: &Cmd, lang: &str, operands: &[&String
     })
 }
 
+fn flag_present(
+    flags: &[String],
+    prog: &Program,
+    cmd: &Cmd,
+    vocab: &crate::flags::Vocab,
+) -> bool {
+    flags.iter().any(|f| {
+        cmd.args.iter().any(|raw| {
+            if matches!(crate::flags::spells(f, raw, vocab), crate::flags::Spell::Yes(_)) {
+                return true;
+            }
+            if matches!(cluster_switch(prog, f, raw), ClusterHit::Yes) {
+                return true;
+            }
+            if cluster_value(prog, f, raw).is_some() {
+                return true;
+            }
+            let s = crate::paths::unquote(raw);
+            if let Some(letter) = bare_short_letter(f) {
+                if is_cluster_vocabulary(prog) && is_short_cluster(s) {
+                    let case_sensitive = prog.case_sensitive_flags.unwrap_or(false);
+                    let letters: Vec<char> = s[1..].chars().collect();
+                    if letters.iter().any(|c| same_letter(*c, letter, case_sensitive)) {
+                        let len = letters.len();
+                        let valid_cluster = letters[..len - 1].iter().all(|c| {
+                            let short = format!("-{c}");
+                            declares(&prog.no_value_options, &short, case_sensitive)
+                        }) && {
+                            let last = format!("-{}", letters[len - 1]);
+                            declares(&prog.no_value_options, &last, case_sensitive)
+                                || declares(&prog.value_options, &last, case_sensitive)
+                        };
+                        if valid_cluster {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        })
+    })
+}
+
+fn extract_flag_value(
+    takes_flags: &[&str],
+    prog: &Program,
+    eff: &[String],
+    vocab: &crate::flags::Vocab,
+) -> Option<String> {
+    for (i, a) in eff.iter().enumerate() {
+        for f in takes_flags {
+            match crate::flags::spells(f, a, vocab) {
+                crate::flags::Spell::Yes(Some(v)) => {
+                    let val = v.strip_prefix('=').unwrap_or(&v);
+                    return Some(val.to_string());
+                }
+                crate::flags::Spell::Yes(None) => {
+                    if let Some(next) = eff.get(i + 1) {
+                        return Some(next.clone());
+                    }
+                }
+                _ => {}
+            }
+            match cluster_value(prog, f, a) {
+                Some(Some(v)) => {
+                    let val = v.strip_prefix('=').unwrap_or(&v);
+                    return Some(val.to_string());
+                }
+                Some(None) => {
+                    if let Some(next) = eff.get(i + 1) {
+                        return Some(next.clone());
+                    }
+                }
+                None => {}
+            }
+        }
+    }
+    None
+}
+
+fn conditional_write_targets(
+    prog: &Program,
+    cmd: &Cmd,
+    _lang: &str,
+    eff: &[String],
+    vocab: &crate::flags::Vocab,
+) -> Option<Vec<String>> {
+    if prog.conditional_write.is_empty() {
+        return None;
+    }
+    let mut matched = false;
+    let mut targets = Vec::new();
+    for cw in &prog.conditional_write {
+        let when_ok = !cw.when_flags.is_empty() && flag_present(&cw.when_flags, prog, cmd, vocab);
+        let unless_ok = cw.unless_flags.is_empty() || !flag_present(&cw.unless_flags, prog, cmd, vocab);
+        if when_ok && unless_ok {
+            matched = true;
+            let takes = cw.all_takes_flags();
+            if let Some(target) = extract_flag_value(&takes, prog, eff, vocab) {
+                targets.push(target);
+            }
+        }
+    }
+    if matched {
+        Some(targets)
+    } else {
+        None
+    }
+}
+
+
 /// Walk the tokens AFTER a matched sub_write subcommand (and, when `then` is
 /// set, after that second word too): consume each `value_options` flag's
 /// value, skip each `no_value_options` flag, collect everything else that
@@ -6258,6 +6408,21 @@ pub fn written_paths_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> WriteTargets {
             push_write_target(&mut out, crate::python::MARKER);
             continue;
         }
+        let abbrev = if prog.case_sensitive_flags.unwrap_or(false) {
+            crate::flags::Abbrev::Refuse
+        } else {
+            crate::flags::Abbrev::Accept
+        };
+        let vocab = crate::flags::vocab_for(prog, abbrev);
+        if let Some(targets) = conditional_write_targets(prog, cmd, lang, &eff, &vocab) {
+            for t in targets {
+                push_write_target(&mut out, &t);
+            }
+            continue;
+        } else if !prog.conditional_write.is_empty() && cmd.by_reference {
+            push_write_target(&mut out, crate::python::MARKER);
+            continue;
+        }
         match prog.writes.as_str() {
             "last_arg" => {
                 let min_pos = prog.min_positional_write.unwrap_or(1);
@@ -6330,12 +6495,6 @@ pub fn written_paths_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> WriteTargets {
             // existing `unknowable` named-ask channel rather than silently
             // matched or silently dropped.
             "named" | "flags_only" => {
-                let abbrev = if prog.case_sensitive_flags.unwrap_or(false) {
-                    crate::flags::Abbrev::Refuse
-                } else {
-                    crate::flags::Abbrev::Accept
-                };
-                let vocab = crate::flags::vocab_for(prog, abbrev);
                 let mut take_next = false;
                 let mut found = false;
                 for a in &eff {

@@ -58,6 +58,45 @@
         }
       ]
     },
+    "ConditionalWrite": {
+      "description": "A shape that derives an output write destination when specific mode flags are present.",
+      "type": "object",
+      "properties": {
+        "takes_flag": {
+          "description": "The flag whose value is the written target (e.g. `\"-f\"`).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "takes_flags": {
+          "description": "The flags whose value is the written target (e.g. `[\"-f\", \"--file\"]`).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "unless_flags": {
+          "description": "Flags that suppress write target derivation (e.g. listing or extraction modes).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "when_flags": {
+          "description": "Flags indicating archive creation or output generation mode (e.g. `[\"-c\", \"--create\"]`).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "EnvName": {
       "description": "An environment-variable name the SHELL ITSELF reads — not data the\ncommand happens to be handed, but a name that changes which program a\nlater word resolves to, or what code the shell runs before the command\non the line (M2.120).\n\nThe distinction this kind exists to make: `LC_ALL=C sort f` sets\nsomething `sort` reads, and vouch's description of `sort` still holds.\n`PATH=<dir> ls` sets something the SHELL reads, and the `ls` that runs\nis whatever sits in that directory — vouch's description of `ls` is then\na description of a program that is not running. Only names listed here\nare read that way; every other assignment stays inert, which is what\nkeeps the ordinary case quiet.",
       "type": "object",
@@ -177,6 +216,13 @@
             "null"
           ],
           "default": null
+        },
+        "conditional_write": {
+          "description": "Shapes in which this program writes an output file conditionally based\non mode flags (e.g. creating an archive with `tar -cf <archive>`),\nwritten as `[[program.conditional_write]]`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ConditionalWrite"
+          }
         },
         "dest_dir_flags": {
           "description": "Options that consume the following token AND that token is the\ndestination the SHELL moves to for everything after this command —\nsibling of `run_dir_flags` (where THIS command runs) but for where the\nshell goes next.",
