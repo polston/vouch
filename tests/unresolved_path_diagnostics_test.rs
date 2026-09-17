@@ -45,11 +45,11 @@ fn single_command_unresolved_variable_attributes_command_and_sources() {
 #[test]
 fn multi_command_chain_attributes_specific_acting_command() {
     let cfg = realistic_config();
-    // mkdir succeeds (it writes /tmp/d), while cp trips the rule with $DEST
+    // mkdir succeeds (it writes C:/tmp/d), while cp trips the rule with $DEST
     let decision = decide_command_at(
         &cfg,
         "bash",
-        r#"mkdir -p /tmp/d && cp a "$DEST""#,
+        r#"mkdir -p C:/tmp/d && cp a "$DEST""#,
         Some(HOME),
         None,
         Some("C:/scratch"),

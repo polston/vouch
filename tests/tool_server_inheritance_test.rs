@@ -92,6 +92,7 @@ language = "bash"
 [[tool]]
 match = ["mcp__custom__write"]
 write_path_field = "dest"
+cwd_from_call = true
 source = "custom writer"
 "#,
     );
@@ -100,12 +101,12 @@ source = "custom writer"
     // Passing "script": "rm -rf /" to mcp__custom__write should NOT trigger delete_recursive
     // because mcp__custom__write declares its own write_path_field and overrides server snippet
     let input = parse_input(
-        r#"{"session_id":"s","cwd":"C:/Users/dev","tool_name":"mcp__custom__write","tool_input":{"dest":"/tmp/safe.txt","script":"rm -rf /"}}"#,
+        r#"{"session_id":"s","cwd":"C:/Users/dev","tool_name":"mcp__custom__write","tool_input":{"dest":"notes/safe.txt","script":"rm -rf /"}}"#,
     )
     .expect("parses");
 
     let outcome = decide(&cfg, &kb, HOME, &input);
-    // Dest is under /tmp (allowed in realistic_config), so write allows and snippet is not parsed
+    // Dest is under C:/Users/dev (allowed in realistic_config), so write allows and snippet is not parsed
     assert!(
         matches!(outcome.decision, Decision::Allow(_)),
         "exact tool with its own declarations overrides server snippet, got: {:?}",
