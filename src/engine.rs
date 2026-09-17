@@ -1478,7 +1478,7 @@ fn judge_once(
         // loop below can key `unresolved_path` to the occurrence that
         // produced this target rather than to the whole line's host
         // language (M2.79).
-        let mut targets: Vec<(String, Option<String>, By, &str)> = Vec::new();
+        let mut targets: Vec<TargetEntry<'_>> = Vec::new();
         let mut unplaced: Vec<Unplaced<'_>> = Vec::new();
 
         // Which `[[write.scope]]` rule claims a program's write, if any. One
@@ -1575,7 +1575,24 @@ fn judge_once(
                     Placed::At(p) => {
                         if !pushed.contains(&p) {
                             pushed.push(p.clone());
-                            targets.push((p, None, None, rlang));
+                            let (owner_head, owner_prefix_assigns, owner_env_assigns) = if let Some(idx) = owner {
+                                if let Some(cmd) = all_cmds.get(idx) {
+                                    (Some(crate::guards::base(&cmd.head)), Some(cmd.prefix_assigns.clone()), Some(cmd.env_assigns.clone()))
+                                } else {
+                                    (None, None, None)
+                                }
+                            } else {
+                                (None, None, None)
+                            };
+                            targets.push(TargetEntry {
+                                target: p,
+                                provenance: None,
+                                by: None,
+                                clang: rlang,
+                                cmd_head: owner_head,
+                                prefix_assigns: owner_prefix_assigns,
+                                env_assigns: owner_env_assigns,
+                            });
                         }
                     }
                     Placed::Nowhere(cause) => {
@@ -1696,7 +1713,15 @@ fn judge_once(
                         CdState::Known(d) => {
                             if !pushed.contains(d) {
                                 pushed.push(d.clone());
-                                targets.push((d.clone(), provenance.clone(), by.clone(), clang));
+                                targets.push(TargetEntry {
+                                    target: d.clone(),
+                                    provenance: provenance.clone(),
+                                    by: by.clone(),
+                                    clang,
+                                    cmd_head: Some(crate::guards::base(&c.head)),
+                                    prefix_assigns: Some(c.prefix_assigns.clone()),
+                                    env_assigns: Some(c.env_assigns.clone()),
+                                });
                             }
                         }
                         CdState::Unknown(cause) => unplaced.push(Unplaced {
@@ -1741,12 +1766,15 @@ fn judge_once(
                         Placed::At(t) => {
                             if !pushed.contains(&t) {
                                 pushed.push(t.clone());
-                                targets.push((
-                                    t,
-                                    if is_relative(&p) { provenance.clone() } else { None },
-                                    by.clone(),
+                                targets.push(TargetEntry {
+                                    target: t,
+                                    provenance: if is_relative(&p) { provenance.clone() } else { None },
+                                    by: by.clone(),
                                     clang,
-                                ));
+                                    cmd_head: Some(crate::guards::base(&c.head)),
+                                    prefix_assigns: Some(c.prefix_assigns.clone()),
+                                    env_assigns: Some(c.env_assigns.clone()),
+                                });
                             }
                         }
                         Placed::Nowhere(cause) => {
@@ -1818,7 +1846,14 @@ fn judge_once(
             }
         }
 
-        for (t, provenance, by, clang) in targets {
+        for entry in targets {
+            let t = entry.target;
+            let provenance = entry.provenance;
+            let by = entry.by;
+            let clang = entry.clang;
+            let cmd_head = entry.cmd_head;
+            let prefix_assigns = entry.prefix_assigns;
+            let env_assigns = entry.env_assigns;
             if t == "/dev/null" || t.eq_ignore_ascii_case("nul") {
                 continue;
             }
@@ -1880,10 +1915,58 @@ fn judge_once(
                             ),
                         )
                     }
-                    None => (
-                        declared,
-                        format!("{}\n  the path: {t}", construct_reason(clang, "unresolved_path")),
-                    ),
+                    None => {
+                        let unres_vars = find_unresolved_variables(&t);
+                        let var_display = if unres_vars.is_empty() {
+                            t.clone()
+                        } else {
+                            format!("${}", unres_vars.join(", $"))
+                        };
+                        let head_str = cmd_head.as_deref().unwrap_or("command");
+
+                        let intra_cmd_desc = if let Some(ref pa) = prefix_assigns {
+                            if unres_vars.iter().any(|v| pa.contains(v)) {
+                                "found".to_string()
+                            } else {
+                                "None".to_string()
+                            }
+                        } else {
+                            "None".to_string()
+                        };
+
+                        let preceding_desc = if let Some(ref ea) = env_assigns {
+                            let pa_set: std::collections::HashSet<_> = prefix_assigns.as_ref().map(|v| v.iter().collect()).unwrap_or_default();
+                            if unres_vars.iter().any(|v| ea.contains_key(v) && !pa_set.contains(v)) {
+                                "found".to_string()
+                            } else {
+                                "None".to_string()
+                            }
+                        } else {
+                            "None".to_string()
+                        };
+
+                        let env_desc = if unres_vars.iter().any(|v| std::env::var(v).is_ok()) {
+                            "found".to_string()
+                        } else {
+                            "None".to_string()
+                        };
+
+                        let reason = format!(
+                            "vouch stopped on: unresolved_path\n  \
+                             written path for '{head_str}' contains unresolvable variable '{var_display}'\n  \
+                             attempted resolution sources:\n    \
+                             - intra-command assignments: {intra_cmd_desc}\n    \
+                             - intra-line preceding assignments: {preceding_desc}\n    \
+                             - environment variables: {env_desc}\n  \
+                             what that means: {}\n  \
+                             to allow this permanently, set lang.{clang}.constructs.unresolved_path = \"allow\"\n  \
+                             that setting applies to EVERY command using this, from now on\n  \
+                             guards still apply — allowing this does not allow what a command does\n  \
+                             the path: {t}",
+                            describe("unresolved_path")
+                        );
+                        (declared, reason)
+                    }
                 };
                 if worst.as_ref().map_or(true, |(w, _)| rank(a) > rank(*w)) {
                     worst = Some((a, reason));
@@ -6541,6 +6624,66 @@ fn join(dir: &str, rel: &str) -> String {
 /// exactly the same triple and are matched against the same `[[write.scope]]`
 /// rule: two spellings of it could only drift apart.
 type By = Option<(String, crate::guards::VerbWord, crate::guards::SecondWord)>;
+
+struct TargetEntry<'a> {
+    target: String,
+    provenance: Option<String>,
+    by: By,
+    clang: &'a str,
+    cmd_head: Option<String>,
+    prefix_assigns: Option<Vec<String>>,
+    env_assigns: Option<std::collections::HashMap<String, Option<String>>>,
+}
+
+fn find_unresolved_variables(t: &str) -> Vec<String> {
+    let mut vars = Vec::new();
+    let chars: Vec<char> = t.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '$' {
+            i += 1;
+            if i < chars.len() && chars[i] == '{' {
+                i += 1;
+                let start = i;
+                while i < chars.len() && chars[i] != '}' {
+                    i += 1;
+                }
+                let name: String = chars[start..i].iter().collect();
+                if !name.is_empty() && !vars.contains(&name) {
+                    vars.push(name);
+                }
+                if i < chars.len() && chars[i] == '}' {
+                    i += 1;
+                }
+            } else {
+                let start = i;
+                while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+                    i += 1;
+                }
+                let name: String = chars[start..i].iter().collect();
+                if !name.is_empty() && !vars.contains(&name) {
+                    vars.push(name);
+                }
+            }
+        } else if chars[i] == '%' && cfg!(windows) {
+            i += 1;
+            let start = i;
+            while i < chars.len() && chars[i] != '%' {
+                i += 1;
+            }
+            let name: String = chars[start..i].iter().collect();
+            if !name.is_empty() && !vars.contains(&name) {
+                vars.push(name);
+            }
+            if i < chars.len() && chars[i] == '%' {
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    vars
+}
 
 enum ScopeFor<'a> {
     Rule(&'a crate::config::WriteScope),

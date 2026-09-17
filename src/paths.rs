@@ -456,20 +456,43 @@ fn collapse(s: &str) -> String {
 /// (the tail is empty). When NO ancestor exists at all — not even a real
 /// root — today's fallback holds: the input is returned unchanged.
 pub fn resolve_links(p: &str) -> String {
-    let components: Vec<std::path::Component> = std::path::Path::new(p).components().collect();
+    resolve_links_with_base(p, None)
+}
+
+/// Resolve links along a path, canonicalizing to the deepest existing ancestor.
+/// When `p` is relative and `base` is provided, resolves against `base`.
+/// When `p` is relative and `base` is None, returns `p` unchanged to avoid
+/// borrowing the test runner process's working directory (M2.47).
+pub fn resolve_links_with_base(p: &str, base: Option<&std::path::Path>) -> String {
+    let path = std::path::Path::new(p);
+    if path.is_relative() {
+        if let Some(b) = base {
+            let combined = b.join(path);
+            return resolve_links_absolute(&combined);
+        } else {
+            return p.to_string();
+        }
+    }
+    resolve_links_absolute(path)
+}
+
+fn resolve_links_absolute(path: &std::path::Path) -> String {
+    let components: Vec<std::path::Component> = path.components().collect();
     if components.is_empty() {
-        return p.to_string();
+        return path.to_string_lossy().to_string();
     }
 
     // The root itself — the drive prefix and/or root separator on Windows,
     // just the root separator on POSIX — is the floor: popping past it
-    // leaves no path to canonicalize, only a bare drive letter with
-    // different (current-directory-relative) meaning.
+    // leaves no path to canonicalize.
     let root_len = components
         .iter()
         .take_while(|c| matches!(c, std::path::Component::Prefix(_) | std::path::Component::RootDir))
         .count();
-    let floor = root_len.max(1);
+    if root_len == 0 {
+        return path.to_string_lossy().to_string();
+    }
+    let floor = root_len;
 
     let mut tail: Vec<String> = Vec::new();
     let mut n = components.len();
@@ -494,7 +517,7 @@ pub fn resolve_links(p: &str) -> String {
         tail.push(components[n].as_os_str().to_string_lossy().to_string());
     }
 
-    p.to_string()
+    path.to_string_lossy().replace('\\', "/")
 }
 
 /// Why a path could not become existing-only evidence for a recognition
@@ -972,5 +995,25 @@ mod tests {
         let input = format!("{}/newfile.txt", fx.link.to_string_lossy().replace('\\', "/"));
         let got = resolve_links(&input);
         assert_eq!(got, format!("{real_target}/newfile.txt"));
+    }
+
+    #[test]
+    fn resolve_links_on_a_relative_path_does_not_canonicalize_against_process_cwd() {
+        // Even if a file exists in the current directory, a relative path without base returns unchanged (M2.47).
+        let rel = "Cargo.toml";
+        assert!(std::path::Path::new(rel).exists(), "Cargo.toml must exist in repo cwd for this test premise");
+        let got = resolve_links(rel);
+        assert_eq!(got, rel, "relative path without base must not borrow runner cwd");
+    }
+
+    #[test]
+    fn resolve_links_with_base_on_a_relative_path_resolves_against_base() {
+        let dir = std::env::temp_dir();
+        let real_dir = std::fs::canonicalize(&dir).expect("temp dir canonicalizes");
+        let real_dir = real_dir.to_string_lossy().replace('\\', "/");
+        let real_dir = real_dir.strip_prefix("//?/").unwrap_or(&real_dir).to_string();
+
+        let got = resolve_links_with_base("some/sub/file.txt", Some(&dir));
+        assert_eq!(got, format!("{real_dir}/some/sub/file.txt"));
     }
 }

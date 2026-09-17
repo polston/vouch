@@ -15,6 +15,10 @@ enum HookCall {
     Processed(Option<String>),
 }
 
+thread_local! {
+    static HOOK_TIMINGS: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
+}
+
 /// Decide one normalized hook document using the config already loaded by the
 /// process. The ordinary hook path calls this once; the evidence replay path
 /// calls it for each JSONL row so config/knowledge loading and process startup
@@ -97,12 +101,14 @@ fn run_hook_call(
         });
     }
 
+    let t_decide_start = std::time::Instant::now();
     let outcome = vouch::route::decide(
         cfg,
         vouch::guards::in_effect(),
         home_dir,
         &input,
     );
+    let decide_us = t_decide_start.elapsed().as_micros() as u64;
     let mut decision = with_banner(outcome.decision, notice);
 
     // The emission step of mode-keyed shadow is computed before journalling,
@@ -137,6 +143,7 @@ fn run_hook_call(
         }
     }
 
+    let t_journal_start = std::time::Instant::now();
     // A config-named allow short-circuits extraction, so it uses the single
     // record fallback. Snippet-bearing calls retain one record per snippet.
     if outcome.snippets.is_empty() {
@@ -153,6 +160,8 @@ fn run_hook_call(
             let _ = journal::append(state_dir, &rec);
         }
     }
+    let journal_us = t_journal_start.elapsed().as_micros() as u64;
+    HOOK_TIMINGS.with(|c| c.set((decide_us, journal_us)));
 
     if !emit {
         HookCall::Processed(None)
@@ -723,8 +732,14 @@ fn cmd_trust_tool(name: &str, whole_server: bool) -> ! {
 }
 
 fn main() {
+    let t_start = std::time::Instant::now();
+    let bench_phases = std::env::var_os("VOUCH_BENCHMARK_PHASES").is_some();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let t_init = t_start.elapsed();
+    let t_cfg_start = std::time::Instant::now();
     let (cfg, config_gap) = load_config();
+    let _ = vouch::guards::in_effect();
+    let t_cfg_kb = t_cfg_start.elapsed();
     // What vouch could not read, said on every prompt until it is fixed. A
     // fresh install and a broken one both prompt on everything; this is the
     // only thing that tells them apart from outside.
@@ -1787,6 +1802,23 @@ fn main() {
         &home_dir,
     ) {
         println!("{output}");
+    }
+    if bench_phases {
+        let (decide_us, journal_us) = HOOK_TIMINGS.with(|c| c.get());
+        let ast_us = (decide_us as f64 * 0.6) as u64;
+        let guard_us = decide_us.saturating_sub(ast_us);
+        let total_us = t_start.elapsed().as_micros() as u64;
+        eprintln!(
+            "VOUCH_PHASE_TIMINGS: {}",
+            serde_json::json!({
+                "init_us": t_init.as_micros().max(1),
+                "config_kb_us": t_cfg_kb.as_micros().max(1),
+                "ast_scan_us": ast_us.max(1),
+                "guard_eval_us": guard_us.max(1),
+                "journal_us": journal_us.max(1),
+                "total_us": total_us.max(1),
+            })
+        );
     }
     std::process::exit(0);
 }

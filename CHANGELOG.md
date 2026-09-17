@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.35.0 (2026-09-17)
+
+
+### Features
+
+* attribute acting command and attempted sources in unresolved path diagnostics
+* benchmark per-tool-call overhead across lifecycle phases
+* inherit tool server snippet declarations in bare exact entries
+
+
+### Bug Fixes
+
+* isolate relative target resolution in replay against test runner cwd
+
 ## 0.34.0 (2026-09-17)
 
 

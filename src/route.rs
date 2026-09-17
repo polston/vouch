@@ -161,10 +161,36 @@ fn decide_tool(
     //    `ConfigGovernsOthers`. Without that exemption, naming one MCP tool in
     //    config would flip every declared tool — every bash command on the
     //    machine, once Task 8 makes `Bash` an entry — to ask.
-    let declared = entry.filter(|e| {
-        e.snippet.is_some() || e.write_path_field.is_some() || e.write_path.is_some()
-    });
-    let Some(declared) = declared else {
+    let declared = match (entry, server) {
+        (Some(e), Some(s))
+            if e.snippet.is_none() && e.write_path_field.is_none() && e.write_path.is_none() =>
+        {
+            if s.snippet.is_some() || s.write_path_field.is_some() || s.write_path.is_some() {
+                let mut inherited = s.clone();
+                if e.cwd_from_call.is_some() {
+                    inherited.cwd_from_call = e.cwd_from_call;
+                }
+                if e.read_path_field.is_some() {
+                    inherited.read_path_field = e.read_path_field.clone();
+                }
+                Some(inherited)
+            } else {
+                None
+            }
+        }
+        (Some(e), _)
+            if e.snippet.is_some() || e.write_path_field.is_some() || e.write_path.is_some() =>
+        {
+            Some(e.clone())
+        }
+        (None, Some(s))
+            if s.snippet.is_some() || s.write_path_field.is_some() || s.write_path.is_some() =>
+        {
+            Some(s.clone())
+        }
+        _ => None,
+    };
+    let Some(ref declared) = declared else {
         let mut decision = undeclared(cfg, entry, tool, action, why);
         if let Some(target) = extract_read_target(entry, &input.tool_input) {
             let cwd = if entry.is_some_and(|e| e.cwd_from_call == Some(true)) {
