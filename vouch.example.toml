@@ -289,6 +289,22 @@ callable_argument = "ask"
 # so vouch will not read it as the name's original meaning.
 rebound_name = "ask"
 
+[lang.javascript]
+# Verdict when no construct objected.
+default = "allow"
+
+[lang.javascript.constructs]
+# A call no entry describes, e.g. javascript:frobnicate(...).
+unmodeled_command = "ask"
+# Dynamic evaluation via eval(...) or new Function(...).
+dynamic_call = "ask"
+# The snippet's parser could not read it at all.
+parse_failure = "ask"
+# A written path that stayed unresolved.
+unresolved_path = "ask"
+# A wrap arm located a snippet in a language vouch has no scanner for.
+unreadable_language = "ask"
+
 [run]
 # trust zone: any command run from under one of these trees is recognised,
 # whatever it is — recognition only (§2 of CLAUDE.md). Guards, the write

@@ -1470,7 +1470,7 @@ writes_via_handle = "file"
 # read asks through `unreadable_language`, keyed to the snippet's own language,
 # so an operator silencing awk noise must not be silencing javascript too.
 [[program]]
-match = ["node", "deno", "bun"]
+match = ["node", "bun"]
 wraps = "after_flag"
 wrap_flags = ["-e", "--eval"]
 wrap_lang = "javascript"
@@ -1596,6 +1596,61 @@ case_sensitive_flags = true
 match = ["deno"]
 wraps = "arg_1"
 wrap_lang = "javascript"
+
+# Pure in-memory / console builtins for JavaScript: verified in Node.js
+[[program]]
+match = [
+  "javascript:console.log", "javascript:console.error", "javascript:console.warn",
+  "javascript:console.info", "javascript:console.dir", "javascript:console.debug",
+  "javascript:console.trace", "javascript:console.table", "javascript:console.time",
+  "javascript:console.timeEnd", "javascript:process.exit", "javascript:process.cwd",
+  "javascript:JSON.stringify", "javascript:JSON.parse",
+  "javascript:Math.floor", "javascript:Math.ceil", "javascript:Math.round",
+  "javascript:Math.max", "javascript:Math.min", "javascript:Math.abs",
+]
+
+# child_process.exec / execSync: shell commands wrapped under bash
+[[program]]
+match = [
+  "javascript:child_process.exec", "javascript:child_process.execSync",
+  "javascript:exec", "javascript:execSync",
+]
+wraps = "arg_0"
+wrap_lang = "bash"
+
+# child_process.spawn / spawnSync / execFile / execFileSync: argv vector wrapped under bash
+[[program]]
+match = [
+  "javascript:child_process.spawn", "javascript:child_process.spawnSync",
+  "javascript:spawn", "javascript:spawnSync",
+  "javascript:child_process.execFile", "javascript:child_process.execFileSync",
+  "javascript:execFile", "javascript:execFileSync",
+]
+wraps = "argv_0"
+wrap_lang = "bash"
+
+# fs file writes: writes = "arg_0"
+[[program]]
+match = [
+  "javascript:fs.writeFileSync", "javascript:fs.writeFile",
+  "javascript:fs.appendFileSync", "javascript:fs.appendFile",
+  "javascript:writeFileSync", "javascript:writeFile",
+  "javascript:appendFileSync", "javascript:appendFile",
+  "javascript:fs.mkdirSync", "javascript:fs.mkdir",
+  "javascript:mkdirSync", "javascript:mkdir",
+  "javascript:fs.rmdirSync", "javascript:rmdirSync",
+  "javascript:fs.unlinkSync", "javascript:unlinkSync",
+]
+writes = "arg_0"
+
+# fs.rmSync: writes = "arg_0"
+[[program]]
+match = ["javascript:fs.rmSync", "javascript:rmSync"]
+writes = "arg_0"
+
+# eval / Function dynamic execution
+[[program]]
+match = ["javascript:eval", "javascript:Function"]
 
 # `Start-Process powershell -ArgumentList "-Command","…"` is one more shape of
 # one shell invoking another. The program is the first positional argument.

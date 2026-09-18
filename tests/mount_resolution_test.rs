@@ -168,3 +168,28 @@ allow_paths = ["C:/Users/dev/AppData/Local/Temp/**"]
     assert!(matches!(d1, vouch::protocol::Decision::Allow(_)));
     assert_eq!(d1, d2);
 }
+
+#[test]
+fn mount_entry_strips_unc_prefix() {
+    let entry = MountEntry::new("/tmp", r"//?/C:/Users/dev/AppData/Local/Temp");
+    assert_eq!(entry.canonical, "C:/Users/dev/AppData/Local/Temp");
+
+    let entry_bs = MountEntry::new("/tmp", r"\\?\C:\Users\dev\AppData\Local\Temp");
+    assert_eq!(entry_bs.canonical, "C:/Users/dev/AppData/Local/Temp");
+}
+
+#[test]
+fn canonicalize_mount_target_strips_unc_and_normalizes() {
+    use vouch::paths::canonicalize_mount_target;
+
+    // A nonexistent path falls back to forward-slash normalized string
+    let fallback = canonicalize_mount_target(r"C:\Nonexistent\Mount\Target\Path");
+    assert_eq!(fallback, "C:/Nonexistent/Mount/Target/Path");
+
+    // An existing path canonicalizes without UNC prefix
+    let cwd = std::env::current_dir().expect("cwd");
+    let canon = canonicalize_mount_target(&cwd.to_string_lossy());
+    assert!(!canon.starts_with("//?/"), "UNC prefix must be stripped: {canon}");
+    assert!(!canon.starts_with(r"\\?\"), "UNC prefix must be stripped: {canon}");
+    assert!(!canon.contains('\\'), "must use forward slashes: {canon}");
+}

@@ -215,6 +215,12 @@ impl MountEntry {
     pub fn new(alias: &str, canonical: &str) -> Self {
         let clean_alias = alias.replace('\\', "/").trim_end_matches('/').to_string();
         let mut clean_canon = canonical.replace('\\', "/").trim_end_matches('/').to_string();
+        if let Some(stripped) = clean_canon.strip_prefix("//?Root/") {
+            clean_canon = stripped.to_string();
+        }
+        if let Some(stripped) = clean_canon.strip_prefix("//?/") {
+            clean_canon = stripped.to_string();
+        }
         if clean_canon.len() >= 2 && clean_canon.as_bytes()[1] == b':' {
             clean_canon = format!("{}{}", clean_canon[..1].to_uppercase(), &clean_canon[1..]);
         }
@@ -222,6 +228,25 @@ impl MountEntry {
             alias: clean_alias,
             canonical: clean_canon,
         }
+    }
+}
+
+/// Canonicalizes a mount target path if it exists on disk, stripping UNC prefixes
+/// and normalizing separators. If canonicalization fails (e.g. nonexistent directory),
+/// returns the raw path with backslashes converted to forward slashes.
+pub fn canonicalize_mount_target(raw: &str) -> String {
+    let clean = raw.trim();
+    if let Ok(c) = std::fs::canonicalize(clean) {
+        let mut s = c.to_string_lossy().replace('\\', "/");
+        if let Some(stripped) = s.strip_prefix("//?Root/") {
+            s = stripped.to_string();
+        }
+        if let Some(stripped) = s.strip_prefix("//?/") {
+            s = stripped.to_string();
+        }
+        s.trim_end_matches('/').to_string()
+    } else {
+        clean.replace('\\', "/").trim_end_matches('/').to_string()
     }
 }
 
@@ -291,14 +316,14 @@ impl MountTable {
             }
         }
         if let Ok(temp) = std::env::var("VOUCH_TEMP_DIR") {
-            table.add("/tmp", temp.trim());
+            table.add("/tmp", &canonicalize_mount_target(&temp));
         }
 
         // 2. Windows MSYS/Git Bash temp directory mapping
         #[cfg(windows)]
         {
             if let Ok(temp) = std::env::var("TEMP").or_else(|_| std::env::var("TMP")) {
-                table.add("/tmp", &temp);
+                table.add("/tmp", &canonicalize_mount_target(&temp));
             }
         }
 

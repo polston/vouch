@@ -3170,34 +3170,36 @@ fn judge_once(
             // entry already covers somewhere else: the two get different
             // advice, and giving the second the first's advice writes a
             // colliding entry that refuses the whole my-knowledge file.
-            let mut fresh: Vec<&str> = Vec::new();
+            let mut fresh: Vec<String> = Vec::new();
+            let mut seen_canonical: std::collections::HashSet<String> = std::collections::HashSet::new();
             for it in &items {
                 if !matches!(it.place, PlaceAnswer::Scoped { .. })
                     && matches!(it.program, ProgramTrustAnswer::NoRelevantRule)
-                    && !fresh.contains(&it.shown.as_str())
                 {
-                    fresh.push(&it.shown);
+                    let canonical = crate::guards::base_name(&it.shown);
+                    if seen_canonical.insert(canonical) {
+                        fresh.push(it.shown.clone());
+                    }
                 }
             }
-            let lines = items
-                .iter()
-                .filter(|it| {
-                    !matches!(it.place, PlaceAnswer::Scoped { .. })
-                        && matches!(it.program, ProgramTrustAnswer::NoRelevantRule)
-                })
-                .map(|it| {
-                    // Only when it differs from the language of the line the
-                    // operator typed: otherwise every prompt would carry a
-                    // word that says nothing.
-                    let where_written = if it.lang == lang {
-                        String::new()
-                    } else {
-                        format!(" (written in {})", it.lang)
-                    };
-                    format!("    {} — {}{where_written}", it.shown, it.desc)
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
+            let mut seen_line_keys: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+            let mut item_lines: Vec<String> = Vec::new();
+            for it in &items {
+                if !matches!(it.place, PlaceAnswer::Scoped { .. })
+                    && matches!(it.program, ProgramTrustAnswer::NoRelevantRule)
+                {
+                    let canonical = crate::guards::base_name(&it.shown);
+                    if seen_line_keys.insert((canonical, it.lang.clone())) {
+                        let where_written = if it.lang == lang {
+                            String::new()
+                        } else {
+                            format!(" (written in {})", it.lang)
+                        };
+                        item_lines.push(format!("    {} — {}{where_written}", it.shown, it.desc));
+                    }
+                }
+            }
+            let lines = item_lines.join("\n");
             let them = if fresh.len() == 1 { "it" } else { "them" };
             // Every language actually holding the prompt open gets named, or a
             // mixed-language line would print one off-switch that turns off
@@ -3212,25 +3214,9 @@ fn judge_once(
             if !fresh.is_empty() {
                 parts.push(format!("no description of: {}", fresh.join(", ")));
                 parts.push(format!("what that means: vouch has no entry that covers {them}"));
-                // The old text quoted a stale 93.8% and then steered toward
-                // switching the check off, which is the deny-list talking: it
-                // made "vouch has never heard of this" sound like a reason to
-                // stop asking. It also said to edit knowledge.toml by hand,
-                // which was doubly wrong — that file is compiled in, and the
-                // user's own file was not being read at all.
-                //
-                // It then printed `vouch trust {names joined by spaces}` — a
-                // command that, four measured ways, did something other than
-                // what the prompt was about (M2.12). A printed command cannot
-                // say what it will trust; these lines can, and the vouch-trust
-                // skill does the checked version: propose, show, write on
-                // accept, prove it fired.
-                parts.push(format!(
-                    "to recognise one, use the vouch-trust skill — it proposes the narrowest \
-                     entry, shows exactly what that entry would trust, writes it only on your \
-                     accept (it drives `vouch trust`, whose usage `vouch trust` alone prints), \
-                     and proves it fires. The narrowest entries here:\n{lines}"
-                ));
+                if !lines.is_empty() {
+                    parts.push(format!("the narrowest entries here:\n{lines}"));
+                }
             }
             for it in &items {
                 if let Some(reason) = program_trust_miss_reason(&it.program) {
@@ -3349,10 +3335,24 @@ fn judge_once(
                     );
                 }
             }
-            parts.push(format!(
-                "to stop checking for unknown programs entirely, set {settings} — that allows \
-                 every program vouch has never heard of, not just this one"
-            ));
+            let divider_and_remedy = if !fresh.is_empty() {
+                format!(
+                    "---\n  \
+                     to recognise one, use the vouch-trust skill — it proposes the narrowest \
+                     entry, shows exactly what that entry would trust, writes it only on your \
+                     accept (it drives `vouch trust`, whose usage `vouch trust` alone prints), \
+                     and proves it fires\n  \
+                     to stop checking for unknown programs entirely, set {settings} — that allows \
+                     every program vouch has never heard of, not just this one"
+                )
+            } else {
+                format!(
+                    "---\n  \
+                     to stop checking for unknown programs entirely, set {settings} — that allows \
+                     every program vouch has never heard of, not just this one"
+                )
+            };
+            parts.push(divider_and_remedy);
             worst = Some((a, parts.join("\n  ")));
         }
     }

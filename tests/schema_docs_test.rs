@@ -495,7 +495,11 @@ fn the_current_document_claim_check_distinguishes_registered_languages() {
         false_scanner_claims(["Python has no scanner."]),
         vec!["python"]
     );
-    assert!(false_scanner_claims(["JavaScript has no scanner."]).is_empty());
+    assert_eq!(
+        false_scanner_claims(["JavaScript has no scanner."]),
+        vec!["javascript"]
+    );
+    assert!(false_scanner_claims(["Ruby has no scanner."]).is_empty());
 }
 
 /// The version lives in five published fields. release-please writes all five in

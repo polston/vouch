@@ -639,12 +639,12 @@ fn host_allows_plus(snippet_lang_table: &str) -> vouch::config::Config {
 #[test]
 fn a_javascript_snippet_names_javascripts_own_setting() {
     let cfg = host_allows_plus(
-        "[lang.javascript]\ndefault = \"allow\"\n\
-         [lang.javascript.constructs]\nunreadable_language = \"allow\"\n",
+        "[lang.javascript]\ndefault = \"ask\"\n\
+         [lang.javascript.constructs]\nparse_failure = \"allow\"\n",
     );
-    match decide_command_in(&cfg, "bash", r#"node -e "console.log(1)""#, Some("C:/Users/dev"), None) {
+    match decide_command_in(&cfg, "bash", r#"node -e "broken(=""#, Some("C:/Users/dev"), None) {
         Decision::Allow(r) => assert!(
-            r.contains("lang.javascript.constructs.unreadable_language"),
+            r.contains("lang.javascript.constructs.parse_failure"),
             "allowed for the wrong reason: {r}"
         ),
         other => panic!("expected Allow keyed to javascript, got {other:?}"),
@@ -686,7 +686,7 @@ fn a_perl_one_liner_names_perls_own_setting() {
 }
 
 /// The other direction, and the one that proves the split is real rather than
-/// three new names for one blanket: allowing awk does NOT allow javascript.
+/// three new names for one blanket: allowing awk does NOT allow perl.
 /// Before this changeset both named `lang.opaque` and this allowed.
 #[test]
 fn allowing_one_snippet_language_does_not_silence_another() {
@@ -694,12 +694,12 @@ fn allowing_one_snippet_language_does_not_silence_another() {
         "[lang.awk]\ndefault = \"allow\"\n\
          [lang.awk.constructs]\nunreadable_language = \"allow\"\n",
     );
-    match decide_command_in(&cfg, "bash", r#"node -e "console.log(1)""#, Some("C:/Users/dev"), None) {
+    match decide_command_in(&cfg, "bash", r#"perl -e 'print 1'"#, Some("C:/Users/dev"), None) {
         Decision::Ask(r) => assert!(
-            r.contains("lang.javascript.constructs.unreadable_language"),
+            r.contains("lang.perl.constructs.unreadable_language"),
             "named the wrong language's setting: {r}"
         ),
-        other => panic!("awk's setting silenced a javascript snippet: {other:?}"),
+        other => panic!("awk's setting silenced a perl snippet: {other:?}"),
     }
 }
 

@@ -668,6 +668,10 @@ fn python_scanner() -> Box<dyn Scanner> {
     Box::new(crate::python::Python)
 }
 
+fn javascript_scanner() -> Box<dyn Scanner> {
+    Box::new(crate::javascript::JavaScript)
+}
+
 /// The one registration seam for scanner-backed languages.
 ///
 /// Runtime dispatch and every exhaustive consumer enumerate this table, so
@@ -685,6 +689,10 @@ const SCANNERS: &[ScannerRegistration] = &[
     ScannerRegistration {
         lang: "python",
         construct: python_scanner,
+    },
+    ScannerRegistration {
+        lang: "javascript",
+        construct: javascript_scanner,
     },
 ];
 

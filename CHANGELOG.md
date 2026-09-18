@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.36.0 (2026-09-18)
+
+
+### Features
+
+* inline JavaScript snippet scanner for node, bun, and deno inline evaluation
+* literal loop variable enumeration in compound shell commands
+
+
+### Bug Fixes
+
+* deduplicate unknown command heads case-insensitively in unmodeled command prompts
+* reconcile Deno CLI inline evaluation knowledge claims
+* same-command variable assignment resolution in guard prompt target display
+* validate shipped knowledge fixture schema versions against drift
+* Windows temp mount target canonicalization resolving 8.3 aliases
+
 ## 0.35.0 (2026-09-17)
 
 

@@ -5161,10 +5161,11 @@ pub fn expand_wrappers_forking(
                         let arg_idx = s.strip_prefix("arg_").and_then(|n| n.parse::<usize>().ok());
                         match arg_idx.and_then(|i| cmd.args.get(i).map(|v| (i, v))) {
                             Some((i, v)) if !cmd.unread_args.contains(&i) && !is_unresolved_marker(v) => {
+                                let unquoted = crate::paths::unquote_snippet(v);
                                 let (scan, lang) = scan_wrap_snippet(
                                     &cmd.head,
                                     &prog.wrap_lang,
-                                    v,
+                                    &unquoted,
                                     &mut out.srcs,
                                     &mut out.failures,
                                     &mut out.constructs,

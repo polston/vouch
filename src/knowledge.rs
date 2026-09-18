@@ -266,7 +266,7 @@ const PROGRAM_LANGUAGE_SCOPES: &[&str] = &["bash", "powershell"];
 /// (M2.242). `ruby` is deliberately absent: zero corpus occurrences, so naming
 /// it would be a claim with nothing behind it, and `opaque` has to keep meaning
 /// something.
-const UNSCANNED_SNIPPET_LANGUAGES: &[&str] = &["javascript", "awk", "perl"];
+const UNSCANNED_SNIPPET_LANGUAGES: &[&str] = &["awk", "perl"];
 
 /// Every recognised snippet language, in stable diagnostic order.
 pub fn snippet_languages() -> impl Iterator<Item = &'static str> + Clone {

@@ -188,13 +188,12 @@ fn the_unmodeled_prompt_describes_a_path_head_by_its_bare_name() {
 
 #[test]
 fn an_opaque_snippet_still_gets_search_only() {
-    // INVERTED (§2.2 item 1, M2.125/§5.2): `node -e` stays opaque — Task 10
-    // does not touch that entry, only how `scan_snippet` looks languages up
-    // — but opaque no longer means "allow clean text". EVERY inline opaque
-    // program asks now, including this harmless one: vouch cannot tell a
-    // printing `console.log(1)` from a writing one without a scanner, so
-    // treating clean text as safe was exactly the laundering `M2.125` names.
-    // The protected-path search still applies underneath the ask (both
+    // INVERTED (§2.2 item 1, M2.125/§5.2): `perl -e` stays opaque (JavaScript
+    // joined the scanner registry in M2.75) — but opaque no longer means "allow
+    // clean text". EVERY inline opaque program asks now, including this harmless
+    // one: vouch cannot tell a printing `print 1` from a writing one without a
+    // scanner, so treating clean text as safe was exactly the laundering `M2.125`
+    // names. The protected-path search still applies underneath the ask (both
     // still recognise the tool and find the snippet; what changed is that
     // NEITHER case is silently trusted any more) — pinned by both reasons
     // naming `unreadable_language`, not by one asking and one allowing.
@@ -211,7 +210,7 @@ paths = ["$HOME/.claude/settings.json"]
     )
     .expect("parses");
     let clean =
-        decide_command_in(&cfg, "bash", r#"node -e "console.log(1)""#, Some("C:/Users/dev"), None);
+        decide_command_in(&cfg, "bash", r#"perl -e "print 1""#, Some("C:/Users/dev"), None);
     match clean {
         Decision::Ask(r) => assert!(r.contains("unreadable_language"), "got: {r}"),
         other => panic!("got {other:?}"),
@@ -220,7 +219,7 @@ paths = ["$HOME/.claude/settings.json"]
     let mentioning = decide_command_in(
         &cfg,
         "bash",
-        r#"node -e "require('fs').readFileSync('C:/Users/dev/.claude/settings.json')""#,
+        r#"perl -e "open my $f, 'C:/Users/dev/.claude/settings.json'""#,
         Some("C:/Users/dev"),
         None,
     );

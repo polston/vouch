@@ -7,6 +7,7 @@ pub mod flags;
 pub mod guards;
 pub mod import_cc;
 pub mod install;
+pub mod javascript;
 pub mod journal;
 pub mod knowledge;
 pub mod outcome;

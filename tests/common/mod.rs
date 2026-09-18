@@ -207,6 +207,12 @@ unmodeled_command = "allow"
 dynamic_call = "allow"
 evaluated_input = "allow"
 parse_failure = "ask"
+[lang.javascript]
+default = "allow"
+[lang.javascript.constructs]
+unmodeled_command = "allow"
+dynamic_call = "allow"
+parse_failure = "ask"
 [write]
 default = "ask"
 allow_paths = [

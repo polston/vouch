@@ -336,7 +336,8 @@ runs against the extracted snippet TEXT, not the tool call.
      the extracted TEXT, never the tool call, same mechanism as command
      step 6. The allow-shaped one must not stop on `unmodeled_command`; the
      ask-shaped one must still ask.
-   - `python` snippet: there IS a scanner (M1.4 landed 2026-08-09), so the
+   - `python` or `javascript` snippet: there IS a scanner (`python` M1.4 landed
+     2026-08-09, `javascript` M2.75 landed 2026-09-17), so the
      snippet is read and decided exactly as a bash one is — it does NOT
      simply ask naming the language, and reporting that it does would be a
      fabricated result. What is missing is only the `vouch explain`
@@ -345,7 +346,7 @@ runs against the extracted snippet TEXT, not the tool call.
      it by hand. Say that plainly — the declaration is proven by the
      recognition verdict in step 4 plus the absence of a gap banner in
      step 6, and the snippet's own decision is not provable here.
-   - `javascript` snippet: there is no scanner and no `vouch explain`
+   - `awk` or `perl` snippet: there is no scanner and no `vouch explain`
      selector — every such snippet asks today, naming the language. That
      is expected, not provable through `vouch explain`; say so rather than
      fabricating a proof.

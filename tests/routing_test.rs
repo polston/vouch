@@ -681,7 +681,11 @@ language = "bash"
 }
 
 #[test]
-fn a_javascript_snippet_asks_end_to_end() {
+fn a_scanned_javascript_snippets_ask_names_the_languages_own_setting() {
+    // JavaScript joined the scanner registry (M2.75), so a declared javascript
+    // snippet is decided through the engine exactly like python, bash and
+    // PowerShell, and its ask names lang.javascript.constructs, not the tool's
+    // blanket tools. grant.
     let kb = kb_with(
         r#"
 [[tool]]
@@ -694,15 +698,12 @@ language = "javascript"
     );
     let cfg = common::realistic_config();
     let input = hook(
-        r#"{"session_id":"s","cwd":"C:/Users/dev","tool_name":"mcp__p_s__js","tool_input":{"code":"console.log(1)"}}"#,
+        r#"{"session_id":"s","cwd":"C:/Users/dev","tool_name":"mcp__p_s__js","tool_input":{"code":"broken(="}}"#,
     );
-    let outcome = decide(&cfg, &kb, HOME, &input);
-    let reason = ask_reason(&outcome.decision);
-    assert!(reason.contains("javascript"), "the prompt must name the language, got: {reason}");
-    assert!(reason.contains("tools.mcp__p_s__js"), "got: {reason}");
-    assert_eq!(
-        outcome.snippets,
-        vec![("console.log(1)".to_string(), "javascript".to_string())]
+    let reason = ask_reason(&decide(&cfg, &kb, HOME, &input).decision).to_string();
+    assert!(
+        reason.contains("lang.javascript.constructs.parse_failure"),
+        "the prompt must name the language's own setting, got: {reason}"
     );
 }
 
@@ -745,11 +746,9 @@ fn a_snippet_language_with_no_scanner_never_reaches_the_engine() {
     // `engine::decide_command_at`'s no-scanner arm returns Abstain, which
     // renders as no output at all — the harness would then decide alone. A
     // snippet language the registry has no scanner for must never get
-    // there, so the language mapped here to javascript has to arrive as an
-    // Ask, from routing. (Python moved off this test in Task 10, once it
-    // joined the registry — javascript is the language `SNIPPET_LANGUAGES`
-    // still closes over that stays scanner-less; the brief named "ruby",
-    // which is not a member of that set and would refuse to load.)
+    // there, so the language mapped here to perl has to arrive as an
+    // Ask, from routing. (Python and javascript moved off this test once
+    // they joined the registry; perl remains scanner-less).
     let kb = kb_with(
         r#"
 [[tool]]
@@ -758,17 +757,17 @@ source = "runs `code` in the language named by `language`"
 [[tool.snippet]]
 field = "code"
 language_from = "language"
-language_values = { shell = "bash", js = "javascript" }
+language_values = { shell = "bash", pl = "perl" }
 "#,
     );
     let cfg = common::realistic_config();
     let input = hook(
-        r#"{"session_id":"s","cwd":"C:/Users/dev","tool_name":"mcp__p_s__exec","tool_input":{"code":"console.log(1)","language":"js"}}"#,
+        r#"{"session_id":"s","cwd":"C:/Users/dev","tool_name":"mcp__p_s__exec","tool_input":{"code":"print 1","language":"pl"}}"#,
     );
     let outcome = decide(&cfg, &kb, HOME, &input);
     assert_ne!(outcome.decision, Decision::Abstain, "the engine's no-scanner arm was reached");
     let reason = ask_reason(&outcome.decision);
-    assert!(reason.contains("javascript"), "got: {reason}");
+    assert!(reason.contains("perl"), "got: {reason}");
 }
 
 /// The same entry twice, once claiming the tool runs in the calling session's

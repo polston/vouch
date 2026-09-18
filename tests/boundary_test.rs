@@ -671,9 +671,11 @@ fn m2_124_find_predicate_without_a_terminator() {
 #[test]
 fn m2_125_opaque_interpreter_inline_eval() {
     let cfg = common::realistic_config();
-    for cmd in ["node -e 'rm -rf d'", "perl -e 'rm -rf d'", "ruby -e 'rm -rf d'",
-                "deno -e 'rm -rf d'", "bun -e 'rm -rf d'"] {
+    for cmd in ["perl -e 'rm -rf d'", "ruby -e 'rm -rf d'"] {
         assert_verdict(&cfg, OUTSIDE, cmd, "ask", Some("unreadable_language"));
+    }
+    for cmd in ["node -e 'rm -rf d'", "deno -e 'rm -rf d'", "bun -e 'rm -rf d'"] {
+        assert_verdict(&cfg, OUTSIDE, cmd, "ask", Some("parse_failure"));
     }
 }
 

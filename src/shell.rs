@@ -1757,6 +1757,46 @@ fn visit_compound_word(
 /// every command inside `Order::Unordered`, same as before this scope table
 /// existed.
 ///
+/// Extracts a list of static literal string values from a for-clause's value list,
+/// handling plain words, quoted strings, and simple comma brace expansions (`Braces::Words`).
+/// Returns `None` if `values` is absent (`for x; do` iterates over positional `$@`),
+/// if any word carries dynamic expansion, wildcard globs, or non-simple brace expansion (`Braces::Rewritten`),
+/// or if the total number of literal items exceeds the expansion limit (32).
+fn extract_literal_for_values(values: Option<&[brush_parser::ast::Word]>) -> Option<Vec<String>> {
+    let words = values?;
+    let mut literals = Vec::new();
+    for w in words {
+        if crate::guards::carries_expansion(&w.value) || w.value.contains('*') || w.value.contains('?') {
+            return None;
+        }
+        match expand_braces(&w.value) {
+            Braces::Words(alts) => {
+                for alt in alts {
+                    if crate::guards::carries_expansion(&alt) || alt.contains('*') || alt.contains('?') {
+                        return None;
+                    }
+                    let unescaped = unescape_unquoted(&alt);
+                    literals.push(crate::paths::unquote(&unescaped).to_string());
+                    if literals.len() > 32 {
+                        return None;
+                    }
+                }
+            }
+            Braces::Literal => {
+                let unescaped = unescape_unquoted(&w.value);
+                literals.push(crate::paths::unquote(&unescaped).to_string());
+                if literals.len() > 32 {
+                    return None;
+                }
+            }
+            Braces::Rewritten => {
+                return None;
+            }
+        }
+    }
+    Some(literals)
+}
+
 /// Returns the range of command positions the body pushed, so the caller can
 /// fix up their input source once it knows what the compound itself supplies —
 /// which it cannot know while the body is being walked, because a compound's
@@ -1814,7 +1854,22 @@ fn walk_compound(
             }
             let s = scoping.enter(out, crate::syntax::ScopeKind::SameProcess, Some(crate::syntax::ScopeClass::LoopBody));
             let mut counter = 0u32;
-            walk_compound_list(&f.body.list, out, &mut counter, unordered, walk, s, env, fns, src);
+            let literal_vals = extract_literal_for_values(f.values.as_deref());
+            match literal_vals {
+                Some(literals) => {
+                    for val in literals {
+                        let mut iter_env = env.clone();
+                        iter_env.insert(f.variable_name.clone(), Some(val));
+                        walk_compound_list(&f.body.list, out, &mut counter, unordered, walk, s, &mut iter_env, fns, src);
+                    }
+                }
+                None => {
+                    let mut iter_env = env.clone();
+                    iter_env.insert(f.variable_name.clone(), None);
+                    walk_compound_list(&f.body.list, out, &mut counter, unordered, walk, s, &mut iter_env, fns, src);
+                }
+            }
+            env.insert(f.variable_name.clone(), None);
         }
         ast::CompoundCommand::CaseClause(c) => {
             // The subject and every pattern word can carry a substitution
