@@ -11,6 +11,13 @@
         "$ref": "#/$defs/EnvName"
       }
     },
+    "guard": {
+      "description": "One entry per declared guard, written as `[[guard]]` (M2.64).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/GuardDecl"
+      }
+    },
     "program": {
       "description": "One entry per described program, written as `[[program]]`.",
       "type": "array",
@@ -121,6 +128,25 @@
         }
       },
       "additionalProperties": false
+    },
+    "GuardDecl": {
+      "description": "One declared guard, written as `[[guard]]` (M2.64).",
+      "type": "object",
+      "properties": {
+        "description": {
+          "description": "A human-readable explanation of what this guard effect means.",
+          "type": "string"
+        },
+        "name": {
+          "description": "The unique name of the guard effect, matching KNOWN_GUARDS.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "description"
+      ]
     },
     "HereWrite": {
       "description": "\"With this shape and no destination named, this program writes into the\ndirectory it is RUN from\" — the write-side twin of `changes_dir` silence\n(M2.129). `tar -xf a.tar` puts the archive's members in the run place,\n`curl -O <url>` puts the URL's basename there, and vouch derived no\ndestination at all for either, so the commonest download-and-extract\nspellings went unjudged while their explicit twins asked.\n\nThe claim is conditional because these programs only do it in some\nshapes. All three conditions are ANDed, and validation requires at least\none of them to be set — an entry claiming a program ALWAYS writes where\nit stands, unconditionally, is one this key has no way to be right about.",

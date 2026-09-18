@@ -134,7 +134,7 @@ fn tar_creation_without_f_writes_to_stdout_no_file_targets() {
 #[test]
 fn conditional_write_unless_flags_suppress_derivation() {
     let kb = load(r#"
-version = 15
+version = 17
 [[program]]
 match = ["archiver"]
 writes = "flags_only"

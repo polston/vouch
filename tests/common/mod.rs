@@ -842,3 +842,10 @@ pub fn dump_every_row_under(cfg: vouch::config::Config, rows: &[Row]) {
     std::fs::write(&path, &out).unwrap_or_else(|e| panic!("could not write {path}: {e}"));
     println!("wrote {} decision rows to {path}", rows.len());
 }
+
+/// Drive-qualify one rooted, drive-less fixture path for Windows (M2.230).
+/// On Windows, `/tmp/...` is a drive-relative path resolved against current drive,
+/// whereas `C:/tmp/...` is a drive-absolute path matching realistic allow_paths.
+pub fn t(p: &str) -> String {
+    if cfg!(windows) { format!("C:{p}") } else { p.to_string() }
+}

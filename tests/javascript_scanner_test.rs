@@ -1,6 +1,6 @@
 mod common;
 
-use common::{realistic_config, realistic_config_with_construct};
+use common::{realistic_config, realistic_config_with_construct, t};
 use vouch::config::Action;
 use vouch::engine::decide_command_at;
 use vouch::protocol::Decision;
@@ -171,10 +171,12 @@ fn mutating_js_snippet_halts_on_spawn_sync_argv() {
 #[test]
 fn js_file_write_in_allowed_path_allows() {
     let cfg = realistic_config();
+    let safe = t("/tmp/safe.txt");
+    let cmd = format!(r#"node -e "const fs = require('fs'); fs.writeFileSync('{safe}', 'hello');""#);
     let decision = decide_command_at(
         &cfg,
         "bash",
-        r#"node -e "const fs = require('fs'); fs.writeFileSync('/tmp/safe.txt', 'hello');""#,
+        &cmd,
         Some(HOME),
         None,
         Some("C:/scratch"),

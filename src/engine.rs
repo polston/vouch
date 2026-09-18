@@ -260,6 +260,9 @@ fn action_word(a: Action) -> &'static str {
 fn guard_reason(hit: &crate::guards::Hit, a: Action, overrode: Option<&str>) -> String {
     let mut lines = Vec::new();
     lines.push(format!("vouch stopped on: {} (guard)", hit.guard));
+    if let Some(desc) = crate::guards::guard_description(&hit.guard) {
+        lines.push(format!("  what that means: {desc}"));
+    }
     lines.push(format!("  command: {}", hit.detail));
     if let Some(resolved) = &hit.resolved_target {
         lines.push(format!("  resolved: {}", resolved));
@@ -1023,6 +1026,7 @@ fn judge_once(
         constructs: expansion_constructs,
         inherited_run_dir: all_inherited,
         top_level_owner: _,
+        assignments: all_assignments,
     } = collect_expanded(kb, &scan, lang, &caps, &mut fork);
 
     // Heredocs captured in THIS text that the locator (inside
@@ -2073,6 +2077,11 @@ fn judge_once(
             if let Some((name, effect)) = crate::guards::env_name_effect(kb, &c.prefix_assigns, clang)
             {
                 rebinding.push((name, effect, clang));
+            }
+            if let Some(assigns) = all_assignments.get(i) {
+                if let Some((name, effect)) = crate::guards::env_name_effect(kb, assigns, clang) {
+                    rebinding.push((name, effect, clang));
+                }
             }
             // The program-side spelling of the same thing: a command told to
             // put a path in the shell's own lookup table under some name
@@ -3462,6 +3471,9 @@ struct Expanded {
     inherited_run_dir: Vec<Option<String>>,
     /// Parallel to `cmds`: which top-level command in `scan.commands` produced each occurrence.
     top_level_owner: Vec<usize>,
+    /// Parallel to `cmds`: environment variable names assigned in the snippet
+    /// or wrapper context that encloses this occurrence.
+    assignments: Vec<Vec<String>>,
 }
 
 /// One wrapped snippet, and every position it can be judged at.
@@ -3567,6 +3579,7 @@ fn collect_expanded(
         inherited_run_dir: Vec::new(),
         scope_table: vec![0],
         top_level_owner: Vec::new(),
+        assignments: Vec::new(),
     };
     // Scanner scopes first, parent-before-child (the walk allocates them in
     // that order), so every engine scope a wrapper expansion adds below sits
@@ -3624,6 +3637,7 @@ fn collect_expanded(
             .cloned()
             .unwrap_or(crate::syntax::InputSource::Unknown);
         let args_complete = scan.args_complete.get(i).copied().unwrap_or(false);
+        let top_assigns: Vec<String> = scan.assignments.iter().map(|(n, _)| n.clone()).collect();
         // ONE cursor across every top-level command on the line, so a fork
         // is numbered by its position in the whole line's walk. Numbering per
         // command would make the same choice vector select different readings
@@ -3634,6 +3648,7 @@ fn collect_expanded(
             &heredocs,
             std::slice::from_ref(&source),
             std::slice::from_ref(&args_complete),
+            &top_assigns,
             lang,
             caps,
             fork,
@@ -3691,6 +3706,7 @@ fn collect_expanded(
             out.args_from_input.push(occ.args_from_input);
             out.args_complete.push(occ.args_complete);
             out.top_level_owner.push(i);
+            out.assignments.push(occ.assignments);
         }
         // The wrapper command `c` (index `i`) is the fallback owner for a
         // snippet with no scope of its own — carry ITS `cmd_scope` entry and

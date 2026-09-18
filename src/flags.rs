@@ -361,7 +361,8 @@ pub fn vocab_for<'a>(prog: &'a Program, abbreviation: Abbrev) -> Vocab<'a> {
         flag_prefix: &prog.flag_prefix,
         case_sensitive: prog.case_sensitive_flags.unwrap_or(false),
         abbreviation,
-        colon_attach: prog.languages.iter().any(|l| l == "powershell"),
+        colon_attach: prog.languages.iter().any(|l| l == "powershell")
+            || prog.flag_prefix.iter().any(|p| p == "/"),
     }
 }
 
@@ -472,19 +473,24 @@ pub(crate) fn effective_prefixes(flag_prefix: &[String]) -> Vec<&str> {
     }
 }
 
-/// cmd.exe-style slash switch: `/s`, `/q`, up to three alphanumeric
-/// characters, no nested path separator. Mirrors `is_slash_flag`
-/// (guards.rs), duplicated here rather than exposed from there — that
-/// function is private and this module changes nothing else in
-/// `guards.rs`.
+/// cmd.exe-style slash switch: `/s`, `/q`, long names like `/noprofile`,
+/// or colon-attached values like `/user:Administrator` (M2.136).
 fn is_slash_flag(s: &str) -> bool {
     match s.strip_prefix('/') {
         Some(rest) => {
-            !rest.is_empty()
-                && rest.len() <= 3
-                && !rest.contains('/')
-                && !rest.contains('\\')
-                && rest.chars().all(|c| c.is_ascii_alphanumeric())
+            if rest.is_empty() {
+                return false;
+            }
+            if let Some((flag_part, _val_part)) = rest.split_once(':') {
+                !flag_part.is_empty()
+                    && !flag_part.contains('/')
+                    && !flag_part.contains('\\')
+                    && flag_part.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            } else {
+                !rest.contains('/')
+                    && !rest.contains('\\')
+                    && rest.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            }
         }
         None => false,
     }

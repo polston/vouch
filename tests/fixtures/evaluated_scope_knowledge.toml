@@ -4,7 +4,7 @@
 # "knowledge" file (`load_files(fixture, ABSENT)`), never merged over the
 # shipped file, so `version` must satisfy the schema check. Every program
 # name is invented — never a real tool's name.
-version = 15
+version = 17
 
 # Scoped "always" claim, plus a standalone flag — but the standalone flag also
 # makes the verb unreadable (an undescribed pre-verb flag), so this entry

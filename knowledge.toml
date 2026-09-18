@@ -79,7 +79,60 @@
 # 14 (2026-09-11): host and network capability declarations (capabilities, sub_capability)
 # for structural sandbox demotion (M2.258).
 # 15 (2026-09-17): conditional program write destinations (`conditional_write`) (M2.139).
-version = 15
+# 17 (2026-09-18): data-driven guard vocabulary declarations (`[[guard]]`) (M2.64).
+version = 17
+
+# ============================================================================
+# GUARD VOCABULARY — data-driven definitions of guarded effects (M2.64)
+# ============================================================================
+
+[[guard]]
+name = "bypass_enforcement"
+description = "disables, circumvents, or alters vouch or another security enforcement mechanism"
+
+[[guard]]
+name = "confidential_output"
+description = "prints, dumps, or exposes confidential secrets, keys, or credentials"
+
+[[guard]]
+name = "delete_recursive"
+description = "recursively removes files or directory trees"
+
+[[guard]]
+name = "grant_execute"
+description = "grants executable permissions to files or scripts"
+
+[[guard]]
+name = "history_rewrite"
+description = "rewrites, truncates, or deletes git commit or shell command history"
+
+[[guard]]
+name = "publish_outward"
+description = "publishes, pushes, or releases artifacts or code to external remotes or registries"
+
+[[guard]]
+name = "process_control"
+description = "sends termination signals or alters running processes"
+
+[[guard]]
+name = "privilege_escalation"
+description = "executes commands with elevated system or administrative privileges"
+
+[[guard]]
+name = "disk_or_system"
+description = "modifies disk partitioning, system firmware, kernel modules, or hardware configuration"
+
+[[guard]]
+name = "in_place_edit"
+description = "edits files in place without an explicit separate backup or destination target"
+
+[[guard]]
+name = "local_state_write"
+description = "writes directly to local repository control metadata or package manager state"
+
+[[guard]]
+name = "remote_execution"
+description = "executes commands or transfers and runs code on remote machines"
 
 # ============================================================================
 # FROM YOUR EXISTING POLICY — these are rules your current tool already applies
@@ -558,9 +611,26 @@ no_value_options = ["-p"]
 # colon-attached values (`/user:name`), a spelling the shared flag rule does
 # not classify today; recorded in ROADMAP.md rather than guessed at here.
 [[program]]
-match = ["sudo", "doas", "runas"]
+match = ["sudo", "doas"]
 wraps = "rest"
 case_sensitive_flags = true
+
+# `runas [/noprofile | /profile] [/env] [/savecred | /netonly] [/smartcard] [/user:<UserName>] [/showtrustlevels] [/trustlevel:<Level>] <Program>`
+# Windows privilege wrapper (M2.136).
+[[program]]
+match = ["runas"]
+wraps = "rest"
+flag_prefix = ["/"]
+case_sensitive_flags = false
+value_options = ["/user", "/trustlevel"]
+no_value_options = [
+  "/noprofile", "/profile", "/env", "/netonly", "/savecred", "/smartcard",
+  "/showtrustlevels",
+]
+[[program.rule]]
+guard = "privilege_escalation"
+source = "inferred: never fired in the recorded corpus"
+always = true
 
 # util-linux `setsid --help`, run inside this machine's WSL distribution —
 # setsid is not installed on the Windows host, so that is where the claim was
@@ -2026,7 +2096,7 @@ source = "inferred: the cmd.exe spelling of rm -r"
 any_flag = ["/s", "/S", "-recurse"]
 
 [[program]]
-match = ["sudo", "doas", "runas"]
+match = ["sudo", "doas"]
 # unix, case-sensitive flags (M2.119 knowledge audit). No flags in this
 # rule (always = true), so the key is inert here today.
 case_sensitive_flags = true
@@ -2820,11 +2890,7 @@ effect = "startup"
 name = "PSModulePath"
 languages = ["powershell"]
 effect = "lookup"
-# NOTE (M2.140): true of the shell, and not yet acted on — the engine reads
-# assignments from the OUTER scan only, so a PowerShell env assignment inside
-# a scanned snippet never reaches this check. The claim stays because it is
-# true and because the row that wires the channel needs it; what it decides
-# today is nothing.
+# Wired via in-snippet assignments channel (M2.140).
 
 # `hash` — the shell's own lookup table.
 #

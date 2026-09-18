@@ -410,7 +410,9 @@ fn scope_of(languages: &[String]) -> HashSet<String> {
 /// take it to 14 (M2.258).
 ///
 /// Conditional program write destinations (`conditional_write`) take it to 15 (M2.139).
-pub const KNOWLEDGE_SCHEMA_VERSION: u32 = 15;
+///
+/// Data-driven guard vocabulary declaration (`[[guard]]`) takes it to 17 (M2.64).
+pub const KNOWLEDGE_SCHEMA_VERSION: u32 = 17;
 
 /// Semantic checks `deny_unknown_fields` cannot express: a `takes` value
 /// outside the closed set, a `run_dir_flags` entry that is not also in
@@ -993,6 +995,28 @@ pub(crate) fn validate(kb: &Knowledge) -> Result<(), String> {
                 "[[env_name]] {:?}: effect = {:?}, which must be \"lookup\" or \"startup\"",
                 e.name, e.effect
             ));
+        }
+    }
+    // `[[guard]]`: a name and a description (M2.64).
+    for g in &kb.guard {
+        if g.name.is_empty() {
+            return Err("[[guard]]: an entry with no `name` describes nothing".to_string());
+        }
+        if g.description.trim().is_empty() {
+            return Err(format!("[[guard]] {:?}: description must not be empty", g.name));
+        }
+    }
+    if !kb.guard.is_empty() {
+        let declared: HashSet<&str> = kb.guard.iter().map(|g| g.name.as_str()).collect();
+        for prog in &kb.program {
+            for rule in &prog.rule {
+                if !declared.contains(rule.guard.as_str()) {
+                    return Err(format!(
+                        "[[program.rule]] on {:?}: names guard {:?}, which is not declared in [[guard]]",
+                        prog.match_names, rule.guard
+                    ));
+                }
+            }
         }
     }
     validate_verb_vocab(kb)?;
@@ -2222,6 +2246,14 @@ pub fn merge(mut base: Knowledge, mine: Knowledge) -> Knowledge {
         {
             Some(b) => *b = m,
             None => base.env_name.push(m),
+        }
+    }
+    // `[[guard]]` carries a name and a description: an operator entry naming the
+    // same guard replaces the shipped description, and any new guard is added (M2.64).
+    for m in mine.guard {
+        match base.guard.iter_mut().find(|b| b.name == m.name) {
+            Some(b) => *b = m,
+            None => base.guard.push(m),
         }
     }
     base

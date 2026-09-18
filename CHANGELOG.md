@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.40.0 (2026-09-18)
+
+
+### Features
+
+* guard vocabulary is declared in knowledge schema version 17 with prompt effect descriptions
+* in-snippet PowerShell environment variable assignments evaluate against rebound name lookup checks
+* mechanical lint test and path helper prevent un-drive-qualified test fixture paths
+* slash-shaped flags support colon-attached values and runas is modeled as a rest wrapper
+
+
+### Bug Fixes
+
+* git hook scanner excludes consecutive assignments containing command substitutions from dump backstops
+
 ## 0.39.0 (2026-09-18)
 
 

@@ -959,6 +959,19 @@ pub struct Knowledge {
     /// written as `[[env_name]]`.
     #[serde(default)]
     pub env_name: Vec<EnvName>,
+    /// One entry per declared guard, written as `[[guard]]` (M2.64).
+    #[serde(default)]
+    pub guard: Vec<GuardDecl>,
+}
+
+/// One declared guard, written as `[[guard]]` (M2.64).
+#[derive(Debug, Deserialize, Default, Clone, PartialEq, Eq, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GuardDecl {
+    /// The unique name of the guard effect, matching KNOWN_GUARDS.
+    pub name: String,
+    /// A human-readable explanation of what this guard effect means.
+    pub description: String,
 }
 
 /// The JSON Schema for `knowledge.toml` / `my-knowledge.toml`, generated from
@@ -1109,6 +1122,26 @@ pub fn notes() -> &'static [String] {
     &loaded().notes
 }
 
+/// The declared description for a guard effect, if any (M2.64).
+pub fn guard_description(name: &str) -> Option<String> {
+    in_effect()
+        .guard
+        .iter()
+        .find(|g| g.name == name)
+        .map(|g| g.description.clone())
+}
+
+/// All currently known guard names — data-driven from knowledge declarations
+/// if present, falling back to static KNOWN_GUARDS (M2.64).
+pub fn known_guards() -> Vec<String> {
+    let kb = in_effect();
+    if !kb.guard.is_empty() {
+        kb.guard.iter().map(|g| g.name.clone()).collect()
+    } else {
+        KNOWN_GUARDS.iter().map(|s| s.to_string()).collect()
+    }
+}
+
 pub(crate) fn base(head: &str) -> String {
     // Backslash is a path separator to fold only for the one shape where
     // that is unambiguous: a Windows-rooted path (`C:\...`, `C:/...`, or a
@@ -1154,11 +1187,19 @@ pub fn base_name(head: &str) -> String {
 fn is_slash_flag(a: &str) -> bool {
     match a.strip_prefix('/') {
         Some(rest) => {
-            !rest.is_empty()
-                && rest.len() <= 3
-                && !rest.contains('/')
-                && !rest.contains('\\')
-                && rest.chars().all(|c| c.is_ascii_alphanumeric())
+            if rest.is_empty() {
+                return false;
+            }
+            if let Some((flag_part, _val_part)) = rest.split_once(':') {
+                !flag_part.is_empty()
+                    && !flag_part.contains('/')
+                    && !flag_part.contains('\\')
+                    && flag_part.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            } else {
+                !rest.contains('/')
+                    && !rest.contains('\\')
+                    && rest.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            }
         }
         None => false,
     }
@@ -4500,6 +4541,7 @@ fn scan_snippet(
             srcs[entry_idx].constructs = s.constructs.clone();
             srcs[entry_idx].heredocs = s.heredocs.clone();
             srcs[entry_idx].commands = s.commands.clone();
+            let assigns: Vec<String> = s.assignments.iter().map(|(n, _)| n.clone()).collect();
             SnippetScan {
                 cmds: s.commands,
                 heredocs: s.heredocs,
@@ -4511,6 +4553,7 @@ fn scan_snippet(
                 cmd_scope: s.cmd_scope,
                 redirect_scope: s.redirect_scope,
                 redirect_chain: s.redirect_chain,
+                assignments: assigns,
                 parsed: true,
             }
         })
@@ -4555,6 +4598,7 @@ struct SnippetScan {
     /// Carried and unread for the same reason as `redirect_scope` above.
     #[allow(dead_code)]
     redirect_chain: Vec<Option<crate::syntax::ChainPos>>,
+    assignments: Vec<String>,
     parsed: bool,
 }
 
@@ -4867,6 +4911,7 @@ pub struct Occurrence {
     pub args_from_input: bool,
     pub args_complete: bool,
     pub inherited_run_dir: Option<String>,
+    pub assignments: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -4946,7 +4991,7 @@ pub fn expand_wrappers_with_sources(
     lang: &str,
     caps: &dyn Fn(&str) -> u8,
 ) -> ExpandedWrappers {
-    expand_wrappers_forking(kb, cmds, heredocs, input_source, args_complete, lang, caps, &mut ForkCursor::new(&[]))
+    expand_wrappers_forking(kb, cmds, heredocs, input_source, args_complete, &[], lang, caps, &mut ForkCursor::new(&[]))
 }
 
 /// The same expansion, run under ONE reading of every ambiguous wrapper.
@@ -4965,6 +5010,7 @@ pub fn expand_wrappers_forking(
     heredocs: &[crate::syntax::Heredoc],
     input_source: &[crate::syntax::InputSource],
     args_complete: &[bool],
+    assignments: &[String],
     lang: &str,
     caps: &dyn Fn(&str) -> u8,
     fork: &mut ForkCursor,
@@ -4976,6 +5022,7 @@ pub fn expand_wrappers_forking(
         heredocs: &[crate::syntax::Heredoc],
         input_source: &[crate::syntax::InputSource],
         args_complete: &[bool],
+        assignments: &[String],
         lang: &str,
         scope: usize,
         // Per-command scopes, when the caller has them: a snippet's own
@@ -5034,6 +5081,7 @@ pub fn expand_wrappers_forking(
                 args_from_input: from_input,
                 args_complete: own_args_complete,
                 inherited_run_dir: inherited.map(str::to_string),
+                assignments: assignments.to_vec(),
             });
             let self_idx = out.occurrences.len() - 1;
             // Where a WRAPPER's own run-dir flag sends everything it wraps.
@@ -5519,12 +5567,17 @@ pub fn expand_wrappers_forking(
                         } else {
                             (own_scope, &[][..], own_order.as_ref(), pass_down)
                         };
+                    let mut child_assigns = assignments.to_vec();
+                    child_assigns.extend(inner.assignments.iter().cloned());
+                    child_assigns.sort();
+                    child_assigns.dedup();
                     go(
                         kb,
                         &inner.cmds,
                         &inner.heredocs,
                         &inner.input_source,
                         &inner.args_complete,
+                        &child_assigns,
                         &next_lang,
                         inner_scope,
                         &inner_scopes,
@@ -5635,12 +5688,17 @@ pub fn expand_wrappers_forking(
                         // and its commands keep the orders that scan recorded.
                         let (body, body_scopes) =
                             allocate_snippet_scopes(&scan, self_idx, heredoc_src_mark, out);
+                        let mut child_assigns = assignments.to_vec();
+                        child_assigns.extend(scan.assignments.iter().cloned());
+                        child_assigns.sort();
+                        child_assigns.dedup();
                         go(
                             kb,
                             &scan.cmds,
                             &scan.heredocs,
                             &scan.input_source,
                             &scan.args_complete,
+                            &child_assigns,
                             &consumed_lang,
                             body,
                             &body_scopes,
@@ -5665,6 +5723,7 @@ pub fn expand_wrappers_forking(
         heredocs,
         input_source,
         args_complete,
+        assignments,
         lang,
         0,
         // No per-command scopes at the top level: every command the caller

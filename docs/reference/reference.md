@@ -163,6 +163,7 @@ shipped one, entry by entry, by name.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `env_name` | array of EnvName | (none) | One entry per environment-variable name the shell itself consults, written as `[[env_name]]`. |
+| `guard` | array of GuardDecl | (none) | One entry per declared guard, written as `[[guard]]` (M2.64). |
 | `program` | array of Program | (none) | One entry per described program, written as `[[program]]`. |
 | `tool` | array of Tool | (none) | One entry per described harness tool (or whole MCP server), written as `[[tool]]`. |
 | `version` | integer (optional) | (unset) | The schema version the file was written against. `None` means the file predates this key. Enforced in `knowledge::read_one`, and ONLY for the shipped file: a `None` here or a value below `knowledge::KNOWLEDGE_SCHEMA_VERSION` refuses the whole shipped load (spec §7, rev 3/4) rather than running blind on fields it never wrote. `my-knowledge.toml` parses into this same struct but is never checked against this field — operator files predate every schema change by design. |
@@ -207,6 +208,15 @@ keeps the ordinary case quiet.
 | `effect` | string | "" | What the shell does with it, from the closed set validated at load:   "lookup"  — it decides which program a name resolves to, so the               command that runs may not be the one described               (`rebound_name`)   "startup" — it names code the shell runs before the command on the               line, which vouch has not read (`evaluated_input`) |
 | `languages` | array of string | [] | Which scanner's lines this claim is true for, same meaning as a `[[program]]`'s. Empty means every language. |
 | `name` | string | "" | The variable's name. Matched the way the PLATFORM matches it: exactly under bash, where `path=x` sets an ordinary variable and changes nothing, and case-insensitively under PowerShell, where `$env:Path` and `$env:PATH` are the same variable (both verified by running). |
+
+### `GuardDecl`
+
+One declared guard, written as `[[guard]]` (M2.64).
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `description` | string | (required) | A human-readable explanation of what this guard effect means. |
+| `name` | string | (required) | The unique name of the guard effect, matching KNOWN_GUARDS. |
 
 ### `HereWrite`
 

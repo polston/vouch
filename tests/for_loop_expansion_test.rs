@@ -1,6 +1,6 @@
 mod common;
 
-use common::realistic_config;
+use common::{realistic_config, t};
 use vouch::engine::decide_command_at;
 use vouch::protocol::Decision;
 
@@ -9,10 +9,12 @@ const HOME: &str = "C:/Users/dev";
 #[test]
 fn literal_for_loop_allows_write_to_allowed_path() {
     let cfg = realistic_config();
+    let tmp = t("/tmp");
+    let cmd = format!(r#"for f in x y; do cp "src/$f.txt" "{tmp}/$f.txt"; done"#);
     let decision = decide_command_at(
         &cfg,
         "bash",
-        r#"for f in x y; do cp "src/$f.txt" "/tmp/$f.txt"; done"#,
+        &cmd,
         Some(HOME),
         None,
         Some("C:/scratch"),
@@ -32,10 +34,12 @@ fn literal_for_loop_allows_write_to_allowed_path() {
 #[test]
 fn literal_brace_for_loop_allows_write() {
     let cfg = realistic_config();
+    let tmp = t("/tmp");
+    let cmd = format!(r#"for ext in {{a,b}}; do cp "src/test.$ext" "{tmp}/test.$ext"; done"#);
     let decision = decide_command_at(
         &cfg,
         "bash",
-        r#"for ext in {a,b}; do cp "src/test.$ext" "/tmp/test.$ext"; done"#,
+        &cmd,
         Some(HOME),
         None,
         Some("C:/scratch"),
@@ -55,10 +59,12 @@ fn literal_brace_for_loop_allows_write() {
 #[test]
 fn quoted_literal_for_loop_allows_write() {
     let cfg = realistic_config();
+    let tmp = t("/tmp");
+    let cmd = format!(r#"for f in "file 1" 'file 2'; do cp "src/$f.txt" "{tmp}/$f.txt"; done"#);
     let decision = decide_command_at(
         &cfg,
         "bash",
-        r#"for f in "file 1" 'file 2'; do cp "src/$f.txt" "/tmp/$f.txt"; done"#,
+        &cmd,
         Some(HOME),
         None,
         Some("C:/scratch"),

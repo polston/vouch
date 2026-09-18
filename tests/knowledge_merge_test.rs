@@ -931,12 +931,14 @@ fn overlay_is_exhaustive_over_every_program_field() {
             program: vec![base],
             tool: vec![],
             env_name: vec![],
+            guard: vec![],
         },
         Knowledge {
             version: None,
             program: vec![mine],
             tool: vec![],
             env_name: vec![],
+            guard: vec![],
         },
     );
     // `mine` only claims bash, so the entry carrying its overlay is found
@@ -1617,12 +1619,14 @@ fn overlay_is_exhaustive_over_every_tool_field() {
             program: vec![],
             tool: vec![base],
             env_name: vec![],
+            guard: vec![],
         },
         Knowledge {
             version: None,
             program: vec![],
             tool: vec![mine],
             env_name: vec![],
+            guard: vec![],
         },
     );
     let t = tool_entry(&merged, "t").expect("t entry");
@@ -1866,7 +1870,7 @@ fn post_merge_validation_catches_run_dir_flags_missing_from_merged_value_options
     std::fs::write(
         &shipped,
         r#"
-version = 15
+version = 17
 [[program]]
 match = ["tool"]
 value_options = ["-C"]
@@ -1877,7 +1881,7 @@ value_options = ["-C"]
     std::fs::write(
         &mine,
         r#"
-version = 15
+version = 17
 [[program]]
 match = ["tool"]
 run_dir_flags = ["--dir"]
@@ -1910,7 +1914,7 @@ fn post_merge_validation_passes_when_flag_present_in_merged_value_options() {
     std::fs::write(
         &shipped,
         r#"
-version = 15
+version = 17
 [[program]]
 match = ["tool"]
 value_options = ["-C"]
@@ -1920,7 +1924,7 @@ value_options = ["-C"]
     std::fs::write(
         &mine,
         r#"
-version = 15
+version = 17
 [[program]]
 match = ["tool"]
 value_options = ["-C", "--dir"]
@@ -1941,14 +1945,14 @@ run_dir_flags = ["--dir"]
 #[test]
 fn an_operator_can_explicitly_override_min_positional_write_to_zero() {
     let shipped = kb(r#"
-version = 15
+version = 17
 [[program]]
 match = ["tool"]
 writes = "positional"
 min_positional_write = 2
 "#);
     let mine = kb(r#"
-version = 15
+version = 17
 [[program]]
 match = ["tool"]
 min_positional_write = 0
@@ -1961,14 +1965,14 @@ min_positional_write = 0
 #[test]
 fn an_omitted_min_positional_write_preserves_shipped_value() {
     let shipped = kb(r#"
-version = 15
+version = 17
 [[program]]
 match = ["tool"]
 writes = "positional"
 min_positional_write = 2
 "#);
     let mine = kb(r#"
-version = 15
+version = 17
 [[program]]
 match = ["tool"]
 "#);

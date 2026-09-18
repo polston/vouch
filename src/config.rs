@@ -701,7 +701,8 @@ pub fn load(text: &str) -> Result<Config, String> {
 }
 
 fn validate(cfg: &Config) -> Result<(), String> {
-    let known = |g: &str| crate::guards::KNOWN_GUARDS.contains(&g);
+    let known_list = crate::guards::known_guards();
+    let known = |g: &str| known_list.iter().any(|k| k == g) || crate::guards::KNOWN_GUARDS.contains(&g);
     for g in cfg.guards.keys() {
         if !known(g) {
             return Err(format!("[guards] names '{g}', which is not a known guard"));
