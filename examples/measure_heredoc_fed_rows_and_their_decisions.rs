@@ -66,9 +66,9 @@ fn main() {
             "bash",
             &|_| 4,
         )
-        .holds_input
+        .occurrences
         .iter()
-        .any(|h| *h);
+        .any(|occ| occ.provenance == vouch::guards::SourceProvenance::ConsumedHeredoc);
         if any_consumed {
             any_consumed_rows += 1;
         }

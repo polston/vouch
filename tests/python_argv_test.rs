@@ -239,17 +239,16 @@ fn source_index_zero_maps_the_declared_spelling_for_inline_and_held_input() {
         ),
     ] {
         let expansion = expanded(source);
-        let (index, command) = expansion
-            .cmds
+        let (index, occurrence) = expansion
+            .occurrences
             .iter()
             .enumerate()
-            .find(|(index, command)| {
-                command.head.ends_with("open")
-                    && expansion.langs.get(*index).is_some_and(|language| language == "python")
+            .find(|(_index, occ)| {
+                occ.cmd.head.ends_with("open") && occ.lang == "python"
             })
             .expect("the Python open call was expanded");
-        assert_eq!(command.args.first().map(String::as_str), Some(expected));
-        assert!(!command.unread_args.contains(&0), "source mapping stayed unread at command {index}");
+        assert_eq!(occurrence.cmd.args.first().map(String::as_str), Some(expected));
+        assert!(!occurrence.cmd.unread_args.contains(&0), "source mapping stayed unread at command {index}");
     }
 }
 

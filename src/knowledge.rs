@@ -13,7 +13,7 @@
 //! nothing while believing it succeeded.
 
 use crate::guards::ToolSnippet;
-use crate::guards::{load, Knowledge, Program, Rule, SubWrite, Tool};
+use crate::guards::{load, Knowledge, Program, Rule, SubcommandOptions, SubWrite, Tool};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -461,6 +461,42 @@ pub(crate) fn validate(kb: &Knowledge) -> Result<(), String> {
                     "[[program]] {:?}: sub_write for subcommand {:?} has takes = {:?}, which must be one of \"\", \"first\", \"last\", \"run_dir\", \"url_basename\"",
                     prog.match_names, sw.subcommand, sw.takes
                 ));
+            }
+        }
+        let mut seen_sub_opts: HashSet<(String, Option<String>)> = HashSet::new();
+        for so in &prog.subcommand_options {
+            if so.subcommands.is_empty() {
+                return Err(format!(
+                    "[[program]] {:?}: subcommand_options must declare at least one subcommand",
+                    prog.match_names
+                ));
+            }
+            for sub in &so.subcommands {
+                if sub.is_empty() {
+                    return Err(format!(
+                        "[[program]] {:?}: subcommand_options contains an empty subcommand name",
+                        prog.match_names
+                    ));
+                }
+                let key = (sub.clone(), so.then.clone());
+                if !seen_sub_opts.insert(key) {
+                    return Err(format!(
+                        "[[program]] {:?}: duplicate subcommand_options for subcommand {:?} (then: {:?})",
+                        prog.match_names, sub, so.then
+                    ));
+                }
+            }
+            if !prog.value_options.is_empty() || !so.value_options.is_empty() {
+                for wf in &so.write_flags {
+                    let in_sub = so.value_options.iter().any(|v| v == wf);
+                    let in_base = prog.value_options.iter().any(|v| v == wf);
+                    if !in_sub && !in_base {
+                        return Err(format!(
+                            "[[program]] {:?}: subcommand_options write_flags contains {:?}, which is not also in value_options",
+                            prog.match_names, wf
+                        ));
+                    }
+                }
             }
         }
         // An entry with `run_dir_flags` set and its OWN `value_options`
@@ -1509,6 +1545,12 @@ fn sub_write_key(s: &SubWrite) -> String {
     format!("{}\u{1}{}", s.subcommand, s.then)
 }
 
+fn subcommand_options_key(so: &SubcommandOptions) -> String {
+    let mut subs = so.subcommands.clone();
+    subs.sort();
+    format!("{}\u{1}{}", subs.join(","), so.then.as_deref().unwrap_or(""))
+}
+
 // [review] `shared_names` used to live here and was called only by the program
 // half of `merge`. It is gone: the shared-name computation belongs to
 // `overlay_all`, which both halves go through, so there is no longer a helper
@@ -1895,6 +1937,37 @@ fn overlay(base: &mut Program, mine: &Program) {
         }
     }
     base.sub_write = laid;
+
+    let mine_sub_opt_keys: HashSet<String> = mine.subcommand_options.iter().map(subcommand_options_key).collect();
+    let mut laid_sub_opts: Vec<SubcommandOptions> = base
+        .subcommand_options
+        .iter()
+        .filter(|s| !mine_sub_opt_keys.contains(&subcommand_options_key(s)))
+        .cloned()
+        .collect();
+    for m in &mine.subcommand_options {
+        match base
+            .subcommand_options
+            .iter()
+            .find(|s| subcommand_options_key(s) == subcommand_options_key(m))
+        {
+            Some(shipped) => {
+                let mut so = shipped.clone();
+                if !m.value_options.is_empty() {
+                    so.value_options = m.value_options.clone();
+                }
+                if !m.no_value_options.is_empty() {
+                    so.no_value_options = m.no_value_options.clone();
+                }
+                if !m.write_flags.is_empty() {
+                    so.write_flags = m.write_flags.clone();
+                }
+                laid_sub_opts.push(so);
+            }
+            None => laid_sub_opts.push(m.clone()),
+        }
+    }
+    base.subcommand_options = laid_sub_opts;
 }
 
 /// Lay the operator's tool entry over a shipped one. Unset means keep — the

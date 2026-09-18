@@ -318,6 +318,9 @@ pub struct Program {
     /// program cannot say that.
     #[serde(default)]
     pub sub_write: Vec<SubWrite>,
+    /// Subcommand-specific options for programs where flag semantics differ by subcommand.
+    #[serde(default)]
+    pub subcommand_options: Vec<SubcommandOptions>,
     /// Which subcommands this entry recognises.
     ///
     /// Three states (spec 2026-08-20 §3): the key ABSENT (`None`) covers the
@@ -649,6 +652,49 @@ pub struct SubWrite {
     /// written path, which is a commit, not a directory.
     #[serde(default)]
     pub takes: String,
+}
+
+/// Options that apply only to specific subcommands of a program.
+#[derive(Debug, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SubcommandOptions {
+    /// The subcommand name(s) this applies to (e.g. ["kustomize"]).
+    pub subcommands: Vec<String>,
+    /// Optional second subcommand word (e.g. "config" in `docker compose config`).
+    #[serde(default)]
+    pub then: Option<String>,
+    /// Subcommand-specific flags that consume a following value token.
+    #[serde(default)]
+    pub value_options: Vec<String>,
+    /// Subcommand-specific flags that take no following value token.
+    #[serde(default)]
+    pub no_value_options: Vec<String>,
+    /// Subcommand-specific flags whose value is a written destination path.
+    #[serde(default)]
+    pub write_flags: Vec<String>,
+}
+
+impl Program {
+    /// Subcommand-specific options matching `sub` and optional `then` word.
+    pub fn matching_subcommand_options<'a>(
+        &'a self,
+        sub: &str,
+        then: Option<&str>,
+    ) -> Vec<&'a SubcommandOptions> {
+        self.subcommand_options
+            .iter()
+            .filter(|so| {
+                if !so.subcommands.iter().any(|s| s == sub) {
+                    return false;
+                }
+                match (&so.then, then) {
+                    (Some(expected), Some(actual)) => expected == actual,
+                    (Some(_), None) => false,
+                    (None, _) => true,
+                }
+            })
+            .collect()
+    }
 }
 
 /// One declared snippet of a `[[tool]]` entry: a named `tool_input` field
@@ -1549,7 +1595,41 @@ pub fn then_of_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> SecondWord {
         Verb::None => return SecondWord::Absent,
         Verb::Unreadable { token, .. } => return SecondWord::Unknown(token),
     };
-    let (positionals, unknowable) = walk_post_subcommand(&cmd.args[sub_idx + 1..], &owned.as_vocab());
+    let sub_token = match cmd.args.get(sub_idx) {
+        Some(s) => s.as_str(),
+        None => return SecondWord::Absent,
+    };
+    let mut post_val = owned.value_options.clone();
+    let mut post_no_val = owned.no_value_options.clone();
+    for prog in entries_for_cmd(kb, cmd, lang) {
+        for so in &prog.subcommand_options {
+            if so.subcommands.iter().any(|s| s == sub_token) {
+                for v in &so.value_options {
+                    if !post_val.contains(v) {
+                        post_val.push(v.clone());
+                    }
+                }
+                for f in &so.no_value_options {
+                    if !post_no_val.contains(f) {
+                        post_no_val.push(f.clone());
+                    }
+                }
+            }
+        }
+    }
+    let post_vocab = crate::flags::Vocab {
+        value_options: &post_val,
+        no_value_options: &post_no_val,
+        flag_prefix: &owned.flag_prefix,
+        case_sensitive: owned.case_sensitive,
+        abbreviation: if owned.case_sensitive {
+            crate::flags::Abbrev::Refuse
+        } else {
+            crate::flags::Abbrev::Accept
+        },
+        colon_attach: owned.colon_attach,
+    };
+    let (positionals, unknowable) = walk_post_subcommand(&cmd.args[sub_idx + 1..], &post_vocab);
     if let Some(tok) = unknowable.first() {
         return SecondWord::Unknown(tok.clone());
     }
@@ -2050,6 +2130,23 @@ pub fn evaluates_input_in(
     snippet_located: bool,
     standalone_eligible: bool,
 ) -> (bool, Option<String>, Option<StandaloneHint>) {
+    let provenance = if holds_input {
+        SourceProvenance::ConsumedHeredoc
+    } else if snippet_located {
+        SourceProvenance::LocatedSnippet
+    } else {
+        SourceProvenance::Direct
+    };
+    evaluates_input_provenance(kb, cmd, lang, provenance, standalone_eligible)
+}
+
+pub fn evaluates_input_provenance(
+    kb: &Knowledge,
+    cmd: &Cmd,
+    lang: &str,
+    provenance: SourceProvenance,
+    standalone_eligible: bool,
+) -> (bool, Option<String>, Option<StandaloneHint>) {
     for prog in entries_for_cmd(kb, cmd, lang) {
         let wrap_lang = wrap_lang_opt(prog);
         match prog.evaluates_input.as_str() {
@@ -2087,14 +2184,12 @@ pub fn evaluates_input_in(
             // this entry falls through to the next one exactly as an unmatched
             // arm did: a name can carry both a `"stdin"` entry and an
             // `"always"` one, and the always entry still has to fire.
-            // `snippet_located` stands this arm down the same way `holds_input`
-            // does: if THIS occurrence's own entry vocabulary already found the
-            // code — whatever flag carried it, attached or spaced, however an
-            // unrelated flag happens to be spelled — standard input is not
-            // where the code came from. `"always"` above is deliberately
+            // `SourceProvenance::is_code_held` stands this arm down if vouch
+            // already has the code (either through a located snippet or a
+            // consumed heredoc). `"always"` above is deliberately
             // untouched: an always-entry runs computed text whatever standard
             // input holds, so a located snippet cannot satisfy that claim.
-            "stdin" if !holds_input && !snippet_located && reads_stdin(cmd) => {
+            "stdin" if !provenance.is_code_held() && reads_stdin(cmd) => {
                 // One lookup, both questions: whether this stands down, and —
                 // when it does not — the off-switch sentence saying what would
                 // have made it.
@@ -2135,7 +2230,10 @@ pub fn evaluates_input_in(
 /// however many arguments it is given.
 pub fn appended_args_could_change_the_answer(kb: &Knowledge, cmd: &Cmd, lang: &str) -> bool {
     entries_for_cmd(kb, cmd, lang).any(|prog| {
-        let claims_write = !prog.writes.is_empty() || !prog.write_flags.is_empty() || !prog.sub_write.is_empty();
+        let claims_write = !prog.writes.is_empty()
+            || !prog.write_flags.is_empty()
+            || !prog.sub_write.is_empty()
+            || prog.subcommand_options.iter().any(|so| !so.write_flags.is_empty());
         let rule_could_match = prog.rule.iter().any(|r| {
             !r.any_flag.is_empty()
                 || !r.any_arg_exact.is_empty()
@@ -4636,7 +4734,11 @@ fn scan_wrap_snippet(
 /// for the locator to find one attached to — callers that have a `Scan` (and
 /// so a real `heredocs` list) use `expand_wrappers_with_sources` directly.
 pub fn expand_wrappers(kb: &Knowledge, cmds: &[Cmd], lang: &str) -> Vec<Cmd> {
-    expand_wrappers_with_sources(kb, cmds, &[], &[], &[], lang, &|_| 4).cmds
+    expand_wrappers_with_sources(kb, cmds, &[], &[], &[], lang, &|_| 4)
+        .occurrences
+        .into_iter()
+        .map(|o| o.cmd)
+        .collect()
 }
 
 /// The same expansion, plus the LANGUAGE each expanded command is written in
@@ -4737,17 +4839,44 @@ pub struct SnippetSource {
     pub commands: Vec<Cmd>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceProvenance {
+    /// Top-level command or normal unlocated command.
+    Direct,
+    /// Script snippet located from an argument or flag (e.g. bash -c, python -c).
+    LocatedSnippet,
+    /// Here-document body consumed and held as code.
+    ConsumedHeredoc,
+    /// Unread code from standard input (curl | bash).
+    StandardInput,
+}
+
+impl SourceProvenance {
+    /// True if vouch holds or located the code, so standard input is not the source.
+    pub fn is_code_held(&self) -> bool {
+        matches!(self, SourceProvenance::LocatedSnippet | SourceProvenance::ConsumedHeredoc)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Occurrence {
+    pub cmd: Cmd,
+    pub execution_site: ExecutionSite,
+    pub lang: String,
+    pub provenance: SourceProvenance,
+    pub args_from_input: bool,
+    pub args_complete: bool,
+    pub inherited_run_dir: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ExpandedWrappers {
     /// Every occurrence: the top-level commands plus every command found
     /// inside a wrapper snippet or a consumed here-document body, in walk
     /// order.
-    pub cmds: Vec<Cmd>,
-    /// Parallel to `cmds`: parsed-snippet scope and local scanner order.
-    pub execution_sites: Vec<ExecutionSite>,
+    pub occurrences: Vec<Occurrence>,
     /// What each child scope 1..N hangs off, in allocation order.
     pub scope_parents: Vec<WrapScope>,
-    /// Parallel to `cmds`: the language each occurrence was scanned under.
-    pub langs: Vec<String>,
     /// Every snippet the walk handed to a scanner, with its own scope
     /// numbering.
     pub srcs: Vec<SnippetSource>,
@@ -4757,94 +4886,23 @@ pub struct ExpandedWrappers {
     /// Every `(lang, error)` a wrapped snippet failed to parse with (channel 1:
     /// a registry scanner exists for that language, but the text did not parse).
     pub parse_failures: Vec<(String, String)>,
-    /// Parallel to `cmds`: whether vouch HOLDS the text of this occurrence's
-    /// standard input — see `holds_input`. Read by the construct channel so a
-    /// scanned body stops the ask that says the code is not in the command.
-    pub holds_input: Vec<bool>,
-    /// Parallel to `cmds`: whether THIS occurrence's own entry vocabulary
-    /// located a snippet the walk then scanned — the `after_c`, `after_flag`,
-    /// and `arg_N` wrap arms alike, every one of them that reaches
-    /// `scan_snippet`/`scan_wrap_snippet` by its own flag or positional
-    /// vocabulary. If vouch found the code, the code did not come from
-    /// standard input — true whatever the flag that carried it was spelled,
-    /// which is why this closes both the attached inline-code form and an
-    /// unrelated flag that happens to be `-s`. Never the here-document
-    /// locator: a consumed here-document IS standard input, and
-    /// `holds_input` already answers for it.
-    ///
-    /// Per OCCURRENCE, never per line: a sibling command's located snippet
-    /// says nothing about this one's standard input (M2.98).
-    pub snippet_located: Vec<bool>,
-    /// Parallel to `cmds`: whether this occurrence was produced by a wrapper
-    /// that appends arguments from a channel the line never names
-    /// (`args_from_input`). Its recorded arguments are therefore a partial
-    /// record, and every judgement an appended token could change has to say
-    /// so rather than answer from what it can see (M2.116).
-    pub args_from_input: Vec<bool>,
-    /// Parallel to `cmds`: whether this occurrence's recorded arguments are a
-    /// faithful record of what the shell will pass — `Scan::args_complete`,
-    /// carried across every wrapper boundary. A top-level occurrence takes
-    /// the value the caller handed in; one unwrapped from a SNIPPET takes the
-    /// inner scan's own; one unwrapped by a same-syntax token slice (`sudo`,
-    /// `find -exec`, `Start-Process`) INHERITS the outer occurrence's, since
-    /// its tokens are the outer command's tokens and no second scan produced
-    /// them. Reading that last case as false instead would silently make
-    /// every wrapper-nested spelling ineligible for the standalone arm.
-    pub args_complete: Vec<bool>,
-    /// Parallel to `cmds`: the directory a WRAPPER's own run-dir flag sent
-    /// this occurrence to, unresolved. `env -C <dir> tar …` moves the inner
-    /// `tar`, not just the `env` — the inner command carries no `-C` token of
-    /// its own, so without this the place passes would judge it wherever the
-    /// shell happened to be. `None` for a top-level command and for anything
-    /// unwrapped by a wrapper with no run-dir flag on it.
-    ///
-    /// Innermost wins when wrappers nest: `env -C a env -C b cmd` places
-    /// `cmd` at `b`. A relative inner value is then resolved by
-    /// `engine::run_dir_place` against the line's own directory rather than
-    /// against `a` — the composition of two nested relative run-dir flags is
-    /// not modelled.
-    pub inherited_run_dir: Vec<Option<String>>,
     /// Every `(key, detail, lang_override)` construct the expansion walk
-    /// itself raised — distinct from a command's or a snippet's own scanned
-    /// constructs, and from `wrap_depth_exceeded` above (one cap-hit marker
-    /// per line; this carries however many the walk found). The engine folds
-    /// each triple through the same `construct_action_for`/`construct_reason`
-    /// machinery as every other construct channel, attributed to the HOST
-    /// language when `lang_override` is `None`, or to that language when it
-    /// is `Some` — the seam `unreadable_language` needs, since a wrap arm's
-    /// snippet may be in a language other than the line it was found on.
-    ///
-    /// Three producers live here: `wrap_unlocated` (an arm was told a
-    /// payload exists and could not find it, host-attributed, `None`),
-    /// `evaluated_input` (a wrap slot holds a marker, so the command string
-    /// is known to exist and known to be unreadable, host-attributed,
-    /// `None`), and `unreadable_language` (a located snippet — a wrap arm's
-    /// payload or a consumed here-document — is in a language nothing can
-    /// scan: `opaque`, `cmd`, or any other name outside the registry;
-    /// attributed to that snippet's own `wrap_lang`, `Some`, matching what
-    /// `route::decide_snippet` already does for the identical construct on
-    /// the tool path — M2.79/M2.73).
+    /// itself raised.
     pub constructs: Vec<(String, String, Option<String>)>,
 }
 
-/// Everything one `go` pass accumulates. A struct rather than eight more
-/// `&mut` parameters: the recursion already carried fourteen, and four of
-/// them had the same type, which is the shape where a mis-ordered call site
-/// compiles and silently swaps two lists.
+impl ExpandedWrappers {
+    /// Iterator over the expanded commands in walk order.
+    pub fn cmds(&self) -> impl Iterator<Item = &Cmd> {
+        self.occurrences.iter().map(|o| &o.cmd)
+    }
+}
+
+/// Everything one `go` pass accumulates.
 #[derive(Default)]
 struct WalkOut {
-    cmds: Vec<Cmd>,
-    execution_sites: Vec<ExecutionSite>,
+    occurrences: Vec<Occurrence>,
     scope_parents: Vec<WrapScope>,
-    langs: Vec<String>,
-    holds: Vec<bool>,
-    /// Whether THIS occurrence's own entry vocabulary located a snippet the
-    /// walk then scanned — see `ExpandedWrappers::snippet_located` for the
-    /// full rationale.
-    snippet_located: Vec<bool>,
-    from_input: Vec<bool>,
-    complete: Vec<bool>,
-    inherited_run_dir: Vec<Option<String>>,
     srcs: Vec<SnippetSource>,
     exceeded: Option<String>,
     failures: Vec<(String, String)>,
@@ -4964,29 +5022,20 @@ pub fn expand_wrappers_forking(
             // snippet case (each command in its own scanner scope); `scope`
             // is every other, where the whole slice shares one.
             let own_scope = scopes.get(i).copied().unwrap_or(scope);
-            out.cmds.push(cmd.clone());
-            out.execution_sites.push(ExecutionSite {
-                scope: own_scope,
-                local_order: own_order.clone(),
-                scanner_order: orders.get(i).is_some(),
+            out.occurrences.push(Occurrence {
+                cmd: cmd.clone(),
+                execution_site: ExecutionSite {
+                    scope: own_scope,
+                    local_order: own_order.clone(),
+                    scanner_order: orders.get(i).is_some(),
+                },
+                lang: lang.to_string(),
+                provenance: SourceProvenance::Direct,
+                args_from_input: from_input,
+                args_complete: own_args_complete,
+                inherited_run_dir: inherited.map(str::to_string),
             });
-            out.langs.push(lang.to_string());
-            // Pushed WITH the command, false for now, and back-patched by the
-            // heredoc locator at the end of this iteration. The index has to be
-            // captured here: the wrapper loop below pushes arbitrarily many
-            // further commands, so appending at the locator would land the
-            // judgement on someone else's occurrence — and a desynced parallel
-            // array does not fail loudly, it silently misattributes.
-            out.holds.push(false);
-            // Same back-patch discipline as `holds` above: pushed false here,
-            // and set true by a wrap arm below ONLY when THIS occurrence's own
-            // entry vocabulary is what located the snippet. `self_idx` is
-            // captured on the next line for exactly this purpose.
-            out.snippet_located.push(false);
-            out.from_input.push(from_input);
-            out.complete.push(own_args_complete);
-            out.inherited_run_dir.push(inherited.map(str::to_string));
-            let self_idx = out.cmds.len() - 1;
+            let self_idx = out.occurrences.len() - 1;
             // Where a WRAPPER's own run-dir flag sends everything it wraps.
             // Read once per command rather than per matching entry, since the
             // flag is a property of the command line, not of one entry.
@@ -5135,7 +5184,7 @@ pub fn expand_wrappers_forking(
                                 // declares `evaluates_input = "stdin"`
                                 // alongside `wraps = "after_c"`, which
                                 // `after_flag`/`arg_N` do not.
-                                out.snippet_located[self_idx] = true;
+                                out.occurrences[self_idx].provenance = SourceProvenance::LocatedSnippet;
                                 match scan_snippet("bash", &inner_src, &mut out.srcs) {
                                     Ok(scan) => scan,
                                     Err(e) => {
@@ -5163,7 +5212,7 @@ pub fn expand_wrappers_forking(
                             // the payload — whatever it was spelled — so
                             // standard input is not where the code came from
                             // (M2.98).
-                            out.snippet_located[self_idx] = true;
+                            out.occurrences[self_idx].provenance = SourceProvenance::LocatedSnippet;
                             join_snippet_args(
                                 prog,
                                 &mut scan,
@@ -5206,7 +5255,7 @@ pub fn expand_wrappers_forking(
                                 // Same reasoning as the `after_flag` arm above:
                                 // this occurrence's own positional vocabulary
                                 // located the payload (M2.98).
-                                out.snippet_located[self_idx] = true;
+                                out.occurrences[self_idx].provenance = SourceProvenance::LocatedSnippet;
                                 next_lang = lang;
                                 scan
                             }
@@ -5301,7 +5350,7 @@ pub fn expand_wrappers_forking(
                                             env_assigns: cmd.env_assigns.clone(),
                                             is_intra_command_function: false,
                                         };
-                                        out.snippet_located[self_idx] = true;
+                                        out.occurrences[self_idx].provenance = SourceProvenance::LocatedSnippet;
                                         next_lang = prog.wrap_lang.clone();
                                         SnippetScan {
                                             cmds: vec![child],
@@ -5318,7 +5367,7 @@ pub fn expand_wrappers_forking(
                                         &mut out.failures,
                                         &mut out.constructs,
                                     );
-                                    out.snippet_located[self_idx] = true;
+                                    out.occurrences[self_idx].provenance = SourceProvenance::LocatedSnippet;
                                     next_lang = lang;
                                     scan
                                 } else {
@@ -5336,7 +5385,7 @@ pub fn expand_wrappers_forking(
                                         env_assigns: cmd.env_assigns.clone(),
                                         is_intra_command_function: false,
                                     };
-                                    out.snippet_located[self_idx] = true;
+                                    out.occurrences[self_idx].provenance = SourceProvenance::LocatedSnippet;
                                     next_lang = prog.wrap_lang.clone();
                                     SnippetScan {
                                         cmds: vec![child],
@@ -5558,7 +5607,7 @@ pub fn expand_wrappers_forking(
                     // sibling); an id never has to coincide, because it is not
                     // a position in either list (M2.127).
                     if held {
-                        out.holds[self_idx] = true;
+                        out.occurrences[self_idx].provenance = SourceProvenance::ConsumedHeredoc;
                         let (source_spelling, trailing) = if cmd.args.first().is_some_and(|arg| arg == "-") {
                             (Some("-"), &cmd.args[1..])
                         } else {
@@ -5632,18 +5681,11 @@ pub fn expand_wrappers_forking(
         &mut walked,
     );
     ExpandedWrappers {
-        cmds: walked.cmds,
-        execution_sites: walked.execution_sites,
+        occurrences: walked.occurrences,
         scope_parents: walked.scope_parents,
-        langs: walked.langs,
         srcs: walked.srcs,
         wrap_depth_exceeded: walked.exceeded,
         parse_failures: walked.failures,
-        holds_input: walked.holds,
-        snippet_located: walked.snippet_located,
-        args_from_input: walked.from_input,
-        args_complete: walked.complete,
-        inherited_run_dir: walked.inherited_run_dir,
         constructs: walked.constructs,
     }
 }
@@ -6364,6 +6406,63 @@ pub fn written_paths_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> WriteTargets {
     let mut out = WriteTargets::default();
     let verb_grammar = verb_vocab(kb, cmd, lang);
     for prog in entries_for_cmd(kb, cmd, lang) {
+        let has_sub_semantics = !prog.sub_write.is_empty() || !prog.subcommand_options.is_empty();
+        let sub_idx = if has_sub_semantics {
+            match resolve_verb(cmd, &verb_grammar.as_vocab(), lang) {
+                Verb::At(i) => Some(i),
+                Verb::None => None,
+                Verb::Unreadable { token, .. } => {
+                    out.unknowable.push(token);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let mut post_val = verb_grammar.value_options.clone();
+        let mut post_no_val = verb_grammar.no_value_options.clone();
+        if let Some(si) = sub_idx {
+            if let Some(sub_token) = cmd.args.get(si) {
+                for so in &prog.subcommand_options {
+                    if so.subcommands.iter().any(|s| s == sub_token) {
+                        for v in &so.value_options {
+                            if !post_val.contains(v) {
+                                post_val.push(v.clone());
+                            }
+                        }
+                        for f in &so.no_value_options {
+                            if !post_no_val.contains(f) {
+                                post_no_val.push(f.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let post_vocab = crate::flags::Vocab {
+            value_options: &post_val,
+            no_value_options: &post_no_val,
+            flag_prefix: &verb_grammar.flag_prefix,
+            case_sensitive: verb_grammar.case_sensitive,
+            abbreviation: if verb_grammar.case_sensitive {
+                crate::flags::Abbrev::Refuse
+            } else {
+                crate::flags::Abbrev::Accept
+            },
+            colon_attach: verb_grammar.colon_attach,
+        };
+        let matched_sub_opts = if let Some(si) = sub_idx {
+            if let Some(sub_token) = cmd.args.get(si) {
+                let (positionals, _) = walk_post_subcommand(&cmd.args[si + 1..], &post_vocab);
+                let then = then_word(&positionals);
+                prog.matching_subcommand_options(sub_token, then)
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
         // Keyword arguments folded onto the positions `arg_names` claims for
         // them (a no-op for every entry that never sets `arg_names`, which is
         // every non-python entry) — every arm below reads this instead of
@@ -6396,7 +6495,9 @@ pub fn written_paths_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> WriteTargets {
                 continue;
             }
             if is_flag(a, &prog.flag_prefix) {
-                if prog.value_options.iter().any(|v| v == a) {
+                if prog.value_options.iter().any(|v| v == a)
+                    || matched_sub_opts.iter().any(|so| so.value_options.iter().any(|v| v == a))
+                {
                     skip_next = true;
                 }
                 continue;
@@ -6660,20 +6761,12 @@ pub fn written_paths_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> WriteTargets {
         // vocabulary is the same name-wide grammar `then_of_in` reads, so the
         // scope and destination walks cannot anchor on different tokens.
         if !prog.sub_write.is_empty() {
-            let sub_idx = match resolve_verb(cmd, &verb_grammar.as_vocab(), lang) {
-                Verb::At(i) => Some(i),
-                Verb::None => None,
-                Verb::Unreadable { token, .. } => {
-                    out.unknowable.push(token);
-                    None
-                }
-            };
             if let Some(sub_idx) = sub_idx {
                 for sw in &prog.sub_write {
                     if cmd.args[sub_idx] != sw.subcommand {
                         continue;
                     }
-                    let (positionals, unk) = walk_post_subcommand(&cmd.args[sub_idx + 1..], &verb_grammar.as_vocab());
+                    let (positionals, unk) = walk_post_subcommand(&cmd.args[sub_idx + 1..], &post_vocab);
                     // Something after the subcommand could not be
                     // classified — vouch does not know whether it takes a
                     // value, so the positional count and ORDER from that
@@ -6774,6 +6867,40 @@ pub fn written_paths_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> WriteTargets {
                 // to ask because it cannot distinguish the two).
                 push_write_target(&mut out, crate::python::MARKER);
             }
+        }
+
+        // Subcommand-specific write destination flags:
+        for so in &matched_sub_opts {
+            if !so.write_flags.is_empty() {
+                let mut take_next = false;
+                for a in &eff {
+                    if take_next {
+                        push_write_target(&mut out, a);
+                        take_next = false;
+                        continue;
+                    }
+                    for f in &so.write_flags {
+                        match crate::flags::spells(f, a, &vocab) {
+                            crate::flags::Spell::Yes(Some(v)) => {
+                                push_write_target(&mut out, &v);
+                                break;
+                            }
+                            crate::flags::Spell::Yes(None) => {
+                                take_next = true;
+                                break;
+                            }
+                            crate::flags::Spell::RefusedAbbrev { .. } => {
+                                out.unknowable.push(a.clone());
+                                break;
+                            }
+                            crate::flags::Spell::No => {}
+                        }
+                    }
+                }
+            }
+        }
+        if cmd.by_reference && prog.subcommand_options.iter().any(|so| !so.write_flags.is_empty()) {
+            push_write_target(&mut out, crate::python::MARKER);
         }
     }
     out

@@ -908,6 +908,13 @@ fn overlay_is_exhaustive_over_every_program_field() {
             takes_flag: Some("-f".to_string()),
             takes_flags: vec![],
         }],
+        subcommand_options: vec![vouch::guards::SubcommandOptions {
+            subcommands: vec!["export".to_string()],
+            then: None,
+            value_options: vec!["--dest".to_string()],
+            no_value_options: vec!["--all".to_string()],
+            write_flags: vec!["--dest".to_string()],
+        }],
     };
     // The shipped side is otherwise blank, except for the two fields whose
     // documented semantics only show up against a non-empty starting point:
@@ -1025,6 +1032,8 @@ fn overlay_is_exhaustive_over_every_program_field() {
         p.sub_write
     );
     assert_eq!(p.sub_write[0].subcommand, "doit");
+    assert_eq!(p.subcommand_options.len(), 1, "subcommand_options did not arrive");
+    assert_eq!(p.subcommand_options[0].subcommands, vec!["export".to_string()]);
     // subcommands / all_subcommands: `all_subcommands` is a merge-time
     // instruction, not a persisted claim — `recognises` reads `None` as the
     // whole-program state. Its documented semantic is "widen, never

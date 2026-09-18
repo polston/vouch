@@ -19,7 +19,6 @@
 #[path = "../tests/common/mod.rs"]
 mod common;
 
-use brush_parser::ast;
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use vouch::guards::Knowledge;
@@ -62,25 +61,7 @@ const CONTROLS: &[(&str, &str)] = &[
     ("NEGATIVE heredoc_quoted", "cat <<'EOF'\n$(id)\nEOF\n"),
 ];
 
-/// Which §2.2 word position a visited raw string came from. `None` (passed
-/// as the caller's own `Option<Pos>`) is used for the rare shapes §2.2 does
-/// not name a row for — a plain (non-assignment) prefix word — so a body
-/// found there still counts toward the totals without inventing an arm.
-#[derive(Clone, Copy)]
-enum Pos {
-    Head,
-    PrefixAssign,
-    Suffix,
-    SuffixAssign,
-    Redirect,
-    HereString,
-    HereDoc,
-    ForValues,
-    Case,
-    ExtendedTest,
-    ArithCmd,
-    FunctionRedirect,
-}
+type Pos = vouch::shell::SubstitutionPosition;
 
 #[derive(Default)]
 struct Counts {
@@ -154,6 +135,7 @@ fn bump_pos(pos: Pos, c: &mut Counts) {
         Pos::ExtendedTest => c.pos_extended_test += 1,
         Pos::ArithCmd => c.pos_arith_cmd += 1,
         Pos::FunctionRedirect => c.pos_function_redirect += 1,
+        Pos::Other => {}
     }
 }
 
@@ -349,9 +331,13 @@ impl<'a> Walker<'a> {
         let mut parser = brush_parser::Parser::new(std::io::Cursor::new(text), &opts);
         match parser.parse_program() {
             Ok(program) => {
-                for cc in &program.complete_commands {
-                    self.compound_list(cc, depth, c);
-                }
+                vouch::shell::for_each_substitution_position(&program, |pos, raw| {
+                    match pos {
+                        Pos::HereDoc => self.heredoc(raw, pos, depth, c),
+                        Pos::Other => self.text(raw, None, depth, c, false),
+                        _ => self.word(raw, pos, depth, c),
+                    }
+                });
             }
             // At the top level a row that fails to parse here simply
             // contributes nothing (the corpus loop already skips it via
@@ -362,204 +348,6 @@ impl<'a> Walker<'a> {
                 if depth > 0 {
                     c.body_parse_failure += 1;
                 }
-            }
-        }
-    }
-
-    fn compound_list(&self, list: &ast::CompoundList, depth: usize, c: &mut Counts) {
-        for item in &list.0 {
-            self.and_or_list(&item.0, depth, c);
-        }
-    }
-
-    fn and_or_list(&self, aol: &ast::AndOrList, depth: usize, c: &mut Counts) {
-        self.pipeline(&aol.first, depth, c);
-        for ao in &aol.additional {
-            match ao {
-                ast::AndOr::And(p) | ast::AndOr::Or(p) => self.pipeline(p, depth, c),
-            }
-        }
-    }
-
-    fn pipeline(&self, p: &ast::Pipeline, depth: usize, c: &mut Counts) {
-        for cmd in &p.seq {
-            self.command(cmd, depth, c);
-        }
-    }
-
-    fn command(&self, cmd: &ast::Command, depth: usize, c: &mut Counts) {
-        match cmd {
-            ast::Command::Simple(sc) => self.simple(sc, depth, c),
-            ast::Command::Compound(cc, redirects) => {
-                self.compound(cc, depth, c);
-                if let Some(list) = redirects {
-                    for r in &list.0 {
-                        self.redirect(r, Pos::Redirect, depth, c);
-                    }
-                }
-            }
-            ast::Command::Function(f) => {
-                // The definition's own redirect list (design §2.2's fifth
-                // row) is walked separately from the body it wraps.
-                if let Some(list) = &f.body.1 {
-                    for r in &list.0 {
-                        self.redirect(r, Pos::FunctionRedirect, depth, c);
-                    }
-                }
-                self.compound(&f.body.0, depth, c);
-            }
-            ast::Command::ExtendedTest(e, redirects) => {
-                self.extended_test(&e.expr, depth, c);
-                if let Some(list) = redirects {
-                    for r in &list.0 {
-                        // A redirect target, not an operand — same arm every
-                        // sibling here uses for its own redirect list.
-                        self.redirect(r, Pos::Redirect, depth, c);
-                    }
-                }
-            }
-        }
-    }
-
-    fn simple(&self, sc: &ast::SimpleCommand, depth: usize, c: &mut Counts) {
-        if let Some(w) = &sc.word_or_name {
-            self.word(&w.value, Pos::Head, depth, c);
-        }
-        if let Some(prefix) = &sc.prefix {
-            for item in &prefix.0 {
-                self.prefix_or_suffix(item, false, depth, c);
-            }
-        }
-        if let Some(suffix) = &sc.suffix {
-            for item in &suffix.0 {
-                self.prefix_or_suffix(item, true, depth, c);
-            }
-        }
-    }
-
-    fn prefix_or_suffix(
-        &self,
-        item: &ast::CommandPrefixOrSuffixItem,
-        is_suffix: bool,
-        depth: usize,
-        c: &mut Counts,
-    ) {
-        match item {
-            ast::CommandPrefixOrSuffixItem::IoRedirect(r) => {
-                self.redirect(r, Pos::Redirect, depth, c);
-            }
-            ast::CommandPrefixOrSuffixItem::Word(w) => {
-                // A plain (non-assignment) PREFIX word names no §2.2 row of
-                // its own — only an assignment does — so it still counts
-                // toward the totals without a position arm.
-                let pos = is_suffix.then_some(Pos::Suffix);
-                self.text(&w.value, pos, depth, c, false);
-            }
-            ast::CommandPrefixOrSuffixItem::AssignmentWord(_, w) => {
-                // The raw word carries the WHOLE `name=value` (or array)
-                // spelling, so one visit covers a scalar assignment, an
-                // assignment-shaped suffix argument, and an array literal
-                // with its elements and index words alike (design §2.2).
-                let pos = if is_suffix { Pos::SuffixAssign } else { Pos::PrefixAssign };
-                self.word(&w.value, pos, depth, c);
-            }
-            ast::CommandPrefixOrSuffixItem::ProcessSubstitution(_, sub) => {
-                // Out of scope for this reader — a process substitution
-                // carries no `$(`/backtick text of its own, the parser
-                // already gave it its own AST shape — but its body can
-                // still hold a substitution, so it is walked for
-                // completeness with no position arm of its own.
-                self.compound_list(&sub.list, depth, c);
-            }
-        }
-    }
-
-    fn compound(&self, cc: &ast::CompoundCommand, depth: usize, c: &mut Counts) {
-        match cc {
-            ast::CompoundCommand::BraceGroup(bg) => self.compound_list(&bg.list, depth, c),
-            ast::CompoundCommand::Subshell(sub) => self.compound_list(&sub.list, depth, c),
-            ast::CompoundCommand::ForClause(f) => {
-                for w in f.values.iter().flatten() {
-                    self.word(&w.value, Pos::ForValues, depth, c);
-                }
-                self.compound_list(&f.body.list, depth, c);
-            }
-            ast::CompoundCommand::CaseClause(cc2) => {
-                self.word(&cc2.value.value, Pos::Case, depth, c);
-                for item in &cc2.cases {
-                    for w in &item.patterns {
-                        self.word(&w.value, Pos::Case, depth, c);
-                    }
-                    if let Some(body) = &item.cmd {
-                        self.compound_list(body, depth, c);
-                    }
-                }
-            }
-            ast::CompoundCommand::IfClause(i) => {
-                self.compound_list(&i.condition, depth, c);
-                self.compound_list(&i.then, depth, c);
-                if let Some(elses) = &i.elses {
-                    for e in elses {
-                        if let Some(cond) = &e.condition {
-                            self.compound_list(cond, depth, c);
-                        }
-                        self.compound_list(&e.body, depth, c);
-                    }
-                }
-            }
-            ast::CompoundCommand::WhileClause(w) | ast::CompoundCommand::UntilClause(w) => {
-                self.compound_list(&w.0, depth, c);
-                self.compound_list(&w.1.list, depth, c);
-            }
-            ast::CompoundCommand::Coprocess(cp) => self.command(&cp.body, depth, c),
-            ast::CompoundCommand::Arithmetic(a) => {
-                self.word(&a.expr.value, Pos::ArithCmd, depth, c);
-            }
-            ast::CompoundCommand::ArithmeticForClause(f) => {
-                for e in [&f.initializer, &f.condition, &f.updater].into_iter().flatten() {
-                    self.word(&e.value, Pos::ArithCmd, depth, c);
-                }
-                self.compound_list(&f.body.list, depth, c);
-            }
-        }
-    }
-
-    fn redirect(&self, r: &ast::IoRedirect, pos: Pos, depth: usize, c: &mut Counts) {
-        match r {
-            ast::IoRedirect::File(_, _, target) => match target {
-                ast::IoFileRedirectTarget::Filename(w) => self.word(&w.value, pos, depth, c),
-                ast::IoFileRedirectTarget::Duplicate(w) => self.word(&w.value, pos, depth, c),
-                ast::IoFileRedirectTarget::Fd(_) => {}
-                ast::IoFileRedirectTarget::ProcessSubstitution(_, sub) => {
-                    self.compound_list(&sub.list, depth, c);
-                }
-            },
-            ast::IoRedirect::HereDocument(_, doc) => {
-                // A quoted delimiter expands nothing — the NEGATIVE control.
-                if doc.requires_expansion {
-                    self.heredoc(&doc.doc.value, Pos::HereDoc, depth, c);
-                }
-            }
-            ast::IoRedirect::HereString(_, w) => self.word(&w.value, Pos::HereString, depth, c),
-            ast::IoRedirect::OutputAndError(w, _) => self.word(&w.value, pos, depth, c),
-        }
-    }
-
-    fn extended_test(&self, expr: &ast::ExtendedTestExpr, depth: usize, c: &mut Counts) {
-        match expr {
-            ast::ExtendedTestExpr::And(l, r) | ast::ExtendedTestExpr::Or(l, r) => {
-                self.extended_test(l, depth, c);
-                self.extended_test(r, depth, c);
-            }
-            ast::ExtendedTestExpr::Not(e) | ast::ExtendedTestExpr::Parenthesized(e) => {
-                self.extended_test(e, depth, c);
-            }
-            ast::ExtendedTestExpr::UnaryTest(_, w) => {
-                self.word(&w.value, Pos::ExtendedTest, depth, c);
-            }
-            ast::ExtendedTestExpr::BinaryTest(_, l, r) => {
-                self.word(&l.value, Pos::ExtendedTest, depth, c);
-                self.word(&r.value, Pos::ExtendedTest, depth, c);
             }
         }
     }

@@ -1368,7 +1368,6 @@ fn expand_bash_source(src: &str) -> vouch::guards::ExpandedWrappers {
 #[test]
 fn parsed_python_snippets_keep_one_child_scope_and_their_local_order() {
     let expanded = expand_bash_source(r#"python -c "first(); second()""#);
-    assert_eq!(expanded.execution_sites.len(), expanded.cmds.len());
     // One scope, hanging off the command that ran the snippet. A snippet with
     // no compounds of its own allocates nothing further — the `AtOrder`
     // variant appears only where the snippet's own scan had a scope
@@ -1376,25 +1375,25 @@ fn parsed_python_snippets_keep_one_child_scope_and_their_local_order() {
     assert_eq!(expanded.scope_parents, vec![vouch::guards::WrapScope::AtCommand(0)]);
 
     let first = expanded
-        .cmds
+        .occurrences
         .iter()
-        .position(|command| command.head == "python:first")
+        .position(|occ| occ.cmd.head == "python:first")
         .unwrap();
     let second = expanded
-        .cmds
+        .occurrences
         .iter()
-        .position(|command| command.head == "python:second")
+        .position(|occ| occ.cmd.head == "python:second")
         .unwrap();
-    assert_eq!(expanded.execution_sites[first].scope, 1);
-    assert!(expanded.execution_sites[first].scanner_order);
+    assert_eq!(expanded.occurrences[first].execution_site.scope, 1);
+    assert!(expanded.occurrences[first].execution_site.scanner_order);
     assert_eq!(
-        expanded.execution_sites[first].local_order,
+        expanded.occurrences[first].execution_site.local_order,
         Some(vouch::syntax::Order::Seq(0))
     );
-    assert_eq!(expanded.execution_sites[second].scope, 1);
-    assert!(expanded.execution_sites[second].scanner_order);
+    assert_eq!(expanded.occurrences[second].execution_site.scope, 1);
+    assert!(expanded.occurrences[second].execution_site.scanner_order);
     assert_eq!(
-        expanded.execution_sites[second].local_order,
+        expanded.occurrences[second].execution_site.local_order,
         Some(vouch::syntax::Order::Seq(1))
     );
 }
@@ -1403,14 +1402,14 @@ fn parsed_python_snippets_keep_one_child_scope_and_their_local_order() {
 fn nested_and_held_snippets_keep_parent_indices_without_desynchronising() {
     let nested = expand_bash_source(r#"python -c "import os; os.system('echo hi')""#);
     let system = nested
-        .cmds
+        .occurrences
         .iter()
-        .position(|command| command.head == "python:os.system")
+        .position(|occ| occ.cmd.head == "python:os.system")
         .unwrap();
     let echo = nested
-        .cmds
+        .occurrences
         .iter()
-        .position(|command| command.head == "echo")
+        .position(|occ| occ.cmd.head == "echo")
         .unwrap();
     assert_eq!(
         nested.scope_parents,
@@ -1419,19 +1418,19 @@ fn nested_and_held_snippets_keep_parent_indices_without_desynchronising() {
             vouch::guards::WrapScope::AtCommand(system),
         ]
     );
-    assert_eq!(nested.execution_sites[system].scope, 1);
-    assert_eq!(nested.execution_sites[echo].scope, 2);
+    assert_eq!(nested.occurrences[system].execution_site.scope, 1);
+    assert_eq!(nested.occurrences[echo].execution_site.scope, 2);
 
     let held = expand_bash_source("python - <<'PY'\nfirst()\nPY");
     let first = held
-        .cmds
+        .occurrences
         .iter()
-        .position(|command| command.head == "python:first")
+        .position(|occ| occ.cmd.head == "python:first")
         .unwrap();
     assert_eq!(held.scope_parents, vec![vouch::guards::WrapScope::AtCommand(0)]);
-    assert_eq!(held.execution_sites[first].scope, 1);
+    assert_eq!(held.occurrences[first].execution_site.scope, 1);
     assert_eq!(
-        held.execution_sites[first].local_order,
+        held.occurrences[first].execution_site.local_order,
         Some(vouch::syntax::Order::Seq(0))
     );
 }
@@ -1448,11 +1447,10 @@ wraps = "rest"
     .unwrap();
     let expanded = expand(&kb, &cmd("env9", &["alpha"]));
     assert!(expanded.scope_parents.is_empty());
-    assert_eq!(expanded.execution_sites.len(), expanded.cmds.len());
     assert!(expanded
-        .execution_sites
+        .occurrences
         .iter()
-        .all(|site| site.scope == 0 && site.local_order.is_none() && !site.scanner_order));
+        .all(|occ| occ.execution_site.scope == 0 && occ.execution_site.local_order.is_none() && !occ.execution_site.scanner_order));
 }
 
 #[test]
@@ -1618,14 +1616,14 @@ wrap_lang = "bash"
         "bash",
         &|_| 4,
     );
-    let vouch::guards::ExpandedWrappers { cmds, srcs, .. } = ex;
+    let vouch::guards::ExpandedWrappers { occurrences, srcs, .. } = ex;
     assert_eq!(
         srcs.iter().map(|s| (s.lang.as_str(), s.src.as_str())).collect::<Vec<_>>(),
         vec![("bash", "echo hi")]
     );
     assert!(
-        cmds.iter().any(|c| c.head == "echo" && c.args == vec!["hi".to_string()]),
-        "expected an inner echo command, got {cmds:?}"
+        occurrences.iter().any(|o| o.cmd.head == "echo" && o.cmd.args == vec!["hi".to_string()]),
+        "expected an inner echo command, got {occurrences:?}"
     );
     assert_eq!(
         wrap_srcs(&kb, &cmd("python:x.y", &["$?"])),
@@ -1756,14 +1754,14 @@ case_sensitive_flags = true
     )
     .expect("parses");
     let ex = expand(&kb, &cmd("find9", &["d", "-exec", "alpha", ";", "-ok", "beta", "x", ";"]));
-    let heads: Vec<String> = ex.cmds.iter().map(|c| c.head.clone()).collect();
+    let heads: Vec<String> = ex.occurrences.iter().map(|o| o.cmd.head.clone()).collect();
     assert_eq!(heads, vec!["find9", "alpha", "beta"], "only the first occurrence used to expand");
     assert!(construct_keys(&ex).is_empty(), "both occurrences terminated: {:?}", ex.constructs);
 
     let ex = expand(&kb, &cmd("find9", &["d", "-exec", "alpha", "x"]));
     assert_eq!(construct_keys(&ex), vec!["wrap_unlocated"]);
     assert_eq!(
-        ex.cmds.iter().map(|c| c.head.clone()).collect::<Vec<_>>(),
+        ex.occurrences.iter().map(|o| o.cmd.head.clone()).collect::<Vec<_>>(),
         vec!["find9"],
         "an unterminated exec yields no command to judge, and says so"
     );
@@ -1784,11 +1782,11 @@ run_dir_flags = ["-C"]
     .expect("parses");
     let ex = expand(&kb, &cmd("env9", &["-C", "C:/tmp", "alpha", "x"]));
     assert_eq!(
-        ex.cmds.iter().map(|c| c.head.clone()).collect::<Vec<_>>(),
+        ex.occurrences.iter().map(|o| o.cmd.head.clone()).collect::<Vec<_>>(),
         vec!["env9", "alpha"]
     );
     assert_eq!(
-        ex.inherited_run_dir,
+        ex.occurrences.iter().map(|o| o.inherited_run_dir.clone()).collect::<Vec<_>>(),
         vec![None, Some("C:/tmp".to_string())],
         "the inner command carries no -C of its own, so the wrapper's has to travel with it"
     );
@@ -1806,8 +1804,8 @@ case_sensitive_flags = true
     )
     .expect("parses");
     let ex = expand(&kb, &cmd("env9", &["FOO=1", "BAR=2", "alpha", "x"]));
-    let inner = ex.cmds.iter().find(|c| c.head == "alpha").expect("the wrapped command");
-    assert_eq!(inner.prefix_assigns, vec!["FOO".to_string(), "BAR".to_string()]);
+    let inner = ex.occurrences.iter().find(|o| o.cmd.head == "alpha").expect("the wrapped command");
+    assert_eq!(inner.cmd.prefix_assigns, vec!["FOO".to_string(), "BAR".to_string()]);
 }
 
 #[test]
@@ -1828,7 +1826,7 @@ case_sensitive_flags = true
     )
     .expect("parses");
     let heads = |c: &vouch::syntax::Cmd| {
-        expand(&kb, c).cmds.iter().map(|x| x.head.clone()).collect::<Vec<_>>()
+        expand(&kb, c).occurrences.iter().map(|x| x.cmd.head.clone()).collect::<Vec<_>>()
     };
     assert_eq!(heads(&cmd("one9", &["5", "alpha"])), vec!["one9", "alpha"]);
     assert_eq!(
@@ -1903,11 +1901,11 @@ no_value_options = ["-Wait"]
     ] {
         let ex = expand(&kb, &cmd("sp9", &args));
         let inner = ex
-            .cmds
+            .occurrences
             .iter()
-            .find(|c| c.head == "alpha")
-            .unwrap_or_else(|| panic!("no wrapped command for {args:?}: {:?}", ex.cmds));
-        assert_eq!(inner.args, vec!["x".to_string(), "y".to_string()], "for {args:?}");
+            .find(|o| o.cmd.head == "alpha")
+            .unwrap_or_else(|| panic!("no wrapped command for {args:?}: {:?}", ex.occurrences));
+        assert_eq!(inner.cmd.args, vec!["x".to_string(), "y".to_string()], "for {args:?}");
         assert!(construct_keys(&ex).is_empty(), "for {args:?}: {:?}", ex.constructs);
     }
 }
@@ -1965,21 +1963,22 @@ fn at_cap_scans_and_one_past_cap_reports() {
 
     // Cap 4: the marker at depth 5 is exactly one past it — cut, and named.
     let ex = vouch::guards::expand_wrappers_with_sources(kb, &top, &[], &[], &[], "bash", &|_| 4);
-    let vouch::guards::ExpandedWrappers { cmds, wrap_depth_exceeded: exceeded, .. } = ex;
-    assert_eq!(exceeded, Some("bash".to_string()), "got cmds={cmds:?}");
+    let vouch::guards::ExpandedWrappers { occurrences, wrap_depth_exceeded: exceeded, .. } = ex;
+    assert_eq!(exceeded, Some("bash".to_string()), "got occurrences={occurrences:?}");
     assert!(
-        !cmds.iter().any(|c| c.head == "echo"),
-        "the marker past the cap must not appear in the scanned commands: {cmds:?}"
+        !occurrences.iter().any(|o| o.cmd.head == "echo"),
+        "the marker past the cap must not appear in the scanned commands: {occurrences:?}"
     );
 
     // Cap 5: every layer, marker included, is within it.
     let ex = vouch::guards::expand_wrappers_with_sources(kb, &top, &[], &[], &[], "bash", &|_| 5);
-    let vouch::guards::ExpandedWrappers { cmds, wrap_depth_exceeded: exceeded, .. } = ex;
-    assert_eq!(exceeded, None, "got cmds={cmds:?}");
+    let vouch::guards::ExpandedWrappers { occurrences, wrap_depth_exceeded: exceeded, .. } = ex;
+    assert_eq!(exceeded, None, "got occurrences={occurrences:?}");
     assert!(
-        cmds.iter()
-            .any(|c| c.head == "echo" && c.args == vec!["done".to_string()]),
-        "expected the marker command once every layer is scanned: {cmds:?}"
+        occurrences
+            .iter()
+            .any(|o| o.cmd.head == "echo" && o.cmd.args == vec!["done".to_string()]),
+        "expected the marker command once every layer is scanned: {occurrences:?}"
     );
 }
 
@@ -2011,15 +2010,15 @@ fn the_cap_is_per_language_of_the_entered_layer() {
         _ => 4,
     };
     let ex = vouch::guards::expand_wrappers_with_sources(kb, &top, &[], &[], &[], "bash", &caps);
-    let vouch::guards::ExpandedWrappers { cmds, wrap_depth_exceeded: exceeded, .. } = ex;
-    assert_eq!(exceeded, Some("bash".to_string()), "got cmds={cmds:?}");
+    let vouch::guards::ExpandedWrappers { occurrences, wrap_depth_exceeded: exceeded, .. } = ex;
+    assert_eq!(exceeded, Some("bash".to_string()), "got occurrences={occurrences:?}");
     assert!(
-        cmds.iter().any(|c| c.head == "sh"),
-        "the powershell-hosted layers must survive past bash's own cap: {cmds:?}"
+        occurrences.iter().any(|o| o.cmd.head == "sh"),
+        "the powershell-hosted layers must survive past bash's own cap: {occurrences:?}"
     );
     assert!(
-        !cmds.iter().any(|c| c.head == "echo"),
-        "the marker one past bash's own cap must not appear: {cmds:?}"
+        !occurrences.iter().any(|o| o.cmd.head == "echo"),
+        "the marker one past bash's own cap must not appear: {occurrences:?}"
     );
 }
 
@@ -2047,12 +2046,12 @@ fn judged_with(kb: &vouch::guards::Knowledge, src: &str, head: &str) -> bool {
         "bash",
         &|_| 4,
     );
-    let i = ex
-        .cmds
+    let occ = ex
+        .occurrences
         .iter()
-        .position(|c| c.head == head)
-        .unwrap_or_else(|| panic!("no occurrence {head} in {src:?}: {:?}", ex.cmds));
-    ex.holds_input[i]
+        .find(|o| o.cmd.head == head)
+        .unwrap_or_else(|| panic!("no occurrence {head} in {src:?}: {:?}", ex.occurrences));
+    occ.provenance == vouch::guards::SourceProvenance::ConsumedHeredoc
 }
 
 fn judged(src: &str, head: &str) -> bool {
@@ -2445,12 +2444,13 @@ fn heredoc_feeds_respects_standalone_run_via_entry_applies() {
 fn a_shells_clustered_inline_code_flag_locates_its_own_snippet() {
     let ex = expand_bash_source("bash -cx 'echo hi'");
     let i = ex
-        .cmds
+        .occurrences
         .iter()
-        .position(|c| c.head == "bash")
+        .position(|o| o.cmd.head == "bash")
         .expect("the outer bash occurrence is in the expansion");
-    assert!(
-        ex.snippet_located[i],
+    assert_eq!(
+        ex.occurrences[i].provenance,
+        vouch::guards::SourceProvenance::LocatedSnippet,
         "the after_c arm located `-c`'s clustered operand without recording it"
     );
     assert!(
@@ -2467,12 +2467,13 @@ fn a_shells_glued_inline_code_flag_is_a_real_ambiguity_not_a_gap() {
     // allowed by treating an undescribed character as an attached value.
     let ex = expand_bash_source("bash -c'echo hi'");
     let i = ex
-        .cmds
+        .occurrences
         .iter()
-        .position(|c| c.head == "bash")
+        .position(|o| o.cmd.head == "bash")
         .expect("the outer bash occurrence is in the expansion");
-    assert!(
-        !ex.snippet_located[i],
+    assert_ne!(
+        ex.occurrences[i].provenance,
+        vouch::guards::SourceProvenance::LocatedSnippet,
         "a shape real bash itself rejects must not be treated as a located snippet"
     );
     assert!(

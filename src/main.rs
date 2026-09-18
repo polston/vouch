@@ -1303,7 +1303,7 @@ fn main() {
                     // so it uses the built-in default depth rather than the
                     // operator's configured cap — same as `expand_wrappers`'s
                     // convenience form — and ignores whether that cap was hit.
-                    let cmds = vouch::guards::expand_wrappers_with_sources(
+                    let ex = vouch::guards::expand_wrappers_with_sources(
                         kb,
                         &scan.commands,
                         &scan.heredocs,
@@ -1311,10 +1311,9 @@ fn main() {
                         &scan.args_complete,
                         &lang,
                         &|_| 4,
-                    )
-                    .cmds;
+                    );
                     let mut seen = std::collections::HashSet::new();
-                    for c in &cmds {
+                    for c in ex.cmds() {
                         if c.head.is_empty() || !seen.insert(c.head.clone()) {
                             continue;
                         }

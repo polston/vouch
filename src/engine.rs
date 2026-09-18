@@ -1014,8 +1014,7 @@ fn judge_once(
         scope_parents,
         scope_table,
         langs: all_langs,
-        holds_input: all_holds_input,
-        snippet_located: all_snippet_located,
+        provenance: all_provenance,
         args_from_input: all_args_from_input,
         args_complete: all_args_complete,
         snippets,
@@ -1300,8 +1299,7 @@ fn judge_once(
                     project_root,
                 )
             } else {
-                let mut per_candidate: Option<(Action, Vec<String>)> = None;
-                for member in members {
+                let per_candidate = BaseSet::fold_ranked(members, |member| {
                     let (member_state, _) = run_dir_place(
                         kb,
                         &all_cmds[i],
@@ -1310,35 +1308,15 @@ fn judge_once(
                         inherited_at(&all_inherited, i),
                         &|raw| resolve(&all_cmds[i], raw),
                     );
-                    let candidate = resolve_guard_action(
+                    resolve_guard_action(
                         cfg,
                         &hit.guard,
                         &place_of(&member_state, here_home),
                         unproven_cause(&member_state),
                         here_home,
                         project_root,
-                    );
-                    // Strictly greater rank replaces and starts a fresh
-                    // sentence list; an equal rank ADDS its sentence. §5 is
-                    // why the tie does not simply keep the first: when two
-                    // entries each cover a different candidate, naming one
-                    // names a setting that does not turn the prompt off —
-                    // remove it and the other candidate still asks. The zone
-                    // pass already names every tree that decided; this is the
-                    // same rule for guard overrides.
-                    match per_candidate {
-                        Some((won, ref mut sentences)) if rank(won) == rank(candidate.0) => {
-                            if let Some(s) = candidate.1 {
-                                remember(sentences, s);
-                            }
-                        }
-                        Some((won, _)) if rank(won) > rank(candidate.0) => {}
-                        _ => {
-                            per_candidate =
-                                Some((candidate.0, candidate.1.into_iter().collect::<Vec<_>>()));
-                        }
-                    }
-                }
+                    )
+                });
                 let (won, sentences) =
                     per_candidate.expect("a set of more than one member has a first member");
                 // Several sentences read as one, in the order the candidates
@@ -1993,24 +1971,20 @@ fn judge_once(
     // trips `lang.python.constructs.evaluated_input`, and a host-language
     // allow of the same construct name must not silently cover it.
     for (i, c) in all_cmds.iter().enumerate() {
-        // Out of bounds reads as NOT held — the fail-closed direction, so a
-        // desynced array keeps today's ask rather than inventing a hold.
-        let holds = all_holds_input.get(i).copied().unwrap_or(false);
-        // Same fail-closed direction as `holds` above: out of bounds reads as
-        // NOT located, so a desynced array keeps today's ask rather than
-        // inventing a stand-down (M2.98).
-        let located = all_snippet_located.get(i).copied().unwrap_or(false);
+        let provenance = all_provenance
+            .get(i)
+            .copied()
+            .unwrap_or(crate::guards::SourceProvenance::Direct);
         // The same fold the recognition loop below reads — one definition, two
         // separate loops over the same parallel vectors.
         let standalone_eligible =
             standalone_eligible_at(&all_args_complete, &all_args_from_input, i);
         let clang = occurrence_lang(&all_langs, i, lang);
-        let (triggered, wrap_lang, hint) = crate::guards::evaluates_input_in(
+        let (triggered, wrap_lang, hint) = crate::guards::evaluates_input_provenance(
             kb,
             c,
             clang,
-            holds,
-            located,
+            provenance,
             standalone_eligible,
         );
         if !triggered {
@@ -2699,51 +2673,60 @@ fn judge_once(
         // 2026-09-03). The collapsed reading asked there, because a plural set
         // became `Unproven` and an unproven place takes a restriction.
         if !distrust.is_empty() {
-            let stop = places.iter().zip(&causes).find_map(|(place, cause)| match place {
+            let stop = BaseSet::reduce_restriction(&places, &causes, |place, cause| match place {
                 Place::Proven(d) => match distrust.holding(d) {
-                    Some(glob) => Some(format!(
-                        "vouch stopped on: run.trust_nothing_under\n  \
-                         where this command runs: {d}\n  \
-                         the tree that covers it: {glob}\n  \
-                         what that means: nothing run from under this tree is recognised — \
-                         described programs ask here too\n  \
-                         to stop asking here, remove {glob} from run.trust_nothing_under"
+                    Some(glob) => Some((
+                        Action::Ask,
+                        format!(
+                            "vouch stopped on: run.trust_nothing_under\n  \
+                             where this command runs: {d}\n  \
+                             the tree that covers it: {glob}\n  \
+                             what that means: nothing run from under this tree is recognised — \
+                             described programs ask here too\n  \
+                             to stop asking here, remove {glob} from run.trust_nothing_under"
+                        ),
                     )),
                     // The place is proven and outside every tree vouch could
                     // LOCATE — but a pattern that names no directory here
                     // cannot be proven outside either, and a restriction
                     // applies until it is. [review] Dropping these silently
                     // turned a configured zone into no zone at all.
-                    None if !distrust.unresolved.is_empty() => Some(format!(
-                        "vouch stopped on: run.trust_nothing_under\n  \
-                         where this command runs: {d}\n  \
-                         the pattern vouch could not resolve: {}\n  \
-                         what that means: this command is outside every tree vouch could \
-                         locate, but a pattern that names no directory on this machine cannot \
-                         be proven outside, and a rule that restricts applies until it is\n  \
-                         to stop asking here, spell that pattern so it resolves ($PROJECT_ROOT or $WORKSPACE_ROOT \
-                          needs a repository or workspace) or remove it from run.trust_nothing_under",
-                        distrust.unresolved.join(", ")
+                    None if !distrust.unresolved.is_empty() => Some((
+                        Action::Ask,
+                        format!(
+                            "vouch stopped on: run.trust_nothing_under\n  \
+                             where this command runs: {d}\n  \
+                             the pattern vouch could not resolve: {}\n  \
+                             what that means: this command is outside every tree vouch could \
+                             locate, but a pattern that names no directory on this machine cannot \
+                             be proven outside, and a rule that restricts applies until it is\n  \
+                             to stop asking here, spell that pattern so it resolves ($PROJECT_ROOT or $WORKSPACE_ROOT \
+                              needs a repository or workspace) or remove it from run.trust_nothing_under",
+                            distrust.unresolved.join(", ")
+                        ),
                     )),
                     None => None,
                 },
                 // Nothing places this command, so it might be standing in the
                 // tree: doubt narrows (spec §The one rule for uncertainty).
-                Place::Unproven => Some(format!(
-                    "vouch stopped on: run.trust_nothing_under\n  \
-                     vouch cannot prove where this command runs: {}\n  \
-                     run.trust_nothing_under ({}) covers a place this command might be running \
-                     in, and a rule that restricts applies unless vouch can prove the command \
-                     runs outside it\n  \
-                     to stop asking here, remove that tree from run.trust_nothing_under, or run \
-                     the command where vouch can place it",
-                    cause,
-                    distrust.written()
+                Place::Unproven => Some((
+                    Action::Ask,
+                    format!(
+                        "vouch stopped on: run.trust_nothing_under\n  \
+                         vouch cannot prove where this command runs: {}\n  \
+                         run.trust_nothing_under ({}) covers a place this command might be running \
+                         in, and a rule that restricts applies unless vouch can prove the command \
+                         runs outside it\n  \
+                         to stop asking here, remove that tree from run.trust_nothing_under, or run \
+                         the command where vouch can place it",
+                        cause,
+                        distrust.written()
+                    ),
                 )),
             });
-            if let Some(reason) = stop {
-                if worst.as_ref().map_or(true, |(w, _)| rank(Action::Ask) > rank(*w)) {
-                    worst = Some((Action::Ask, reason));
+            if let Some((act, reason)) = stop {
+                if worst.as_ref().map_or(true, |(w, _)| rank(act) > rank(*w)) {
+                    worst = Some((act, reason));
                 }
                 continue;
             }
@@ -2760,10 +2743,7 @@ fn judge_once(
         // before. `Yes` is place-independent, so a mix of `Yes` and `AtPlace`
         // still grants — the entry recognises the command either way, and only
         // the sentence differs.
-        let mut scoped_globs: Vec<String> = Vec::new();
-        let mut scoped_dirs: Vec<String> = Vec::new();
-        let mut every_candidate_recognised = true;
-        for candidate in &places {
+        let recognised_places = BaseSet::reduce_grant(&places, |candidate| {
             let run_place = match candidate {
                 Place::Proven(d) => Some(d.as_str()),
                 Place::Unproven => None,
@@ -2780,25 +2760,31 @@ fn judge_once(
                 standalone_eligible,
             ) {
                 crate::guards::Recognised::AtPlace(glob) => {
-                    if !scoped_globs.contains(&glob) {
-                        scoped_globs.push(glob);
-                    }
-                    // Only a proven candidate can reach a scoped entry, so
-                    // this arm always has a directory to name.
-                    if let Place::Proven(d) = candidate {
-                        if !scoped_dirs.contains(d) {
-                            scoped_dirs.push(d.clone());
-                        }
+                    let dir = match candidate {
+                        Place::Proven(d) => Some(d.clone()),
+                        Place::Unproven => None,
+                    };
+                    Some((Some(glob), dir))
+                }
+                crate::guards::Recognised::Yes => Some((None, None)),
+                crate::guards::Recognised::No => None,
+            }
+        });
+        if let Some(items) = recognised_places.filter(|_| !places.is_empty()) {
+            let mut scoped_globs: Vec<String> = Vec::new();
+            let mut scoped_dirs: Vec<String> = Vec::new();
+            for (glob, dir) in items {
+                if let Some(g) = glob {
+                    if !scoped_globs.contains(&g) {
+                        scoped_globs.push(g);
                     }
                 }
-                crate::guards::Recognised::Yes => {}
-                crate::guards::Recognised::No => {
-                    every_candidate_recognised = false;
-                    break;
+                if let Some(d) = dir {
+                    if !scoped_dirs.contains(&d) {
+                        scoped_dirs.push(d);
+                    }
                 }
             }
-        }
-        if every_candidate_recognised && !places.is_empty() {
             // The PLACE is what recognised this, so the allow says which entry
             // and which of its trees. With nothing scoped it was an ordinary
             // unscoped recognition and says nothing extra, exactly as before.
@@ -2862,13 +2848,10 @@ fn judge_once(
         // refused for being plural. "Whatever it is" includes an unknown VERB
         // of a described program: 3b and 3c left that unrecognised like
         // anything else.
-        let zone_hits: Option<Vec<(String, String)>> = places
-            .iter()
-            .map(|p| match p {
-                Place::Proven(d) => trust.holding(d).map(|glob| (glob.to_string(), d.clone())),
-                Place::Unproven => None,
-            })
-            .collect();
+        let zone_hits: Option<Vec<(String, String)>> = BaseSet::reduce_grant(&places, |p| match p {
+            Place::Proven(d) => trust.holding(d).map(|glob| (glob.to_string(), d.clone())),
+            Place::Unproven => None,
+        });
         if let Some(hits) = zone_hits.filter(|h| !h.is_empty()) {
             // Every decider is named, the same rule the guard pass follows for
             // overrides: a set covered by two different trees was let through
@@ -3432,15 +3415,10 @@ struct Expanded {
     langs: Vec<String>,
     /// Whether vouch HOLDS the text of each command's standard input — see
     /// `guards::holds_input`. True only where a here-document the locator
-    /// consumed and scanned is provably that command's input; the construct
-    /// channel reads it so a scanned body stops the ask that says the code is
-    /// not in what vouch was handed.
-    holds_input: Vec<bool>,
-    /// Parallel to `cmds`: whether THIS occurrence's own entry vocabulary
-    /// located a snippet the wrapper walk then scanned, so the code did not
-    /// come from standard input — see
-    /// `guards::ExpandedWrappers::snippet_located` for the full rationale.
-    snippet_located: Vec<bool>,
+    /// Parallel to `cmds`: how each occurrence's code was obtained —
+    /// whether direct, from a located snippet, a consumed here-document,
+    /// or unread standard input.
+    provenance: Vec<crate::guards::SourceProvenance>,
     /// Whether each command's recorded arguments are a partial record because
     /// a wrapper above it appends more from a channel the line never names
     /// (`xargs`). Read by §1d4, which fails closed for every claim an
@@ -3579,8 +3557,7 @@ fn collect_expanded(
         execution_sites: Vec::new(),
         scope_parents: Vec::new(),
         langs: Vec::new(),
-        holds_input: Vec::new(),
-        snippet_located: Vec::new(),
+        provenance: Vec::new(),
         args_from_input: Vec::new(),
         args_complete: Vec::new(),
         snippets: Vec::new(),
@@ -3663,7 +3640,6 @@ fn collect_expanded(
         );
         let command_offset = out.cmds.len();
         let scope_offset = out.scope_parents.len();
-        let execution_sites = ex.execution_sites;
         // The expansion walk numbers its own scopes from 1, relative to this
         // one command's expansion, and says of each what it hangs off. A
         // snippet's body hangs off the command that ran it; a scope INSIDE
@@ -3689,44 +3665,31 @@ fn collect_expanded(
                 }
             });
         }
-        // Zipped rather than indexed, one more strand than before: the walk
-        // builds these arrays in lockstep, and a zip that runs short stops
-        // early instead of reading a neighbour's answer for the strand that
-        // fell behind.
-        for (j, (((((((ec, site), elang), eholds), elocated), einherited), efrom_input), ecomplete)) in ex
-            .cmds
-            .into_iter()
-            .zip(execution_sites)
-            .zip(ex.langs)
-            .zip(ex.holds_input)
-            .zip(ex.snippet_located)
-            .zip(ex.inherited_run_dir)
-            .zip(ex.args_from_input)
-            .zip(ex.args_complete)
-            .enumerate()
-        {
+        for (j, occ) in ex.occurrences.into_iter().enumerate() {
             // The expansion walk's own scope ids are relative to this one
             // command's expansion: its 0 is "wherever the wrapper command
             // itself sits" — the command's scanner scope, mapped above — and
             // its children rebase past every engine scope already allocated.
-            let scope = if site.scope == 0 {
+            let scope = if occ.execution_site.scope == 0 {
                 outer_scope
             } else {
-                scope_offset + site.scope
+                scope_offset + occ.execution_site.scope
             };
-            let effective_order = site.local_order.unwrap_or_else(|| order.clone());
-            out.cmds.push(ec);
+            let effective_order = occ
+                .execution_site
+                .local_order
+                .unwrap_or_else(|| order.clone());
+            out.cmds.push(occ.cmd);
             out.execution_sites.push(ExpandedExecutionSite {
                 scope,
                 order: effective_order,
-                scanner_order: site.scanner_order || j == 0,
+                scanner_order: occ.execution_site.scanner_order || j == 0,
             });
-            out.langs.push(elang);
-            out.holds_input.push(eholds);
-            out.snippet_located.push(elocated);
-            out.inherited_run_dir.push(einherited);
-            out.args_from_input.push(efrom_input);
-            out.args_complete.push(ecomplete);
+            out.langs.push(occ.lang);
+            out.provenance.push(occ.provenance);
+            out.inherited_run_dir.push(occ.inherited_run_dir);
+            out.args_from_input.push(occ.args_from_input);
+            out.args_complete.push(occ.args_complete);
             out.top_level_owner.push(i);
         }
         // The wrapper command `c` (index `i`) is the fallback owner for a
@@ -4084,7 +4047,7 @@ const DRIVE_RELATIVE: &str =
 
 /// The directory a command at some position in the sequence runs in.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum CdState {
+pub enum CdState {
     /// Not normalised — `normalize` runs once, on the joined path, exactly
     /// where it always did.
     Known(String),
@@ -4098,7 +4061,7 @@ enum CdState {
 }
 
 impl CdState {
-    fn known_dir(&self) -> Option<&str> {
+    pub fn known_dir(&self) -> Option<&str> {
         match self {
             CdState::Known(d) => Some(d.as_str()),
             _ => None,
@@ -4519,7 +4482,7 @@ pub fn resolve_program_location(head: &str, run_dir: Option<&str>, home: &str) -
 /// applies unless vouch can prove it runs outside it** (spec 2026-08-06 §The
 /// one rule for uncertainty). Doubt narrows, never widens.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Place {
+pub enum Place {
     /// vouch can name the directory this command runs in, normalised.
     Proven(String),
     /// Nothing places it: a directory change vouch cannot order, an
@@ -4996,18 +4959,18 @@ fn resolve_guard_action(
 /// member absorbs the whole set with its own cause — "one of these three,
 /// or somewhere I cannot name" is not a set.
 #[derive(Debug, Clone, PartialEq)]
-struct BaseSet {
-    states: Vec<CdState>,
+pub struct BaseSet {
+    pub states: Vec<CdState>,
 }
 
 const BASE_SET_CAP: usize = 4;
 
 impl BaseSet {
-    fn of(state: CdState) -> BaseSet {
+    pub fn of(state: CdState) -> BaseSet {
         BaseSet { states: vec![state] }
     }
 
-    fn from_states(states: Vec<CdState>) -> BaseSet {
+    pub fn from_states(states: Vec<CdState>) -> BaseSet {
         if let Some(u) = states.iter().find(|s| matches!(s, CdState::Unknown(_))) {
             return BaseSet::of(u.clone());
         }
@@ -5026,25 +4989,70 @@ impl BaseSet {
         BaseSet { states: out }
     }
 
-    fn union(a: &BaseSet, b: &BaseSet) -> BaseSet {
+    pub fn union(a: &BaseSet, b: &BaseSet) -> BaseSet {
         BaseSet::from_states(a.states.iter().chain(&b.states).cloned().collect())
     }
 
     /// The Task 4 boundary shim: a consumer that needs ONE directory gets
     /// the singleton's member, else an Unknown — replaced by the real
     /// per-member merges (design §4.3) consumer by consumer in Task 5.
-    fn collapse(&self) -> CdState {
+    pub fn collapse(&self) -> CdState {
         match self.states.as_slice() {
             [one] => one.clone(),
             _ => CdState::Unknown(PLURAL_BASES.to_string()),
         }
     }
 
-    fn single_known(&self) -> Option<&str> {
+    pub fn single_known(&self) -> Option<&str> {
         match self.states.as_slice() {
             [CdState::Known(d)] => Some(d.as_str()),
             _ => None,
         }
+    }
+
+    /// Evaluates a candidate base set against a RESTRICTION policy (worst-rank wins).
+    /// If ANY candidate triggers an Ask or Deny (or cannot be proven outside a restriction),
+    /// the restriction fires.
+    pub fn reduce_restriction<F>(places: &[Place], causes: &[String], judge: F) -> Option<(Action, String)>
+    where
+        F: Fn(&Place, &str) -> Option<(Action, String)>,
+    {
+        places.iter().zip(causes).find_map(|(place, cause)| judge(place, cause))
+    }
+
+    /// Evaluates a candidate base set against a GRANT policy (all-or-none).
+    /// A grant is effective ONLY if EVERY candidate provably qualifies.
+    /// If any candidate is unproven or fails the predicate, the grant is withheld (`None`).
+    pub fn reduce_grant<T, F>(places: &[Place], judge: F) -> Option<Vec<T>>
+    where
+        F: Fn(&Place) -> Option<T>,
+    {
+        places.iter().map(|place| judge(place)).collect::<Option<Vec<T>>>()
+    }
+
+    /// Folds candidates across ranked actions, keeping the highest-ranked action
+    /// and accumulating all explanations at that winning rank.
+    pub fn fold_ranked<I, F>(items: I, mut eval: F) -> Option<(Action, Vec<String>)>
+    where
+        I: IntoIterator,
+        F: FnMut(I::Item) -> (Action, Option<String>),
+    {
+        let mut best: Option<(Action, Vec<String>)> = None;
+        for item in items {
+            let (action, sentence) = eval(item);
+            match best {
+                Some((won, ref mut sentences)) if rank(won) == rank(action) => {
+                    if let Some(s) = sentence {
+                        remember(sentences, s);
+                    }
+                }
+                Some((won, _)) if rank(won) > rank(action) => {}
+                _ => {
+                    best = Some((action, sentence.into_iter().collect()));
+                }
+            }
+        }
+        best
     }
 }
 

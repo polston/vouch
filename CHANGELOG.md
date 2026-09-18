@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.39.0 (2026-09-18)
+
+
+### Features
+
+* enumerate command substitution positions via canonical AST visitors shared between the shell parser and measurement harnesses
+* introduce unified restriction, grant, and ranked reduction combinators on candidate base sets
+* support subcommand-specific option definitions and output destination derivation in knowledge schemas
+* unify wrapper expansion state into structured occurrence records with consolidated source provenance
+
+
+### Bug Fixes
+
+* skip parameter expansions as units and enforce arithmetic context for heredoc operators in substitution parsing
+
 ## 0.38.0 (2026-09-18)
 
 

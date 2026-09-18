@@ -132,6 +132,290 @@ fn bodies_via(raw: &str, mode: Mode) -> Bodies {
     out
 }
 
+/// Canonical word positions where command substitutions can appear in a shell script AST.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum SubstitutionPosition {
+    Head,
+    PrefixAssign,
+    Suffix,
+    SuffixAssign,
+    Redirect,
+    HereString,
+    HereDoc,
+    ForValues,
+    Case,
+    ExtendedTest,
+    ArithCmd,
+    FunctionRedirect,
+    Other,
+}
+
+impl SubstitutionPosition {
+    /// Name of the position corresponding to the measurement report.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SubstitutionPosition::Head => "head",
+            SubstitutionPosition::PrefixAssign => "prefix_assign",
+            SubstitutionPosition::Suffix => "suffix",
+            SubstitutionPosition::SuffixAssign => "suffix_assign",
+            SubstitutionPosition::Redirect => "redirect",
+            SubstitutionPosition::HereString => "herestring",
+            SubstitutionPosition::HereDoc => "heredoc",
+            SubstitutionPosition::ForValues => "for_values",
+            SubstitutionPosition::Case => "case",
+            SubstitutionPosition::ExtendedTest => "extended_test",
+            SubstitutionPosition::ArithCmd => "arith_cmd",
+            SubstitutionPosition::FunctionRedirect => "function_redirect",
+            SubstitutionPosition::Other => "other",
+        }
+    }
+}
+
+/// Enumerate every raw word or here-document body that can carry a command
+/// substitution in `program`, along with its canonical `SubstitutionPosition`.
+pub fn for_each_substitution_position<F>(program: &ast::Program, mut visit: F)
+where
+    F: FnMut(SubstitutionPosition, &str),
+{
+    fn compound_list<F: FnMut(SubstitutionPosition, &str)>(
+        list: &ast::CompoundList,
+        visit: &mut F,
+    ) {
+        for item in &list.0 {
+            and_or_list(&item.0, visit);
+        }
+    }
+
+    fn and_or_list<F: FnMut(SubstitutionPosition, &str)>(
+        aol: &ast::AndOrList,
+        visit: &mut F,
+    ) {
+        pipeline(&aol.first, visit);
+        for ao in &aol.additional {
+            match ao {
+                ast::AndOr::And(p) | ast::AndOr::Or(p) => {
+                    pipeline(p, visit);
+                }
+            }
+        }
+    }
+
+    fn pipeline<F: FnMut(SubstitutionPosition, &str)>(
+        p: &ast::Pipeline,
+        visit: &mut F,
+    ) {
+        for cmd in &p.seq {
+            command(cmd, visit);
+        }
+    }
+
+    fn command<F: FnMut(SubstitutionPosition, &str)>(
+        cmd: &ast::Command,
+        visit: &mut F,
+    ) {
+        match cmd {
+            ast::Command::Simple(sc) => simple(sc, visit),
+            ast::Command::Compound(cc, redirects) => {
+                compound(cc, visit);
+                if let Some(list) = redirects {
+                    for r in &list.0 {
+                        redirect(r, SubstitutionPosition::Redirect, visit);
+                    }
+                }
+            }
+            ast::Command::Function(f) => {
+                if let Some(list) = &f.body.1 {
+                    for r in &list.0 {
+                        redirect(r, SubstitutionPosition::FunctionRedirect, visit);
+                    }
+                }
+                compound(&f.body.0, visit);
+            }
+            ast::Command::ExtendedTest(e, redirects) => {
+                extended_test(&e.expr, visit);
+                if let Some(list) = redirects {
+                    for r in &list.0 {
+                        redirect(r, SubstitutionPosition::Redirect, visit);
+                    }
+                }
+            }
+        }
+    }
+
+    fn simple<F: FnMut(SubstitutionPosition, &str)>(
+        sc: &ast::SimpleCommand,
+        visit: &mut F,
+    ) {
+        if let Some(w) = &sc.word_or_name {
+            visit(SubstitutionPosition::Head, &w.value);
+        }
+        if let Some(prefix) = &sc.prefix {
+            for item in &prefix.0 {
+                prefix_or_suffix(item, false, visit);
+            }
+        }
+        if let Some(suffix) = &sc.suffix {
+            for item in &suffix.0 {
+                prefix_or_suffix(item, true, visit);
+            }
+        }
+    }
+
+    fn prefix_or_suffix<F: FnMut(SubstitutionPosition, &str)>(
+        item: &ast::CommandPrefixOrSuffixItem,
+        is_suffix: bool,
+        visit: &mut F,
+    ) {
+        match item {
+            ast::CommandPrefixOrSuffixItem::IoRedirect(r) => {
+                redirect(r, SubstitutionPosition::Redirect, visit);
+            }
+            ast::CommandPrefixOrSuffixItem::Word(w) => {
+                let pos = if is_suffix {
+                    SubstitutionPosition::Suffix
+                } else {
+                    SubstitutionPosition::Other
+                };
+                visit(pos, &w.value);
+            }
+            ast::CommandPrefixOrSuffixItem::AssignmentWord(_, w) => {
+                let pos = if is_suffix {
+                    SubstitutionPosition::SuffixAssign
+                } else {
+                    SubstitutionPosition::PrefixAssign
+                };
+                visit(pos, &w.value);
+            }
+            ast::CommandPrefixOrSuffixItem::ProcessSubstitution(_, sub) => {
+                compound_list(&sub.list, visit);
+            }
+        }
+    }
+
+    fn compound<F: FnMut(SubstitutionPosition, &str)>(
+        cc: &ast::CompoundCommand,
+        visit: &mut F,
+    ) {
+        match cc {
+            ast::CompoundCommand::BraceGroup(bg) => compound_list(&bg.list, visit),
+            ast::CompoundCommand::Subshell(sub) => compound_list(&sub.list, visit),
+            ast::CompoundCommand::ForClause(f) => {
+                for w in f.values.iter().flatten() {
+                    visit(SubstitutionPosition::ForValues, &w.value);
+                }
+                compound_list(&f.body.list, visit);
+            }
+            ast::CompoundCommand::CaseClause(cc2) => {
+                visit(SubstitutionPosition::Case, &cc2.value.value);
+                for item in &cc2.cases {
+                    for w in &item.patterns {
+                        visit(SubstitutionPosition::Case, &w.value);
+                    }
+                    if let Some(body) = &item.cmd {
+                        compound_list(body, visit);
+                    }
+                }
+            }
+            ast::CompoundCommand::IfClause(i) => {
+                compound_list(&i.condition, visit);
+                compound_list(&i.then, visit);
+                if let Some(elses) = &i.elses {
+                    for e in elses {
+                        if let Some(cond) = &e.condition {
+                            compound_list(cond, visit);
+                        }
+                        compound_list(&e.body, visit);
+                    }
+                }
+            }
+            ast::CompoundCommand::WhileClause(w)
+            | ast::CompoundCommand::UntilClause(w) => {
+                compound_list(&w.0, visit);
+                compound_list(&w.1.list, visit);
+            }
+            ast::CompoundCommand::Coprocess(cp) => command(&cp.body, visit),
+            ast::CompoundCommand::Arithmetic(a) => {
+                visit(SubstitutionPosition::ArithCmd, &a.expr.value);
+            }
+            ast::CompoundCommand::ArithmeticForClause(f) => {
+                for e in [&f.initializer, &f.condition, &f.updater].into_iter().flatten() {
+                    visit(SubstitutionPosition::ArithCmd, &e.value);
+                }
+                compound_list(&f.body.list, visit);
+            }
+        }
+    }
+
+    fn redirect<F: FnMut(SubstitutionPosition, &str)>(
+        r: &ast::IoRedirect,
+        pos: SubstitutionPosition,
+        visit: &mut F,
+    ) {
+        match r {
+            ast::IoRedirect::File(_, _, target) => match target {
+                ast::IoFileRedirectTarget::Filename(w)
+                | ast::IoFileRedirectTarget::Duplicate(w) => {
+                    visit(pos, &w.value);
+                }
+                ast::IoFileRedirectTarget::Fd(_) => {}
+                ast::IoFileRedirectTarget::ProcessSubstitution(_, sub) => {
+                    compound_list(&sub.list, visit);
+                }
+            },
+            ast::IoRedirect::HereDocument(_, doc) => {
+                if doc.requires_expansion {
+                    visit(SubstitutionPosition::HereDoc, &doc.doc.value);
+                }
+            }
+            ast::IoRedirect::HereString(_, w) => {
+                visit(SubstitutionPosition::HereString, &w.value);
+            }
+            ast::IoRedirect::OutputAndError(w, _) => {
+                visit(pos, &w.value);
+            }
+        }
+    }
+
+    fn extended_test<F: FnMut(SubstitutionPosition, &str)>(
+        expr: &ast::ExtendedTestExpr,
+        visit: &mut F,
+    ) {
+        match expr {
+            ast::ExtendedTestExpr::And(l, r)
+            | ast::ExtendedTestExpr::Or(l, r) => {
+                extended_test(l, visit);
+                extended_test(r, visit);
+            }
+            ast::ExtendedTestExpr::Not(e)
+            | ast::ExtendedTestExpr::Parenthesized(e) => {
+                extended_test(e, visit);
+            }
+            ast::ExtendedTestExpr::UnaryTest(_, w) => {
+                visit(SubstitutionPosition::ExtendedTest, &w.value);
+            }
+            ast::ExtendedTestExpr::BinaryTest(_, l, r) => {
+                visit(SubstitutionPosition::ExtendedTest, &l.value);
+                visit(SubstitutionPosition::ExtendedTest, &r.value);
+            }
+        }
+    }
+
+    for cc in &program.complete_commands {
+        compound_list(cc, &mut visit);
+    }
+}
+
+/// Enumerate every raw word or here-document body that can carry a command
+/// substitution in `src`, along with its canonical `SubstitutionPosition`.
+pub fn for_each_substitution_position_in_src<F>(src: &str, visit: F)
+where
+    F: FnMut(SubstitutionPosition, &str),
+{
+    if let Ok(program) = parse_source(src) {
+        for_each_substitution_position(&program, visit);
+    }
+}
+
 /// One flat pass over already-stripped text, emitting one body per OUTERMOST
 /// substitution and noting `unreadable` for one whose end vouch could not
 /// find (design §2.1 steps 3 and 4).
@@ -403,6 +687,7 @@ fn extent_brace<'t>(
     let content = is_non_forking_substitution_opener(cs, dollar)?;
     let start = cs.get(content).map(|&(pos, _)| pos).unwrap_or(text.len());
     let mut depth = 1usize;
+    let mut arith_depth = 0usize;
     let mut quoting = Quoting::default();
     let mut after_nested: Option<usize> = None;
     let mut pending: Vec<(String, bool)> = Vec::new();
@@ -423,9 +708,26 @@ fn extent_brace<'t>(
                 after_nested = Some(i);
                 continue;
             }
+            '$' if cs.get(i + 1).is_some_and(|&(_, c)| c == '{')
+                && is_non_forking_substitution_opener(cs, i).is_none() =>
+            {
+                i = skip_parameter_expansion(cs, i)?;
+                after_nested = Some(i);
+                continue;
+            }
             '`' => {
                 i = skip_backquotes(cs, i)?;
                 continue;
+            }
+            '(' => {
+                if (cs.get(i + 1).is_some_and(|&(_, c)| c == '(') && arith_depth == 0) || arith_depth > 0 {
+                    arith_depth += 1;
+                }
+            }
+            ')' => {
+                if arith_depth > 0 {
+                    arith_depth -= 1;
+                }
             }
             '{' => depth += 1,
             '}' => {
@@ -440,7 +742,7 @@ fn extent_brace<'t>(
                 }
                 continue;
             }
-            '<' if is_heredoc_operator(cs, i) => {
+            '<' if arith_depth == 0 && is_heredoc_operator(cs, i) => {
                 let (delim, strip_tabs, next) = heredoc_delimiter(cs, i);
                 if !delim.is_empty() {
                     pending.push((delim, strip_tabs));
@@ -513,6 +815,7 @@ fn extent<'t>(
     let content = dollar + 2;
     let start = cs.get(content)?.0;
     let mut depth = 0usize;
+    let mut arith_depth = 0usize;
     let mut quoting = Quoting::default();
     // The index just past the most recent nested substitution's closer. That
     // `)` is INSIDE a word, unlike the `)` that ends a subshell, so it does not
@@ -546,11 +849,23 @@ fn extent<'t>(
                 after_nested = Some(i);
                 continue;
             }
+            '$' if cs.get(i + 1).is_some_and(|&(_, c)| c == '{')
+                && is_non_forking_substitution_opener(cs, i).is_none() =>
+            {
+                i = skip_parameter_expansion(cs, i)?;
+                after_nested = Some(i);
+                continue;
+            }
             '`' => {
                 i = skip_backquotes(cs, i)?;
                 continue;
             }
-            '(' => depth += 1,
+            '(' => {
+                if (cs.get(i + 1).is_some_and(|&(_, c)| c == '(') && arith_depth == 0) || arith_depth > 0 {
+                    arith_depth += 1;
+                }
+                depth += 1;
+            }
             ')' => {
                 // A pattern's terminator, not this substitution's closer. A
                 // `)` deeper than this level is the mate of a `(` the walk
@@ -559,6 +874,9 @@ fn extent<'t>(
                 if cases > 0 && depth == 1 {
                     i += 1;
                     continue;
+                }
+                if arith_depth > 0 {
+                    arith_depth -= 1;
                 }
                 depth -= 1;
                 if depth == 0 {
@@ -595,7 +913,7 @@ fn extent<'t>(
                 i += "esac".chars().count();
                 continue;
             }
-            '<' if skip_docs && is_heredoc_operator(cs, i) => {
+            '<' if skip_docs && arith_depth == 0 && is_heredoc_operator(cs, i) => {
                 let (delim, strip_tabs, next) = heredoc_delimiter(cs, i);
                 // An operator with no delimiter after it introduces no
                 // here-document; the `<` is then ordinary text.
@@ -1178,6 +1496,54 @@ fn skip_backquotes(cs: &[(usize, char)], tick: usize) -> Option<usize> {
             '`' => return Some(i + 1),
             _ => i += 1,
         }
+    }
+    None
+}
+
+/// The position just past a `${ … }` parameter expansion that starts at the
+/// `$`, or `None` when it never closes.
+///
+/// Nest- and quote-aware: a `}` inside quotes or inside an inner substitution
+/// does not end the outer one. Parentheses inside the parameter expansion
+/// (e.g. pattern trimming in `${var%*)}`) belong to the pattern and do not
+/// close enclosing command substitutions.
+fn skip_parameter_expansion(cs: &[(usize, char)], dollar: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut quoting = Quoting::default();
+    let mut i = dollar + 2;
+    while i < cs.len() {
+        if let Some(next) = quoting.step_expanding(cs, i) {
+            i = next;
+            continue;
+        }
+        match cs[i].1 {
+            '\\' => {
+                i += 2;
+                continue;
+            }
+            '$' if cs.get(i + 1).is_some_and(|&(_, c)| c == '(') => {
+                i = skip_command_substitution(cs, i)?;
+                continue;
+            }
+            '$' if cs.get(i + 1).is_some_and(|&(_, c)| c == '{') => {
+                depth += 1;
+                i += 2;
+                continue;
+            }
+            '`' => {
+                i = skip_backquotes(cs, i)?;
+                continue;
+            }
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
     }
     None
 }

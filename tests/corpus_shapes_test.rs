@@ -41,7 +41,10 @@ fn expanded(kb: &vouch::guards::Knowledge, scan: &vouch::syntax::Scan) -> Vec<vo
         "bash",
         &|_| 4,
     )
-    .cmds
+    .occurrences
+    .into_iter()
+    .map(|o| o.cmd)
+    .collect()
 }
 
 /// Counts, per program, how many corpus commands invoke it — parsed, not matched.

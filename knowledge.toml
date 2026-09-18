@@ -2533,6 +2533,11 @@ no_value_options = [
   "-A", "--all-namespaces",
 ]
 
+[[program.subcommand_options]]
+subcommands = ["kustomize"]
+value_options = ["-o", "--output"]
+write_flags = ["-o", "--output"]
+
 [[program.rule]]
 guard = "remote_execution"
 source = "declared: pod/container command execution"

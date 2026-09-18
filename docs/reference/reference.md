@@ -271,6 +271,7 @@ name.
 | `standalone_flags` | array of string | [] | Flags this entry vouches for ALONE: a run whose every argument is one of these (whole-token, unquoted view, the entry's case rule) is a standalone run — covered by the entry, and read as evaluating no standard input. The claim per flag: given only listed flags, the program performs the flag's own action and stops. Verified by running each flag, per name and case — each alone and once all together — before it is written. |
 | `sub_capability` | array of SubCapability | (none) | Subcommand-specific capability declarations, written as `[[program.sub_capability]]`. |
 | `sub_write` | array of SubWrite | (none) | Write targets that depend on the SUBCOMMAND, not on the program.  `git` writes wherever `clone`, `init` and `worktree add` are told to, and nowhere for `status` or `log`. A single `writes` for the whole program cannot say that. |
+| `subcommand_options` | array of SubcommandOptions | (none) | Subcommand-specific options for programs where flag semantics differ by subcommand. |
 | `subcommand_paths` | array of array of string (optional) | (unset) | Exact positional command paths this entry recognises.  Each non-empty inner vector is matched from the first positional word under this entry's flag grammar. `[["mcp", "get"]]` recognises that operation without recognising `mcp add` or another sibling. Either this key or `subcommands` being present makes the entry scoped; both absent still means whole-program coverage. When both are present their scopes are unioned. |
 | `subcommands` | array of string (optional) | (unset) | Which subcommands this entry recognises.  Three states (spec 2026-08-20 §3): the key ABSENT (`None`) covers the whole program — every run; a non-empty list covers those verbs, plus standalone runs when `standalone_flags` is present; an explicitly EMPTY list covers no verb at all — only standalone runs, and the loader refuses that spelling without a non-empty `standalone_flags` (an entry that can never recognise anything reads as installed protection and is worse than none). |
 | `value_options` | array of string | [] | Options that consume the following token. Needed to find the subcommand. |
@@ -342,6 +343,18 @@ told to, and nowhere for `status` or `log`.
 | `subcommand` | string | (required) | The subcommand this applies to, e.g. "clone". |
 | `takes` | string | "" | Which of those arguments is the destination: "last" (the default) or "first".  `git clone <url> <dir>` puts it last, but `git worktree add <dir> [<commit-ish>]` puts it FIRST — taking the last recorded `HEAD` as a written path, which is a commit, not a directory. |
 | `then` | string | "" | A second word that must follow it, e.g. "add" for `worktree add`. |
+
+### `SubcommandOptions`
+
+Options that apply only to specific subcommands of a program.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `no_value_options` | array of string | [] | Subcommand-specific flags that take no following value token. |
+| `subcommands` | array of string | (required) | The subcommand name(s) this applies to (e.g. ["kustomize"]). |
+| `then` | string (optional) | (unset) | Optional second subcommand word (e.g. "config" in `docker compose config`). |
+| `value_options` | array of string | [] | Subcommand-specific flags that consume a following value token. |
+| `write_flags` | array of string | [] | Subcommand-specific flags whose value is a written destination path. |
 
 ### `Tool`
 

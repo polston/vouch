@@ -422,6 +422,13 @@
             "$ref": "#/$defs/SubWrite"
           }
         },
+        "subcommand_options": {
+          "description": "Subcommand-specific options for programs where flag semantics differ by subcommand.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SubcommandOptions"
+          }
+        },
         "subcommand_paths": {
           "description": "Exact positional command paths this entry recognises.\n\nEach non-empty inner vector is matched from the first positional word\nunder this entry's flag grammar. `[[\"mcp\", \"get\"]]` recognises that\noperation without recognising `mcp add` or another sibling. Either\nthis key or `subcommands` being present makes the entry scoped; both\nabsent still means whole-program coverage. When both are present their\nscopes are unioned.",
           "type": [
@@ -727,6 +734,55 @@
       "additionalProperties": false,
       "required": [
         "subcommand"
+      ]
+    },
+    "SubcommandOptions": {
+      "description": "Options that apply only to specific subcommands of a program.",
+      "type": "object",
+      "properties": {
+        "no_value_options": {
+          "description": "Subcommand-specific flags that take no following value token.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "subcommands": {
+          "description": "The subcommand name(s) this applies to (e.g. [\"kustomize\"]).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "then": {
+          "description": "Optional second subcommand word (e.g. \"config\" in `docker compose config`).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "value_options": {
+          "description": "Subcommand-specific flags that consume a following value token.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "write_flags": {
+          "description": "Subcommand-specific flags whose value is a written destination path.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "subcommands"
       ]
     },
     "Tool": {
