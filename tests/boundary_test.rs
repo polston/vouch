@@ -1049,7 +1049,8 @@ mod m2_131_junction {
     impl JunctionFixture {
         fn build() -> Self {
             let junction_dir = std::path::PathBuf::from("C:/tmp/vouch_boundary_junction");
-            let target_dir = std::env::temp_dir().join("vouch_boundary_junction_target");
+            let target_dir = std::path::PathBuf::from("C:/outside_boundary_junction_target");
+            let _ = std::fs::remove_dir_all(&target_dir);
             std::fs::create_dir_all(&junction_dir)
                 .unwrap_or_else(|e| panic!("could not create {}: {e}", junction_dir.display()));
             std::fs::create_dir_all(&target_dir)
