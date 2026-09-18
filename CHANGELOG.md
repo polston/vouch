@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.41.0 (2026-09-18)
+
+
+### Features
+
+* detect unified diff added environment dumps in pre-push hook
+* evaluate mode-conditioned writes by reference as unresolved invocations
+* exempt literal None in higher-order callback argument positions
+* format unresolved python variable targets with unresolved marker token
+* replace phantom reconcile skill with inline remediation in config diagnostics
+
 ## 0.40.0 (2026-09-18)
 
 

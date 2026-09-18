@@ -242,6 +242,7 @@ fn argument_value(
             _ => ArgumentValue::unread(MARKER),
         },
         ast::Expr::BooleanLiteral(b) => ArgumentValue::readable(b.value.to_string()),
+        ast::Expr::NoneLiteral(_) => ArgumentValue::readable("None"),
         // A name resolves to what it was assigned, or stays a marker.
         // Keeping the marker is the point: `open(p, "w")` where `p` came
         // from argv is a write to a path vouch cannot name, and saying so is
@@ -249,7 +250,7 @@ fn argument_value(
         ast::Expr::Name(n) => assigned
             .get(n.id.as_str())
             .cloned()
-            .unwrap_or_else(|| ArgumentValue::unread(format!("${}", n.id))),
+            .unwrap_or_else(|| ArgumentValue::unread(MARKER)),
         ast::Expr::Subscript(subscript) => {
             match (dotted(&subscript.value), static_nonnegative_index(&subscript.slice)) {
                 (Some(name), Some(index)) => ArgumentValue::indexed(name, index),

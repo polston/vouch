@@ -379,19 +379,13 @@ mod m2_89 {
     /// slot as the reference carrier — the same pattern
     /// `a_referenced_directory_mover_raises_callable_argument_alone` and
     /// `a_referenced_all_args_write_reports_an_unresolved_destination` below
-    /// already use — so this no longer depends on Task 5 at all. Empirically
-    /// confirmed to exercise the real mode-gate: a by-reference call carries
-    /// no arguments, so `mode_says_write` reads the absent mode position as a
-    /// read (no unpack in play) and `written_paths_in`'s `arg_0` arm skips the
-    /// write target entirely — genuinely different from
-    /// `a_referenced_all_args_write_reports_an_unresolved_destination`'s
-    /// `os.rename` sibling, whose ungated `"all_args"` grammar pushes
-    /// `python::MARKER` (Finding B) and does say `unresolved_path` on the same
-    /// empty-argument shape.
+    /// M2.212: when a mode-gated write (like `open`) is handed by reference,
+    /// its mode cannot be proven to be read-only, so it pushes the unresolved
+    /// marker and asks on unresolved_path (same precedent as dd and os.rename).
     #[test]
-    fn a_referenced_mode_gated_write_without_a_mode_is_not_a_write() {
+    fn a_referenced_mode_gated_write_without_a_mode_reports_an_unresolved_destination() {
         let (_, reason) = common_decide(r#"python -c "open('f', opener=open)""#);
-        assert!(!reason.contains("unresolved_path"), "reason was: {reason}");
+        assert!(reason.contains("unresolved_path"), "reason was: {reason}");
     }
 
     /// The brief's own sketch for this test (`"for f in fs:\n    map(f, xs)"`
@@ -689,6 +683,38 @@ mod vocabulary {
         assert!(
             !reason.contains("callback_argument") && !reason.contains("callable_argument"),
             "reason was: {reason}"
+        );
+    }
+
+    #[test]
+    fn filter_none_allows() {
+        for src in [
+            r#"python -c "list(filter(None, ['a', '']))""#,
+            r#"python -c "list(filter(None, [0, 1, 2]))""#,
+            r#"python -c "list(filter(function=None, iterable=['a', '']))""#,
+        ] {
+            let (a, reason) = common_decide(src);
+            assert_eq!(a, Action::Allow, "{src}: got {reason}");
+        }
+    }
+
+    #[test]
+    fn map_open_by_reference_asks_on_unresolved_path() {
+        let (a, reason) = common_decide(r#"python -c "list(map(open, ['a', 'b']))""#);
+        assert_eq!(a, Action::Ask);
+        assert!(
+            reason.contains("unresolved_path"),
+            "expected unresolved_path, got {reason}"
+        );
+    }
+
+    #[test]
+    fn unresolved_python_name_in_write_target_reports_unresolved_marker_not_shell_variable() {
+        let (a, reason) = common_decide(r#"python -c "p = sys.argv[1]; open(p, 'w')""#);
+        assert_eq!(a, Action::Ask);
+        assert!(
+            reason.contains("unresolved_path") && reason.contains("$?") && !reason.contains("$p"),
+            "expected unresolved token $? without $p, got: {reason}"
         );
     }
 }

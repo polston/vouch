@@ -235,7 +235,7 @@ fn a_trust_zone_inside_a_distrust_zone_is_reported_inert() {
     let findings = vouch::config::inert_place_rules(&cfg, "C:/Users/dev", None);
     assert_eq!(findings.len(), 1);
     assert!(findings[0].contains("trust_all_under") && findings[0].contains("can never grant"), "{}", findings[0]);
-    assert!(findings[0].contains("vouch-reconcile"), "{}", findings[0]);
+    assert!(findings[0].contains("to fix: remove the narrower trust zone") && !findings[0].contains("vouch-reconcile"), "{}", findings[0]);
 }
 
 #[test]
@@ -313,7 +313,7 @@ fn an_ask_entry_entirely_inside_a_wall_is_reported_inert() {
     // other four checks cover, just for the fourth pair of lists.
     let cfg = config::load("[write]\nask_paths = [\"C:/x/sub/**\"]\ndeny_paths = [\"C:/x/**\"]").unwrap();
     let findings = vouch::config::inert_place_rules(&cfg, "C:/Users/dev", None);
-    assert!(findings.iter().any(|f| f.contains("ask_paths") && f.contains("deny_paths") && f.contains("vouch-reconcile")));
+    assert!(findings.iter().any(|f| f.contains("ask_paths") && f.contains("deny_paths") && f.contains("to fix:") && !f.contains("vouch-reconcile")));
 }
 
 #[test]
@@ -326,7 +326,7 @@ fn an_allow_entry_entirely_inside_the_ask_wall_is_reported_inert() {
     // above, with the other wall list.
     let cfg = config::load("[write]\nallow_paths = [\"C:/x/sub/**\"]\nask_paths = [\"C:/x/**\"]").unwrap();
     let findings = vouch::config::inert_place_rules(&cfg, "C:/Users/dev", None);
-    assert!(findings.iter().any(|f| f.contains("allow_paths") && f.contains("write.ask_paths") && f.contains("vouch-reconcile")), "{findings:?}");
+    assert!(findings.iter().any(|f| f.contains("allow_paths") && f.contains("write.ask_paths") && f.contains("to fix:") && !f.contains("vouch-reconcile")), "{findings:?}");
 }
 
 #[test]
@@ -345,7 +345,7 @@ fn a_shadowed_two_token_scope_entry_is_reported_inert() {
          [[write.scope]]\nprograms = [\"git init\"]\nonly_under = [\"C:/work/**\"]",
     ).unwrap();
     let findings = vouch::config::inert_place_rules(&cfg, "C:/Users/dev", None);
-    assert!(findings.iter().any(|f| f.contains("git") && f.contains("git init") && f.contains("vouch-reconcile")));
+    assert!(findings.iter().any(|f| f.contains("git") && f.contains("git init") && f.contains("to fix:") && !f.contains("vouch-reconcile")));
 }
 
 #[test]
@@ -363,7 +363,7 @@ fn a_shadowed_three_token_scope_entry_is_reported_inert() {
     ).unwrap();
     let findings = vouch::config::inert_place_rules(&cfg, "C:/Users/dev", None);
     assert!(
-        findings.iter().any(|f| f.contains("git worktree add") && f.contains("vouch-reconcile")),
+        findings.iter().any(|f| f.contains("git worktree add") && f.contains("to fix:") && !f.contains("vouch-reconcile")),
         "{findings:?}"
     );
 }

@@ -6780,6 +6780,7 @@ pub fn written_paths_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> WriteTargets {
                 if let Some(i) = s.strip_prefix("arg_").and_then(|n| n.parse::<usize>().ok()) {
                     let has_unpack = has_unpack_arg(cmd);
                     let mode_blocks = prog.writes_only_with_file_mode == Some(true)
+                        && !cmd.by_reference
                         && !mode_says_write(prog, &eff, &padding, base_off, has_unpack);
                     if !mode_blocks {
                         // `eff_position_occupied`, not a bare `eff.get(i)`

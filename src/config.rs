@@ -823,7 +823,7 @@ fn validate(cfg: &Config) -> Result<(), String> {
             if b.iter().any(|pb| fold(pa) == fold(pb)) {
                 return Err(format!(
                     "'{pa}' appears in both {an} and {bn} — the config says two opposite \
-                     things about one tree; fix it (the vouch-reconcile skill guides this)"
+                     things about one tree; to fix: remove it from one list (run 'vouch doctor' to check)"
                 ));
             }
         }
@@ -1100,7 +1100,7 @@ pub fn inert_place_rules(cfg: &Config, home: &str, project_root: Option<&str>) -
         format!(
             "run.trust_all_under '{t}' is entirely inside run.trust_nothing_under \
              '{d}' — the distrust zone is checked first, so it can never grant \
-             trust there; the vouch-reconcile skill guides fixing this"
+             trust there; to fix: remove the narrower trust zone or adjust boundaries (run 'vouch doctor' to check)"
         )
     });
 
@@ -1108,8 +1108,8 @@ pub fn inert_place_rules(cfg: &Config, home: &str, project_root: Option<&str>) -
     report(&allow, &deny, &|a, d| {
         format!(
             "write.allow_paths '{a}' is entirely inside write.deny_paths '{d}' — \
-             the wall is checked first, so it can never allow a write there; the \
-             vouch-reconcile skill guides fixing this"
+             the wall is checked first, so it can never allow a write there; to \
+             fix: remove it from write.allow_paths or narrow write.deny_paths (run 'vouch doctor' to check)"
         )
     });
 
@@ -1120,8 +1120,8 @@ pub fn inert_place_rules(cfg: &Config, home: &str, project_root: Option<&str>) -
     report(&ask, &deny, &|a, d| {
         format!(
             "write.ask_paths '{a}' is entirely inside write.deny_paths '{d}' — deny \
-             is checked first, so it can never ask there; the vouch-reconcile skill \
-             guides fixing this"
+             is checked first, so it can never ask there; to fix: remove it \
+             from write.ask_paths or narrow write.deny_paths (run 'vouch doctor' to check)"
         )
     });
 
@@ -1135,8 +1135,8 @@ pub fn inert_place_rules(cfg: &Config, home: &str, project_root: Option<&str>) -
     report(&allow, &ask, &|a, k| {
         format!(
             "write.allow_paths '{a}' is entirely inside write.ask_paths '{k}' — \
-             ask is checked first, so it can never allow a write there; the \
-             vouch-reconcile skill guides fixing this"
+             ask is checked first, so it can never allow a write there; to fix: \
+             remove it from write.allow_paths or narrow write.ask_paths (run 'vouch doctor' to check)"
         )
     });
 
@@ -1157,8 +1157,7 @@ pub fn inert_place_rules(cfg: &Config, home: &str, project_root: Option<&str>) -
                     "[[run.guards]] override under '{u}' loosens {guard} to \
                      {}, entirely inside run.trust_nothing_under '{d}' — that \
                      zone forces at least ask everywhere under it, so the override \
-                     can never loosen anything there; the vouch-reconcile skill \
-                     guides fixing this",
+                     can never loosen anything there; to fix: adjust boundaries or remove the override (run 'vouch doctor' to check)",
                     action_word(action)
                 )
             });
@@ -1205,7 +1204,8 @@ pub fn inert_place_rules(cfg: &Config, home: &str, project_root: Option<&str>) -
                     "[[write.scope]] entry {entry_num} ('{e1}') comes before entry {} ('{e2}') \
                      for the same program — vouch matches the first entry that names a command, \
                      so the wider entry matches first and '{e2}' can never separately \
-                     judge {narrow}; the vouch-reconcile skill guides fixing this",
+                     judge {narrow}; to fix: move entry {} before entry {entry_num} or remove the shadowed entry (run 'vouch doctor' to check)",
+                    j + 1,
                     j + 1
                 ));
             }

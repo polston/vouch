@@ -1134,7 +1134,7 @@ fn effective_python_arguments_preserve_keyword_positions_and_readability() {
     assert!(equals_literal.padding.is_empty());
 
     let keyword = effective_open_args(r#"open(mode="w", file=value)"#);
-    assert_eq!(keyword.values, vec!["$value", "w"]);
+    assert_eq!(keyword.values, vec!["$?", "w"]);
     assert_eq!(keyword.unread, std::collections::HashSet::from([0]));
     assert!(keyword.padding.is_empty());
 }
@@ -1270,7 +1270,7 @@ writes = "arg_0"
     // flows to the unresolved_path ask downstream (marker-as-target here;
     // one end-to-end ASK test lands in Task 11).
     let t = py_written(&kb, "p.mkdir()");
-    assert_eq!(t.paths, vec!["$p".to_string()], "got {t:?}");
+    assert_eq!(t.paths, vec!["$?".to_string()], "got {t:?}");
 }
 
 #[test]

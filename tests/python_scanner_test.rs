@@ -371,7 +371,7 @@ fn an_implicitly_concatenated_f_string_keeps_its_literal_prefix() {
     // one.
     let s = parse(r#"open("dir/" f"{d}.txt")"#).unwrap();
     let c = s.commands.iter().find(|c| c.head == "python:open").unwrap();
-    assert_eq!(c.args, vec!["dir/$d.txt"]);
+    assert_eq!(c.args, vec!["dir/$?.txt"]);
 }
 
 #[test]
@@ -386,7 +386,7 @@ fn a_nameless_keyword_unpacking_leaves_a_marker() {
     // which the two shared identically before this fix.
     let s = parse("open(p, **opts)").unwrap();
     let c = s.commands.iter().find(|c| c.head == "python:open").unwrap();
-    assert_eq!(c.args, vec!["$p", "$**"]);
+    assert_eq!(c.args, vec!["$?", "$**"]);
 }
 
 #[test]
