@@ -1150,102 +1150,42 @@ fn judge_once(
     let mut injected_redirect_scope: Vec<Option<usize>> =
         vec![None; scan.redirect_targets.len()];
     for site in &snippets {
-        let (plang, psrc) = (&site.lang, &site.src);
-        // A language the registry has no scanner for `continue`s here —
-        // recorded divergence from the route path, which asks explicitly
-        // instead (`route::decide_snippet`'s `unreadable_language`). This
-        // site sees only snippets already reached by wrapper expansion, most
-        // of which are `"opaque"` by design (nothing claims a scanner for
-        // it), so silently skipping the rest of them is not this task's
-        // hole to close — that is ROADMAP M2.73.
-        let Some(ps) = crate::syntax::scanner_for(plang) else {
+        let plang = &site.lang;
+        if crate::syntax::scanner_for(plang).is_none() {
             continue;
-        };
-        // A scan failure here is the SAME text `scan_snippet` already
-        // attempted while expanding wrappers — `snippets` is built from the
-        // exact source list `scan_snippet` pushes into — so a failure is the
-        // identical failure channel 1 (`parse_failures`, folded below)
-        // already turns into an ask naming
-        // `lang.<plang>.constructs.parse_failure`. Nothing silently
-        // vanishes on `Err`: there is simply no redirect or construct list
-        // to read from text that did not parse, and the ask already says so.
-        if let Ok(inner) = ps.scan(psrc) {
-            // A redirect inside a wrapped snippet keeps the position the
-            // SNIPPET gives it (M2.225). The expansion walk allocated one
-            // engine scope per scanner scope the snippet's own scan holds and
-            // handed the mapping up in `site.scopes`, so `redirect_scope[j]`
-            // — an id in the snippet's own numbering, which the outer scan
-            // cannot read — translates into a scope the outer scan can. Order
-            // and chain come from the same inner scan, for the same reason:
-            // they say where the redirect sits INSIDE the snippet, which is
-            // exactly what an ordered `cd` in that snippet has to be compared
-            // against.
-            //
-            // Position and scope are decided TOGETHER, per redirect. Taking
-            // the snippet's order with the wrapper's scope would compare an
-            // inner sequence number against the outer scope's own numbering,
-            // where the same number means a different place entirely.
-            //
-            // The wrapper's own order, scope and chain are that pair's
-            // fallback, and they are still right for the one case they
-            // describe: a snippet that allocated no scope at all (it held no
-            // commands, or the expansion walk's own scan of it did not parse)
-            // genuinely has no position of its own, and the wrapper's is the
-            // only one there is. Giving those `Unordered` instead would make
-            // every wrapped write unresolvable even when the wrapper's place
-            // in the sequence is plain.
-            //
-            // Every channel grows in the same step. Leaving one short was
-            // review finding IMPORTANT 2 (M2.221) — every consumer that walks
-            // them in lockstep by index silently read past the end of the
-            // short one for every wrapper-injected redirect — and the
-            // assertions below now cover the fifth channel too.
-            for j in 0..inner.redirect_targets.len() {
-                let placed = inner
-                    .redirect_scope
-                    .get(j)
-                    .copied()
-                    .flatten()
-                    .and_then(|k| site.scopes.get(k).copied());
-                let (order, chain) = match placed {
-                    Some(_) => (
-                        inner
-                            .redirect_order
-                            .get(j)
-                            .cloned()
-                            .unwrap_or(crate::syntax::Order::Unordered),
-                        inner.redirect_chain.get(j).copied().flatten(),
-                    ),
-                    None => (site.wrapper_order.clone(), site.wrapper_chain),
-                };
-                scan.redirect_order.push(order);
-                // The scanner channel keeps meaning what it has always meant
-                // — the OUTER scan's own view, which for an injected redirect
-                // is the wrapper's entry — while the translated engine scope
-                // travels beside it and wins when it is there.
-                scan.redirect_scope.push(site.wrapper_scope);
-                scan.redirect_chain.push(chain);
-                injected_redirect_scope.push(placed);
-            }
-            scan.redirect_targets.extend(inner.redirect_targets);
-            scan.redirect_env.extend(inner.redirect_env);
-            for c in inner.constructs {
-                snippet_constructs.push((plang.clone(), c));
-            }
-            // A heredoc captured INSIDE this snippet's own text, carried up
-            // by this same re-scan: the identical unconsumed-marking rule
-            // applied at the top level above, but for a heredoc nested one or
-            // more snippet boundaries deep. Without this, a heredoc fed to an
-            // undeclared consumer inside a wrapped snippet (`sh -c "consumer
-            // <<'EOF' ... EOF"`) loses its marker entirely — captured by the
-            // scanner, never consumed by the locator (the consumer is
-            // undeclared), and never marked (nothing else re-reads it).
-            for heredoc in &inner.heredocs {
-                if let Some(consumer) = inner.commands.get(heredoc.cmd_index) {
-                    let standalone_eligible = true;
-                    if crate::guards::heredoc_feeds(kb, consumer, plang, heredoc, standalone_eligible).is_none() {
-                        snippet_constructs.push((plang.clone(), "heredoc".to_string()));
-                    }
+        }
+        for j in 0..site.redirect_targets.len() {
+            let placed = site
+                .redirect_scope
+                .get(j)
+                .copied()
+                .flatten()
+                .and_then(|k| site.scopes.get(k).copied());
+            let (order, chain) = match placed {
+                Some(_) => (
+                    site.redirect_order
+                        .get(j)
+                        .cloned()
+                        .unwrap_or(crate::syntax::Order::Unordered),
+                    site.redirect_chain.get(j).copied().flatten(),
+                ),
+                None => (site.wrapper_order.clone(), site.wrapper_chain),
+            };
+            scan.redirect_order.push(order);
+            scan.redirect_scope.push(site.wrapper_scope);
+            scan.redirect_chain.push(chain);
+            injected_redirect_scope.push(placed);
+        }
+        scan.redirect_targets.extend(site.redirect_targets.iter().cloned());
+        scan.redirect_env.extend(site.redirect_env.iter().cloned());
+        for c in &site.constructs {
+            snippet_constructs.push((plang.clone(), c.clone()));
+        }
+        for heredoc in &site.heredocs {
+            if let Some(consumer) = site.commands.get(heredoc.cmd_index) {
+                let standalone_eligible = true;
+                if crate::guards::heredoc_feeds(kb, consumer, plang, heredoc, standalone_eligible).is_none() {
+                    snippet_constructs.push((plang.clone(), "heredoc".to_string()));
                 }
             }
         }
@@ -2596,7 +2536,13 @@ fn judge_once(
             remember(&mut grants, construct_grant(lang, &key));
         }
         if worst.as_ref().map_or(true, |(w, _)| rank(a) > rank(*w)) {
-            worst = Some((a, construct_reason(lang, &key)));
+            let mut reason = construct_reason(lang, &key);
+            if let Some((_, detail)) = scan.construct_details.iter().find(|(n, _)| n == name) {
+                if !detail.is_empty() {
+                    reason = format!("{reason}\n  could not read: {detail}");
+                }
+            }
+            worst = Some((a, reason));
         }
     }
     // 2b. Constructs found INSIDE a wrapped snippet (collected at §1b above)
@@ -3560,6 +3506,14 @@ struct SnippetSite {
     /// Empty when the snippet allocated none — it did not parse, or held no
     /// commands (M2.225).
     scopes: Vec<usize>,
+    redirect_targets: Vec<String>,
+    redirect_env: Vec<std::collections::HashMap<String, Option<String>>>,
+    redirect_order: Vec<crate::syntax::Order>,
+    redirect_scope: Vec<Option<usize>>,
+    redirect_chain: Vec<Option<crate::syntax::ChainPos>>,
+    constructs: Vec<String>,
+    heredocs: Vec<crate::syntax::Heredoc>,
+    commands: Vec<crate::syntax::Cmd>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3799,6 +3753,14 @@ fn collect_expanded(
                 wrapper_scope,
                 wrapper_chain,
                 scopes,
+                redirect_targets: src.redirect_targets,
+                redirect_env: src.redirect_env,
+                redirect_order: src.redirect_order,
+                redirect_scope: src.redirect_scope,
+                redirect_chain: src.redirect_chain,
+                constructs: src.constructs,
+                heredocs: src.heredocs,
+                commands: src.commands,
             });
         }
         out.parse_failures.extend(ex.parse_failures);

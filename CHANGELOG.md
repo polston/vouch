@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.38.0 (2026-09-18)
+
+
+### Features
+
+* deduplicate wrapped snippet AST scans across decision evaluations
+* distinguish literal single-quoted tokens from expandable arguments in PowerShell
+* report trigger-specific diagnostic details for scanner constructs
+* support bash 5.3 non-forking value substitutions in same-process scopes
+
+
+### Bug Fixes
+
+* cap nested subshell recursion depth to prevent stack exhaustion
+
 ## 0.37.0 (2026-09-18)
 
 

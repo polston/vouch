@@ -28,7 +28,12 @@ fn is_dynamic(value: &str) -> bool {
 
 /// True when a word embeds a command substitution, which executes a command.
 fn has_command_substitution(value: &str) -> bool {
-    value.contains("$(") || value.contains('`')
+    value.contains("$(")
+        || value.contains('`')
+        || value.contains("${ ")
+        || value.contains("${|")
+        || value.contains("${\t")
+        || value.contains("${\n")
 }
 
 /// `\`-newline is deleted by bash before any expansion — inside double quotes
@@ -44,15 +49,33 @@ pub fn strip_line_continuations(raw: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// Whether a command substitution executes in a forked subshell or the current shell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubstitutionKind {
+    /// `$( ... )` or `` ` ... ` `` — runs in a subshell, enters ProcessBoundary scope, notes "subshell".
+    Forked,
+    /// `${ cmd; }` or `${| cmd; }` (bash 5.3) — runs in current shell without a fork, enters SameProcess scope.
+    NonForking,
+}
+
+/// One parsed substitution body with its execution kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubstitutionItem {
+    pub body: String,
+    pub kind: SubstitutionKind,
+}
+
 /// See the struct's field docs; the rules are the design's §2.1.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Bodies {
-    /// One entry per `$(…)` or backtick body, outermost only: a body's own
-    /// nested substitutions are found by the walk over that body, never here.
+    /// One entry per substitution body, outermost only: a body's own nested
+    /// substitutions are found by the walk over that body, never here.
     pub bodies: Vec<String>,
+    /// Parallel items carrying the substitution kind for same-process vs forked execution.
+    pub items: Vec<SubstitutionItem>,
     /// True when the text plainly holds a substitution vouch could not
     /// delimit: the word failed to parse, or a literal piece still carries
-    /// `$(` or a backtick after parsing. The scan (`scan`, below) returns at
+    /// an opener after parsing. The scan (`scan`, below) returns at
     /// the first unreadable opener it meets — any bodies already found stay
     /// in `bodies`, but a second, perfectly readable substitution later in
     /// the same text is never reached and is silently dropped from `bodies`.
@@ -60,6 +83,13 @@ pub struct Bodies {
     /// whole word rather than reporting a partial reading as though it were
     /// complete.
     pub unreadable: bool,
+}
+
+impl Bodies {
+    pub fn push_body(&mut self, body: String, kind: SubstitutionKind) {
+        self.bodies.push(body.clone());
+        self.items.push(SubstitutionItem { body, kind });
+    }
 }
 
 /// Which characters carry structure in the text the scan is walking. WORD
@@ -151,10 +181,19 @@ fn scan(text: &str, mode: Mode, out: &mut Bodies) {
                     }
                 }
             }
+            '$' if is_non_forking_substitution_opener(&cs, i).is_some() => {
+                match brace_substitution_at(&cs, text, i, out, &mut memo) {
+                    Some(next) => i = next,
+                    None => {
+                        out.unreadable = true;
+                        return;
+                    }
+                }
+            }
             '`' => match skip_backquotes(&cs, i) {
                 Some(next) => {
-                    out.bodies
-                        .push(collapse_backquote_escapes(&text[cs[i].0 + 1..cs[next - 1].0]));
+                    let body = collapse_backquote_escapes(&text[cs[i].0 + 1..cs[next - 1].0]);
+                    out.push_body(body, SubstitutionKind::Forked);
                     i = next;
                 }
                 None => {
@@ -174,6 +213,7 @@ fn scan(text: &str, mode: Mode, out: &mut Bodies) {
 enum Reading<'t> {
     Arithmetic(&'t str),
     Body(&'t str),
+    NonForkingBody(&'t str),
 }
 
 /// Every `$(` opener one scan of one text has already resolved, keyed on the
@@ -294,9 +334,129 @@ fn substitution_at<'t>(
                 scan(inner, Mode::Word, out);
             }
         }
-        Reading::Body(span) => out.bodies.push(span.to_string()),
+        Reading::Body(span) | Reading::NonForkingBody(span) => {
+            out.push_body(span.to_string(), SubstitutionKind::Forked);
+        }
     }
     Some(after)
+}
+
+/// Whether `cs[dollar]` introduces a non-forking command substitution (`${ cmd; }` or `${| cmd; }`).
+/// Returns `Some(content_idx)` where the inner command text begins.
+fn is_non_forking_substitution_opener(cs: &[(usize, char)], dollar: usize) -> Option<usize> {
+    if dollar + 1 >= cs.len() || cs[dollar].1 != '$' || cs[dollar + 1].1 != '{' {
+        return None;
+    }
+    match cs.get(dollar + 2).map(|&(_, c)| c) {
+        Some('|') => Some(dollar + 3),
+        Some(' ' | '\t' | '\n') => Some(dollar + 2),
+        _ => None,
+    }
+}
+
+/// Read a non-forking substitution `${ cmd; }` or `${| cmd; }` with depth cap and memoization.
+fn read_brace_substitution<'t>(
+    cs: &[(usize, char)],
+    text: &'t str,
+    dollar: usize,
+    depth: usize,
+    memo: &mut Memo<'t>,
+) -> Option<(Reading<'t>, usize)> {
+    if depth >= SUBSTITUTION_DEPTH_CAP {
+        return None;
+    }
+    if let Some(&cached) = memo.get(&dollar) {
+        return cached;
+    }
+    let res = extent_brace(cs, text, dollar, depth, memo)
+        .map(|(span, after)| (Reading::NonForkingBody(span), after));
+    memo.insert(dollar, res);
+    res
+}
+
+/// One non-forking substitution at `dollar`: emit its body into `out` with `SubstitutionKind::NonForking`.
+fn brace_substitution_at<'t>(
+    cs: &[(usize, char)],
+    text: &'t str,
+    dollar: usize,
+    out: &mut Bodies,
+    memo: &mut Memo<'t>,
+) -> Option<usize> {
+    let (reading, after) = read_brace_substitution(cs, text, dollar, 0, memo)?;
+    match reading {
+        Reading::NonForkingBody(span) | Reading::Body(span) => {
+            out.push_body(span.to_string(), SubstitutionKind::NonForking);
+        }
+        _ => {}
+    }
+    Some(after)
+}
+
+/// The text between a non-forking `${` / `${|` opener and its matching `}`.
+fn extent_brace<'t>(
+    cs: &[(usize, char)],
+    text: &'t str,
+    dollar: usize,
+    nesting: usize,
+    memo: &mut Memo<'t>,
+) -> Option<(&'t str, usize)> {
+    let content = is_non_forking_substitution_opener(cs, dollar)?;
+    let start = cs.get(content).map(|&(pos, _)| pos).unwrap_or(text.len());
+    let mut depth = 1usize;
+    let mut quoting = Quoting::default();
+    let mut after_nested: Option<usize> = None;
+    let mut pending: Vec<(String, bool)> = Vec::new();
+    let mut i = content;
+    while i < cs.len() {
+        if let Some(next) = quoting.step_expanding(cs, i) {
+            i = next;
+            continue;
+        }
+        match cs[i].1 {
+            '$' if cs.get(i + 1).is_some_and(|&(_, c)| c == '(') => {
+                i = read_substitution(cs, text, i, nesting + 1, memo)?.1;
+                after_nested = Some(i);
+                continue;
+            }
+            '$' if is_non_forking_substitution_opener(cs, i).is_some() => {
+                i = read_brace_substitution(cs, text, i, nesting + 1, memo)?.1;
+                after_nested = Some(i);
+                continue;
+            }
+            '`' => {
+                i = skip_backquotes(cs, i)?;
+                continue;
+            }
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((&text[start..cs[i].0], i + 1));
+                }
+            }
+            '#' if starts_comment(cs, i, after_nested) => {
+                while i < cs.len() && cs[i].1 != '\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            '<' if is_heredoc_operator(cs, i) => {
+                let (delim, strip_tabs, next) = heredoc_delimiter(cs, i);
+                if !delim.is_empty() {
+                    pending.push((delim, strip_tabs));
+                    i = next;
+                    continue;
+                }
+            }
+            '\n' if !pending.is_empty() => {
+                i = skip_heredoc_bodies(cs, i + 1, &mut pending)?;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
 }
 
 /// The inside of `$(( … ))` when this extent is arithmetic rather than a
@@ -378,6 +538,11 @@ fn extent<'t>(
         match cs[i].1 {
             '$' if cs.get(i + 1).is_some_and(|&(_, c)| c == '(') => {
                 i = read_substitution(cs, text, i, nesting + 1, memo)?.1;
+                after_nested = Some(i);
+                continue;
+            }
+            '$' if is_non_forking_substitution_opener(cs, i).is_some() => {
+                i = read_brace_substitution(cs, text, i, nesting + 1, memo)?.1;
                 after_nested = Some(i);
                 continue;
             }
@@ -1951,22 +2116,28 @@ fn walk_compound(
                 // Recursion terminates without a depth counter: the text
                 // handed over is what sat BETWEEN the parentheses, so it
                 // strictly shrinks at every level.
-                Opening::NestedSubshell => match parse_program(&a.expr.value) {
-                    Some(program) => walk_subshell(
-                        &program.complete_commands,
-                        out,
-                        walk,
-                        scoping,
-                        unordered,
-                        env,
-                        fns,
-                        &a.expr.value,
-                    ),
-                    // Spelled as a nested subshell and not parseable as one.
-                    // Saying so is the point; falling through would restore
-                    // the silence this row exists to remove.
-                    None => out.note("parse_failure"),
-                },
+                Opening::NestedSubshell => {
+                    if walk.depth >= SUBSTITUTION_DEPTH_CAP {
+                        out.note_with_detail("parse_failure", "nested subshell depth cap exceeded");
+                    } else {
+                        let enclosing = walk.depth;
+                        walk.depth = enclosing + 1;
+                        match parse_program(&a.expr.value) {
+                            Some(program) => walk_subshell(
+                                &program.complete_commands,
+                                out,
+                                walk,
+                                scoping,
+                                unordered,
+                                env,
+                                fns,
+                                &a.expr.value,
+                            ),
+                            None => out.note_with_detail("parse_failure", "nested subshell parse error"),
+                        }
+                        walk.depth = enclosing;
+                    }
+                }
                 Opening::Arithmetic => {
                     // Real arithmetic runs no command and writes nothing, so
                     // it says nothing on its own — the two exceptions are an
@@ -2124,10 +2295,23 @@ fn visit_bodies(
     fns: &std::collections::HashSet<String>,
 ) {
     if read.unreadable {
-        out.note("parse_failure");
+        out.note_with_detail("parse_failure", "unreadable substitution");
     }
-    for body in read.bodies {
-        walk_substitution_body(&body, out, parent_scope, anchor_order, anchor_chain, walk, env, fns);
+    if read.items.is_empty() {
+        for body in read.bodies {
+            walk_substitution_body(&body, out, parent_scope, anchor_order, anchor_chain, walk, env, fns);
+        }
+    } else {
+        for item in read.items {
+            match item.kind {
+                SubstitutionKind::Forked => {
+                    walk_substitution_body(&item.body, out, parent_scope, anchor_order, anchor_chain, walk, env, fns);
+                }
+                SubstitutionKind::NonForking => {
+                    walk_non_forking_substitution_body(&item.body, out, parent_scope, anchor_order, anchor_chain, walk, env, fns);
+                }
+            }
+        }
     }
 }
 
@@ -2143,7 +2327,7 @@ fn walk_substitution_body(
 ) {
     out.note("subshell");
     if walk.depth >= SUBSTITUTION_DEPTH_CAP {
-        out.note("parse_failure");
+        out.note_with_detail("parse_failure", "substitution depth cap exceeded");
         return;
     }
     // A body that does not re-parse still gets its scope: the boundary is a
@@ -2152,7 +2336,7 @@ fn walk_substitution_body(
     // same shape either way.
     let parsed = parse_program(body);
     if parsed.is_none() {
-        out.note("parse_failure");
+        out.note_with_detail("parse_failure", "substitution body parse error");
     }
     // Saved and restored around the body walk alone. A plain saved value is
     // enough where a thread-local needed a `Drop` guard: this depth lives in
@@ -2172,6 +2356,71 @@ fn walk_substitution_body(
         body,
     );
     walk.depth = enclosing;
+}
+
+fn walk_non_forking_substitution_body(
+    body: &str,
+    out: &mut Parsed,
+    parent_scope: usize,
+    anchor_order: &Order,
+    anchor_chain: Option<crate::syntax::ChainPos>,
+    walk: &mut WalkState,
+    env: &std::collections::HashMap<String, Option<String>>,
+    fns: &std::collections::HashSet<String>,
+) {
+    // Non-forking value substitutions execute in the current shell process;
+    // they do NOT fork, so they do NOT note "subshell".
+    if walk.depth >= SUBSTITUTION_DEPTH_CAP {
+        out.note_with_detail("parse_failure", "substitution depth cap exceeded");
+        return;
+    }
+    let parsed = parse_program(body);
+    if parsed.is_none() {
+        out.note_with_detail("parse_failure", "non-forking substitution body parse error");
+    }
+    let enclosing = walk.depth;
+    walk.depth = enclosing + 1;
+    walk_same_process_child(
+        parsed.iter().flat_map(|p| &p.complete_commands),
+        out,
+        parent_scope,
+        anchor_order,
+        anchor_chain,
+        walk,
+        env,
+        fns,
+        body,
+        Some(crate::syntax::ScopeClass::Brace),
+    );
+    walk.depth = enclosing;
+}
+
+fn walk_same_process_child<'a>(
+    lists: impl IntoIterator<Item = &'a ast::CompoundList>,
+    out: &mut Parsed,
+    parent_scope: usize,
+    anchor_order: &Order,
+    anchor_chain: Option<crate::syntax::ChainPos>,
+    walk: &mut WalkState,
+    env: &std::collections::HashMap<String, Option<String>>,
+    fns: &std::collections::HashSet<String>,
+    src: &str,
+    class: Option<crate::syntax::ScopeClass>,
+) {
+    let scope = alloc_scope(
+        out,
+        parent_scope,
+        crate::syntax::ScopeKind::SameProcess,
+        class,
+        anchor_order.clone(),
+        anchor_chain,
+    );
+    let mut counter = 0u32;
+    let mut child_env = env.clone();
+    let mut child_fns = fns.clone();
+    for list in lists {
+        walk_compound_list(list, out, &mut counter, false, walk, scope, &mut child_env, &mut child_fns, src);
+    }
 }
 
 /// The forked child a command substitution's body and both spellings of a
@@ -2437,7 +2686,22 @@ fn resolve_predictable_substitutions(value: &str) -> Option<String> {
                 let dollar = i;
                 let (reading, next) = read_substitution(&cs, &text, dollar, 0, &mut memo)?;
                 match reading {
-                    Reading::Body(span) => {
+                    Reading::Body(span) | Reading::NonForkingBody(span) => {
+                        let repl = evaluate_predictable_substitution(span)?;
+                        result.push_str(&text[last_end..cs[dollar].0]);
+                        result.push_str(&repl);
+                        last_end = if next < cs.len() { cs[next].0 } else { text.len() };
+                        i = next;
+                        found_any = true;
+                    }
+                    Reading::Arithmetic(_) => return None,
+                }
+            }
+            '$' if is_non_forking_substitution_opener(&cs, i).is_some() => {
+                let dollar = i;
+                let (reading, next) = read_brace_substitution(&cs, &text, dollar, 0, &mut memo)?;
+                match reading {
+                    Reading::Body(span) | Reading::NonForkingBody(span) => {
                         let repl = evaluate_predictable_substitution(span)?;
                         result.push_str(&text[last_end..cs[dollar].0]);
                         result.push_str(&repl);

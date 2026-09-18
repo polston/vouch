@@ -73,6 +73,7 @@ fn a_cli_is_not_one_operation() {
         by_reference: false,
         env_assigns: Default::default(),
         is_intra_command_function: false,
+        expandable_args: Default::default(),
     };
 
     // Hand-built probes, so the argument record is complete and closed by
@@ -104,6 +105,7 @@ fn an_entry_with_no_subcommands_covers_the_whole_program() {
             by_reference: false,
             env_assigns: Default::default(),
             is_intra_command_function: false,
+            expandable_args: Default::default(),
         },
         "bash",
         true

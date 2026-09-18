@@ -312,6 +312,7 @@ pub fn cmd(head: &str, args: &[&str]) -> vouch::syntax::Cmd {
         receiver_origin: vouch::syntax::ValueOrigin::Unknown,
         by_reference: false,
         is_intra_command_function: false,
+        expandable_args: Default::default(),
     }
 }
 

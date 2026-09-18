@@ -1153,7 +1153,7 @@ fn token_is_unreadable(cmd: &Cmd, index: usize, lang: &str) -> bool {
     };
     match lang {
         "python" => false,
-        "powershell" => carries_expansion(token),
+        "powershell" => cmd.expandable_args.contains(&index),
         _ => token.contains(['\'', '"']) || carries_expansion(token),
     }
 }
@@ -4143,6 +4143,7 @@ fn after_exec_commands(prog: &Program, args: &[String]) -> (Vec<Cmd>, Vec<String
                 unread_args: Default::default(),
                 keyword_args: Default::default(),
                 callable_args: Default::default(),
+                expandable_args: Default::default(),
                 chain: None,
                 prefix_assigns: vec![],
                 receiver_origin: crate::syntax::ValueOrigin::Unknown,
@@ -4373,24 +4374,47 @@ fn scan_snippet(
     // commands at all, and `fill_snippet_scopes` writes it back. A snippet
     // that never reaches that point keeps the empty table, which is the
     // truthful record that it has no position of its own.
-    srcs.push(SnippetSource { lang: lang.to_string(), src: src.to_string(), scope_table: Vec::new() });
+    let entry_idx = srcs.len();
+    srcs.push(SnippetSource {
+        lang: lang.to_string(),
+        src: src.to_string(),
+        scope_table: Vec::new(),
+        redirect_targets: Vec::new(),
+        redirect_env: Vec::new(),
+        redirect_order: Vec::new(),
+        redirect_scope: Vec::new(),
+        redirect_chain: Vec::new(),
+        constructs: Vec::new(),
+        heredocs: Vec::new(),
+        commands: Vec::new(),
+    });
     let Some(scanner) = crate::syntax::scanner_for(lang) else {
         return Ok(SnippetScan::default());
     };
     scanner
         .scan(src)
-        .map(|s| SnippetScan {
-            cmds: s.commands,
-            heredocs: s.heredocs,
-            input_source: s.input_source,
-            args_complete: s.args_complete,
-            indexed_values: s.indexed_values,
-            order: s.order,
-            scan_scopes: s.scan_scopes,
-            cmd_scope: s.cmd_scope,
-            redirect_scope: s.redirect_scope,
-            redirect_chain: s.redirect_chain,
-            parsed: true,
+        .map(|s| {
+            srcs[entry_idx].redirect_targets = s.redirect_targets.clone();
+            srcs[entry_idx].redirect_env = s.redirect_env.clone();
+            srcs[entry_idx].redirect_order = s.redirect_order.clone();
+            srcs[entry_idx].redirect_scope = s.redirect_scope.clone();
+            srcs[entry_idx].redirect_chain = s.redirect_chain.clone();
+            srcs[entry_idx].constructs = s.constructs.clone();
+            srcs[entry_idx].heredocs = s.heredocs.clone();
+            srcs[entry_idx].commands = s.commands.clone();
+            SnippetScan {
+                cmds: s.commands,
+                heredocs: s.heredocs,
+                input_source: s.input_source,
+                args_complete: s.args_complete,
+                indexed_values: s.indexed_values,
+                order: s.order,
+                scan_scopes: s.scan_scopes,
+                cmd_scope: s.cmd_scope,
+                redirect_scope: s.redirect_scope,
+                redirect_chain: s.redirect_chain,
+                parsed: true,
+            }
         })
         .map_err(|e| (lang.to_string(), e))
 }
@@ -4703,6 +4727,14 @@ pub struct SnippetSource {
     /// has no position of its own", which is the one case where the wrapper's
     /// own stamp is the right answer rather than a lost one.
     pub scope_table: Vec<usize>,
+    pub redirect_targets: Vec<String>,
+    pub redirect_env: Vec<std::collections::HashMap<String, Option<String>>>,
+    pub redirect_order: Vec<crate::syntax::Order>,
+    pub redirect_scope: Vec<Option<usize>>,
+    pub redirect_chain: Vec<Option<crate::syntax::ChainPos>>,
+    pub constructs: Vec<String>,
+    pub heredocs: Vec<crate::syntax::Heredoc>,
+    pub commands: Vec<Cmd>,
 }
 
 pub struct ExpandedWrappers {
@@ -5032,6 +5064,7 @@ pub fn expand_wrappers_forking(
                                     unread_args: Default::default(),
                                     keyword_args: Default::default(),
                                     callable_args: Default::default(),
+                                    expandable_args: Default::default(),
                                     chain: None,
                                     // The env words this wrapper set for the
                                     // command it runs are that command's own
@@ -5260,6 +5293,7 @@ pub fn expand_wrappers_forking(
                                             unread_args: Default::default(),
                                             keyword_args: Default::default(),
                                             callable_args: Default::default(),
+                                            expandable_args: Default::default(),
                                             chain: None,
                                             prefix_assigns: vec![],
                                             receiver_origin: crate::syntax::ValueOrigin::Unknown,
@@ -5294,6 +5328,7 @@ pub fn expand_wrappers_forking(
                                         unread_args: Default::default(),
                                         keyword_args: Default::default(),
                                         callable_args: Default::default(),
+                                        expandable_args: Default::default(),
                                         chain: None,
                                         prefix_assigns: vec![],
                                         receiver_origin: crate::syntax::ValueOrigin::Unknown,
@@ -5361,6 +5396,7 @@ pub fn expand_wrappers_forking(
                                         unread_args: Default::default(),
                                         keyword_args: Default::default(),
                                         callable_args: Default::default(),
+                                        expandable_args: Default::default(),
                                         chain: None,
                                         prefix_assigns: vec![],
                                         receiver_origin: crate::syntax::ValueOrigin::Unknown,

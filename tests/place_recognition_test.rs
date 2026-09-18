@@ -197,6 +197,7 @@ fn probe() -> Cmd {
         by_reference: false,
         env_assigns: Default::default(),
         is_intra_command_function: false,
+        expandable_args: Default::default(),
     }
 }
 

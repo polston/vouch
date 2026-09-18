@@ -27,6 +27,9 @@ pub struct Cmd {
     /// could otherwise be recovered from, and M2.78 is the scar that made
     /// that a rule rather than a preference.
     pub callable_args: std::collections::HashMap<usize, CallableArg>,
+    /// Argument positions subject to shell variable or command expansion.
+    /// Single-quoted literals and constant tokens are absent from this set.
+    pub expandable_args: std::collections::HashSet<usize>,
     /// This command's position in an `&&`/`||` and-or chain, `None` when it
     /// is not part of one — a plain `;`/newline-separated statement, or the
     /// sole member of a trivial one-pipeline "chain" with no `&&`/`||` link
@@ -359,6 +362,8 @@ pub struct Scan {
     pub commands: Vec<Cmd>,
     /// Named constructs, deduplicated. Each name is a settable key.
     pub constructs: Vec<String>,
+    /// Contextual details for named constructs (e.g. unparseable fragment text for parse_failure).
+    pub construct_details: Vec<(String, String)>,
     /// Files this text writes to by redirection, where the target is literal.
     pub redirect_targets: Vec<String>,
     /// Whether each command's position (parallel to `commands`) is provable.
@@ -456,8 +461,17 @@ pub struct Scan {
 
 impl Scan {
     pub fn note(&mut self, name: &str) {
+        self.note_with_detail(name, "");
+    }
+
+    pub fn note_with_detail(&mut self, name: &str, detail: &str) {
         if !self.constructs.iter().any(|c| c == name) {
             self.constructs.push(name.to_string());
+        }
+        if !detail.is_empty()
+            && !self.construct_details.iter().any(|(n, d)| n == name && d == detail)
+        {
+            self.construct_details.push((name.to_string(), detail.to_string()));
         }
     }
 
@@ -486,6 +500,35 @@ impl Scan {
         env_assigns: std::collections::HashMap<String, Option<String>>,
         is_intra_command_function: bool,
     ) {
+        self.push_cmd_with_expandable(
+            head,
+            args,
+            order,
+            input_source,
+            args_complete,
+            chain,
+            prefix_assigns,
+            scope,
+            env_assigns,
+            is_intra_command_function,
+            Default::default(),
+        );
+    }
+
+    pub fn push_cmd_with_expandable(
+        &mut self,
+        head: String,
+        args: Vec<String>,
+        order: Order,
+        input_source: InputSource,
+        args_complete: bool,
+        chain: Option<ChainPos>,
+        prefix_assigns: Vec<String>,
+        scope: Option<usize>,
+        env_assigns: std::collections::HashMap<String, Option<String>>,
+        is_intra_command_function: bool,
+        expandable_args: std::collections::HashSet<usize>,
+    ) {
         if head.is_empty() {
             return;
         }
@@ -496,6 +539,7 @@ impl Scan {
             unread_args: Default::default(),
             keyword_args: Default::default(),
             callable_args: Default::default(),
+            expandable_args,
             chain,
             prefix_assigns,
             receiver_origin: ValueOrigin::Unknown,
@@ -593,6 +637,9 @@ impl Scan {
                     cp
                 })
             }));
+        for (name, detail) in other.construct_details {
+            self.note_with_detail(&name, &detail);
+        }
         for c in other.constructs {
             self.note(&c);
         }

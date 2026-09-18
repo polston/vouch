@@ -450,16 +450,28 @@ fn is_flag(tok: &str) -> bool {
     tok.starts_with('-') || tok.starts_with('/')
 }
 
-/// Splits a statement into whitespace-separated tokens, keeping quoted runs whole.
-fn tokens(s: &str) -> Vec<String> {
+/// A token with its raw string and whether it undergoes PowerShell expansion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Token {
+    text: String,
+    expandable: bool,
+}
+
+/// Splits a statement into whitespace-separated tokens, keeping quoted runs whole
+/// and classifying whether variable or escape expansion applies out of band.
+fn tokenize(s: &str) -> Vec<Token> {
     let mut out = Vec::new();
     let mut cur = String::new();
+    let mut expandable = false;
     let mut in_single = false;
     let mut in_double = false;
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
         match c {
             '`' => {
+                if !in_single {
+                    expandable = true;
+                }
                 cur.push(c);
                 if let Some(n) = chars.next() {
                     cur.push(n);
@@ -471,18 +483,30 @@ fn tokens(s: &str) -> Vec<String> {
             '"' if !in_single => {
                 in_double = !in_double;
             }
+            '$' if !in_single => {
+                expandable = true;
+                cur.push(c);
+            }
             c if c.is_whitespace() && !in_single && !in_double => {
                 if !cur.is_empty() {
-                    out.push(std::mem::take(&mut cur));
+                    out.push(Token {
+                        text: std::mem::take(&mut cur),
+                        expandable: std::mem::take(&mut expandable),
+                    });
                 }
             }
             _ => cur.push(c),
         }
     }
     if !cur.is_empty() {
-        out.push(cur);
+        out.push(Token { text: cur, expandable });
     }
     out
+}
+
+/// Splits a statement into whitespace-separated tokens, keeping quoted runs whole.
+fn tokens(s: &str) -> Vec<String> {
+    tokenize(s).into_iter().map(|t| t.text).collect()
 }
 
 const KEYWORDS: &[(&str, &str)] = &[
@@ -789,8 +813,16 @@ pub fn parse(src: &str) -> Result<Parsed, String> {
         if body.starts_with('&') {
             out.note("call_operator");
             let rest = body[1..].trim();
-            let toks = tokens(rest);
-            if let Some(head) = toks.first() {
+            let toks = tokenize(rest);
+            if let Some(head_tok) = toks.first() {
+                let head = &head_tok.text;
+                let args: Vec<String> = toks[1..].iter().map(|t| t.text.clone()).collect();
+                let mut expandable_args = std::collections::HashSet::new();
+                for (idx, t) in toks[1..].iter().enumerate() {
+                    if t.expandable {
+                        expandable_args.insert(idx);
+                    }
+                }
                 // The input source is not POPULATED for this language in this
                 // changeset, which is not the same as being unknowable:
                 // PowerShell has no input-redirection operator at all (`<` is
@@ -801,9 +833,9 @@ pub fn parse(src: &str) -> Result<Parsed, String> {
                 // attribution above; prefix assignments stay unpopulated —
                 // PowerShell's assignment statements have no shell-style
                 // `NAME=val cmd` prefix shape.
-                out.push_cmd(
+                out.push_cmd_with_expandable(
                     head.clone(),
-                    toks[1..].to_vec(),
+                    args,
                     order.clone(),
                     crate::syntax::InputSource::Unknown,
                     true,
@@ -812,6 +844,7 @@ pub fn parse(src: &str) -> Result<Parsed, String> {
                     Some(0),
                     out.assignments.iter().cloned().collect(),
                     false,
+                    expandable_args,
                 );
             }
             continue;
@@ -885,8 +918,9 @@ pub fn parse(src: &str) -> Result<Parsed, String> {
             continue;
         }
 
-        let toks = tokens(body);
-        if let Some(head) = toks.first() {
+        let toks = tokenize(body);
+        if let Some(head_tok) = toks.first() {
+            let head = &head_tok.text;
             if head.is_empty() || is_flag(head) {
                 continue;
             }
@@ -896,11 +930,18 @@ pub fn parse(src: &str) -> Result<Parsed, String> {
             {
                 continue;
             }
+            let args: Vec<String> = toks[1..].iter().map(|t| t.text.clone()).collect();
+            let mut expandable_args = std::collections::HashSet::new();
+            for (idx, t) in toks[1..].iter().enumerate() {
+                if t.expandable {
+                    expandable_args.insert(idx);
+                }
+            }
             // Input source and prefix assigns — see the call-operator arm
             // above. Chain identity comes from the order/chain attribution.
-            out.push_cmd(
+            out.push_cmd_with_expandable(
                 head.clone(),
-                toks[1..].to_vec(),
+                args,
                 order.clone(),
                 crate::syntax::InputSource::Unknown,
                 true,
@@ -909,6 +950,7 @@ pub fn parse(src: &str) -> Result<Parsed, String> {
                 Some(0),
                 out.assignments.iter().cloned().collect(),
                 false,
+                expandable_args,
             );
         }
     }

@@ -913,6 +913,7 @@ fn a_run_dir_flags_only_entry_loads_and_merges_over_the_shipped_value_options() 
         by_reference: false,
         env_assigns: Default::default(),
         is_intra_command_function: false,
+        expandable_args: Default::default(),
     };
     assert!(
         matches!(
