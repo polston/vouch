@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.37.0 (2026-09-18)
+
+
+### Features
+
+* comprehensive PowerShell AST construct classification via poshtree
+* full ECMAScript AST parsing via oxc for JavaScript inline snippets
+
+
+### Bug Fixes
+
+* relocate Windows boundary junction test target outside allowed paths
+
 ## 0.36.0 (2026-09-18)
 
 

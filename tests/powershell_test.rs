@@ -578,3 +578,46 @@ fn type_literal_deletion_remains_strictly_guarded() {
         _ => panic!("expected Ask on type_literal, got {d:?}"),
     }
 }
+
+#[test]
+fn ast_class_definition_is_named() {
+    assert_construct(
+        r#"
+        class ServerConfig {
+            [string]$HostName
+            [int]$Port = 8080
+            ServerConfig([string]$h) {
+                $this.HostName = $h
+            }
+        }
+        "#,
+        "keyword_class",
+    );
+}
+
+#[test]
+fn ast_try_catch_is_named() {
+    assert_construct(
+        r#"
+        try {
+            Get-Item "C:\nonexistent" -ErrorAction Stop
+        } catch [System.IO.FileNotFoundException] {
+            Write-Output "not found"
+        }
+        "#,
+        "keyword_try",
+    );
+}
+
+#[test]
+fn ast_switch_statement_is_named() {
+    assert_construct(
+        r#"
+        switch -Regex ($val) {
+            "^a" { "starts with a" }
+            default { "other" }
+        }
+        "#,
+        "keyword_switch",
+    );
+}

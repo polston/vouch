@@ -507,6 +507,73 @@ pub fn parse(src: &str) -> Result<Parsed, String> {
         out.note("type_literal");
     }
 
+    // AST-backed structural pass with poshtree:
+    let pt = poshtree::v2::parse(src);
+    if !pt.errors.is_empty() {
+        for err in &pt.errors {
+            let msg = err.message.to_lowercase();
+            if msg.contains("quote") || msg.contains("string") {
+                out.note("unbalanced_quotes");
+            }
+        }
+    }
+
+    pt.script.walk(&mut |node| {
+        match &node.kind {
+            poshtree::v2::NodeKind::TypeExpression(_)
+            | poshtree::v2::NodeKind::Cast { .. } => {
+                out.note("type_literal");
+            }
+            poshtree::v2::NodeKind::InvokeMember { is_static, .. } => {
+                if *is_static {
+                    out.note("type_literal");
+                } else {
+                    out.note("method_call");
+                }
+            }
+            poshtree::v2::NodeKind::MemberAccess { is_static: true, .. } => {
+                out.note("type_literal");
+            }
+            poshtree::v2::NodeKind::ForEach { .. } => {
+                out.note("keyword_foreach");
+            }
+            poshtree::v2::NodeKind::While { .. } => {
+                out.note("keyword_while");
+            }
+            poshtree::v2::NodeKind::DoWhile { .. } => {
+                out.note("keyword_do");
+            }
+            poshtree::v2::NodeKind::Switch { .. } => {
+                out.note("keyword_switch");
+            }
+            poshtree::v2::NodeKind::ClassDefinition { .. } => {
+                out.note("keyword_class");
+            }
+            poshtree::v2::NodeKind::Try { .. } => {
+                out.note("keyword_try");
+            }
+            poshtree::v2::NodeKind::Function { .. } => {
+                out.note("function_def");
+            }
+            poshtree::v2::NodeKind::Command { invocation: true, .. } => {
+                if src.get(node.span.start..).is_some_and(|s| s.trim_start().starts_with('&')) {
+                    out.note("call_operator");
+                }
+            }
+            poshtree::v2::NodeKind::Variable(v) => {
+                if v.starts_with('@') && v.len() > 1 {
+                    out.note("splatting");
+                }
+            }
+            poshtree::v2::NodeKind::Flow { keyword, .. } => {
+                if keyword == "trap" {
+                    out.note("keyword_trap");
+                }
+            }
+            _ => {}
+        }
+    });
+
     // Order and chain-identity attribution (M2.126): a `;`/newline-joined
     // statement gets the next top-level sequence position; a statement
     // joined to a neighbour by `|` — i.e. a pipeline with more than one

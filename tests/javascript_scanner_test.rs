@@ -282,3 +282,63 @@ fn js_syntax_error_fails_closed_on_unclosed_string() {
         other => panic!("expected Ask on syntax error, got: {other:?}"),
     }
 }
+
+#[test]
+fn modern_js_regex_and_optional_chaining_allows() {
+    let cfg = realistic_config();
+    let decision = decide_command_at(
+        &cfg,
+        "bash",
+        r#"node -e "const re = /pattern\d+/gi; const obj = {}; if (re.test('foo')) { console.log(obj?.a?.b); }""#,
+        Some(HOME),
+        None,
+        Some("C:/scratch"),
+    );
+
+    match decision {
+        Decision::Allow(reason) => {
+            assert!(reason.contains("allowed"), "expected allow for modern regex and optional chaining, got: {reason}");
+        }
+        other => panic!("expected Allow for modern regex and optional chaining, got: {other:?}"),
+    }
+}
+
+#[test]
+fn modern_js_classes_and_arrow_destructuring_allows() {
+    let cfg = realistic_config();
+    let decision = decide_command_at(
+        &cfg,
+        "bash",
+        r#"node -e "class App { #id = 1; get() { return this.#id; } } const f = ({ x = 10 }) => console.log(x); f({});""#,
+        Some(HOME),
+        None,
+        Some("C:/scratch"),
+    );
+
+    match decision {
+        Decision::Allow(reason) => {
+            assert!(reason.contains("allowed"), "expected allow for modern classes and arrow destructuring, got: {reason}");
+        }
+        other => panic!("expected Allow for modern classes and arrow destructuring, got: {other:?}"),
+    }
+}
+
+#[test]
+fn modern_js_nullish_coalescing_and_top_level_return_allows() {
+    let cfg = realistic_config();
+    let decision = decide_command_at(
+        &cfg,
+        "bash",
+        r#"node -e "const val = null ?? 'fallback'; if (!val) return; console.log(val);""#,
+        Some(HOME),
+        None,
+        Some("C:/scratch"),
+    );
+
+    match decision {
+        Decision::Allow(reason) => {
+            assert!(reason.contains("allowed"), "expected allow for nullish coalescing and top-level return, got: {reason}");
+        }
+        other => panic!("expected Allow for nullish coalescing, got: {other:?}"),
+    }
+}

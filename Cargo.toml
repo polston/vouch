@@ -1,6 +1,6 @@
 [package]
 name = "vouch"
-version = "0.36.0"
+version = "0.37.0"
 edition = "2021"
 rust-version = "1.97"
 license = "WTFPL"
@@ -29,3 +29,9 @@ sha2 = "0.10"
 toml = { version = "0.8", features = ["preserve_order"] }
 toml_edit = "0.25.13"
 tokio = { version = "1", features = ["io-std", "io-util", "macros", "rt-multi-thread"] }
+oxc_allocator = "=0.150.0"
+oxc_parser = "=0.150.0"
+oxc_ast = "=0.150.0"
+oxc_span = "=0.150.0"
+oxc_ast_visit = "=0.150.0"
+poshtree = "0.4.2"
