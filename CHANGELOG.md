@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.42.0 (2026-09-21)
+
+
+### Features
+
+* automatically detect parent shell environment for explain and why commands
+* evaluate higher-order callable references in functools.reduce
+* recognize standard stream writes on sys.stdout and sys.stderr
+
+
+### Bug Fixes
+
+* halt on rebound_name when shadowed imported callables are passed by reference
+* provide actionable build and copy guidance on absent corpus in test gate
+
 ## 0.41.0 (2026-09-18)
 
 

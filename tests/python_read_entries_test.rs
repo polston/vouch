@@ -649,6 +649,23 @@ fn a_writelines_method_requires_a_known_handle_and_open_still_judges_its_path() 
 }
 
 #[test]
+fn standard_stream_writes_allow() {
+    for src in [
+        r#"python -c "import sys; sys.stdout.write('hello\n')""#,
+        r#"python -c "import sys; sys.stderr.write('hello\n')""#,
+        r#"python -c "import sys; sys.stdout.writelines(['a\n', 'b\n'])""#,
+        r#"python -c "import sys; sys.stderr.writelines(['a\n', 'b\n'])""#,
+        r#"python -c "from sys import stdout; stdout.write('hello\n')""#,
+        r#"python -c "from sys import stderr; stderr.write('hello\n')""#,
+    ] {
+        match decide(src) {
+            Decision::Allow(_) => {}
+            other => panic!("{src}: expected Allow for standard stream write, got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn known_data_producers_enable_curated_methods() {
     for cmd in [
         r#"python -c "{}.get('name')""#,

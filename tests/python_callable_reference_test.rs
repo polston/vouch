@@ -177,20 +177,15 @@ fn a_loop_target_shadowing_a_def_bound_name_is_unresolved() {
 /// Empirically (verified by running this exact snippet through the fixed
 /// scanner) it resolves to `Named{head: "os.remove"}`, not `Unresolved`:
 /// `callable_ref`'s own Name arm consults `imported` before `poisoned`, so
-/// an imported-then-rebound bare name still resolves through the import
-/// map. That is a narrower, separate asymmetry against `Walk::target`
-/// (which checks `poisoned` first and refuses outright) than the one this
-/// finding is about, and is out of scope for this fix: the bar this test
-/// pins is the one the finding states — not `Inline`.
+/// A rebound imported name resolves to `Unresolved` (rather than resolving
+/// through the import map to the shadowed symbol) and emits `rebound_name`.
 #[test]
 fn an_imported_name_later_rebound_by_a_def_is_not_silently_inline() {
     let s = scan("from os import remove\nmap(remove, ['x'])\ndef remove(p):\n    pass\n");
     let c = cmd_for(&s, "map");
     assert!(!matches!(c.callable_args.get(&0), Some(CallableArg::Inline)), "got {:?}", c.callable_args.get(&0));
-    match c.callable_args.get(&0) {
-        Some(CallableArg::Named { head, .. }) => assert_eq!(head, "os.remove"),
-        other => panic!("expected the verified current behavior, Named(os.remove), got {other:?}"),
-    }
+    assert!(matches!(c.callable_args.get(&0), Some(CallableArg::Unresolved)), "expected Unresolved, got {:?}", c.callable_args.get(&0));
+    assert!(s.constructs.iter().any(|construct| construct == "rebound_name"), "expected rebound_name construct in {:?}", s.constructs);
 }
 
 /// Finding 3 (fix round 1): a method-shaped call pushes its receiver at
@@ -715,6 +710,66 @@ mod vocabulary {
         assert!(
             reason.contains("unresolved_path") && reason.contains("$?") && !reason.contains("$p"),
             "expected unresolved token $? without $p, got: {reason}"
+        );
+    }
+
+    #[test]
+    fn functools_reduce_evaluates_callable_references() {
+        // Harmless lambda: evaluated in place and allowed
+        let (a, reason) = common_decide(r#"python -c "import functools; functools.reduce(lambda a, b: a + b, [1, 2, 3])""#);
+        assert_eq!(a, Action::Allow, "expected Allow for harmless lambda, got: {reason}");
+
+        // Destructive callable by reference: trips unresolved_path or guard
+        let (a, reason) = common_decide(r#"python -c "import functools, os; functools.reduce(os.remove, ['a', 'b'])""#);
+        assert_eq!(a, Action::Ask);
+        assert!(
+            reason.contains("unresolved_path") || reason.contains("delete_path"),
+            "expected unresolved_path or delete_path, got: {reason}"
+        );
+        assert!(
+            reason.contains("python:os.remove"),
+            "expected attribution to python:os.remove, got: {reason}"
+        );
+        assert!(
+            !reason.contains("unmodeled_command: python:functools.reduce"),
+            "functools.reduce must be recognized, got: {reason}"
+        );
+
+        // Imported form `from functools import reduce`
+        let (a, reason) = common_decide(r#"python -c "from functools import reduce; reduce(lambda a, b: a + b, [1, 2, 3])""#);
+        assert_eq!(a, Action::Allow, "expected Allow for from-import reduce, got: {reason}");
+    }
+
+    #[test]
+    fn rebound_import_passed_as_callable_reference_halts_on_rebound_name() {
+        // Default config: stops on callable_argument without resolving to the shadowed os.remove
+        let (a, reason) = common_decide("python -c '\nfrom os import remove\ndef remove(x): pass\nmap(remove, [\"a\"])\n'");
+        assert_eq!(a, Action::Ask);
+        assert!(
+            reason.contains("callable_argument"),
+            "expected callable_argument ask, got: {reason}"
+        );
+        assert!(
+            !reason.contains("by reference: python:os.remove"),
+            "must not resolve shadowed import to os.remove, got: {reason}"
+        );
+        assert!(
+            !reason.contains("unresolved_path"),
+            "must not treat shadowed import as write path, got: {reason}"
+        );
+
+        // Scan carries both Unresolved callable arg and rebound_name construct
+        let s = scan("from os import remove\ndef remove(x): pass\nmap(remove, ['a'])\n");
+        let c = cmd_for(&s, "map");
+        assert!(matches!(c.callable_args.get(&0), Some(CallableArg::Unresolved)));
+        assert!(s.constructs.iter().any(|construct| construct == "rebound_name"));
+
+        // Direct call head consistently halts on rebound_name
+        let (a, reason) = common_decide("python -c '\nfrom os import remove\ndef remove(x): pass\nremove(\"a\")\n'");
+        assert_eq!(a, Action::Ask);
+        assert!(
+            reason.contains("rebound_name"),
+            "expected direct call to halt on rebound_name, got: {reason}"
         );
     }
 }

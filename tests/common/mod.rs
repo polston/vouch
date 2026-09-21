@@ -134,14 +134,16 @@ pub fn skip(what: &str) {
     if std::env::var_os(REQUIRE_REAL).is_some() {
         panic!(
             "{what}: {REAL} is absent and {REQUIRE_REAL} is set. This run was \
-             supposed to measure real traffic and cannot."
+             supposed to measure real traffic and cannot. To populate the fixture, \
+             copy it from the main checkout (cp <main>/tests/fixtures/bash_corpus.json tests/fixtures/) \
+             or build it locally with python3 tests/fixtures/build_fixture.py."
         );
     }
     eprintln!(
         "SKIP {what}: {REAL} is absent. It is gitignored real machine history - \
-         rebuild it locally with tests/fixtures/build_fixture.py. This is a \
-         measurement test and must not run on synthetic data. Set \
-         {REQUIRE_REAL} to make this a failure instead."
+         rebuild it locally with tests/fixtures/build_fixture.py, or copy it from the \
+         main checkout. This is a measurement test and must not run on synthetic data. \
+         Set {REQUIRE_REAL} to make this a failure instead."
     );
 }
 

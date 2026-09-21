@@ -2028,3 +2028,68 @@ fn guard_target_resolution_prints_resolved_or_unresolvable() {
     std::fs::remove_dir_all(base).unwrap();
 }
 
+#[test]
+fn explain_parent_shell_detection_and_explicit_selectors() {
+    let home = pinned_home();
+    let vouch_bin = bin();
+
+    // 1. Explicit selector ps forces powershell grammar
+    let out = Command::new(&vouch_bin)
+        .args(["explain", "ps", "Get-ChildItem"])
+        .env("VOUCH_CONFIG", "vouch.example.toml")
+        .env("VOUCH_STATE_DIR", std::env::temp_dir().join("vouch_cli_test_ps"))
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("ALLOW") || text.contains("ASK"), "{text}");
+
+    // 2. Explicit selector bash forces bash grammar
+    let out = Command::new(&vouch_bin)
+        .args(["explain", "bash", "echo 1"])
+        .env("VOUCH_CONFIG", "vouch.example.toml")
+        .env("VOUCH_STATE_DIR", std::env::temp_dir().join("vouch_cli_test_bash"))
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("ALLOW"), "{text}");
+
+    // 3. Invocation from bash shell detects bash
+    let cmd_str = format!("\"{vouch_bin}\" explain 'echo parent_bash'");
+    if let Ok(out) = Command::new("bash")
+        .args(["-c", &cmd_str])
+        .env("VOUCH_CONFIG", "vouch.example.toml")
+        .env("VOUCH_STATE_DIR", std::env::temp_dir().join("vouch_cli_test_parent_bash"))
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+    {
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains("ALLOW"), "{text}");
+    }
+
+    // 4. Invocation from pwsh detects powershell (if available)
+    let pwsh_cmd = format!("& '{vouch_bin}' explain 'Get-ChildItem'");
+    for shell in ["pwsh", "powershell"] {
+        if let Ok(out) = Command::new(shell)
+            .args(["-NoProfile", "-Command", &pwsh_cmd])
+            .env("VOUCH_CONFIG", "vouch.example.toml")
+            .env("VOUCH_STATE_DIR", std::env::temp_dir().join("vouch_cli_test_parent_pwsh"))
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .output()
+        {
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            let text = String::from_utf8_lossy(&out.stdout);
+            assert!(!text.contains("syntax error"), "{text}");
+            break;
+        }
+    }
+}
+

@@ -684,13 +684,17 @@ impl Flow {
     fn callable_ref(&self, expr: &ast::Expr) -> Option<CallableRef> {
         match expr {
             ast::Expr::Name(name) => {
-                if let Some(alias) = self.env.callable_aliases.get(name.id.as_str()) {
+                let id = name.id.as_str();
+                if self.poisoned.contains(id) && self.env.imported.contains_key(id) {
+                    return None;
+                }
+                if let Some(alias) = self.env.callable_aliases.get(id) {
                     return Some(alias.clone());
                 }
-                if let Some(imported) = self.env.imported.get(name.id.as_str()) {
+                if let Some(imported) = self.env.imported.get(id) {
                     return Some(CallableRef { head: imported.clone(), receiver: None });
                 }
-                if self.poisoned.contains(name.id.as_str()) {
+                if self.poisoned.contains(id) {
                     return None;
                 }
                 Some(CallableRef { head: name.id.to_string(), receiver: None })
@@ -698,6 +702,9 @@ impl Flow {
             ast::Expr::Attribute(_) => {
                 let path = dotted(expr)?;
                 let (root, rest) = path.split_once('.')?;
+                if self.poisoned.contains(root) && self.env.imported.contains_key(root) {
+                    return None;
+                }
                 if let Some(module) = self.env.imported.get(root) {
                     return Some(CallableRef { head: format!("{module}.{rest}"), receiver: None });
                 }
@@ -1461,6 +1468,16 @@ impl Walk {
         }
     }
 
+    fn is_rebound_import(&self, expr: &ast::Expr) -> bool {
+        if let Some(d) = dotted(expr) {
+            let split = d.split_once('.');
+            let root = split.map(|(f, _)| f).unwrap_or(&d);
+            self.poisoned.contains(root) && self.imported.contains_key(root)
+        } else {
+            false
+        }
+    }
+
     fn call(&mut self, node: &ast::ExprCall) {
         let (head, receiver) = match self.call_heads.get(&call_key(node)) {
             Some(alias) => (alias.head.clone(), alias.receiver.as_ref().map(|_| ArgumentValue::unread(MARKER))),
@@ -1473,6 +1490,16 @@ impl Walk {
         if head == REBOUND {
             self.out.note("rebound_name");
             return;
+        }
+        for a in &node.arguments.args {
+            if self.is_rebound_import(a) {
+                self.out.note("rebound_name");
+            }
+        }
+        for k in &node.arguments.keywords {
+            if self.is_rebound_import(&k.value) {
+                self.out.note("rebound_name");
+            }
         }
         let mut args: Vec<String> = Vec::new();
         let mut unread_args = std::collections::HashSet::new();

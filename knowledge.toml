@@ -1195,12 +1195,10 @@ match = ["python:filter"]
 arg_names = ["function", "iterable"]
 callback_args = ["function"]
 
-# `functools.reduce` is absent because this pass did not audit it, not
-# because it resists description: its function parameter is positional-only
-# exactly as `map`'s is, so the same `callback_args` entry would be
-# expressible and would let a referenced callable be judged. Unmodeled is
-# the conservative state — it keeps asking — and ROADMAP.md M2.208 holds the
-# open choice between auditing it in and leaving it out.
+[[program]]
+match = ["python:functools.reduce"]
+arg_names = ["function", "sequence", "initial"]
+callback_args = ["function"]
 
 # Module-qualified reads, chosen singly — json.load READS from a handle,
 # json.dump WRITES through one (group D below); yaml.safe_load parses with
@@ -1525,6 +1523,15 @@ callback_args = ["cls", "default"]
 match = ["python:.write", "python:.writelines"]
 writes_via_handle = "arg_0"
 receiver_from = ["file_handle"]
+
+[[program]]
+match = [
+    "python:sys.stdout.write",
+    "python:sys.stderr.write",
+    "python:sys.stdout.writelines",
+    "python:sys.stderr.writelines",
+]
+writes_via_handle = "arg_0"
 
 [[program]]
 match = ["python:print"]

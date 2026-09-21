@@ -124,3 +124,57 @@ fn a_bare_cwd_flag_with_no_value_is_an_error() {
     let e = parse_target(&a(&["--cwd"])).expect_err("must reject");
     assert!(e.contains("--cwd needs a directory"), "got: {e}");
 }
+
+#[test]
+fn parse_target_with_default_uses_given_default_when_no_selector() {
+    let t = vouch::cli::parse_target_with_default(&a(&["Get-Item x"]), "powershell")
+        .expect("parses");
+    assert_eq!(t.lang, "powershell");
+    assert_eq!(t.cmd, "Get-Item x");
+}
+
+#[test]
+fn parse_target_with_default_respects_explicit_override() {
+    let t = vouch::cli::parse_target_with_default(&a(&["bash", "echo 1"]), "powershell")
+        .expect("parses");
+    assert_eq!(t.lang, "bash");
+    assert_eq!(t.cmd, "echo 1");
+
+    let t = vouch::cli::parse_target_with_default(&a(&["ps", "Get-ChildItem"]), "bash")
+        .expect("parses");
+    assert_eq!(t.lang, "powershell");
+    assert_eq!(t.cmd, "Get-ChildItem");
+}
+
+#[test]
+fn classify_shell_name_identifies_powershell_and_bash_variants() {
+    use vouch::cli::classify_shell_name;
+
+    assert_eq!(classify_shell_name("pwsh"), Some("powershell"));
+    assert_eq!(classify_shell_name("pwsh.exe"), Some("powershell"));
+    assert_eq!(classify_shell_name("powershell"), Some("powershell"));
+    assert_eq!(classify_shell_name("powershell.exe"), Some("powershell"));
+    assert_eq!(classify_shell_name("C:\\Program Files\\PowerShell\\7\\pwsh.exe"), Some("powershell"));
+    assert_eq!(classify_shell_name("/usr/local/bin/pwsh"), Some("powershell"));
+
+    assert_eq!(classify_shell_name("bash"), Some("bash"));
+    assert_eq!(classify_shell_name("bash.exe"), Some("bash"));
+    assert_eq!(classify_shell_name("/bin/bash"), Some("bash"));
+    assert_eq!(classify_shell_name("zsh"), Some("bash"));
+    assert_eq!(classify_shell_name("/bin/zsh"), Some("bash"));
+    assert_eq!(classify_shell_name("sh"), Some("bash"));
+    assert_eq!(classify_shell_name("dash"), Some("bash"));
+    assert_eq!(classify_shell_name("ash"), Some("bash"));
+
+    assert_eq!(classify_shell_name("cmd"), None);
+    assert_eq!(classify_shell_name("cmd.exe"), None);
+    assert_eq!(classify_shell_name("cargo"), None);
+    assert_eq!(classify_shell_name("python3"), None);
+    assert_eq!(classify_shell_name("unknown_process"), None);
+}
+
+#[test]
+fn detect_parent_shell_does_not_panic() {
+    // Calling detect_parent_shell should succeed safely on any platform
+    let _ = vouch::cli::detect_parent_shell();
+}

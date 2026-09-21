@@ -35,6 +35,163 @@ fn selector(s: &str) -> Option<&'static str> {
     }
 }
 
+/// Classify a process executable or command name into a supported shell grammar,
+/// returning `"powershell"` for PowerShell variants, `"bash"` for POSIX/Unix
+/// shells, or `None` if unrecognized.
+pub fn classify_shell_name(name: &str) -> Option<&'static str> {
+    let lower = name.trim().to_ascii_lowercase();
+    let filename = lower.rsplit(|c| c == '/' || c == '\\').next().unwrap_or(&lower);
+    let base = filename.strip_suffix(".exe").unwrap_or(filename);
+
+    match base {
+        "powershell" | "pwsh" => Some("powershell"),
+        "bash" | "sh" | "zsh" | "dash" | "ash" => Some("bash"),
+        _ => None,
+    }
+}
+
+#[cfg(unix)]
+extern "C" {
+    fn getppid() -> i32;
+}
+
+#[cfg(unix)]
+fn get_parent_process_name() -> Option<String> {
+    let ppid = unsafe { getppid() };
+    if ppid <= 1 {
+        return None;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        extern "C" {
+            fn proc_name(pid: i32, buffer: *mut u8, buffersize: u32) -> i32;
+        }
+        let mut buf = [0u8; 1024];
+        let len = unsafe { proc_name(ppid, buf.as_mut_ptr(), buf.len() as u32) };
+        if len > 0 {
+            let end = buf.iter().position(|&b| b == 0).unwrap_or(len as usize);
+            let s = String::from_utf8_lossy(&buf[..end]).trim().to_string();
+            if !s.is_empty() {
+                return Some(s);
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(comm) = std::fs::read_to_string(format!("/proc/{ppid}/comm")) {
+            let trimmed = comm.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+
+    // Generic Unix fallback: inspect via ps
+    if let Ok(output) = std::process::Command::new("ps")
+        .args(["-o", "comm=", "-p", &ppid.to_string()])
+        .output()
+    {
+        if output.status.success() {
+            let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !s.is_empty() {
+                return Some(s);
+            }
+        }
+    }
+
+    None
+}
+
+#[cfg(windows)]
+fn get_parent_process_name() -> Option<String> {
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct PROCESSENTRY32W {
+        dwSize: u32,
+        cntUsage: u32,
+        th32ProcessID: u32,
+        th32DefaultHeapID: usize,
+        th32ModuleID: u32,
+        cntThreads: u32,
+        th32ParentProcessID: u32,
+        pcPriClassBase: i32,
+        dwFlags: u32,
+        szExeFile: [u16; 260],
+    }
+
+    extern "system" {
+        fn GetCurrentProcessId() -> u32;
+        fn CreateToolhelp32Snapshot(dwFlags: u32, th32ProcessID: u32) -> isize;
+        fn Process32FirstW(hSnapshot: isize, lppe: *mut PROCESSENTRY32W) -> i32;
+        fn Process32NextW(hSnapshot: isize, lppe: *mut PROCESSENTRY32W) -> i32;
+        fn CloseHandle(hObject: isize) -> i32;
+    }
+
+    const TH32CS_SNAPPROCESS: u32 = 0x00000002;
+    const INVALID_HANDLE_VALUE: isize = -1;
+
+    unsafe {
+        let current_pid = GetCurrentProcessId();
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot == INVALID_HANDLE_VALUE || snapshot == 0 {
+            return None;
+        }
+
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            cntUsage: 0,
+            th32ProcessID: 0,
+            th32DefaultHeapID: 0,
+            th32ModuleID: 0,
+            cntThreads: 0,
+            th32ParentProcessID: 0,
+            pcPriClassBase: 0,
+            dwFlags: 0,
+            szExeFile: [0u16; 260],
+        };
+
+        let mut parent_pid: Option<u32> = None;
+        let mut processes = Vec::new();
+
+        if Process32FirstW(snapshot, &mut entry) != 0 {
+            loop {
+                if entry.th32ProcessID == current_pid {
+                    parent_pid = Some(entry.th32ParentProcessID);
+                }
+                let end = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
+                let exe_name = String::from_utf16_lossy(&entry.szExeFile[..end]);
+                processes.push((entry.th32ProcessID, exe_name));
+
+                if Process32NextW(snapshot, &mut entry) == 0 {
+                    break;
+                }
+            }
+        }
+        CloseHandle(snapshot);
+
+        if let Some(ppid) = parent_pid {
+            for (pid, exe) in processes {
+                if pid == ppid {
+                    return Some(exe);
+                }
+            }
+        }
+        None
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn get_parent_process_name() -> Option<String> {
+    None
+}
+
+/// Detect the shell of the parent process, returning `"powershell"`, `"bash"`, or `None`.
+pub fn detect_parent_shell() -> Option<&'static str> {
+    get_parent_process_name().as_deref().and_then(classify_shell_name)
+}
+
 /// Parse the arguments AFTER the subcommand word.
 ///
 /// `--cwd <dir>` is consumed first, if present, before anything positional is
@@ -43,15 +200,20 @@ fn selector(s: &str) -> Option<&'static str> {
 /// about `cwd`, never about `lang`/`cmd`.
 ///
 /// `["bash", "ls -la"]` -> bash, `ls -la`
-/// `["ls -la"]`         -> bash, `ls -la`
-/// `["ps"]`             -> bash, `ps`   (a lone selector is a command: `ps`
+/// `["ls -la"]`         -> detected shell or bash, `ls -la`
+/// `["ps"]`             -> detected shell or bash, `ps`   (a lone selector is a command: `ps`
 ///                                      and `bash` are real programs, and
 ///                                      asking about them must stay possible)
-/// `[]`                 -> bash, ``     (callers treat empty as "no argument")
+/// `[]`                 -> detected shell or bash, ``     (callers treat empty as "no argument")
 ///
 /// Anything else is an error rather than a guess. Guessing is what produced
 /// the defect this function replaces.
 pub fn parse_target(args: &[String]) -> Result<Target, String> {
+    parse_target_with_default(args, detect_parent_shell().unwrap_or("bash"))
+}
+
+/// Parse arguments with an explicit default language used when no selector is given.
+pub fn parse_target_with_default(args: &[String], default_lang: &'static str) -> Result<Target, String> {
     const USAGE: &str = "usage: vouch explain [--cwd <dir>] [bash|ps] '<command>'\n  \
                          the command must be ONE argument - quote it, e.g. \
                          vouch explain 'rm -rf /tmp/x'";
@@ -63,8 +225,8 @@ pub fn parse_target(args: &[String]) -> Result<Target, String> {
         _ => (None, args),
     };
     match positional {
-        [] => Ok(Target { lang: "bash", cmd: String::new(), cwd }),
-        [only] => Ok(Target { lang: "bash", cmd: only.clone(), cwd }),
+        [] => Ok(Target { lang: default_lang, cmd: String::new(), cwd }),
+        [only] => Ok(Target { lang: default_lang, cmd: only.clone(), cwd }),
         [first, rest] => match selector(first) {
             Some(lang) => Ok(Target { lang, cmd: rest.clone(), cwd }),
             None => Err(format!(
