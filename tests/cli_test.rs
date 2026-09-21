@@ -2059,20 +2059,28 @@ fn explain_parent_shell_detection_and_explicit_selectors() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("ALLOW"), "{text}");
 
-    // 3. Invocation from bash shell detects bash
-    let bash_vouch_bin = vouch_bin.replace('\\', "/");
-    let cmd_str = format!("\"{bash_vouch_bin}\" explain 'echo parent_bash'");
-    if let Ok(out) = Command::new("bash")
-        .args(["-c", &cmd_str])
-        .env("VOUCH_CONFIG", "vouch.example.toml")
-        .env("VOUCH_STATE_DIR", std::env::temp_dir().join("vouch_cli_test_parent_bash"))
-        .env("HOME", &home)
-        .env("USERPROFILE", &home)
-        .output()
+    // 3. Invocation from bash shell detects bash (on Unix)
+    #[cfg(unix)]
     {
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-        let text = String::from_utf8_lossy(&out.stdout);
-        assert!(text.contains("ALLOW"), "{text}");
+        let cmd_str = format!("\"{vouch_bin}\" explain 'echo parent_bash'");
+        if let Ok(out) = Command::new("bash")
+            .args(["-c", &cmd_str])
+            .env("VOUCH_CONFIG", "vouch.example.toml")
+            .env("VOUCH_STATE_DIR", std::env::temp_dir().join("vouch_cli_test_parent_bash"))
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .output()
+        {
+            assert!(
+                out.status.success(),
+                "status: {:?}, stdout: {:?}, stderr: {:?}",
+                out.status,
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let text = String::from_utf8_lossy(&out.stdout);
+            assert!(text.contains("ALLOW"), "{text}");
+        }
     }
 
     // 4. Invocation from pwsh detects powershell (if available)
@@ -2086,7 +2094,13 @@ fn explain_parent_shell_detection_and_explicit_selectors() {
             .env("USERPROFILE", &home)
             .output()
         {
-            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            assert!(
+                out.status.success(),
+                "status: {:?}, stdout: {:?}, stderr: {:?}",
+                out.status,
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
             let text = String::from_utf8_lossy(&out.stdout);
             assert!(!text.contains("syntax error"), "{text}");
             break;
