@@ -2060,7 +2060,8 @@ fn explain_parent_shell_detection_and_explicit_selectors() {
     assert!(text.contains("ALLOW"), "{text}");
 
     // 3. Invocation from bash shell detects bash
-    let cmd_str = format!("\"{vouch_bin}\" explain 'echo parent_bash'");
+    let bash_vouch_bin = vouch_bin.replace('\\', "/");
+    let cmd_str = format!("\"{bash_vouch_bin}\" explain 'echo parent_bash'");
     if let Ok(out) = Command::new("bash")
         .args(["-c", &cmd_str])
         .env("VOUCH_CONFIG", "vouch.example.toml")
