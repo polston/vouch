@@ -21,6 +21,7 @@ fn appends_one_json_line_per_record() {
         lang: String::new(),
         permission_mode: String::new(),
         host: "claude".into(),
+        count: 1,
     };
     append(&dir, &rec).unwrap();
     append(&dir, &rec).unwrap();
@@ -115,6 +116,7 @@ fn a_missing_directory_is_created_rather_than_failing() {
         lang: String::new(),
         permission_mode: String::new(),
         host: "claude".into(),
+        count: 1,
     };
     append(&dir, &rec).unwrap();
     assert!(dir.join("journal.jsonl").exists());
@@ -183,4 +185,201 @@ fn legacy_hostless_rows_still_correlate_only_with_legacy_outcomes() {
     let recs = vouch::journal::all(&dir);
     assert_eq!(recs[0].host, "");
     assert_eq!(recs[0].outcome, Outcome::Executed);
+}
+
+#[test]
+fn compact_records_preserves_recent_window_and_deduplicates_history() {
+    use vouch::journal::{compact_records, JournalPolicy};
+
+    let make_rec = |id: &str, cmd: &str, ts: &str| Record {
+        id: id.into(),
+        outcome: Outcome::Pending,
+        ts: ts.into(),
+        session: "s".into(),
+        tool: "Bash".into(),
+        cmd: cmd.into(),
+        verdict: "allow".into(),
+        reason: "ok".into(),
+        mode: "live".into(),
+        cwd: String::new(),
+        lang: "bash".into(),
+        permission_mode: String::new(),
+        host: "claude".into(),
+        count: 1,
+    };
+
+    let records = vec![
+        make_rec("1", "git status", "100"),
+        make_rec("2", "ls -la", "101"),
+        make_rec("3", "git status", "102"),
+        make_rec("4", "git status", "103"),
+        // Recent window (last 2 records)
+        make_rec("5", "git status", "104"),
+        make_rec("6", "pwd", "105"),
+    ];
+
+    let policy = JournalPolicy {
+        max_records: 10,
+        compact_duplicates: true,
+        preserve_recent: 2,
+    };
+
+    let (compacted, stats) = compact_records(&records, &policy);
+    assert_eq!(stats.original_count, 6);
+    // Historical had 4 records: 3 git status, 1 ls -la -> collapses to 2 records (git status with count 3, ls -la with count 1)
+    // Recent had 2 records: untouched (ids "5", "6")
+    assert_eq!(compacted.len(), 4);
+    assert_eq!(compacted[0].cmd, "git status");
+    assert_eq!(compacted[0].count, 3);
+    assert_eq!(compacted[0].ts, "103"); // latest historical timestamp
+    assert_eq!(compacted[1].cmd, "ls -la");
+    assert_eq!(compacted[1].count, 1);
+    assert_eq!(compacted[2].id, "5");
+    assert_eq!(compacted[2].count, 1);
+    assert_eq!(compacted[3].id, "6");
+    assert_eq!(compacted[3].count, 1);
+}
+
+#[test]
+fn prune_enforces_hard_record_cap() {
+    use vouch::journal::{compact_records, JournalPolicy};
+
+    let make_rec = |id: &str| Record {
+        id: id.into(),
+        outcome: Outcome::Pending,
+        ts: id.into(),
+        session: "s".into(),
+        tool: "Bash".into(),
+        cmd: format!("cmd_{id}"),
+        verdict: "allow".into(),
+        reason: "ok".into(),
+        mode: "live".into(),
+        cwd: String::new(),
+        lang: "bash".into(),
+        permission_mode: String::new(),
+        host: "claude".into(),
+        count: 1,
+    };
+
+    let records: Vec<Record> = (0..20).map(|i| make_rec(&i.to_string())).collect();
+    let policy = JournalPolicy {
+        max_records: 5,
+        compact_duplicates: false,
+        preserve_recent: 2,
+    };
+
+    let (compacted, stats) = compact_records(&records, &policy);
+    assert_eq!(compacted.len(), 5);
+    assert_eq!(stats.pruned_count, 15);
+    // The retained 5 records are the latest records (15..20)
+    assert_eq!(compacted[0].id, "15");
+    assert_eq!(compacted[4].id, "19");
+}
+
+#[test]
+fn tail_record_reads_last_entry_without_parsing_whole_file() {
+    use vouch::journal::{append, append_outcome, last, tail_record, OutcomeRecord};
+
+    let dir = std::env::temp_dir().join("vouch_journal_tail_test");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+
+    assert!(last(&dir).is_none());
+    assert!(tail_record(&dir).is_none());
+
+    for i in 0..10 {
+        let rec = Record {
+            id: format!("id_{i}"),
+            outcome: Outcome::Pending,
+            ts: i.to_string(),
+            session: "s".into(),
+            tool: "Bash".into(),
+            cmd: format!("echo {i}"),
+            verdict: "allow".into(),
+            reason: "ok".into(),
+            mode: "live".into(),
+            cwd: String::new(),
+            lang: "bash".into(),
+            permission_mode: String::new(),
+            host: "claude".into(),
+            count: 1,
+        };
+        append(&dir, &rec).unwrap();
+    }
+
+    append_outcome(
+        &dir,
+        &OutcomeRecord {
+            id: "id_9".into(),
+            outcome: Outcome::Executed,
+            detail: String::new(),
+            host: "claude".into(),
+        },
+    )
+    .unwrap();
+
+    let tail = tail_record(&dir).expect("should find tail record");
+    assert_eq!(tail.id, "id_9");
+    assert_eq!(tail.cmd, "echo 9");
+    assert_eq!(tail.outcome, Outcome::Executed);
+
+    let l = last(&dir).expect("should find last record");
+    assert_eq!(l.id, "id_9");
+    assert_eq!(l.outcome, Outcome::Executed);
+}
+
+#[test]
+fn atomic_compaction_retains_outcome_pairing() {
+    use vouch::journal::{append, append_outcome, prune_and_compact, JournalPolicy, OutcomeRecord};
+
+    let dir = std::env::temp_dir().join("vouch_journal_atomic_test");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+
+    // Write duplicate commands
+    for i in 0..10 {
+        let rec = Record {
+            id: format!("id_{i}"),
+            outcome: Outcome::Pending,
+            ts: i.to_string(),
+            session: "s".into(),
+            tool: "Bash".into(),
+            cmd: if i < 6 { "git status".into() } else { format!("cmd_{i}") },
+            verdict: "allow".into(),
+            reason: "ok".into(),
+            mode: "live".into(),
+            cwd: String::new(),
+            lang: "bash".into(),
+            permission_mode: String::new(),
+            host: "claude".into(),
+            count: 1,
+        };
+        append(&dir, &rec).unwrap();
+        append_outcome(
+            &dir,
+            &OutcomeRecord {
+                id: format!("id_{i}"),
+                outcome: Outcome::Executed,
+                detail: String::new(),
+                host: "claude".into(),
+            },
+        )
+        .unwrap();
+    }
+
+    let policy = JournalPolicy {
+        max_records: 6,
+        compact_duplicates: true,
+        preserve_recent: 2, // ids 8 and 9 are preserved
+    };
+
+    let stats = prune_and_compact(&dir, &policy).unwrap();
+    assert!(stats.original_count == 10);
+
+    let recs = vouch::journal::all(&dir);
+    assert!(recs.len() <= 6);
+    // Verified that all outcomes for retained records are properly folded
+    for r in &recs {
+        assert_eq!(r.outcome, Outcome::Executed, "record {} outcome should be Executed", r.id);
+    }
 }

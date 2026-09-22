@@ -56,6 +56,17 @@ pub struct Record {
     /// from hook input.
     #[serde(default)]
     pub host: String,
+    /// Execution count when duplicate runs are compacted. Defaults to 1.
+    #[serde(default = "default_count", skip_serializing_if = "is_one")]
+    pub count: usize,
+}
+
+fn default_count() -> usize {
+    1
+}
+
+fn is_one(c: &usize) -> bool {
+    *c == 1
 }
 
 /// Seconds since the epoch, as a string. No date library: the journal only
@@ -121,6 +132,7 @@ pub fn record_from_host(host: Host, input: &HookInput, d: &Decision, mode: &str)
         lang: String::new(),
         permission_mode: input.permission_mode.clone(),
         host: host.as_str().into(),
+        count: 1,
     }
 }
 
@@ -140,6 +152,7 @@ pub fn record_unparseable(host: Host, raw: &str, d: &Decision) -> Record {
         lang: String::new(),
         permission_mode: String::new(),
         host: host.as_str().into(),
+        count: 1,
     }
 }
 
@@ -187,6 +200,7 @@ pub fn records_from_snippets_host(
             lang: lang.clone(),
             permission_mode: input.permission_mode.clone(),
             host: host.as_str().into(),
+            count: 1,
         })
         .collect()
 }
@@ -264,5 +278,217 @@ pub fn all(dir: &Path) -> Vec<Record> {
 }
 
 pub fn last(dir: &Path) -> Option<Record> {
-    all(dir).pop()
+    tail_record(dir).or_else(|| all(dir).pop())
+}
+
+/// Configuration policy for journal rotation, retention caps, and historical deduplication.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JournalPolicy {
+    /// Maximum total records retained after compaction and pruning. Default is 5,000.
+    pub max_records: usize,
+    /// Whether to collapse duplicate runs in historical records while aggregating counts.
+    pub compact_duplicates: bool,
+    /// Number of recent records to preserve un-compacted to protect active session tool_use_id pairing. Default is 1,000.
+    pub preserve_recent: usize,
+}
+
+impl Default for JournalPolicy {
+    fn default() -> Self {
+        Self {
+            max_records: 5000,
+            compact_duplicates: true,
+            preserve_recent: 1000,
+        }
+    }
+}
+
+/// Statistics reported after pruning and compaction.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct CompactionStats {
+    pub original_count: usize,
+    pub compacted_count: usize,
+    pub pruned_count: usize,
+    pub outcomes_retained: usize,
+}
+
+/// Pure in-memory compaction and bounded retention algorithm.
+///
+/// 1. Partitions records into historical and recent (last `preserve_recent` entries).
+///    Recent entries are left completely untouched to preserve harness `tool_use_id` pairing.
+/// 2. In historical records, duplicate runs sharing `(host, tool, lang, cmd, verdict, mode)`
+///    are collapsed into their latest occurrence, aggregating execution counts.
+/// 3. If combined records exceed `max_records`, oldest records are truncated.
+pub fn compact_records(records: &[Record], policy: &JournalPolicy) -> (Vec<Record>, CompactionStats) {
+    let original_count = records.len();
+    if records.is_empty() {
+        return (Vec::new(), CompactionStats::default());
+    }
+
+    let preserve_recent = policy.preserve_recent.min(records.len());
+    let split_idx = records.len() - preserve_recent;
+    let (historical, recent) = records.split_at(split_idx);
+
+    let mut final_historical: Vec<Record> = Vec::new();
+    if policy.compact_duplicates && !historical.is_empty() {
+        // Collect latest instance of each signature, accumulating execution counts
+        let mut latest_by_sig: HashMap<(String, String, String, String, String, String), Record> = HashMap::new();
+        for r in historical.iter().rev() {
+            let key = (
+                r.host.clone(),
+                r.tool.clone(),
+                r.lang.clone(),
+                r.cmd.clone(),
+                r.verdict.clone(),
+                r.mode.clone(),
+            );
+            latest_by_sig
+                .entry(key)
+                .and_modify(|entry| {
+                    entry.count = entry.count.saturating_add(r.count.max(1));
+                })
+                .or_insert_with(|| {
+                    let mut rec = r.clone();
+                    if rec.count == 0 {
+                        rec.count = 1;
+                    }
+                    rec
+                });
+        }
+        // Preserve relative chronological order of first-seen signatures from historical records
+        let mut retained_keys = std::collections::HashSet::new();
+        for r in historical {
+            let key = (
+                r.host.clone(),
+                r.tool.clone(),
+                r.lang.clone(),
+                r.cmd.clone(),
+                r.verdict.clone(),
+                r.mode.clone(),
+            );
+            if retained_keys.insert(key.clone()) {
+                if let Some(compacted_rec) = latest_by_sig.remove(&key) {
+                    final_historical.push(compacted_rec);
+                }
+            }
+        }
+    } else {
+        final_historical.extend_from_slice(historical);
+    }
+
+    let mut combined = final_historical;
+    combined.extend_from_slice(recent);
+
+    let compacted_count = combined.len();
+    let mut pruned_count = 0;
+    if combined.len() > policy.max_records {
+        let excess = combined.len() - policy.max_records;
+        pruned_count = excess;
+        combined = combined.split_off(excess);
+    }
+
+    (
+        combined,
+        CompactionStats {
+            original_count,
+            compacted_count,
+            pruned_count,
+            outcomes_retained: 0,
+        },
+    )
+}
+
+/// Atomically compacts duplicate historical runs and prunes records exceeding the retention policy cap.
+///
+/// Also prunes orphaned `outcomes.jsonl` entries whose corresponding journal records have been pruned.
+pub fn prune_and_compact(dir: &Path, policy: &JournalPolicy) -> std::io::Result<CompactionStats> {
+    create_dir_all(dir)?;
+    let recs: Vec<Record> = read_lines(dir, "journal.jsonl");
+    if recs.is_empty() {
+        return Ok(CompactionStats::default());
+    }
+
+    let (compacted_recs, mut stats) = compact_records(&recs, policy);
+
+    // Filter outcomes to only retain those matching retained journal records
+    let outcomes: Vec<OutcomeRecord> = read_lines(dir, "outcomes.jsonl");
+    let active_ids: std::collections::HashSet<(String, String)> = compacted_recs
+        .iter()
+        .filter(|r| !r.id.is_empty())
+        .map(|r| (r.host.clone(), r.id.clone()))
+        .collect();
+    let filtered_outcomes: Vec<OutcomeRecord> = outcomes
+        .into_iter()
+        .filter(|o| active_ids.contains(&(o.host.clone(), o.id.clone())))
+        .collect();
+    stats.outcomes_retained = filtered_outcomes.len();
+
+    // Atomic write for journal.jsonl
+    let tmp_journal = dir.join("journal.jsonl.tmp");
+    {
+        let mut f = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp_journal)?;
+        for r in &compacted_recs {
+            let line = serde_json::to_string(r).unwrap_or_default();
+            f.write_all(line.as_bytes())?;
+            f.write_all(b"\n")?;
+        }
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp_journal, dir.join("journal.jsonl"))?;
+
+    // Atomic write for outcomes.jsonl
+    let tmp_outcomes = dir.join("outcomes.jsonl.tmp");
+    {
+        let mut f = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp_outcomes)?;
+        for o in &filtered_outcomes {
+            let line = serde_json::to_string(o).unwrap_or_default();
+            f.write_all(line.as_bytes())?;
+            f.write_all(b"\n")?;
+        }
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp_outcomes, dir.join("outcomes.jsonl"))?;
+
+    Ok(stats)
+}
+
+/// Reads the single most recent record directly from the end of `journal.jsonl`
+/// without loading or parsing the entire historical file.
+pub fn tail_record(dir: &Path) -> Option<Record> {
+    use std::io::{Read, Seek, SeekFrom};
+    let path = dir.join("journal.jsonl");
+    let mut file = std::fs::File::open(&path).ok()?;
+    let len = file.metadata().ok()?.len();
+    if len == 0 {
+        return None;
+    }
+    let read_size = std::cmp::min(len, 8192) as usize;
+    file.seek(SeekFrom::End(-(read_size as i64))).ok()?;
+    let mut buf = vec![0u8; read_size];
+    file.read_exact(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf);
+    let last_line = text.lines().rev().find(|l| !l.trim().is_empty())?;
+    let mut rec: Record = serde_json::from_str(last_line).ok()?;
+
+    if !rec.id.is_empty() {
+        if let Ok(out_file) = std::fs::File::open(dir.join("outcomes.jsonl")) {
+            use std::io::{BufRead, BufReader};
+            let reader = BufReader::new(out_file);
+            for line in reader.lines().flatten() {
+                if let Ok(o) = serde_json::from_str::<OutcomeRecord>(&line) {
+                    if o.host == rec.host && o.id == rec.id {
+                        rec.outcome = o.outcome;
+                    }
+                }
+            }
+        }
+    }
+    Some(rec)
 }

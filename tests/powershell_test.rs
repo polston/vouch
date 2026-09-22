@@ -621,3 +621,46 @@ fn ast_switch_statement_is_named() {
         "keyword_switch",
     );
 }
+
+#[test]
+fn push_location_literal_path_sets_destination_directory() {
+    let cfg = load(r#"
+version = 1
+[lang.powershell]
+default = "allow"
+[lang.powershell.constructs]
+unmodeled_command = "allow"
+[write]
+default = "ask"
+allow_paths = ["C:/**", "/tmp/**"]
+"#)
+    .expect("config parses");
+
+    // Case 1: Push-Location with -LiteralPath allows relative write in destination
+    let d = vouch::engine::decide_command_at(
+        &cfg,
+        "powershell",
+        "Push-Location -LiteralPath 'C:/test[1]'; Set-Content ./out.txt 'hello'",
+        None,
+        None,
+        Some("C:/"),
+    );
+    assert!(
+        matches!(d, Decision::Allow(_)),
+        "Push-Location -LiteralPath should allow subsequent relative write, got: {d:?}"
+    );
+
+    // Case 2: Case insensitivity of -literalpath flag
+    let d_case = vouch::engine::decide_command_at(
+        &cfg,
+        "powershell",
+        "Push-Location -literalpath 'C:/test[1]'; Set-Content ./out.txt 'hello'",
+        None,
+        None,
+        Some("C:/"),
+    );
+    assert!(
+        matches!(d_case, Decision::Allow(_)),
+        "Push-Location -literalpath (lowercase) should allow subsequent relative write, got: {d_case:?}"
+    );
+}

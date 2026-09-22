@@ -512,6 +512,7 @@ fn undeclared_option_record(id: &str, head: &str, flag: &str) -> vouch::journal:
         lang: String::new(),
         permission_mode: String::new(),
         host: "claude".into(),
+        count: 1,
     }
 }
 
@@ -570,6 +571,104 @@ fn doctor_aggregates_undeclared_dir_change_options_by_spelling() {
     assert!(i3 < i2 && i2 < i1, "not sorted by count descending: {text}");
 }
 
+/// [M2.49] The undeclared options bucket in `vouch doctor` is capped at 20 items
+/// in terminal output, while the header preserves the total unique count.
+#[test]
+fn doctor_caps_undeclared_options_at_twenty() {
+    let home = pinned_home();
+    let state = std::env::temp_dir().join("vouch_cli_test_doctor_undeclared_capped");
+    let _ = std::fs::remove_dir_all(&state);
+
+    for i in 1..=25 {
+        let flag = format!("-flag{i:02}");
+        vouch::journal::append(
+            &state,
+            &undeclared_option_record(&format!("id{i}"), "set-location", &flag),
+        )
+        .unwrap();
+    }
+
+    let out = Command::new(bin())
+        .arg("doctor")
+        .env("VOUCH_STATE_DIR", &state)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("undeclared options on dir-changers, by spelling (25):"),
+        "total count header should be 25: {text}"
+    );
+    let count = text.lines().filter(|l| l.contains("set-location -flag")).count();
+    assert_eq!(count, 20, "doctor must display at most 20 undeclared options, got {count}");
+}
+
+/// [M2.49] `parse_undeclared_option_line` requires exact two-space indent, non-empty
+/// valid flag prefix, and rejects whitespace, quotes, or control characters to prevent
+/// adversarial spoofing.
+#[test]
+fn parse_undeclared_option_line_hardened_anchoring_and_validation() {
+    use vouch::engine::parse_undeclared_option_line;
+
+    // Honest lines emitted by vouch
+    assert_eq!(
+        parse_undeclared_option_line("  the option '-erroraction' is not described for 'Set-Location'"),
+        Some(("Set-Location", "-erroraction"))
+    );
+    assert_eq!(
+        parse_undeclared_option_line("  the option '/s' is not described for 'cmd'"),
+        Some(("cmd", "/s"))
+    );
+
+    // Adversarial / unanchored / spoofed lines must be rejected
+    assert_eq!(
+        parse_undeclared_option_line("the option '-flag' is not described for 'cmd'"),
+        None,
+        "missing 2-space indent must be rejected"
+    );
+    assert_eq!(
+        parse_undeclared_option_line("    the option '-flag' is not described for 'cmd'"),
+        None,
+        "wrong indent must be rejected"
+    );
+    assert_eq!(
+        parse_undeclared_option_line("  the option '' is not described for 'cmd'"),
+        None,
+        "empty flag must be rejected"
+    );
+    assert_eq!(
+        parse_undeclared_option_line("  the option '-flag' is not described for ''"),
+        None,
+        "empty head must be rejected"
+    );
+    assert_eq!(
+        parse_undeclared_option_line("  the option 'bareword' is not described for 'cmd'"),
+        None,
+        "flag without prefix must be rejected"
+    );
+    assert_eq!(
+        parse_undeclared_option_line("  the option '-flag with spaces' is not described for 'cmd'"),
+        None,
+        "flag with spaces must be rejected"
+    );
+    assert_eq!(
+        parse_undeclared_option_line("  the option '-flag' is not described for 'cmd with spaces'"),
+        None,
+        "head with spaces must be rejected"
+    );
+    assert_eq!(
+        parse_undeclared_option_line("  the option '-flag' is not described for 'cmd' extra text"),
+        None,
+        "trailing content must be rejected"
+    );
+    assert_eq!(
+        parse_undeclared_option_line("  the option '-flag' is not described for 'cmd'\n"),
+        None,
+        "control characters must be rejected"
+    );
+}
+
 #[test]
 fn doctor_omits_the_undeclared_options_section_when_nothing_carries_the_marker() {
     let home = pinned_home();
@@ -590,6 +689,7 @@ fn doctor_omits_the_undeclared_options_section_when_nothing_carries_the_marker()
         lang: String::new(),
         permission_mode: String::new(),
         host: "claude".into(),
+        count: 1,
     };
     vouch::journal::append(&state, &rec).unwrap();
 
@@ -676,6 +776,7 @@ fn doctor_rescans_a_snippet_row_using_its_own_recorded_language() {
         lang: "bash".into(),
         permission_mode: String::new(),
         host: "claude".into(),
+        count: 1,
     };
     vouch::journal::append(&state, &rec).unwrap();
 
@@ -832,6 +933,7 @@ fn why_replay_expands_project_root_from_the_recorded_directory() {
         lang: "bash".into(),
         permission_mode: String::new(),
         host: "claude".into(),
+        count: 1,
     };
     vouch::journal::append(&state, &rec).unwrap();
 
@@ -950,6 +1052,7 @@ fn why_replays_program_location_recognition_from_the_recorded_directory() {
         lang: "bash".into(),
         permission_mode: String::new(),
         host: "claude".into(),
+        count: 1,
     };
     vouch::journal::append(&state, &rec).unwrap();
 
@@ -1192,6 +1295,7 @@ fn why_rescans_a_journalled_rows_own_cwd_and_names_the_zone_that_allowed_it() {
         lang: String::new(),
         permission_mode: String::new(),
         host: "claude".into(),
+        count: 1,
     };
     vouch::journal::append(&state, &rec).unwrap();
 
@@ -1600,6 +1704,69 @@ fn trust_of_an_mcp_tool_restores_prior_content_when_verification_fails() {
     );
 }
 
+/// [M2.54] When my-knowledge did NOT exist before trusting a program, a failed
+/// verification must remove the newly written file rather than leaving behind a
+/// zero-byte file residue.
+#[test]
+fn trust_of_a_program_removes_a_freshly_written_file_when_verification_fails() {
+    let home = pinned_home();
+    let file = std::env::temp_dir().join("vouch_cli_test_trust_prog_verify_fail.toml");
+    let _ = std::fs::remove_file(&file);
+    let bad_knowledge = std::env::temp_dir().join("vouch_cli_test_trust_prog_bad_knowledge.toml");
+    std::fs::write(&bad_knowledge, "this is not [[[ valid toml").unwrap();
+    let out = Command::new(bin())
+        .arg("trust")
+        .arg("totallymadeupprogfail")
+        .env("VOUCH_MY_KNOWLEDGE", &file)
+        .env("VOUCH_KNOWLEDGE", &bad_knowledge)
+        .env("VOUCH_STATE_DIR", std::env::temp_dir().join("vouch_cli_test_scratch"))
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "a verification failure must be a non-zero exit, got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        !file.exists(),
+        "no my-knowledge existed before this run — a failed verification must remove the \
+         freshly written file, not leave a zero-byte one: {}",
+        file.display()
+    );
+}
+
+/// [M2.54] When my-knowledge DID exist before trusting a program, a failed
+/// verification must restore its exact prior bytes, not mint an empty file.
+#[test]
+fn trust_of_a_program_restores_prior_content_when_verification_fails() {
+    let home = pinned_home();
+    let file = std::env::temp_dir().join("vouch_cli_test_trust_prog_verify_fail_restore.toml");
+    let prior = "# a prior comment nobody wrote a description of\n";
+    std::fs::write(&file, prior).unwrap();
+    let bad_knowledge =
+        std::env::temp_dir().join("vouch_cli_test_trust_prog_bad_knowledge_restore.toml");
+    std::fs::write(&bad_knowledge, "this is not [[[ valid toml").unwrap();
+    let out = Command::new(bin())
+        .arg("trust")
+        .arg("totallymadeupprogrestore")
+        .env("VOUCH_MY_KNOWLEDGE", &file)
+        .env("VOUCH_KNOWLEDGE", &bad_knowledge)
+        .env("VOUCH_STATE_DIR", std::env::temp_dir().join("vouch_cli_test_scratch"))
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+    let after = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(
+        after, prior,
+        "a my-knowledge file that existed before this run must be restored exactly, not left \
+         with the failed entry or emptied"
+    );
+}
+
 /// [M2.12 defect 2] With an empty [tools] section, following the prompt's
 /// `set tools.<Name> = "allow"` instruction flips the whole section into
 /// governing every tool — the shipped-described tools start prompting. The
@@ -1833,11 +2000,11 @@ fn the_control_flag_combinations_refuse() {
     }
 }
 
-/// The M2.54 slash half stays on its own row: a `/`-spelled token is not
-/// flag-shaped under the routing loop's `starts_with('-')` test, so it still
-/// lands in `words` and is written as a subcommand exactly as before.
+/// [M2.54] A switch-shaped `/`-spelled token (e.g. `/s`) is routed as a flag,
+/// not a subcommand word. Standalone flags require `-` prefix, so it is refused
+/// before writing a bogus subcommand.
 #[test]
-fn a_slash_token_still_lands_in_words() {
+fn a_slash_token_is_routed_as_a_flag_and_refuses() {
     let home = pinned_home();
     let file = std::env::temp_dir().join("vouch_cli_test_trust_slash_token.toml");
     let _ = std::fs::remove_file(&file);
@@ -1851,12 +2018,13 @@ fn a_slash_token_still_lands_in_words() {
         .env("USERPROFILE", &home)
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    let written = std::fs::read_to_string(&file).unwrap();
+    assert!(!out.status.success(), "slash flag must be refused, not minted as subcommand");
+    let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        written.contains(r#"subcommands = ["/s"]"#),
-        "a slash token must still land in words as a subcommand: {written}"
+        err.contains("`/s` cannot be trusted as a standalone flag"),
+        "expected refusal as standalone flag, got: {err}"
     );
+    assert!(!file.exists(), "no file should be written on refusal");
 }
 
 /// Task 8: `doctor` prints `guards::notes()` in the config-only section —
@@ -2106,5 +2274,73 @@ fn explain_parent_shell_detection_and_explicit_selectors() {
             break;
         }
     }
+}
+
+/// [M2.45] Ambient CDPATH environment variable makes an unanchored relative
+/// cd destination unknowable (ask), while dot-anchored `./sub` or absolute
+/// destinations bypass the search (allow under allowed write zones).
+#[test]
+fn ambient_cdpath_unresolves_relative_destination_but_allows_dot_and_absolute() {
+    let home = pinned_home();
+    let config = std::env::temp_dir().join("vouch_cli_test_ambient_cdpath_cfg.toml");
+    std::fs::write(
+        &config,
+        "version = 1\n[lang.bash]\ndefault = \"allow\"\n[write]\ndefault = \"ask\"\nallow_paths = [\"/tmp/**\", \"/private/tmp/**\", \"C:/tmp/**\"]\n",
+    )
+    .unwrap();
+
+    // 1. Ambient CDPATH set: unanchored relative `cd sub` fails closed to ask
+    let out1 = Command::new(bin())
+        .arg("explain")
+        .arg("--cwd")
+        .arg(if cfg!(windows) { "C:/tmp/proj" } else { "/tmp/proj" })
+        .arg("cd sub && echo x > f.txt")
+        .env("CDPATH", "/other/search/dir")
+        .env("VOUCH_CONFIG", &config)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+        .unwrap();
+    let text1 = String::from_utf8_lossy(&out1.stdout);
+    assert!(
+        text1.contains("ASK"),
+        "unanchored relative cd under ambient CDPATH must ask: {text1}"
+    );
+
+    // 2. Ambient CDPATH set: dot-anchored `./sub` bypasses CDPATH search -> allow
+    let out2 = Command::new(bin())
+        .arg("explain")
+        .arg("--cwd")
+        .arg(if cfg!(windows) { "C:/tmp/proj" } else { "/tmp/proj" })
+        .arg("cd ./sub && echo x > f.txt")
+        .env("CDPATH", "/other/search/dir")
+        .env("VOUCH_CONFIG", &config)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+        .unwrap();
+    let text2 = String::from_utf8_lossy(&out2.stdout);
+    assert!(
+        text2.contains("ALLOW"),
+        "dot-anchored cd must bypass ambient CDPATH search: {text2}"
+    );
+
+    // 3. Command prefix clearing `CDPATH=` overrides ambient CDPATH -> allow
+    let out3 = Command::new(bin())
+        .arg("explain")
+        .arg("--cwd")
+        .arg(if cfg!(windows) { "C:/tmp/proj" } else { "/tmp/proj" })
+        .arg("CDPATH= cd sub && echo x > f.txt")
+        .env("CDPATH", "/other/search/dir")
+        .env("VOUCH_CONFIG", &config)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+        .unwrap();
+    let text3 = String::from_utf8_lossy(&out3.stdout);
+    assert!(
+        text3.contains("ALLOW"),
+        "prefix clearing CDPATH must override ambient CDPATH: {text3}"
+    );
 }
 

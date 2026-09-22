@@ -241,6 +241,33 @@ fn a_visible_cdpath_assignment_unresolves_a_relative_destination() {
     assert_eq!(v, "ask");
 }
 
+#[test]
+fn dot_anchored_and_absolute_paths_bypass_cdpath_search() {
+    // A relative destination starting with `./` or `../` or an absolute path
+    // bypasses CDPATH search and remains resolvable, while prefix-clearing
+    // CDPATH (CDPATH=) unblocks relative hops.
+    let (v1, _) = common::decision_at(
+        &cfg(),
+        "CDPATH=/x cd ./sub && echo x > f.txt",
+        &t("/tmp/proj"),
+    );
+    assert_eq!(v1, "allow", "dot-anchored cd must bypass CDPATH search");
+
+    let (v2, _) = common::decision_at(
+        &cfg(),
+        &format!("CDPATH=/x cd {} && echo x > f.txt", t("/tmp/proj/sub")),
+        &t("/tmp/proj"),
+    );
+    assert_eq!(v2, "allow", "absolute cd must bypass CDPATH search");
+
+    let (v3, _) = common::decision_at(
+        &cfg(),
+        "CDPATH= cd sub && echo x > f.txt",
+        &t("/tmp/proj"),
+    );
+    assert_eq!(v3, "allow", "clearing CDPATH on command prefix must unblock relative cd");
+}
+
 // --- Task 6: body candidates (design §3.3 / §4.2) --------------------------
 
 #[test]

@@ -449,7 +449,7 @@ pub fn trace_command_at(
         &expanded.inherited_run_dir,
         &resolve,
         home,
-        false,
+        is_cdpath_bound(&assigned),
         &start,
     );
     let mut step2_details = Vec::new();
@@ -762,6 +762,17 @@ fn assignments_in_effect(
     assignments: &[(String, Option<String>)],
 ) -> std::collections::HashMap<String, Option<String>> {
     assignments.iter().cloned().collect()
+}
+
+/// Whether CDPATH is bound: command-line prefix/same-line assignments take
+/// precedence (empty clears it, unreadable fails closed, non-empty binds it),
+/// falling back to the ambient process environment (M2.45).
+fn is_cdpath_bound(assigned: &std::collections::HashMap<String, Option<String>>) -> bool {
+    match assigned.get("CDPATH") {
+        Some(Some(val)) => !val.is_empty(),
+        Some(None) => true,
+        None => std::env::var_os("CDPATH").map(|s| !s.is_empty()).unwrap_or(false),
+    }
 }
 
 /// Resolve one scanner token exactly as the decision path does: the last
@@ -1093,7 +1104,7 @@ fn judge_once(
         &all_inherited,
         &resolve,
         home,
-        assigned.contains_key("CDPATH"),
+        is_cdpath_bound(&assigned),
         &start,
     );
 
@@ -3819,7 +3830,7 @@ pub fn count_unknown_run_place_commands(lang: &str, src: &str) -> usize {
         &inherited_run_dir,
         &resolve,
         None,
-        assigned.contains_key("CDPATH"),
+        is_cdpath_bound(&assigned),
         &start,
     );
     (0..all_cmds.len())
@@ -3938,7 +3949,7 @@ pub fn measure_program_locations(
         &inherited_run_dir,
         &resolve,
         Some(home),
-        assigned.contains_key("CDPATH"),
+        is_cdpath_bound(&assigned),
         &start,
     );
     let trust = ProgramTrustRules::of(cfg, home, project_root);
@@ -6149,10 +6160,28 @@ pub fn undeclared_option_line(flag: &str, head: &str) -> String {
 /// The inverse of `undeclared_option_line`, just above: pulls `(head, flag)`
 /// back out of one line of a recorded journal reason. `vouch doctor`
 /// (`src/main.rs`) is the only caller.
+///
+/// Anchored and hardened (M2.49): requires the exact two-space indent, non-empty
+/// tokens, valid flag prefix (`-` or `/`), and rejects tokens containing whitespace,
+/// quotes, or control characters to prevent adversarial prompt/argument spoofing.
 pub fn parse_undeclared_option_line(line: &str) -> Option<(&str, &str)> {
-    let rest = line.trim_start().strip_prefix("the option '")?;
+    let rest = line.strip_prefix("  the option '")?;
     let (flag, rest) = rest.split_once("' is not described for '")?;
     let head = rest.strip_suffix('\'')?;
+    if flag.is_empty() || head.is_empty() {
+        return None;
+    }
+    if !flag.starts_with('-') && !flag.starts_with('/') {
+        return None;
+    }
+    if flag.contains(['\'', '"', '\n', '\r', '\t', ' '])
+        || head.contains(['\'', '"', '\n', '\r', '\t', ' '])
+    {
+        return None;
+    }
+    if !flag.chars().all(|c| !c.is_control()) || !head.chars().all(|c| !c.is_control()) {
+        return None;
+    }
     Some((head, flag))
 }
 

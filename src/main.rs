@@ -884,13 +884,10 @@ fn main() {
     // explicit accept; nothing is ever written without it.
     if args.first().map(String::as_str) == Some("trust") {
         // Route every trailing token: vouch's own two control flags are
-        // reserved before anything else, everything else spelled with a
-        // leading `-` (single OR double dash — a single-dash flag used to
-        // fall through into `words` and be minted as a bogus subcommand,
-        // the M2.54 defect) is a candidate `standalone_flags` member, and
-        // everything left is a plain word (the program name, a verb, or a
-        // slash-spelled token, which is not flag-shaped here and stays a
-        // word exactly as before).
+        // reserved before anything else, candidate flags (dash-prefixed or
+        // slash-switch shaped) are routed into `flags_typed` so flags can
+        // never be minted as bogus subcommands, and everything left is a
+        // plain word (program name or subcommand verb).
         let mut flags_typed: Vec<String> = Vec::new();
         let mut words: Vec<String> = Vec::new();
         let (mut all, mut whole_server) = (false, false);
@@ -906,7 +903,12 @@ fn main() {
                 whole_server = true;
                 continue;
             }
-            if a.starts_with('-') {
+            if a.starts_with('-')
+                || (a.starts_with('/')
+                    && a.len() > 1
+                    && !a.contains('\\')
+                    && a[1..].chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == ':'))
+            {
                 flags_typed.push(a.clone());
             } else {
                 words.push(a.clone());
@@ -1079,6 +1081,7 @@ fn main() {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
+        let existed_before = path.exists();
         let existing = std::fs::read_to_string(&path).unwrap_or_default();
         let header = if existing.trim().is_empty() { MY_KNOWLEDGE_HEADER } else { "" };
         match std::fs::write(&path, format!("{existing}{header}{entry}")) {
@@ -1149,21 +1152,29 @@ fn main() {
                 if verified {
                     println!("verified: an entry now recognises `{claimed}`");
                 } else {
-                    // Undo: restore the file to what it was before this run.
-                    let restored = std::fs::write(&path, &existing).is_ok();
+                    // Undo: restore the file to what it was before this run,
+                    // or remove it if it did not exist before (M2.54).
+                    let (restored, undo_desc) = if existed_before {
+                        (
+                            std::fs::write(&path, &existing).is_ok(),
+                            "restored to what it was before this run",
+                        )
+                    } else {
+                        (std::fs::remove_file(&path).is_ok(), "removed again")
+                    };
                     if loaded.gaps.is_empty() {
                         if restored {
                             eprintln!(
                                 "wrote the entry, checked it, and `{claimed}` is still not \
-                                 recognised — the entry does not fire, so it has been removed \
-                                 again. This is a vouch defect, not something you did wrong; \
+                                 recognised — the entry does not fire, so it has been {undo_desc}. \
+                                 This is a vouch defect, not something you did wrong; \
                                  please report it."
                             );
                         } else {
                             eprintln!(
                                 "wrote the entry, checked it, and `{claimed}` is still not \
                                  recognised — the entry does not fire, so it could NOT be \
-                                 removed. Please delete it from {} by hand. This is a vouch \
+                                 {undo_desc}. Please delete it from {} by hand. This is a vouch \
                                  defect, not something you did wrong; please report it.",
                                 vouch::knowledge::display_path(&path)
                             );
@@ -1176,14 +1187,14 @@ fn main() {
                         if restored {
                             eprintln!(
                                 "wrote the entry, but could not verify it: the knowledge vouch \
-                                 reads has problems of its own, and the entry has been removed \
-                                 again until they are fixed:"
+                                 reads has problems of its own, and the entry has been {undo_desc} \
+                                 until they are fixed:"
                             );
                         } else {
                             eprintln!(
                                 "wrote the entry, but could not verify it: the knowledge vouch \
                                  reads has problems of its own, and the entry could NOT be \
-                                 removed. Please delete it from {} by hand until those problems \
+                                 {undo_desc}. Please delete it from {} by hand until those problems \
                                  are fixed. The problems:",
                                 vouch::knowledge::display_path(&path)
                             );
@@ -1267,6 +1278,7 @@ fn main() {
         }
 
         let dir = journal::state_dir();
+        let _ = journal::prune_and_compact(&dir, &journal::JournalPolicy::default());
         let recs = journal::all(&dir);
         if recs.is_empty() {
             println!("no decisions recorded yet ({})", vouch::knowledge::display_path(&dir));
@@ -1367,7 +1379,7 @@ fn main() {
             let mut ud: Vec<_> = undeclared.iter().collect();
             ud.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
             println!("\nundeclared options on dir-changers, by spelling ({}):", ud.len());
-            for ((head, flag), n) in ud {
+            for ((head, flag), n) in ud.iter().take(20) {
                 println!("  {n:>5}  {head} {flag}");
             }
         }
@@ -1386,7 +1398,9 @@ fn main() {
     // `vouch review` — evidence-backed rule candidates. Writes NOTHING without
     // an explicit `--accept <name>`, and never proposes a guard at all.
     if args.first().map(String::as_str) == Some("review") {
-        let recs = journal::all(&journal::state_dir());
+        let dir = journal::state_dir();
+        let _ = journal::prune_and_compact(&dir, &journal::JournalPolicy::default());
+        let recs = journal::all(&dir);
         let cands = vouch::review::candidates(&recs);
 
         if let Some(pos) = args.iter().position(|a| a == "--accept") {

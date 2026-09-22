@@ -2412,7 +2412,7 @@ changes_dir = "stack"
 match = ["pushd", "push-location"]
 languages = ["powershell"]
 changes_dir = "stack"
-dest_dir_flags = ["-path"]
+dest_dir_flags = ["-path", "-literalpath"]
 no_value_options = ["-passthru"]
 case_sensitive_flags = false
 

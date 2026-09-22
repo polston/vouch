@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.43.0 (2026-09-22)
+
+
+### Features
+
+* compact audit journals and outcome logs during review and doctor passes to enforce bounded storage while preserving recent decisions
+* declare literalpath destination flag for powershell pushd and push-location
+
+
+### Bug Fixes
+
+* cap doctor undeclared options display at twenty items and anchor option line parsing
+* clean up newly written my-knowledge on failed trust rollback and route slash-shaped flags into member validation
+* isolate relative directory navigation from ambient CDPATH search diversion
+
 ## 0.42.0 (2026-09-21)
 
 

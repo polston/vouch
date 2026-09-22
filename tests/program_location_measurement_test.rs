@@ -24,6 +24,7 @@ impl Scratch {
             std::process::id()
         ));
         std::fs::create_dir_all(&path).unwrap();
+        let path = std::fs::canonicalize(path).unwrap();
         Self(path)
     }
 
@@ -39,7 +40,8 @@ impl Drop for Scratch {
 }
 
 fn slash(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+    let text = path.to_string_lossy().replace('\\', "/");
+    text.strip_prefix("//?/").unwrap_or(&text).to_string()
 }
 
 #[test]
@@ -158,10 +160,11 @@ fn neutral_scratch_rule_moves_only_the_matching_direct_program() {
         vouch::engine::decide_command_at(cfg, "bash", command, Some("C:/Users/dev"), None, None)
     };
     assert!(matches!(decide(&base, &slash(&matching)), Decision::Ask(_)));
-    assert!(matches!(
-        decide(&candidate, &slash(&matching)),
-        Decision::Allow(_)
-    ));
+    let decided = decide(&candidate, &slash(&matching));
+    assert!(
+        matches!(decided, Decision::Allow(_)),
+        "expected allow for matching probe-alpha, got: {decided:?}"
+    );
 
     for unchanged in [
         "probe-alpha".to_string(),
