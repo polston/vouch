@@ -30,6 +30,8 @@ use serde::Deserialize;
 
 pub const REAL: &str = "tests/fixtures/bash_corpus.json";
 pub const SYNTHETIC: &str = "tests/fixtures/synthetic_corpus.json";
+pub const REAL_POWERSHELL: &str = "tests/fixtures/powershell_corpus.json";
+pub const SYNTHETIC_POWERSHELL: &str = "tests/fixtures/synthetic_powershell_corpus.json";
 
 /// Set this to turn a skipped measurement into a failure. A default run stays
 /// quiet, because the real corpus legitimately does not exist on most
@@ -120,6 +122,26 @@ pub fn all() -> Vec<(&'static str, Vec<Row>)> {
     let mut v = vec![("synthetic", synthetic())];
     if let Some(r) = real() {
         v.push(("real", r));
+    }
+    v
+}
+
+/// The real recorded PowerShell corpus, or None when it has not been built on this machine.
+pub fn real_powershell() -> Option<Vec<Row>> {
+    load(REAL_POWERSHELL)
+}
+
+/// The committed synthetic PowerShell corpus. Absence is a broken checkout, not a skip.
+pub fn synthetic_powershell() -> Vec<Row> {
+    load(SYNTHETIC_POWERSHELL)
+        .expect("synthetic_powershell_corpus.json is committed; the checkout is incomplete")
+}
+
+/// Every PowerShell corpus available here: synthetic always, real when it exists.
+pub fn all_powershell() -> Vec<(&'static str, Vec<Row>)> {
+    let mut v = vec![("synthetic_powershell", synthetic_powershell())];
+    if let Some(r) = real_powershell() {
+        v.push(("real_powershell", r));
     }
     v
 }

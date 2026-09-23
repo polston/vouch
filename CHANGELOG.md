@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.44.0 (2026-09-23)
+
+
+### Features
+
+* add duplicate match checks and directory changer claim guarding to vouch trust
+* add mechanical verification of shipped and development skills against repository invariants
+* add synthetic PowerShell corpus and section 5 net property test coverage across all constructs
+
+
+### Bug Fixes
+
+* break engine verdict ties by diagnostic specificity to preserve by-reference and guard reasons
+* order config migration instructions to prioritize moving legacy vouch.toml before example templates
+
 ## 0.43.0 (2026-09-22)
 
 

@@ -38,18 +38,78 @@ pub fn is_protection_ask(reason: &str) -> bool {
     matches!(reason.lines().next(), Some(l) if l == PROTECTED_FILE_LINE || l == WRITE_WALL_LINE)
 }
 
+fn is_guard_ask(reason: &str) -> bool {
+    reason.lines().next().map_or(false, |l| {
+        l.starts_with("vouch stopped on: ") && l.ends_with(" (guard)")
+    }) || reason.contains(" (guard)")
+}
+
+fn is_specific_diagnostic_ask(reason: &str) -> bool {
+    reason.contains("by reference:") || reason.contains("a callable was handed over")
+}
+
+fn is_policy_ask(reason: &str) -> bool {
+    reason.contains("write.allow_paths")
+        || reason.contains("read.allow_paths")
+        || reason.contains("write.scope")
+        || reason.contains("[[write.scope]]")
+        || reason.contains("path outside every allowed area")
+        || reason.contains("link target outside allowed area")
+        || reason.contains("run.trust_nothing_under")
+        || reason.contains("unresolved_path")
+}
+
+fn is_construct_ask(reason: &str) -> bool {
+    reason.starts_with("vouch stopped on: ") && !reason.starts_with("vouch stopped on: unmodeled_command")
+}
+
+fn is_unmodeled_command_ask(reason: &str) -> bool {
+    reason.starts_with("vouch stopped on: unmodeled_command")
+}
+
+/// Diagnostic specificity score for reasons of EQUAL action rank:
+/// - Level 6: Protection ask (protected file, write wall)
+/// - Level 5: Guard ask (dangerous operation described by a guard rule)
+/// - Level 4: Specific diagnostic / by-reference finding (callable_argument, rebound_name, etc.)
+/// - Level 3: Policy ask (write.allow_paths, read.allow_paths, write.scope, unresolved_path)
+/// - Level 2: General construct ask (redirect, subshell, dynamic_command, etc.)
+/// - Level 1: Unmodeled command ask (no description of program)
+/// - Level 0: Generic fallback
+fn reason_specificity(r: &str) -> u8 {
+    if is_protection_ask(r) {
+        6
+    } else if is_guard_ask(r) {
+        5
+    } else if is_specific_diagnostic_ask(r) {
+        4
+    } else if is_policy_ask(r) {
+        3
+    } else if is_construct_ask(r) {
+        2
+    } else if is_unmodeled_command_ask(r) {
+        1
+    } else {
+        0
+    }
+}
+
 /// Whether a new (action, reason) takes the recorded-reason slot from the
-/// held one — a higher rank always does; at EQUAL rank a protection reason
-/// takes the slot from a non-protection one, so the recorded first line
-/// cannot hide that a protection rule fired beside a guard (probed
-/// 2026-08-16: `rm -r` on a protected path recorded the guard line). §5's
-/// "checked first and wins" now holds for the REPORT, not only the check.
+/// held one — a strictly higher action rank always takes the slot (Deny > Ask > Allow).
+/// At EQUAL action rank, a more diagnostically specific reason displaces a less specific
+/// one (M2.211), preventing generic write policy or construct asks from masking
+/// by-reference findings, guards, or protections. At equal specificity, the held reason
+/// stays (first writer wins among equals).
 fn wins_reason_slot(a: Action, reason: &str, held: &Option<(Action, String)>) -> bool {
     match held {
         None => true,
         Some((w, held_r)) => {
-            rank(a) > rank(*w)
-                || (rank(a) == rank(*w) && is_protection_ask(reason) && !is_protection_ask(held_r))
+            if rank(a) > rank(*w) {
+                true
+            } else if rank(a) < rank(*w) {
+                false
+            } else {
+                reason_specificity(reason) > reason_specificity(held_r)
+            }
         }
     }
 }
@@ -236,7 +296,7 @@ fn fold_expansion_constructs(
             remember(grants, construct_grant(key_lang, &setting_key));
         }
         let reason = format!("{}\n  {detail}", construct_reason(key_lang, &setting_key));
-        if worst.as_ref().map_or(true, |(w, _)| rank(a) > rank(*w)) {
+        if wins_reason_slot(a, &reason, worst) {
             *worst = Some((a, reason));
         }
     }
@@ -1387,7 +1447,7 @@ fn judge_once(
                 h.guard
             ));
         }
-        if worst.as_ref().map_or(true, |(w, _)| rank(top) > rank(*w)) {
+        if wins_reason_slot(top, &reason, &worst) {
             worst = Some((top, reason));
         }
     }
@@ -1774,7 +1834,7 @@ fn judge_once(
                 }
                 None => (generic, u.generic),
             };
-            if worst.as_ref().map_or(true, |(w, _)| rank(a) > rank(*w)) {
+            if wins_reason_slot(a, &reason, &worst) {
                 worst = Some((a, reason));
             }
         }
@@ -1901,7 +1961,7 @@ fn judge_once(
                         (declared, reason)
                     }
                 };
-                if worst.as_ref().map_or(true, |(w, _)| rank(a) > rank(*w)) {
+                if wins_reason_slot(a, &reason, &worst) {
                     worst = Some((a, reason));
                 }
                 continue;
@@ -2022,17 +2082,17 @@ fn judge_once(
         if a == Action::Allow {
             remember(&mut grants, construct_grant(ckey, &key));
         }
-        if worst.as_ref().map_or(true, |(w, _)| rank(a) > rank(*w)) {
-            let mut reason = construct_reason(ckey, &key);
-            if let Some(h) = hint {
-                let pairing =
-                    if h.pair_no_value_options { ", and in `no_value_options`," } else { "" };
-                reason.push_str(&format!(
-                    "\n  if none of these flags runs anything by itself, listing them in \
-                     `standalone_flags`{pairing} on the entry for `{}` removes this ask",
-                    crate::guards::base_name(&c.head)
-                ));
-            }
+        let mut reason = construct_reason(ckey, &key);
+        if let Some(h) = hint {
+            let pairing =
+                if h.pair_no_value_options { ", and in `no_value_options`," } else { "" };
+            reason.push_str(&format!(
+                "\n  if none of these flags runs anything by itself, listing them in \
+                 `standalone_flags`{pairing} on the entry for `{}` removes this ask",
+                crate::guards::base_name(&c.head)
+            ));
+        }
+        if wins_reason_slot(a, &reason, &worst) {
             worst = Some((a, reason));
         }
     }
@@ -2061,8 +2121,9 @@ fn judge_once(
         if a == Action::Allow {
             remember(&mut grants, construct_grant(clang, &key));
         }
-        if worst.as_ref().map_or(true, |(w, _)| rank(a) > rank(*w)) {
-            worst = Some((a, construct_reason(clang, &key)));
+        let reason = construct_reason(clang, &key);
+        if wins_reason_slot(a, &reason, &worst) {
+            worst = Some((a, reason));
         }
     }
 
@@ -2112,23 +2173,24 @@ fn judge_once(
             if a == Action::Allow {
                 remember(&mut grants, construct_grant(clang, &key));
             }
-            if worst.as_ref().map_or(true, |(w, _)| rank(a) > rank(*w)) {
-                let detail = match effect {
-                    "startup" => format!(
-                        "`{label}` names a file the shell runs before the command on this line, \
-                         and vouch has not read it"
-                    ),
-                    "flag" => format!(
-                        "`{label}` puts a path of its own into the shell's lookup table, so a \
-                         name later on this line runs that path instead of the program vouch \
-                         describes"
-                    ),
-                    _ => format!(
-                        "`{label}` is a name the shell itself reads when it looks a program up, \
-                         so vouch cannot tell which program will run"
-                    ),
-                };
-                worst = Some((a, format!("{}\n  {detail}", construct_reason(clang, &key))));
+            let detail = match effect {
+                "startup" => format!(
+                    "`{label}` names a file the shell runs before the command on this line, \
+                     and vouch has not read it"
+                ),
+                "flag" => format!(
+                    "`{label}` puts a path of its own into the shell's lookup table, so a \
+                     name later on this line runs that path instead of the program vouch \
+                     describes"
+                ),
+                _ => format!(
+                    "`{label}` is a name the shell itself reads when it looks a program up, \
+                     so vouch cannot tell which program will run"
+                ),
+            };
+            let reason = format!("{}\n  {detail}", construct_reason(clang, &key));
+            if wins_reason_slot(a, &reason, &worst) {
+                worst = Some((a, reason));
             }
         }
     }
@@ -2266,7 +2328,7 @@ fn judge_once(
                         h.guard
                     ));
                 }
-                if worst.as_ref().map_or(true, |(w, _)| rank(top) > rank(*w)) {
+                if wins_reason_slot(top, &reason, &worst) {
                     worst = Some((top, reason));
                 }
             }
@@ -2335,7 +2397,7 @@ fn judge_once(
                         ),
                     ),
                 };
-                if worst.as_ref().map_or(true, |(w, _)| rank(a) > rank(*w)) {
+                if wins_reason_slot(a, &reason, &worst) {
                     worst = Some((a, reason));
                 }
             }
@@ -2388,7 +2450,7 @@ fn judge_once(
                     describe(&key),
                     by.head
                 );
-                if worst.as_ref().map_or(true, |(w, _)| rank(a) > rank(*w)) {
+                if wins_reason_slot(a, &reason, &worst) {
                     worst = Some((a, reason));
                 }
             }
@@ -2427,14 +2489,12 @@ fn judge_once(
         if a == Action::Allow {
             remember(&mut grants, construct_grant(clang, &key));
         }
-        if worst.as_ref().map_or(true, |(w, _)| rank(a) > rank(*w)) {
-            worst = Some((
-                a,
-                format!(
-                    "{}\n  a callable was handed over and vouch could not tell what it names",
-                    construct_reason(clang, &key)
-                ),
-            ));
+        let reason = format!(
+            "{}\n  a callable was handed over and vouch could not tell what it names",
+            construct_reason(clang, &key)
+        );
+        if wins_reason_slot(a, &reason, &worst) {
+            worst = Some((a, reason));
         }
     }
 
@@ -2465,8 +2525,9 @@ fn judge_once(
         if a == Action::Allow {
             remember(&mut grants, construct_grant(clang, &key));
         }
-        if worst.as_ref().map_or(true, |(w, _)| rank(a) > rank(*w)) {
-            worst = Some((a, construct_reason(clang, &key)));
+        let reason = construct_reason(clang, &key);
+        if wins_reason_slot(a, &reason, &worst) {
+            worst = Some((a, reason));
         }
     }
 
@@ -2484,7 +2545,7 @@ fn judge_once(
             "{}\n  to scan more layers, set lang.{lang}.wrap_depth = <a larger number>",
             construct_reason(lang, &key)
         );
-        if worst.as_ref().is_none_or(|(w, _)| rank(a) > rank(*w)) {
+        if wins_reason_slot(a, &reason, &worst) {
             worst = Some((a, reason));
         }
     }
@@ -2518,7 +2579,7 @@ fn judge_once(
             "{}\n  could not read: {error}",
             construct_reason(lang, &key)
         );
-        if worst.as_ref().map_or(true, |(w, _)| rank(a) > rank(*w)) {
+        if wins_reason_slot(a, &reason, &worst) {
             worst = Some((a, reason));
         }
     }
@@ -2529,13 +2590,13 @@ fn judge_once(
         if a == Action::Allow {
             remember(&mut grants, construct_grant(lang, &key));
         }
-        if worst.as_ref().map_or(true, |(w, _)| rank(a) > rank(*w)) {
-            let mut reason = construct_reason(lang, &key);
-            if let Some((_, detail)) = scan.construct_details.iter().find(|(n, _)| n == name) {
-                if !detail.is_empty() {
-                    reason = format!("{reason}\n  could not read: {detail}");
-                }
+        let mut reason = construct_reason(lang, &key);
+        if let Some((_, detail)) = scan.construct_details.iter().find(|(n, _)| n == name) {
+            if !detail.is_empty() {
+                reason = format!("{reason}\n  could not read: {detail}");
             }
+        }
+        if wins_reason_slot(a, &reason, &worst) {
             worst = Some((a, reason));
         }
     }
@@ -2549,8 +2610,9 @@ fn judge_once(
         if a == Action::Allow {
             remember(&mut grants, construct_grant(lang, &key));
         }
-        if worst.as_ref().map_or(true, |(w, _)| rank(a) > rank(*w)) {
-            worst = Some((a, construct_reason(lang, &key)));
+        let reason = construct_reason(lang, &key);
+        if wins_reason_slot(a, &reason, &worst) {
+            worst = Some((a, reason));
         }
     }
 
@@ -2745,7 +2807,7 @@ fn judge_once(
                 )),
             });
             if let Some((act, reason)) = stop {
-                if worst.as_ref().map_or(true, |(w, _)| rank(act) > rank(*w)) {
+                if wins_reason_slot(act, &reason, &worst) {
                     worst = Some((act, reason));
                 }
                 continue;
@@ -3114,7 +3176,7 @@ fn judge_once(
         }
     }
     if let Some(a) = unmodeled_action {
-        if worst.as_ref().map_or(true, |(w, _)| rank(a) > rank(*w)) {
+        if wins_reason_slot(a, "vouch stopped on: unmodeled_command", &worst) {
             // Names a FRESH entry could recognise, kept apart from names an
             // entry already covers somewhere else: the two get different
             // advice, and giving the second the first's advice writes a
@@ -7294,5 +7356,76 @@ mod tests {
             grants.iter().any(|g| g.contains("lang.cmd.constructs.unreadable_language")),
             "the host language was named instead of the carried one: {grants:?}"
         );
+    }
+
+    #[test]
+    fn wins_reason_slot_prioritizes_higher_rank_then_specificity() {
+        // Deny beats Ask regardless of specificity
+        assert!(wins_reason_slot(
+            Action::Deny,
+            "vouch stopped on: unmodeled_command",
+            &Some((Action::Ask, "vouch stopped on: /protected (protection)".into()))
+        ));
+        assert!(!wins_reason_slot(
+            Action::Ask,
+            "vouch stopped on: /protected (protection)",
+            &Some((Action::Deny, "vouch stopped on: unmodeled_command".into()))
+        ));
+
+        // Protection ask beats guard ask
+        let prot = format!("{PROTECTED_FILE_LINE}\n  /etc/vouch/config.toml");
+        let guard = "vouch stopped on: delete_recursive (guard)\n  what that means: rm -r";
+        assert!(wins_reason_slot(
+            Action::Ask,
+            &prot,
+            &Some((Action::Ask, guard.into()))
+        ));
+        assert!(!wins_reason_slot(
+            Action::Ask,
+            guard,
+            &Some((Action::Ask, prot.clone()))
+        ));
+
+        // Guard ask beats by-reference diagnostic
+        let by_ref = "vouch stopped on: callable_argument\n  by reference: python:os.chdir";
+        assert!(wins_reason_slot(
+            Action::Ask,
+            guard,
+            &Some((Action::Ask, by_ref.into()))
+        ));
+        assert!(!wins_reason_slot(
+            Action::Ask,
+            by_ref,
+            &Some((Action::Ask, guard.into()))
+        ));
+
+        // By-reference diagnostic beats generic write policy ask
+        let write_ask = "vouch stopped on: path outside every allowed area\n  C:/out.txt\n  to allow this permanently, add to write.allow_paths";
+        assert!(wins_reason_slot(
+            Action::Ask,
+            by_ref,
+            &Some((Action::Ask, write_ask.into()))
+        ));
+        assert!(!wins_reason_slot(
+            Action::Ask,
+            write_ask,
+            &Some((Action::Ask, by_ref.into()))
+        ));
+
+        // Policy ask beats construct ask
+        let construct_ask = "vouch stopped on: subshell\n  what that means: ...";
+        assert!(wins_reason_slot(
+            Action::Ask,
+            write_ask,
+            &Some((Action::Ask, construct_ask.into()))
+        ));
+
+        // Equal specificity: held reason stays (first writer wins among equals)
+        let construct_2 = "vouch stopped on: redirect\n  what that means: ...";
+        assert!(!wins_reason_slot(
+            Action::Ask,
+            construct_2,
+            &Some((Action::Ask, construct_ask.into()))
+        ));
     }
 }

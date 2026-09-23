@@ -280,6 +280,11 @@ fn banner(config_gap: Option<&vouch::knowledge::Gap>) -> Option<String> {
     }
 
     for (former, now) in moved_files() {
+        if std::path::Path::new(&former).file_name() == Some(std::ffi::OsStr::new("vouch.toml"))
+            && config_gap.is_some_and(|cg| cg.kind == vouch::knowledge::GapKind::Missing)
+        {
+            continue;
+        }
         if std::path::Path::new(&former).exists() && !std::path::Path::new(&now).exists() {
             lines.push(format!(
                 "a vouch file is at a path vouch no longer reads.\n  \
@@ -457,14 +462,31 @@ fn gap_paragraph(g: &vouch::knowledge::Gap) -> String {
                  not supposed to be reachable.\n  file: {}\n  why: {}",
                 g.source, g.kind, g.path, g.why
             ),
-            (GapSource::Config, GapKind::Missing) => format!(
-                "vouch has no config file, so nothing has been allowed and every command \
-                 asks.\n  \
-                 looked for: {}\n  why: {}\n  \
-                 `vouch.example.toml` is the file to copy — it ships in the release \
-                 bundle beside this binary, and sits at the root of a repository checkout.",
-                g.path, g.why
-            ),
+            (GapSource::Config, GapKind::Missing) => {
+                let h = home();
+                let former_cfg = vouch::knowledge::former_path(&h, "vouch.toml");
+                if former_cfg.exists() {
+                    let former = vouch::knowledge::display_path(&former_cfg);
+                    format!(
+                        "vouch has no config file at its current location, but found an existing \
+                         one at a former path.\n  \
+                         looked for: {}\n  \
+                         found:      {former}\n  \
+                         move {former} to {} to keep your settings. \
+                         Do NOT copy `vouch.example.toml` over it: that would overwrite your configuration.",
+                        g.path, g.path
+                    )
+                } else {
+                    format!(
+                        "vouch has no config file, so nothing has been allowed and every command \
+                         asks.\n  \
+                         looked for: {}\n  why: {}\n  \
+                         `vouch.example.toml` is the file to copy — it ships in the release \
+                         bundle beside this binary, and sits at the root of a repository checkout.",
+                        g.path, g.why
+                    )
+                }
+            }
             // [review] The defect this branch exists for: a config with ONE
             // bad character printed the "no config file" headline above a
             // parse error pointing at line 2 of it, then told the operator to
@@ -635,6 +657,22 @@ fn cmd_trust_tool(name: &str, whole_server: bool) -> ! {
     }
     let existed_before = path.exists();
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    if let Ok(my_kb) = toml::from_str::<vouch::guards::Knowledge>(&existing) {
+        let duplicate = if whole_server {
+            my_kb.tool.iter().any(|t| t.server.as_deref() == Some(name))
+        } else {
+            my_kb.tool.iter().any(|t| t.match_names.iter().any(|m| m == name))
+        };
+        if duplicate {
+            eprintln!(
+                "`{name}` is already modeled in {}.\n  \
+                 appending a duplicate entry would shadow earlier declarations (snippets, payload inspection, write paths).\n  \
+                 to change its configuration, edit the file directly.",
+                vouch::knowledge::display_path(&path)
+            );
+            std::process::exit(1);
+        }
+    }
     let header = if existing.trim().is_empty() { MY_KNOWLEDGE_HEADER } else { "" };
     let stamp = vouch::journal::now_epoch_secs();
     let entry = if whole_server {
@@ -1083,6 +1121,42 @@ fn main() {
         }
         let existed_before = path.exists();
         let existing = std::fs::read_to_string(&path).unwrap_or_default();
+        if let Ok(my_kb) = toml::from_str::<vouch::guards::Knowledge>(&existing) {
+            let duplicate = my_kb
+                .program
+                .iter()
+                .any(|p| p.match_names.iter().any(|m| m.eq_ignore_ascii_case(&program)));
+            if duplicate {
+                eprintln!(
+                    "`{program}` is already modeled in {}.\n  \
+                     appending a duplicate entry would shadow earlier declarations.\n  \
+                     to change its configuration, edit the file directly.",
+                    vouch::knowledge::display_path(&path)
+                );
+                std::process::exit(1);
+            }
+        }
+        if subs.is_empty() && flags_typed.is_empty() {
+            let loaded = vouch::knowledge::load_files(
+                &vouch::knowledge::knowledge_path(&home()),
+                &path,
+            );
+            let is_dir_changer = vouch::guards::dir_change_entry(&loaded.kb, &program, "bash").is_some()
+                || vouch::guards::dir_change_entry(&loaded.kb, &program, "powershell").is_some()
+                || matches!(
+                    program.to_ascii_lowercase().as_str(),
+                    "cd" | "chdir" | "pushd" | "popd" | "set-location" | "push-location" | "pop-location" | "sl"
+                );
+            if is_dir_changer {
+                eprintln!(
+                    "`{program}` is a directory-changing program.\n  \
+                     `vouch trust` only creates entries asserting the program does not change the working directory.\n  \
+                     to describe a directory-changing program, declare `changes_dir = \"stated\"` (or \"stack\" / \"unstated\") in {} directly.",
+                    vouch::knowledge::display_path(&path)
+                );
+                std::process::exit(1);
+            }
+        }
         let header = if existing.trim().is_empty() { MY_KNOWLEDGE_HEADER } else { "" };
         match std::fs::write(&path, format!("{existing}{header}{entry}")) {
             Ok(()) => {

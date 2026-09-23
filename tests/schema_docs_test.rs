@@ -4,7 +4,7 @@
 //! knowledge loaders actually read (`vouch::cli::generate_schema_docs`), and
 //! two more tests hold the release-flow invariants to the same standard.
 //!
-//! Seven independent gates:
+//! Eight independent gates:
 //!   1. the committed files must match what the structs generate RIGHT NOW —
 //!      otherwise the reference page is describing a shape the loader no
 //!      longer accepts, or has stopped accepting a shape it still does.
@@ -26,6 +26,9 @@
 //!      neither omissions nor dead settings.
 //!   7. current operational documentation present in either repository does
 //!      not claim a registered scanner is absent.
+//!   8. all shipped and development skills must have valid frontmatter, reference
+//!      only valid CLAUDE.md sections, and carry no anti-patterns contradicting
+//!      repository invariants (M2.234).
 
 /// `core.autocrlf` on a Windows checkout rewrites a committed LF file to
 /// CRLF on disk; the generator always emits LF. Normalizing before compare
@@ -605,4 +608,224 @@ fn a_tracked_changelog_carries_no_forge_remnant() {
             rest = &inner[(close + 1).min(inner.len())..];
         }
     }
+}
+
+/// Discovers all skill files across the repository.
+/// In the development repository, both plugin/skills and .claude/skills are checked;
+/// in the public mirror, only plugin/skills is present. Canonicalization ensures symlinked
+/// directories (like .agents/skills -> .claude/skills) are not scanned twice.
+fn skill_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    let mut dirs_to_scan = vec![root.join("plugin/skills")];
+    if root.join("release-please-config.json").is_file() {
+        dirs_to_scan.push(root.join(".claude/skills"));
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    for base in dirs_to_scan {
+        if !base.is_dir() {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&base) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path().join("SKILL.md");
+            if path.is_file() {
+                if let Ok(canon) = path.canonicalize() {
+                    if seen.insert(canon) {
+                        files.push(path);
+                    }
+                }
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+fn check_skill_frontmatter(content: &str) -> Result<(String, String), String> {
+    let normalized = normalize(content);
+    let mut lines = normalized.lines();
+    if lines.next() != Some("---") {
+        return Err("missing opening '---'".to_string());
+    }
+    let mut name = None;
+    let mut desc = None;
+    let mut closed = false;
+    for line in lines {
+        if line == "---" {
+            closed = true;
+            break;
+        }
+        if let Some(rest) = line.strip_prefix("name:") {
+            let val = rest.trim();
+            if !val.is_empty() {
+                name = Some(val.to_string());
+            }
+        } else if let Some(rest) = line.strip_prefix("description:") {
+            let val = rest.trim();
+            if !val.is_empty() {
+                desc = Some(val.to_string());
+            }
+        }
+    }
+    if !closed {
+        return Err("missing closing '---'".to_string());
+    }
+    let name = name.ok_or_else(|| "missing or empty 'name' field in frontmatter".to_string())?;
+    let desc = desc.ok_or_else(|| "missing or empty 'description' field in frontmatter".to_string())?;
+    Ok((name, desc))
+}
+
+fn check_skill_anti_patterns(content: &str) -> Vec<String> {
+    let mut findings = Vec::new();
+    for (i, line) in content.lines().enumerate() {
+        let line_num = i + 1;
+        let trimmed = line.trim();
+
+        // 1. Fictitious schema table definitions as actual TOML block headers
+        if trimmed == "[[server]]" {
+            findings.push(format!("line {line_num}: contains fictitious '[[server]]' schema table"));
+        }
+
+        // 2. Instructing agents to leave destructive commands undescribed or unmodeled
+        if line.contains("leave destructive commands undescribed")
+            || line.contains("leave destructive commands unmodeled")
+            || line.contains("destructive operations get no entry")
+            || line.contains("tell the operator vouch asks about it on purpose and stop")
+        {
+            findings.push(format!("line {line_num}: instructs leaving destructive operations undescribed (M2.234)"));
+        }
+
+        // 3. Obsolete / defunct skill references
+        if line.contains("vouch-reconcile") {
+            findings.push(format!("line {line_num}: references defunct skill 'vouch-reconcile'"));
+        }
+
+        // 4. Instructions to bypass sandboxes
+        if line.contains("BypassSandbox: true") {
+            findings.push(format!("line {line_num}: instructs bypassing the sandbox"));
+        }
+    }
+    findings
+}
+
+fn extract_claude_sections(claude_content: &str) -> std::collections::HashSet<String> {
+    let mut sections = std::collections::HashSet::new();
+    for line in claude_content.lines() {
+        if let Some(rest) = line.strip_prefix("## ") {
+            let heading = rest.trim();
+            if let Some((num, _)) = heading.split_once(' ') {
+                let clean_num = num.trim_end_matches('.');
+                sections.insert(clean_num.to_string());
+            }
+        }
+    }
+    sections
+}
+
+fn check_skill_claude_anchors(content: &str, valid_sections: &std::collections::HashSet<String>) -> Vec<String> {
+    let mut findings = Vec::new();
+    for (i, line) in content.lines().enumerate() {
+        let line_num = i + 1;
+        let mut rest = line;
+        while let Some(pos) = rest.find("CLAUDE.md") {
+            let after = &rest[pos + "CLAUDE.md".len()..];
+            let trimmed = after.trim_start();
+            if let Some(section_ref) = trimmed.strip_prefix('§') {
+                let sec = section_ref
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit() || *c == '.')
+                    .collect::<String>();
+                if !sec.is_empty() && !valid_sections.contains(&sec) {
+                    findings.push(format!("line {line_num}: references non-existent CLAUDE.md section §{sec}"));
+                }
+            }
+            rest = after;
+        }
+    }
+    findings
+}
+
+/// Gate 8: Shipped and development skills satisfy durable repository invariants (M2.234).
+#[test]
+fn shipped_and_development_skills_satisfy_invariants() {
+    let root = manifest_dir();
+    let skills = skill_files(&root);
+    assert!(!skills.is_empty(), "found no skill files to verify");
+
+    let claude_sections = if let Ok(claude_content) = std::fs::read_to_string(root.join("CLAUDE.md")) {
+        Some(extract_claude_sections(&claude_content))
+    } else {
+        None
+    };
+
+    let mut total_findings = Vec::new();
+    for skill_path in &skills {
+        let rel_path = skill_path.strip_prefix(&root).unwrap_or(skill_path).display().to_string();
+        let content = std::fs::read_to_string(skill_path)
+            .unwrap_or_else(|e| panic!("failed to read skill at {rel_path}: {e}"));
+
+        // 1. Frontmatter
+        if let Err(err) = check_skill_frontmatter(&content) {
+            total_findings.push(format!("{rel_path}: invalid frontmatter: {err}"));
+        }
+
+        // 2. Anti-patterns
+        for finding in check_skill_anti_patterns(&content) {
+            total_findings.push(format!("{rel_path}: {finding}"));
+        }
+
+        // 3. Section anchors
+        if let Some(sections) = &claude_sections {
+            for finding in check_skill_claude_anchors(&content, sections) {
+                total_findings.push(format!("{rel_path}: {finding}"));
+            }
+        }
+    }
+
+    assert!(
+        total_findings.is_empty(),
+        "skill invariant verification found issues:\n{}",
+        total_findings.join("\n")
+    );
+}
+
+#[test]
+fn skill_invariant_linter_catches_intentional_violations() {
+    // 1. Frontmatter tests
+    assert!(check_skill_frontmatter("no frontmatter here").is_err());
+    assert!(check_skill_frontmatter("---\nname: foo\n---\n").is_err()); // missing description
+    assert!(check_skill_frontmatter("---\ndescription: bar\n---\n").is_err()); // missing name
+    assert!(check_skill_frontmatter("---\nname:\ndescription: bar\n---\n").is_err()); // empty name
+    let (name, desc) = check_skill_frontmatter("---\nname: my-skill\ndescription: does stuff\n---\n")
+        .expect("valid frontmatter parses");
+    assert_eq!(name, "my-skill");
+    assert_eq!(desc, "does stuff");
+
+    // 2. Anti-pattern tests
+    let fictitious_table = "some text\n[[server]]\nname = \"s\"";
+    assert_eq!(check_skill_anti_patterns(fictitious_table).len(), 1);
+
+    let benign_mention = "never invent fictitious tables (e.g. [[server]] does not exist)";
+    assert!(check_skill_anti_patterns(benign_mention).is_empty());
+
+    let bad_advice = "rule 3: leave destructive commands undescribed";
+    assert_eq!(check_skill_anti_patterns(bad_advice).len(), 1);
+
+    let defunct_skill = "use the vouch-reconcile tool to fix it";
+    assert_eq!(check_skill_anti_patterns(defunct_skill).len(), 1);
+
+    let sandbox_bypass = "set BypassSandbox: true";
+    assert_eq!(check_skill_anti_patterns(sandbox_bypass).len(), 1);
+
+    // 3. Anchor cross-reference tests
+    let mut sections = std::collections::HashSet::new();
+    sections.insert("1".to_string());
+    sections.insert("0.0".to_string());
+    assert!(check_skill_claude_anchors("refer to CLAUDE.md §1 for details", &sections).is_empty());
+    assert!(check_skill_claude_anchors("refer to CLAUDE.md §0.0 glossary", &sections).is_empty());
+    let bad_anchor = check_skill_claude_anchors("refer to CLAUDE.md §99.9 for details", &sections);
+    assert_eq!(bad_anchor.len(), 1);
 }

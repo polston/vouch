@@ -519,6 +519,19 @@ mod m2_89 {
         );
     }
 
+    /// M2.211: When a command has both a write ask and a by-reference callable ask,
+    /// the engine's reason tie-break preserves the more specific by-reference diagnostic reason
+    /// rather than letting an ordinary write-ask mask it.
+    #[test]
+    fn a_referenced_mover_with_competing_write_preserves_by_reference_reason() {
+        let (a, reason) = common_decide(
+            r#"python -c "import os; map(os.chdir, dirs); open('out.txt', 'w')""#,
+        );
+        assert_eq!(a, Action::Ask);
+        assert!(reason.contains("callable_argument"), "reason was: {reason}");
+        assert!(reason.contains("by reference: python:os.chdir"), "reason was: {reason}");
+    }
+
     /// Task 4 review C2/C3, isolated from the tie-break masking above: the
     /// broadened `unevaluable` check's `changes_dir` arm, with no competing
     /// write ask in the command to mask it. `open`'s own call is mode-less

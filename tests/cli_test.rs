@@ -2344,3 +2344,143 @@ fn ambient_cdpath_unresolves_relative_destination_but_allows_dot_and_absolute() 
     );
 }
 
+#[test]
+fn trust_refuses_duplicate_tool_entry() {
+    let file = std::env::temp_dir().join("vouch_cli_test_trust_dup_tool.toml");
+    let _ = std::fs::remove_file(&file);
+    let home = std::env::temp_dir().join("vouch_cli_test_home_dup_tool");
+    let _ = std::fs::create_dir_all(&home);
+
+    // First trust succeeds.
+    let out1 = Command::new(bin())
+        .arg("trust")
+        .arg("mcp__server__first_tool")
+        .env("VOUCH_MY_KNOWLEDGE", &file)
+        .env("VOUCH_STATE_DIR", std::env::temp_dir().join("vouch_cli_test_scratch"))
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+        .unwrap();
+    assert!(out1.status.success(), "first trust must succeed: {}", String::from_utf8_lossy(&out1.stderr));
+
+    // Second trust of the same tool refuses and does not duplicate.
+    let out2 = Command::new(bin())
+        .arg("trust")
+        .arg("mcp__server__first_tool")
+        .env("VOUCH_MY_KNOWLEDGE", &file)
+        .env("VOUCH_STATE_DIR", std::env::temp_dir().join("vouch_cli_test_scratch"))
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+        .unwrap();
+    assert!(!out2.status.success(), "second trust of duplicate tool must fail");
+    let err2 = String::from_utf8_lossy(&out2.stderr);
+    assert!(
+        err2.contains("is already modeled in"),
+        "error must cite duplicate modeling: {err2}"
+    );
+    let _ = std::fs::remove_file(&file);
+}
+
+#[test]
+fn trust_refuses_duplicate_program_entry() {
+    let file = std::env::temp_dir().join("vouch_cli_test_trust_dup_prog.toml");
+    let _ = std::fs::remove_file(&file);
+    let home = std::env::temp_dir().join("vouch_cli_test_home_dup_prog");
+    let _ = std::fs::create_dir_all(&home);
+
+    // First trust succeeds.
+    let out1 = Command::new(bin())
+        .arg("trust")
+        .arg("customprogdup")
+        .env("VOUCH_MY_KNOWLEDGE", &file)
+        .env("VOUCH_STATE_DIR", std::env::temp_dir().join("vouch_cli_test_scratch"))
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+        .unwrap();
+    assert!(out1.status.success(), "first trust must succeed: {}", String::from_utf8_lossy(&out1.stderr));
+
+    // Second trust of the same program refuses.
+    let out2 = Command::new(bin())
+        .arg("trust")
+        .arg("customprogdup")
+        .env("VOUCH_MY_KNOWLEDGE", &file)
+        .env("VOUCH_STATE_DIR", std::env::temp_dir().join("vouch_cli_test_scratch"))
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+        .unwrap();
+    assert!(!out2.status.success(), "second trust of duplicate program must fail");
+    let err2 = String::from_utf8_lossy(&out2.stderr);
+    assert!(
+        err2.contains("is already modeled in"),
+        "error must cite duplicate modeling: {err2}"
+    );
+    let _ = std::fs::remove_file(&file);
+}
+
+#[test]
+fn trust_refuses_known_directory_changing_program() {
+    let file = std::env::temp_dir().join("vouch_cli_test_trust_dir_changer.toml");
+    let _ = std::fs::remove_file(&file);
+    let home = std::env::temp_dir().join("vouch_cli_test_home_dir_changer");
+    let _ = std::fs::create_dir_all(&home);
+
+    let out = Command::new(bin())
+        .arg("trust")
+        .arg("cd")
+        .env("VOUCH_MY_KNOWLEDGE", &file)
+        .env("VOUCH_STATE_DIR", std::env::temp_dir().join("vouch_cli_test_scratch"))
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "trusting cd must fail");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("is a directory-changing program"),
+        "error must state that program changes directory: {err}"
+    );
+    assert!(
+        !file.exists(),
+        "refused trust must write no file"
+    );
+}
+
+#[test]
+fn missing_config_with_legacy_vouch_toml_prioritizes_move_and_forbids_copy_example() {
+    let home = std::env::temp_dir().join("vouch_cli_test_home_legacy_migration");
+    let config_dir = home.join(".config");
+    let _ = std::fs::create_dir_all(&config_dir);
+    let legacy_config = config_dir.join("vouch.toml");
+    std::fs::write(&legacy_config, "version = 1\n").unwrap();
+
+    let out = Command::new(bin())
+        .arg("explain")
+        .arg("ls -la")
+        .env_remove("VOUCH_CONFIG")
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("VOUCH_STATE_DIR", std::env::temp_dir().join("vouch_cli_test_scratch"))
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("move") && stdout.contains("to keep your settings"),
+        "banner must prioritize moving legacy config: {stdout}"
+    );
+    assert!(
+        stdout.contains("Do NOT copy `vouch.example.toml` over it"),
+        "banner must explicitly warn against copying example config: {stdout}"
+    );
+    assert!(
+        !stdout.contains("`vouch.example.toml` is the file to copy"),
+        "banner must not advise copying example config when legacy config exists: {stdout}"
+    );
+
+    let _ = std::fs::remove_file(&legacy_config);
+    let _ = std::fs::remove_dir_all(&home);
+}
+

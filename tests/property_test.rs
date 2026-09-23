@@ -19,6 +19,20 @@ fn the_synthetic_corpus_is_committed_and_loads() {
     );
 }
 
+#[test]
+fn the_synthetic_powershell_corpus_is_committed_and_loads() {
+    let rows = common::synthetic_powershell();
+    assert!(
+        rows.len() >= 30,
+        "synthetic powershell corpus should cover a spread of shapes, got {}",
+        rows.len()
+    );
+    assert!(
+        rows.iter().all(|r| !r.cmd.is_empty()),
+        "no row may have an empty command"
+    );
+}
+
 use common::realistic_config;
 use vouch::engine::{decide_command_at, decide_command_in};
 use vouch::protocol::Decision;
@@ -67,6 +81,14 @@ fn names_a_lang_construct_setting(reason: &str) -> bool {
     })
 }
 
+fn names_a_lang_default_setting(reason: &str) -> bool {
+    reason.split("set lang.").skip(1).any(|rest| {
+        rest.split_once(".default = ").is_some_and(|(lang, after)| {
+            !lang.is_empty() && (after.starts_with("\"allow\"") || after.starts_with("'allow'"))
+        })
+    })
+}
+
 /// CLAUDE.md §5, as one predicate: does this reason name something the
 /// operator can change to stop seeing it?
 ///
@@ -89,6 +111,7 @@ fn names_a_lang_construct_setting(reason: &str) -> bool {
 fn names_a_setting(reason: &str) -> bool {
     reason.contains("setting: ")
         || names_a_lang_construct_setting(reason)
+        || names_a_lang_default_setting(reason)
         || reason.contains("write.allow_paths")
         || reason.contains("no setting that allows this")
         || reason.contains("run.trust_all_under")
@@ -177,6 +200,57 @@ fn the_synthetic_corpus_actually_exercises_prompting() {
     assert!(asks >= 8, "synthetic corpus produced only {asks} prompts - too few to prove anything");
     assert!(guards >= 3, "synthetic corpus produced only {guards} guard hits");
     assert!(write_policy >= 1, "synthetic corpus never hit write.allow_paths");
+}
+
+#[test]
+fn every_powershell_prompt_names_a_setting_that_turns_it_off() {
+    let cfg = realistic_config();
+    for (name, rows) in common::all_powershell() {
+        let mut unfixable: Vec<(String, String)> = Vec::new();
+        for row in &rows {
+            let reason = match decide_command_in(&cfg, "powershell", &row.cmd, Some("C:/Users/dev"), None) {
+                Decision::Ask(r) | Decision::Deny(r) => r,
+                _ => continue,
+            };
+            if !names_a_setting(&reason) {
+                unfixable.push((
+                    row.cmd.chars().take(90).collect(),
+                    reason.lines().next().unwrap_or("").to_string(),
+                ));
+            }
+        }
+        for (cmd, why) in unfixable.iter().take(10) {
+            eprintln!("  UNFIXABLE [{name}]: {why}\n      {cmd}");
+        }
+        assert!(
+            unfixable.is_empty(),
+            "{name}: {} prompts name nothing that would turn them off",
+            unfixable.len()
+        );
+    }
+}
+
+#[test]
+fn the_synthetic_powershell_corpus_actually_exercises_prompting() {
+    let cfg = realistic_config();
+    let (mut asks, mut guards, mut write_policy) = (0, 0, 0);
+    for row in common::synthetic_powershell() {
+        if let Decision::Ask(r) | Decision::Deny(r) =
+            decide_command_in(&cfg, "powershell", &row.cmd, Some("C:/Users/dev"), None)
+        {
+            asks += 1;
+            if r.contains("(guard)") {
+                guards += 1;
+            }
+            if r.contains("write.allow_paths") {
+                write_policy += 1;
+            }
+        }
+    }
+    eprintln!("synthetic powershell: {asks} prompts, {guards} guard hits, {write_policy} write-policy hits");
+    assert!(asks >= 8, "synthetic powershell corpus produced only {asks} prompts - too few to prove anything");
+    assert!(guards >= 3, "synthetic powershell corpus produced only {guards} guard hits");
+    assert!(write_policy >= 1, "synthetic powershell corpus never hit write.allow_paths");
 }
 
 /// The basename normalisation `guards::base` applies internally, duplicated
