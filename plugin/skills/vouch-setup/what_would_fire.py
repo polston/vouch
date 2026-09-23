@@ -1103,11 +1103,12 @@ def sentinel(args, scratch):
     ask and deny, so every number after it would be wrong). Abort loudly,
     report nothing. The BULK replay uses the ORIGINAL candidate files.
     """
-    marker = os.path.join(scratch, "sentinel-" + uuid.uuid4().hex).replace(os.sep, "/")
+    run_id = uuid.uuid4().hex
+    marker = os.path.join(scratch, "sentinel-" + run_id).replace(os.sep, "/")
     payload = {
         "hook_event_name": "PreToolUse",
-        "session_id": "wwf-sentinel",
-        "tool_use_id": "wwf-sentinel",
+        "session_id": "wwf-sentinel-" + run_id,
+        "tool_use_id": "wwf-sentinel-" + run_id,
         "cwd": scratch.replace(os.sep, "/"),
         "permission_mode": STAMPED_MODE,
         "tool_name": "Write",
@@ -1115,10 +1116,10 @@ def sentinel(args, scratch):
     }
 
     # Control: the unmodified candidate config must NOT already deny here.
-    ctl_dir = os.path.join(scratch, "state", "sentinel-control")
+    ctl_dir = os.path.join(scratch, "state", "sentinel-control-" + run_id)
     os.makedirs(ctl_dir, exist_ok=True)
     run_call(args.binary, payload, candidate_env(args, args.config, ctl_dir))
-    ctl = [r for r in read_journal(ctl_dir) if r.get("session") == "wwf-sentinel"]
+    ctl = [r for r in read_journal(ctl_dir) if r.get("session") == payload["session_id"]]
     if ctl and ctl[0].get("verdict") == "deny":
         sys.exit(
             "sentinel control failed: the candidate config already denies writes under "
@@ -1127,7 +1128,8 @@ def sentinel(args, scratch):
         )
 
     try:
-        cfg = tomllib.load(open(args.config, "rb"))
+        with open(args.config, "rb") as fh:
+            cfg = tomllib.load(fh)
     except Exception as e:
         sys.exit("sentinel failed: the candidate config did not parse (%s)" % e)
 
@@ -1162,14 +1164,14 @@ def sentinel(args, scratch):
             "sentinel failed: the candidate config carries a value shape this "
             "writer does not handle (%s). Nothing was measured." % e
         )
-    sent_cfg = os.path.join(scratch, "sentinel-config.toml")
+    sent_cfg = os.path.join(scratch, "sentinel-config-" + run_id + ".toml")
     with open(sent_cfg, "w", encoding="utf-8") as fh:
         fh.write(body)
 
-    sd = os.path.join(scratch, "state", "sentinel")
+    sd = os.path.join(scratch, "state", "sentinel-" + run_id)
     os.makedirs(sd, exist_ok=True)
     rc, _out, err = run_call(args.binary, payload, candidate_env(args, sent_cfg, sd))
-    rows = [r for r in read_journal(sd) if r.get("session") == "wwf-sentinel"]
+    rows = [r for r in read_journal(sd) if r.get("session") == payload["session_id"]]
     if not rows:
         sys.exit(
             "sentinel failed: the call wrote NO journal row (binary exit %r). Either "
@@ -1180,13 +1182,15 @@ def sentinel(args, scratch):
     if row.get("verdict") != "deny":
         sys.exit(
             "sentinel failed: expected deny under the marker directory, got %r. "
-            "Two causes reach this line and they are not the same: the "
+            "Three causes reach this line and they are not the same: the "
             "VOUCH_CONFIG override did not take (a cargo-invoked run replaces the "
-            "candidate files with the repository's own), or the candidate config "
-            "was REFUSED at load, in which case nothing is allowed and every call "
-            "asks. Run `vouch explain 'ls -la'` with the same three environment "
-            "variables and read the banner to tell them apart. Nothing was "
-            "measured." % row.get("verdict")
+            "candidate files with the repository's own), the candidate config "
+            "was REFUSED at load (in which case nothing is allowed and every call "
+            "asks), or the candidate knowledge file describes nothing for the "
+            "tool the sentinel uses to write its marker (Write), which changes the "
+            "verdict the same way. Run `vouch explain 'ls -la'` with the same "
+            "three environment variables and read the banner to tell them apart. "
+            "Nothing was measured." % row.get("verdict")
         )
     if row.get("mode") != "live":
         sys.exit(
@@ -1284,8 +1288,8 @@ def replay(rows, args, scratch, fallback_cwd):
     est_s = (len(rest) * ms / 1000.0 / workers) if rest else 0.0
     est = "~%.1f min" % (est_s / 60.0) if est_s >= 60 else "~%d s" % round(est_s)
     print(
-        "%d rows at %.1f ms/call across %d workers: expect %s"
-        % (len(indexed), ms, workers, est),
+        "%d total rows (%d remaining) at %.1f ms/call across %d workers: expect %s"
+        % (len(indexed), len(rest), ms, workers, est),
         flush=True,
     )
 
@@ -1500,32 +1504,37 @@ def report(joined, refused, failed, counters, stats, scratch, capped, kept, sour
             "  calls whose rows disagreed       %8d" % stats["split_decision_calls"]
         )
 
-    assert stats["rows_replayed"] == (
+    if stats["rows_replayed"] != (
         stats["rows_joined"] + stats["rows_refused"] + stats["rows_failed"]
-    ), (
-        "replayed (%d) != joined (%d) + refused (%d) + failed (%d)"
-        % (
-            stats["rows_replayed"],
-            stats["rows_joined"],
-            stats["rows_refused"],
-            stats["rows_failed"],
+    ):
+        sys.exit(
+            "reconciliation failed: replayed (%d) != joined (%d) + refused (%d) + failed (%d)"
+            % (
+                stats["rows_replayed"],
+                stats["rows_joined"],
+                stats["rows_refused"],
+                stats["rows_failed"],
+            )
         )
-    )
-    assert stats["unexpected_sessions"] == 0, (
-        "%d journal rows carry a session this run did not stamp - the state dir "
-        "was not clean" % stats["unexpected_sessions"]
-    )
+    if stats["unexpected_sessions"] != 0:
+        sys.exit(
+            "reconciliation failed: %d journal rows carry a session this run did not stamp - the state dir "
+            "was not clean" % stats["unexpected_sessions"]
+        )
 
     classes = []
     asks = []
+    stood_down_denies = []
     heads = []
     for row, jrows in joined:
         cls, jr = classify(jrows)
         shape = call_shape(row)
         classes.append((cls, shape))
         heads.append((head_name(row), shape))
-        if cls in ("ask", "stood-down"):
+        if cls == "ask" or (cls == "stood-down" and jr.get("verdict") == "ask"):
             asks.append((_first_line_class(jr.get("reason")), shape))
+        elif cls == "stood-down" and jr.get("verdict") == "deny":
+            stood_down_denies.append((_first_line_class(jr.get("reason")), shape))
     for row in refused:
         shape = call_shape(row)
         classes.append(("input-refused", shape))
@@ -1550,6 +1559,13 @@ def report(joined, refused, failed, counters, stats, scratch, capped, kept, sour
         "asks and stood-down asks; a stood-down row is a suppressed emission, "
         "not a human decision",
     )
+    if stood_down_denies:
+        _two_figure_table(
+            "stood-down deny reasons by first-line class",
+            _tally(stood_down_denies),
+            "stood-down denies; a stood-down row is a suppressed emission, "
+            "not a human decision",
+        )
     _two_figure_table(
         "head-program names",
         _tally(heads)[:40],
@@ -1707,17 +1723,36 @@ def main(argv):
     try:
         return _run(args, scratch)
     finally:
-        if args.keep_state and os.path.isdir(os.path.join(state_root, "merged")):
-            # Kept deliberately for `vouch doctor`; the per-worker copies are
-            # redundant once merged, so only the merged one survives.
-            for name in os.listdir(state_root):
-                if name != "merged":
-                    shutil.rmtree(os.path.join(state_root, name), ignore_errors=True)
+        if args.keep_state:
+            merged_dir = os.path.join(state_root, "merged")
+            if os.path.isdir(merged_dir):
+                # Kept deliberately for `vouch doctor`; the per-worker copies are
+                # redundant once merged, so only the merged one survives.
+                for name in os.listdir(state_root):
+                    if name != "merged":
+                        shutil.rmtree(os.path.join(state_root, name), ignore_errors=True)
+                sys.stderr.write("kept state dir: %s\n" % os.path.abspath(merged_dir))
+            elif os.path.isdir(state_root) and os.listdir(state_root):
+                try:
+                    merge_journals(scratch)
+                    if os.path.isdir(merged_dir):
+                        for name in os.listdir(state_root):
+                            if name != "merged":
+                                shutil.rmtree(os.path.join(state_root, name), ignore_errors=True)
+                        sys.stderr.write("kept state dir: %s\n" % os.path.abspath(merged_dir))
+                    else:
+                        sys.stderr.write("kept state dir: %s\n" % os.path.abspath(state_root))
+                except Exception:
+                    sys.stderr.write("kept state dir: %s\n" % os.path.abspath(state_root))
         else:
             shutil.rmtree(state_root, ignore_errors=True)
-        sent = os.path.join(scratch, "sentinel-config.toml")
-        if os.path.exists(sent):
-            os.remove(sent)
+        if os.path.isdir(scratch):
+            for name in os.listdir(scratch):
+                if name.startswith("sentinel-config") and name.endswith(".toml"):
+                    try:
+                        os.remove(os.path.join(scratch, name))
+                    except OSError:
+                        pass
 
 
 def _run(args, scratch):

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.46.0 (2026-09-23)
+
+
+### Features
+
+* reconcile skill installation destination files, prune bytecode cache directories, and report file-level progress
+* record verified minimum supported Rust version 1.96 in package manifest
+
+
+### Bug Fixes
+
+* clarify host plugin tooling version warning contract and align documentation with present-tense rules
+* harden setup replay verification assertions, isolate run paths, and partition stood-down denials
+* optimize advisory predictor module lookups, unify false-positive ledger lists, and eliminate redundant tree hashing
+
 ## 0.45.0 (2026-09-23)
 
 
