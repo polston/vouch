@@ -2549,6 +2549,69 @@ fn the_veto_is_per_command_not_per_line() {
     );
 }
 
+#[test]
+fn veto_honours_declarative_unless_position() {
+    // 1. unless_position = "arg_1": veto applies only at arg_1
+    let kb_arg1 = vouch::guards::load(
+        r#"
+[[program]]
+match = ["tester1"]
+[[program.rule]]
+guard = "process_control"
+source = "test"
+always = true
+unless_position = "arg_1"
+unless_flags = ["-v"]
+"#,
+    )
+    .unwrap();
+
+    let p1 = parse("tester1 a -v b").unwrap();
+    assert!(check_all(&kb_arg1, &p1.commands).is_empty(), "arg_1 with -v should veto guard");
+
+    let p2 = parse("tester1 -v a b").unwrap();
+    assert_eq!(
+        check_all(&kb_arg1, &p2.commands).len(),
+        1,
+        "arg_0 with -v should NOT veto when unless_position is arg_1"
+    );
+
+    // 2. unless_position = "any": veto applies at any argument position
+    let kb_any = vouch::guards::load(
+        r#"
+[[program]]
+match = ["tester2"]
+[[program.rule]]
+guard = "process_control"
+source = "test"
+always = true
+unless_position = "any"
+unless_flags = ["-v"]
+"#,
+    )
+    .unwrap();
+
+    let p3 = parse("tester2 a b c -v").unwrap();
+    assert!(check_all(&kb_any, &p3.commands).is_empty(), "any position with -v should veto guard");
+
+    let p4 = parse("tester2 a b c").unwrap();
+    assert_eq!(check_all(&kb_any, &p4.commands).len(), 1, "missing -v should not veto guard");
+
+    // 3. Validation rejects invalid unless_position
+    let bad_toml = r#"
+[[program]]
+match = ["tester3"]
+[[program.rule]]
+guard = "process_control"
+source = "test"
+always = true
+unless_position = "first"
+unless_flags = ["-v"]
+"#;
+    let err = vouch::knowledge::validate_text(bad_toml).unwrap_err();
+    assert!(err.contains("rule unless_position must be 'any' or 'arg_<N>'"), "expected validation error: {err}");
+}
+
 // ---------------------------------------------------------------------------
 // The builtins that stopped being holes in the hand-written list (M2.16)
 // ---------------------------------------------------------------------------

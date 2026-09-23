@@ -465,6 +465,28 @@ pub(crate) fn validate(kb: &Knowledge) -> Result<(), String> {
                 ));
             }
         }
+        for r in &prog.rule {
+            if let Some(pos) = &r.unless_position {
+                let valid = pos == "any"
+                    || (pos.starts_with("arg_")
+                        && pos["arg_".len()..].chars().all(|c| c.is_ascii_digit())
+                        && !pos["arg_".len()..].is_empty());
+                if !valid {
+                    return Err(format!(
+                        "[[program]] {:?}: rule unless_position must be 'any' or 'arg_<N>', got {:?}",
+                        prog.match_names, pos
+                    ));
+                }
+            }
+        }
+        for m in &prog.invokes_methods {
+            if m.trim().is_empty() {
+                return Err(format!(
+                    "[[program]] {:?}: invokes_methods contains an empty parameter name",
+                    prog.match_names
+                ));
+            }
+        }
         let mut seen_sub_opts: HashSet<(String, Option<String>)> = HashSet::new();
         for so in &prog.subcommand_options {
             if so.subcommands.is_empty() {
@@ -940,6 +962,14 @@ pub(crate) fn validate(kb: &Knowledge) -> Result<(), String> {
             if !is_parameter_name(name) {
                 return Err(format!(
                     "[[program]] {:?}: callback_args entry {name:?} is not a valid identifier",
+                    prog.match_names
+                ));
+            }
+        }
+        for name in &prog.invokes_methods {
+            if !is_parameter_name(name) {
+                return Err(format!(
+                    "[[program]] {:?}: invokes_methods entry {name:?} is not a valid identifier",
                     prog.match_names
                 ));
             }
@@ -1803,6 +1833,9 @@ fn overlay(base: &mut Program, mine: &Program) {
     }
     if !mine.callback_args.is_empty() {
         base.callback_args = mine.callback_args.clone();
+    }
+    if !mine.invokes_methods.is_empty() {
+        base.invokes_methods = mine.invokes_methods.clone();
     }
     if mine.produces.is_some() {
         base.produces = mine.produces.clone();

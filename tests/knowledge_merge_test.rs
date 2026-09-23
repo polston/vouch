@@ -830,6 +830,7 @@ fn overlay_is_exhaustive_over_every_program_field() {
             sub_arg_0_in: vec![],
             any_flag: vec!["-r".to_string()],
             unless_flags: vec![],
+            unless_position: Some("arg_0".to_string()),
             any_arg_exact: vec![],
             any_arg_prefix: vec![],
             grants_execute: false,
@@ -869,6 +870,7 @@ fn overlay_is_exhaustive_over_every_program_field() {
         // `callback_args` follows the same non-empty-replaces pattern as
         // `arg_names` (task 2b, M2.86 fix round).
         callback_args: vec!["cb".to_string()],
+        invokes_methods: vec!["tz".to_string()],
         // Origin claims follow the Option pattern: absence preserves and an
         // explicit empty list retracts (M2.87, knowledge schema v10).
         produces: Some(vec!["data".to_string()]),
@@ -1027,6 +1029,7 @@ fn overlay_is_exhaustive_over_every_program_field() {
     assert_eq!(p.here_write[0].when_flags, vec!["-x".to_string()]);
     assert_eq!(p.rule.len(), 1, "rule did not arrive: {:?}", p.rule);
     assert_eq!(p.rule[0].guard, "delete_recursive");
+    assert_eq!(p.rule[0].unless_position, Some("arg_0".to_string()));
     assert_eq!(
         p.sub_write.len(),
         1,
@@ -1086,6 +1089,11 @@ fn overlay_is_exhaustive_over_every_program_field() {
         p.callback_args,
         vec!["cb".to_string()],
         "callback_args did not arrive"
+    );
+    assert_eq!(
+        p.invokes_methods,
+        vec!["tz".to_string()],
+        "invokes_methods did not arrive"
     );
     assert_eq!(
         p.produces,
@@ -1201,6 +1209,10 @@ fn overlay_is_exhaustive_over_every_program_field() {
     assert!(
         leftover.callback_args.is_empty(),
         "mine's callback_args leaked into the scope mine never addressed"
+    );
+    assert!(
+        leftover.invokes_methods.is_empty(),
+        "mine's invokes_methods leaked into the scope mine never addressed"
     );
     assert!(
         leftover.produces.is_none(),

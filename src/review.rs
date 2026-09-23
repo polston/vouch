@@ -106,7 +106,7 @@ pub fn candidates(records: &[Record]) -> Vec<Candidate> {
         // Only rows where vouch acted as the live gate are evidence — a
         // shadow or stood-down row never asked the user anything, and an
         // unknown future mode word must fail the same closed way.
-        if r.mode != "live" {
+        if r.mode != "live" || r.measurement {
             continue;
         }
         let (name, is_guard) = match stopped_on(&r.reason) {

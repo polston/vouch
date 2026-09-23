@@ -20,6 +20,7 @@ fn rec(id: &str, verdict: &str, reason: &str, outcome: Outcome, mode: &str, sess
         permission_mode: String::new(),
         host: "claude".into(),
         count: 1,
+        measurement: false,
     }
 }
 
@@ -358,4 +359,12 @@ fn accepting_a_powershell_construct_creates_its_own_section() {
         vouch::config::Action::Allow,
         "{out}"
     );
+}
+
+#[test]
+fn measurement_session_records_are_ignored_by_candidates() {
+    let mut r = rec("1", "ask", CONSTRUCT_REASON, Outcome::Executed, "live", "s1");
+    r.measurement = true;
+    let c = candidates(&[r]);
+    assert!(c.is_empty(), "measurement records must not yield review candidates");
 }

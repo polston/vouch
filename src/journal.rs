@@ -59,6 +59,13 @@ pub struct Record {
     /// Execution count when duplicate runs are compacted. Defaults to 1.
     #[serde(default = "default_count", skip_serializing_if = "is_one")]
     pub count: usize,
+    /// Whether this record represents synthetic test, benchmark, or probe traffic.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub measurement: bool,
+}
+
+pub fn is_measurement_session() -> bool {
+    std::env::var_os("VOUCH_MEASUREMENT").is_some()
 }
 
 fn default_count() -> usize {
@@ -133,6 +140,7 @@ pub fn record_from_host(host: Host, input: &HookInput, d: &Decision, mode: &str)
         permission_mode: input.permission_mode.clone(),
         host: host.as_str().into(),
         count: 1,
+        measurement: is_measurement_session(),
     }
 }
 
@@ -153,6 +161,7 @@ pub fn record_unparseable(host: Host, raw: &str, d: &Decision) -> Record {
         permission_mode: String::new(),
         host: host.as_str().into(),
         count: 1,
+        measurement: is_measurement_session(),
     }
 }
 
@@ -201,6 +210,7 @@ pub fn records_from_snippets_host(
             permission_mode: input.permission_mode.clone(),
             host: host.as_str().into(),
             count: 1,
+            measurement: is_measurement_session(),
         })
         .collect()
 }
@@ -331,7 +341,7 @@ pub fn compact_records(records: &[Record], policy: &JournalPolicy) -> (Vec<Recor
     let mut final_historical: Vec<Record> = Vec::new();
     if policy.compact_duplicates && !historical.is_empty() {
         // Collect latest instance of each signature, accumulating execution counts
-        let mut latest_by_sig: HashMap<(String, String, String, String, String, String), Record> = HashMap::new();
+        let mut latest_by_sig: HashMap<(String, String, String, String, String, String, bool), Record> = HashMap::new();
         for r in historical.iter().rev() {
             let key = (
                 r.host.clone(),
@@ -340,6 +350,7 @@ pub fn compact_records(records: &[Record], policy: &JournalPolicy) -> (Vec<Recor
                 r.cmd.clone(),
                 r.verdict.clone(),
                 r.mode.clone(),
+                r.measurement,
             );
             latest_by_sig
                 .entry(key)
@@ -364,6 +375,7 @@ pub fn compact_records(records: &[Record], policy: &JournalPolicy) -> (Vec<Recor
                 r.cmd.clone(),
                 r.verdict.clone(),
                 r.mode.clone(),
+                r.measurement,
             );
             if retained_keys.insert(key.clone()) {
                 if let Some(compacted_rec) = latest_by_sig.remove(&key) {

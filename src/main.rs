@@ -1358,6 +1358,15 @@ fn main() {
             println!("no decisions recorded yet ({})", vouch::knowledge::display_path(&dir));
             std::process::exit(0);
         }
+        let include_measurement = args.iter().any(|a| a == "--all" || a == "--include-measurement");
+        let (meas_recs, prod_recs): (Vec<&journal::Record>, Vec<&journal::Record>) =
+            recs.iter().partition(|r| r.measurement);
+        let scan_recs: Vec<&journal::Record> = if include_measurement {
+            recs.iter().collect()
+        } else {
+            prod_recs.clone()
+        };
+
         // Re-scan the recorded commands against the CURRENT knowledge rather
         // than scraping the reason text. Scraping only ever saw commands that
         // PROMPTED, so with `unmodeled_command = "allow"` — the shipped setting
@@ -1368,7 +1377,7 @@ fn main() {
         let kb = vouch::guards::in_effect();
         let mut unreadable: Vec<&journal::Record> = Vec::new();
         let mut unmodeled: std::collections::HashMap<String, usize> = Default::default();
-        for r in &recs {
+        for r in &scan_recs {
             // `r.lang` is authoritative for a row Task 9 journaled per
             // snippet; a row from before that field existed falls back to a
             // knowledge lookup (`fixed_snippet_lang`) instead of the old
@@ -1410,7 +1419,21 @@ fn main() {
                 }
             }
         }
-        println!("decisions recorded: {}", recs.len());
+        if include_measurement && !meas_recs.is_empty() {
+            println!(
+                "decisions recorded: {} (including {} measurement)",
+                recs.len(),
+                meas_recs.len()
+            );
+        } else if !meas_recs.is_empty() {
+            println!(
+                "decisions recorded: {} (plus {} measurement)",
+                prod_recs.len(),
+                meas_recs.len()
+            );
+        } else {
+            println!("decisions recorded: {}", recs.len());
+        }
         println!("\ncommands vouch could NOT read ({}):", unreadable.len());
         for r in unreadable.iter().take(20) {
             println!("  {}", r.cmd.chars().take(140).collect::<String>());
@@ -1442,7 +1465,7 @@ fn main() {
         // have produced a rule-4 ask at all, and a header over an empty list
         // reads as a gap where there is none.
         let mut undeclared: std::collections::HashMap<(String, String), usize> = Default::default();
-        for r in &recs {
+        for r in &scan_recs {
             for line in r.reason.lines() {
                 if let Some((head, flag)) = vouch::engine::parse_undeclared_option_line(line) {
                     *undeclared.entry((head.to_string(), flag.to_string())).or_default() += 1;

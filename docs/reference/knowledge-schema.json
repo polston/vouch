@@ -278,6 +278,14 @@
             "$ref": "#/$defs/HereWrite"
           }
         },
+        "invokes_methods": {
+          "description": "Parameters that receive an object whose own methods are called by the callee\n(e.g. `datetime.now(tz)` calls methods on `tz`). Distinct from `callback_args`\n(which asserts callable invocation) and `writes_via_handle` (which asserts file writing).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
         "languages": {
           "description": "Which scanned languages this entry applies to: values from `\"bash\"`,\n`\"powershell\"` — the scanners this field scopes entries against\n(`src/shell.rs`, `src/powershell.rs`). Python is a third scanner but\nis not a value here: a python snippet is scoped through the\n`python:` match prefix on the entry's own name, not through this\nfield. Empty means every language, which is what every entry meant\nbefore this field existed.\n\nA claim can be true in one language and false in the other: `chdir` is\na `Set-Location` alias in PowerShell and is not a bash builtin at all.",
           "type": "array",
@@ -651,6 +659,14 @@
           "items": {
             "type": "string"
           }
+        },
+        "unless_position": {
+          "description": "Argument position at which `unless_flags` veto applies:\n\"arg_<N>\" (e.g. \"arg_0\"), \"any\", or omitted (defaults to \"arg_0\" for backward compatibility).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         }
       },
       "additionalProperties": false,

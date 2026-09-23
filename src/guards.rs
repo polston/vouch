@@ -100,6 +100,10 @@ pub struct Rule {
     /// flag that merely COULD be hiding in an unreadable token.
     #[serde(default)]
     pub unless_flags: Vec<String>,
+    /// Argument position at which `unless_flags` veto applies:
+    /// "arg_<N>" (e.g. "arg_0"), "any", or omitted (defaults to "arg_0" for backward compatibility).
+    #[serde(default)]
+    pub unless_position: Option<String>,
     /// Fires when any argument equals one of these exactly.
     #[serde(default)]
     pub any_arg_exact: Vec<String>,
@@ -449,6 +453,11 @@ pub struct Program {
     /// Non-empty replaces on merge, like `arg_names`.
     #[serde(default)]
     pub callback_args: Vec<String>,
+    /// Parameters that receive an object whose own methods are called by the callee
+    /// (e.g. `datetime.now(tz)` calls methods on `tz`). Distinct from `callback_args`
+    /// (which asserts callable invocation) and `writes_via_handle` (which asserts file writing).
+    #[serde(default)]
+    pub invokes_methods: Vec<String>,
     /// Origin tags this call's return value is known to produce. Tags are
     /// policy vocabulary declared by knowledge, not a closed set in code.
     /// A call that occupies one of this entry's declared `callback_args`
@@ -1934,19 +1943,30 @@ fn any_flag_spelled(flags: &[String], cmd: &Cmd, vocab: &crate::flags::Vocab) ->
 /// fails to fire leaves the guard firing, which asks. An entry needing an
 /// any-position veto should say so with its own key and its own reason,
 /// rather than widening this one.
-fn veto_flag_spelled(flags: &[String], cmd: &Cmd, prog: &Program) -> bool {
-    let Some(first) = cmd.args.first() else {
-        return false;
+fn veto_flag_spelled(rule: &Rule, cmd: &Cmd, prog: &Program) -> bool {
+    let flags = &rule.unless_flags;
+    let pos = rule.unless_position.as_deref().unwrap_or("arg_0");
+    let exact = |tok: &str| {
+        let tok = crate::paths::unquote(tok);
+        flags.iter().any(|f| {
+            if prog.case_sensitive_flags.unwrap_or(false) {
+                *f == tok
+            } else {
+                f.eq_ignore_ascii_case(&tok)
+            }
+        })
     };
-    let tok = crate::paths::unquote(first);
-    let exact = |f: &String| {
-        if prog.case_sensitive_flags.unwrap_or(false) {
-            *f == tok
+    if pos == "any" {
+        cmd.args.iter().any(|arg| exact(arg))
+    } else if let Some(idx_str) = pos.strip_prefix("arg_") {
+        if let Ok(idx) = idx_str.parse::<usize>() {
+            cmd.args.get(idx).map(|arg| exact(arg)).unwrap_or(false)
         } else {
-            f.eq_ignore_ascii_case(&tok)
+            false
         }
-    };
-    flags.iter().any(exact)
+    } else {
+        false
+    }
 }
 
 /// True when every criterion this rule states holds for `cmd`.
@@ -1980,7 +2000,7 @@ fn rule_match_in(rule: &Rule, cmd: &Cmd, prog: &Program, lang: &str) -> RuleMatc
     // The veto comes first, and before `always` in particular: a rule that
     // fires on every invocation is exactly the one that needs a way to name
     // the invocation it must not fire on.
-    if !rule.unless_flags.is_empty() && veto_flag_spelled(&rule.unless_flags, cmd, prog) {
+    if !rule.unless_flags.is_empty() && veto_flag_spelled(rule, cmd, prog) {
         return RuleMatch { matched: false, unread_verb: None };
     }
     if rule.always {
@@ -6170,6 +6190,10 @@ fn callback_arg_positions(prog: &Program, base_off: usize) -> HashSet<usize> {
     prog.callback_args.iter().filter_map(|c| prog.arg_names.iter().position(|n| n == c)).map(|p| p + base_off).collect()
 }
 
+fn invokes_methods_positions(prog: &Program, base_off: usize) -> HashSet<usize> {
+    prog.invokes_methods.iter().filter_map(|c| prog.arg_names.iter().position(|n| n == c)).map(|p| p + base_off).collect()
+}
+
 /// The one place a write-target CANDIDATE becomes a write target vouch will
 /// actually report (task 2b fix round 5, the general backstop). Any
 /// internal sentinel is normalised to `MARKER` — already proven safe
@@ -6564,14 +6588,15 @@ pub fn written_paths_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> WriteTargets {
             non_flags.push((i, a));
         }
         let callback_positions = callback_arg_positions(prog, base_off);
-        // Excludes a declared callback position (never a path, whatever sits
+        let invokes_methods_positions = invokes_methods_positions(prog, base_off);
+        // Excludes a declared callback position or invokes_methods position (never a path, whatever sits
         // there) AND a padded, never-addressed one (task 2b fix round 5 —
         // `eff_position_occupied`, not a bare index check: "skipped rather
         // than pushed as a write path" for BOTH `all_args` and `last_arg`,
         // the two arms that ever read this list).
         let non_flags_paths: Vec<&String> = non_flags
             .iter()
-            .filter(|(i, _)| !callback_positions.contains(i) && eff_position_occupied(&eff, &padding, *i))
+            .filter(|(i, _)| !callback_positions.contains(i) && !invokes_methods_positions.contains(i) && eff_position_occupied(&eff, &padding, *i))
             .map(|(_, a)| *a)
             .collect();
         // "Writes where it stands": a declared shape whose destination is the

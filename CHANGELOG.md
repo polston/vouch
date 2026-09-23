@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.45.0 (2026-09-23)
+
+
+### Features
+
+* declarative parameter vocabulary for handed-over receiver object method execution
+* declarative program rule veto argument positions in knowledge schema
+* isolate measurement session records from production journal traffic and doctor statistics
+
+
+### Bug Fixes
+
+* canonicalize git hook path comparisons across drive-letter and posix representations
+
 ## 0.44.0 (2026-09-23)
 
 

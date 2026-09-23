@@ -22,6 +22,7 @@ fn appends_one_json_line_per_record() {
         permission_mode: String::new(),
         host: "claude".into(),
         count: 1,
+        measurement: false,
     };
     append(&dir, &rec).unwrap();
     append(&dir, &rec).unwrap();
@@ -117,6 +118,7 @@ fn a_missing_directory_is_created_rather_than_failing() {
         permission_mode: String::new(),
         host: "claude".into(),
         count: 1,
+        measurement: false,
     };
     append(&dir, &rec).unwrap();
     assert!(dir.join("journal.jsonl").exists());
@@ -206,6 +208,7 @@ fn compact_records_preserves_recent_window_and_deduplicates_history() {
         permission_mode: String::new(),
         host: "claude".into(),
         count: 1,
+        measurement: false,
     };
 
     let records = vec![
@@ -259,6 +262,7 @@ fn prune_enforces_hard_record_cap() {
         permission_mode: String::new(),
         host: "claude".into(),
         count: 1,
+        measurement: false,
     };
 
     let records: Vec<Record> = (0..20).map(|i| make_rec(&i.to_string())).collect();
@@ -303,6 +307,7 @@ fn tail_record_reads_last_entry_without_parsing_whole_file() {
             permission_mode: String::new(),
             host: "claude".into(),
             count: 1,
+            measurement: false,
         };
         append(&dir, &rec).unwrap();
     }
@@ -353,6 +358,7 @@ fn atomic_compaction_retains_outcome_pairing() {
             permission_mode: String::new(),
             host: "claude".into(),
             count: 1,
+            measurement: false,
         };
         append(&dir, &rec).unwrap();
         append_outcome(
@@ -382,4 +388,82 @@ fn atomic_compaction_retains_outcome_pairing() {
     for r in &recs {
         assert_eq!(r.outcome, Outcome::Executed, "record {} outcome should be Executed", r.id);
     }
+}
+
+#[test]
+fn measurement_record_serialization_and_legacy_compatibility() {
+    let rec_prod = Record {
+        id: "p1".into(),
+        ts: "100".into(),
+        session: "s".into(),
+        tool: "Bash".into(),
+        cmd: "ls".into(),
+        verdict: "allow".into(),
+        reason: "ok".into(),
+        mode: "live".into(),
+        cwd: String::new(),
+        outcome: Outcome::Pending,
+        lang: "bash".into(),
+        permission_mode: String::new(),
+        host: "claude".into(),
+        count: 1,
+        measurement: false,
+    };
+    let json_prod = serde_json::to_string(&rec_prod).unwrap();
+    assert!(!json_prod.contains("measurement"), "false measurement should be omitted: {json_prod}");
+
+    let mut rec_meas = rec_prod.clone();
+    rec_meas.measurement = true;
+    let json_meas = serde_json::to_string(&rec_meas).unwrap();
+    assert!(json_meas.contains("\"measurement\":true"), "true measurement should be present: {json_meas}");
+
+    // Legacy row without measurement field
+    let legacy_json = r#"{"id":"leg","ts":"100","session":"s","tool":"Bash","cmd":"ls","verdict":"allow","reason":"ok","mode":"live"}"#;
+    let decoded: Record = serde_json::from_str(legacy_json).unwrap();
+    assert!(!decoded.measurement, "legacy row must default to measurement: false");
+}
+
+#[test]
+fn compact_records_isolates_measurement_from_production() {
+    use vouch::journal::{compact_records, JournalPolicy};
+
+    let make_rec = |id: &str, cmd: &str, meas: bool| Record {
+        id: id.into(),
+        outcome: Outcome::Pending,
+        ts: "100".into(),
+        session: "s".into(),
+        tool: "Bash".into(),
+        cmd: cmd.into(),
+        verdict: "allow".into(),
+        reason: "ok".into(),
+        mode: "live".into(),
+        cwd: String::new(),
+        lang: "bash".into(),
+        permission_mode: String::new(),
+        host: "claude".into(),
+        count: 1,
+        measurement: meas,
+    };
+
+    let records = vec![
+        make_rec("1", "git status", false),
+        make_rec("2", "git status", false),
+        make_rec("3", "git status", true),
+        make_rec("4", "git status", true),
+    ];
+
+    let policy = JournalPolicy {
+        max_records: 10,
+        compact_duplicates: true,
+        preserve_recent: 0, // all in historical
+    };
+
+    let (compacted, stats) = compact_records(&records, &policy);
+    assert_eq!(stats.original_count, 4);
+    // Should collapse into 2 records: one production (count 2) and one measurement (count 2)
+    assert_eq!(compacted.len(), 2);
+    let prod = compacted.iter().find(|r| !r.measurement).expect("production record");
+    assert_eq!(prod.count, 2);
+    let meas = compacted.iter().find(|r| r.measurement).expect("measurement record");
+    assert_eq!(meas.count, 2);
 }

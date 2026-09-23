@@ -577,6 +577,7 @@ case_sensitive_flags = true
 guard = "process_control"
 source = "declared: operator granted a guard for signalling a process, 2026-08-19"
 always = true
+unless_position = "arg_0"
 # `-0` probes; `-l` and `-L` LIST signal names (checked in `help kill`, and
 # `-L` is a synonym of `-l`). None of the three sends a signal, so without
 # them here the `always` rule asserts that every `kill` invocation signals a
@@ -1449,13 +1450,12 @@ match = [
 # that must be true, and callback_args asserts invocation, not method use).
 # It is not writes_via_handle either — that key asserts a write through an
 # already-opened file object with a destination judged at open; tz is not a
-# file handle and its methods are not confined to writing. No existing key
-# states "an object is handed over so its own methods run," so the claim is
-# removed outright rather than approximated under either one. Recorded as
-# ROADMAP.md M2.207, not approximated by a false claim here.
+# file handle and its methods are not confined to writing. `invokes_methods`
+# declares that tz's own methods run (M2.207).
 [[program]]
 match = ["python:datetime.datetime.now"]
 arg_names = ["tz"]
+invokes_methods = ["tz"]
 
 # Hash objects are built from in-memory bytes; hashing itself performs no I/O.
 [[program]]

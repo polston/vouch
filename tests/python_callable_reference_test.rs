@@ -673,6 +673,10 @@ mod vocabulary {
         assert!(reason.contains("callable_argument"), "reason was: {reason}");
     }
 
+    /// Standing regression guard: `any(xs)` and `sum(xs)` accept iterables of
+    /// values rather than callable functions, and are defined in the pre-existing
+    /// flat pure-read builtins table. This test ensures higher-order callable
+    /// reference changes do not disrupt basic read builtins (M2.210).
     #[test]
     fn a_pure_aggregate_allows() {
         for src in [r#"python -c "print(any(xs))""#, r#"python -c "print(sum(xs))""#] {
@@ -681,7 +685,9 @@ mod vocabulary {
     }
 
     /// §3: the claim must be true. `tz` is a tzinfo OBJECT whose methods
-    /// `now()` calls; it is never invoked as a function.
+    /// `now()` calls; it is never invoked as a function. M2.207 introduces
+    /// `invokes_methods = ["tz"]` so knowledge accurately describes receiver
+    /// object delegation without false callable or write claims.
     #[test]
     fn datetime_now_no_longer_claims_its_tz_slot_is_invoked() {
         let (a, reason) = common_decide(
@@ -692,6 +698,18 @@ mod vocabulary {
             !reason.contains("callback_argument") && !reason.contains("callable_argument"),
             "reason was: {reason}"
         );
+        assert!(
+            !reason.contains("unresolved_path"),
+            "must not treat tz as a write path; reason was: {reason}"
+        );
+
+        let kb = vouch::guards::in_effect();
+        let prog = kb
+            .program
+            .iter()
+            .find(|p| p.match_names.iter().any(|m| m == "python:datetime.datetime.now"))
+            .expect("datetime.datetime.now entry exists in shipped knowledge");
+        assert_eq!(prog.invokes_methods, vec!["tz"]);
     }
 
     #[test]

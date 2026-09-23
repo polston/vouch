@@ -513,6 +513,7 @@ fn undeclared_option_record(id: &str, head: &str, flag: &str) -> vouch::journal:
         permission_mode: String::new(),
         host: "claude".into(),
         count: 1,
+        measurement: false,
     }
 }
 
@@ -690,6 +691,7 @@ fn doctor_omits_the_undeclared_options_section_when_nothing_carries_the_marker()
         permission_mode: String::new(),
         host: "claude".into(),
         count: 1,
+        measurement: false,
     };
     vouch::journal::append(&state, &rec).unwrap();
 
@@ -777,6 +779,7 @@ fn doctor_rescans_a_snippet_row_using_its_own_recorded_language() {
         permission_mode: String::new(),
         host: "claude".into(),
         count: 1,
+        measurement: false,
     };
     vouch::journal::append(&state, &rec).unwrap();
 
@@ -791,6 +794,88 @@ fn doctor_rescans_a_snippet_row_using_its_own_recorded_language() {
     assert!(
         text.contains("totallyunmodeledprogram123"),
         "doctor must re-scan a snippet row by its own recorded lang: {text}"
+    );
+}
+
+#[test]
+fn doctor_isolates_measurement_records_and_reports_dual_counts() {
+    let home = pinned_home();
+    let state = std::env::temp_dir().join("vouch_cli_test_doctor_measurement");
+    let _ = std::fs::remove_dir_all(&state);
+
+    let prod_rec = vouch::journal::Record {
+        id: "prod1".into(),
+        ts: vouch::journal::now_epoch_secs(),
+        session: "s1".into(),
+        tool: "Bash".into(),
+        cmd: "ls -la".into(),
+        verdict: "allow".into(),
+        reason: String::new(),
+        mode: "live".into(),
+        cwd: String::new(),
+        outcome: vouch::outcome::Outcome::Pending,
+        lang: "bash".into(),
+        permission_mode: String::new(),
+        host: "claude".into(),
+        count: 1,
+        measurement: false,
+    };
+    vouch::journal::append(&state, &prod_rec).unwrap();
+
+    let meas_rec = vouch::journal::Record {
+        id: "meas1".into(),
+        ts: vouch::journal::now_epoch_secs(),
+        session: "s_meas".into(),
+        tool: "Bash".into(),
+        cmd: "syntheticunmodeledcmd987".into(),
+        verdict: "ask".into(),
+        reason: String::new(),
+        mode: "live".into(),
+        cwd: String::new(),
+        outcome: vouch::outcome::Outcome::Pending,
+        lang: "bash".into(),
+        permission_mode: String::new(),
+        host: "claude".into(),
+        count: 1,
+        measurement: true,
+    };
+    vouch::journal::append(&state, &meas_rec).unwrap();
+
+    // Default doctor run: excludes measurement records from unmodeled aggregation and reports dual counts
+    let out = Command::new(bin())
+        .arg("doctor")
+        .env("VOUCH_STATE_DIR", &state)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("decisions recorded: 1 (plus 1 measurement)"),
+        "expected dual count in default run: {text}"
+    );
+    assert!(
+        !text.contains("syntheticunmodeledcmd987"),
+        "measurement command must be excluded from default doctor unmodeled report: {text}"
+    );
+
+    // Doctor with --all: includes measurement records in unmodeled aggregation
+    let out_all = Command::new(bin())
+        .arg("doctor")
+        .arg("--all")
+        .env("VOUCH_STATE_DIR", &state)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+        .unwrap();
+    let text_all = String::from_utf8_lossy(&out_all.stdout);
+    assert!(
+        text_all.contains("decisions recorded: 2 (including 1 measurement)"),
+        "expected including measurement count with --all: {text_all}"
+    );
+    assert!(
+        text_all.contains("syntheticunmodeledcmd987"),
+        "--all must include measurement commands in unmodeled report: {text_all}"
     );
 }
 
@@ -934,6 +1019,7 @@ fn why_replay_expands_project_root_from_the_recorded_directory() {
         permission_mode: String::new(),
         host: "claude".into(),
         count: 1,
+        measurement: false,
     };
     vouch::journal::append(&state, &rec).unwrap();
 
@@ -1053,6 +1139,7 @@ fn why_replays_program_location_recognition_from_the_recorded_directory() {
         permission_mode: String::new(),
         host: "claude".into(),
         count: 1,
+        measurement: false,
     };
     vouch::journal::append(&state, &rec).unwrap();
 
@@ -1296,6 +1383,7 @@ fn why_rescans_a_journalled_rows_own_cwd_and_names_the_zone_that_allowed_it() {
         permission_mode: String::new(),
         host: "claude".into(),
         count: 1,
+        measurement: false,
     };
     vouch::journal::append(&state, &rec).unwrap();
 
