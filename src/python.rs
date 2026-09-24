@@ -83,7 +83,130 @@ pub const KNOWN_CONSTRUCTS: &[&str] = &[
     "rebound_name",
     "unreadable_language",
     "unread_verb",
+    "unmodeled_import",
 ];
+
+/// Standard library modules whose top-level import is inert (no external side effects).
+pub const KNOWN_INERT_MODULES: &[&str] = &[
+    "PIL",
+    "__future__",
+    "abc",
+    "argparse",
+    "array",
+    "ast",
+    "asyncio",
+    "base64",
+    "binascii",
+    "bisect",
+    "builtins",
+    "bz2",
+    "calendar",
+    "cmath",
+    "codecs",
+    "collections",
+    "colorsys",
+    "concurrent",
+    "configparser",
+    "contextlib",
+    "contextvars",
+    "copy",
+    "csv",
+    "dataclasses",
+    "datetime",
+    "decimal",
+    "difflib",
+    "dis",
+    "email",
+    "enum",
+    "errno",
+    "exceptions",
+    "fileinput",
+    "fnmatch",
+    "fractions",
+    "functools",
+    "gc",
+    "genericpath",
+    "getpass",
+    "glob",
+    "gzip",
+    "hashlib",
+    "heapq",
+    "hmac",
+    "html",
+    "http",
+    "importlib",
+    "inspect",
+    "io",
+    "ipaddress",
+    "itertools",
+    "json",
+    "linecache",
+    "logging",
+    "lzma",
+    "math",
+    "mimetypes",
+    "multiprocessing",
+    "ntpath",
+    "numbers",
+    "operator",
+    "optparse",
+    "os",
+    "pathlib",
+    "pickle",
+    "pkgutil",
+    "platform",
+    "plistlib",
+    "posixpath",
+    "pprint",
+    "queue",
+    "quopri",
+    "random",
+    "re",
+    "reprlib",
+    "secrets",
+    "select",
+    "shlex",
+    "shutil",
+    "signal",
+    "socket",
+    "sqlite3",
+    "stat",
+    "statistics",
+    "string",
+    "struct",
+    "subprocess",
+    "sys",
+    "tarfile",
+    "tempfile",
+    "textwrap",
+    "threading",
+    "time",
+    "timeit",
+    "token",
+    "tokenize",
+    "tomllib",
+    "trace",
+    "traceback",
+    "tracemalloc",
+    "types",
+    "typing",
+    "unicodedata",
+    "unittest",
+    "urllib",
+    "uuid",
+    "warnings",
+    "weakref",
+    "xml",
+    "yaml",
+    "zipfile",
+    "zlib",
+    "zoneinfo",
+];
+
+/// Returns true when `name` is a curated inert standard library module.
+pub fn is_known_inert_module(name: &str) -> bool {
+    KNOWN_INERT_MODULES.binary_search(&name).is_ok()
+}
 
 /// A call whose target vouch cannot name: `f()` where `f` is a parameter, or
 /// a call on something built by an expression rather than a plain name.
@@ -1370,6 +1493,10 @@ struct Walk {
     /// Syntax-only execution order, computed independently and keyed by the
     /// call's stable source range. Missing means unordered, never sequential.
     call_orders: HashMap<CallKey, Order>,
+    /// How many function definitions enclose the statement being visited.
+    /// Top-level imports execute at import time and are checked against
+    /// KNOWN_INERT_MODULES (M2.93).
+    scope_depth: usize,
 }
 
 impl Walk {
@@ -1609,6 +1736,12 @@ impl Walk {
 impl<'a> Visitor<'a> for Walk {
     fn visit_stmt(&mut self, stmt: &'a ast::Stmt) {
         match stmt {
+            ast::Stmt::FunctionDef(_) => {
+                self.scope_depth += 1;
+                visitor::walk_stmt(self, stmt);
+                self.scope_depth -= 1;
+                return;
+            }
             // `p = "C:/work/x"` then `open(p, "w")`. The same reason the
             // shell scanner records `f="…"`: the destination is stated in
             // plain sight one line earlier, and not reading it makes a
@@ -1629,26 +1762,40 @@ impl<'a> Visitor<'a> for Walk {
             // separates a MODULE path from a method on a local variable, so
             // a no-op-looking entry is doing the work.
             //
-            // What these two arms do NOT do is note a construct, and an
-            // import is not inert: it runs the imported module's own
-            // top-level code. A snippet whose statements are all imports
-            // therefore emits no commands and allows. That is pre-existing
-            // (the same is true at this changeset's fork point) and it is
-            // recorded as ROADMAP M2.93 — named there for what it is, with
-            // the shape of a fix. Do not read the name-map recording below
-            // as the whole of what an import means.
+            // An import statement runs the imported module's own top-level
+            // code. Top-level imports outside the curated known-inert standard
+            // library set emit construct `unmodeled_import` with the module
+            // name as detail (ROADMAP M2.93).
             ast::Stmt::Import(import) => {
                 for a in &import.names {
                     let bound = a.asname.as_ref().unwrap_or(&a.name);
                     self.imported.insert(bound.to_string(), a.name.to_string());
+                    if self.scope_depth == 0 {
+                        let root = a.name.split('.').next().unwrap_or(&a.name);
+                        if !is_known_inert_module(root) {
+                            self.out.note_with_detail("unmodeled_import", root);
+                        }
+                    }
                 }
             }
             ast::Stmt::ImportFrom(import_from) => {
-                if let Some(module) = &import_from.module {
+                if import_from.level > 0 {
+                    if self.scope_depth == 0 {
+                        self.out.note_with_detail("unmodeled_import", "relative_import");
+                    }
+                } else if let Some(module) = &import_from.module {
                     for a in &import_from.names {
                         let bound = a.asname.as_ref().unwrap_or(&a.name);
                         self.imported.insert(bound.to_string(), format!("{module}.{}", a.name));
                     }
+                    if self.scope_depth == 0 {
+                        let root = module.split('.').next().unwrap_or(module);
+                        if !is_known_inert_module(root) {
+                            self.out.note_with_detail("unmodeled_import", root);
+                        }
+                    }
+                } else if self.scope_depth == 0 {
+                    self.out.note_with_detail("unmodeled_import", "relative_import");
                 }
             }
             _ => {}

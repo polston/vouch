@@ -836,6 +836,64 @@ pub fn is_bare_program_name(head: &str) -> bool {
     head.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '+' | '-'))
 }
 
+/// Evaluates a sequence of corpus rows under a config (M2.106).
+pub fn evaluate_corpus_rows(
+    cfg: &vouch::config::Config,
+    rows: &[Row],
+) -> Vec<(usize, vouch::protocol::Decision)> {
+    rows.iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let d = vouch::engine::decide_command_in(cfg, "bash", &row.cmd, Some("C:/Users/dev"), None);
+            (i, d)
+        })
+        .collect()
+}
+
+/// Formats evaluated decisions as tab-separated rows: `<index>\t<VERDICT>\t<reason_first_line>\n`.
+pub fn format_decisions_tsv(decisions: &[(usize, vouch::protocol::Decision)]) -> String {
+    let mut out = String::new();
+    for (i, d) in decisions {
+        let (verdict, reason): (&str, &str) = match d {
+            vouch::protocol::Decision::Allow(r) => ("ALLOW", r.as_str()),
+            vouch::protocol::Decision::Ask(r) => ("ASK", r.as_str()),
+            vouch::protocol::Decision::Deny(r) => ("DENY", r.as_str()),
+            vouch::protocol::Decision::Abstain => ("ABSTAIN", ""),
+        };
+        let first_line = reason.lines().next().unwrap_or("");
+        out.push_str(&format!("{i}\t{verdict}\t{first_line}\n"));
+    }
+    out
+}
+
+/// Formats evaluated decisions as JSONL rows: `{"i":<index>,"verdict":"<verdict>"}\n`.
+pub fn format_per_row_jsonl(decisions: &[(usize, vouch::protocol::Decision)]) -> String {
+    let mut out = String::new();
+    for (i, d) in decisions {
+        let v = match d {
+            vouch::protocol::Decision::Allow(_) => "allow",
+            vouch::protocol::Decision::Ask(_) => "ask",
+            vouch::protocol::Decision::Deny(_) => "deny",
+            vouch::protocol::Decision::Abstain => "abstain",
+        };
+        out.push_str(&format!("{{\"i\":{i},\"verdict\":\"{v}\"}}\n"));
+    }
+    out
+}
+
+/// Transforms decisions TSV text directly to JSONL per-row text without re-evaluating commands (M2.106).
+pub fn decisions_tsv_to_jsonl(tsv: &str) -> String {
+    let mut out = String::new();
+    for line in tsv.lines() {
+        let mut parts = line.split('\t');
+        if let (Some(i_str), Some(verdict)) = (parts.next(), parts.next()) {
+            let v_lower = verdict.to_lowercase();
+            out.push_str(&format!("{{\"i\":{i_str},\"verdict\":\"{v_lower}\"}}\n"));
+        }
+    }
+    out
+}
+
 /// The body the four decision dumps share. Shared rather than copied so the
 /// sides of a pair can only differ by the config they were handed — two texts
 /// free to drift apart would produce a transition matrix nobody could attribute.
@@ -849,22 +907,19 @@ pub fn dump_every_row_under(cfg: vouch::config::Config, rows: &[Row]) {
     let path = std::env::var("VOUCH_DUMP_DECISIONS")
         .expect("set VOUCH_DUMP_DECISIONS to the output path before running this dump");
 
-    let mut out = String::new();
-    for (i, row) in rows.iter().enumerate() {
-        let d = vouch::engine::decide_command_in(&cfg, "bash", &row.cmd, Some("C:/Users/dev"), None);
-        let (verdict, reason): (&str, &str) = match &d {
-            vouch::protocol::Decision::Allow(r) => ("ALLOW", r.as_str()),
-            vouch::protocol::Decision::Ask(r) => ("ASK", r.as_str()),
-            vouch::protocol::Decision::Deny(r) => ("DENY", r.as_str()),
-            // Not reachable for lang "bash" (a scanner always exists), but
-            // covered rather than left to panic mid-dump if that ever changes.
-            vouch::protocol::Decision::Abstain => ("ABSTAIN", ""),
-        };
-        let first_line = reason.lines().next().unwrap_or("");
-        out.push_str(&format!("{i}\t{verdict}\t{first_line}\n"));
-    }
+    let decisions = evaluate_corpus_rows(&cfg, rows);
+    let out = format_decisions_tsv(&decisions);
     std::fs::write(&path, &out).unwrap_or_else(|e| panic!("could not write {path}: {e}"));
     println!("wrote {} decision rows to {path}", rows.len());
+
+    // Dual-dump deduplication (M2.106): If VOUCH_DUMP_PER_ROW is also set, emit
+    // the JSONL format from the same evaluated decisions without re-deciding.
+    if let Ok(per_row_path) = std::env::var("VOUCH_DUMP_PER_ROW") {
+        let jsonl = format_per_row_jsonl(&decisions);
+        std::fs::write(&per_row_path, &jsonl)
+            .unwrap_or_else(|e| panic!("could not write {per_row_path}: {e}"));
+        println!("wrote {} per-row JSONL rows to {per_row_path} (dual dump)", rows.len());
+    }
 }
 
 /// Drive-qualify one rooted, drive-less fixture path for Windows (M2.230).

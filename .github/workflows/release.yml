@@ -53,6 +53,15 @@ jobs:
           targets: ${{ matrix.triple }}
       - name: build
         run: cargo build --release --target ${{ matrix.triple }}
+      - name: smoke test built binaries
+        shell: bash
+        run: |
+          BIN="target/${{ matrix.triple }}/release/${{ matrix.bin }}"
+          BROKER="target/${{ matrix.triple }}/release/${{ matrix.broker }}"
+          chmod +x "$BIN" "$BROKER"
+          "$BIN" --version
+          "$BROKER" --version
+          VOUCH_KNOWLEDGE="knowledge.toml" "$BIN" explain 'ls -la'
       - name: stage (layout mirrors the install destination)
         shell: bash
         run: |

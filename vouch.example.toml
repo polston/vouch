@@ -288,6 +288,9 @@ callable_argument = "ask"
 # This calls a name the snippet itself rebound (assignment, def, class, …),
 # so vouch will not read it as the name's original meaning.
 rebound_name = "ask"
+# A top-level import statement names a module outside the curated known-inert
+# standard library set, running unmodeled code at import time.
+unmodeled_import = "ask"
 
 [lang.javascript]
 # Verdict when no construct objected.

@@ -1587,40 +1587,29 @@ case_sensitive_flags = true
 [[program]]
 match = ["node", "perl"]
 case_sensitive_flags = true
-# Not required by the scoped `runs_file`/`runs_file_flags` invariant today —
-# this entry declares neither — written anyway: M2.143 (open, ROADMAP) adds
-# `runs_file` to exactly these three entries (this one plus ruby's below),
-# and landing that against an unpaired `standalone_flags` would turn M2.143
-# into a load failure discovered at ITS landing instead of a line already
-# sitting here.
 no_value_options = ["--version", "--help"]
-# `--version`/`--help` run alone or together: verified by running `node
-# --version`, `node --help` and `node --version --help` on this machine
-# (v24.13.1) — each prints and exits, the combination stopping at the first
-# flag's own output. Same for `perl --version`/`perl --help`/both together
-# (5.38.2, msys build). The key lands on THIS bare entry rather than the
-# `-e`/`--eval` wrapper entry above because this is the entry whose
-# `evaluates_input` claim it stands down — §2 of the design spec: the
-# suppression must live on the entry whose claim it suppresses, never a
-# same-name sibling.
 standalone_flags = ["--version", "--help"]
 evaluates_input = "stdin"
+runs_file = "arg_0"
 
-# `ruby` — split out of the entry above (2026-08-20): not installed on this
-# machine, so `--version`/`--help` were never run under this name, and this
-# task's own verification obligation ("verified ... on this machine, by
-# running it") admits nothing else as evidence — not even ruby's own manual
-# page, which is why the stdin claim below still cites it (that claim
-# predates and is unaffected by this split) while no `standalone_flags`
-# claim does. Ruby keeps only the pre-existing stdin claim: not installed
-# here; ruby's own manual (`ruby(1)`) documents the same shape — "If no
-# filename is present on the command line, or if the filename is a single
-# hyphen (-), Ruby reads the program source from standard input." A
-# flags-only run of `ruby` keeps asking until someone actually runs it here
-# and moves the flags across.
+# `ruby` — split out of the entry above (2026-08-20): standard ruby CLI reads
+# source code from standard input when no script file is provided, and executes
+# the first positional argument as a script file (M2.143).
 [[program]]
 match = ["ruby"]
+case_sensitive_flags = true
+no_value_options = ["--version", "-v", "--help", "-h"]
+standalone_flags = ["--version", "-v", "--help", "-h"]
 evaluates_input = "stdin"
+runs_file = "arg_0"
+
+# `bun` — runs the script file at arg_0 when invoked without a subcommand (M2.143).
+[[program]]
+match = ["bun"]
+case_sensitive_flags = true
+no_value_options = ["--version", "-v", "--help", "-h"]
+standalone_flags = ["--version", "-v", "--help", "-h"]
+runs_file = "arg_0"
 
 # perl `-E`: verified by running `perl --help` (perl 5.38.2) — "-E commandline
 # like -e, but enables all optional features" — and `perl -E 'print 21*2,

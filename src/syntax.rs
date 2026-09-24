@@ -280,11 +280,9 @@ pub enum InputSource {
     /// A pipeline member other than the FIRST, with no redirect resolving to
     /// descriptor 0.
     Pipe,
-    /// Nothing supplies descriptor 0 and no enclosing construct the walk
-    /// EXAMINES does either. One accepted exception: an untracked `exec`-family
-    /// redirection earlier in the text can make this value wrong (ROADMAP
-    /// M2.101) — accepted because no value here can hold an input, so the
-    /// error is a false fact, never a false allow.
+    /// Nothing supplies descriptor 0 and no enclosing construct or prior
+    /// `exec`-family redirection sequence the walk examines does either
+    /// (ROADMAP M2.101).
     Nothing,
     /// Not resolvable, or not populated by this scanner. The fail-closed
     /// default: `Unknown` never holds, so it keeps whatever ask the command

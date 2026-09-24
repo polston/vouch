@@ -2401,6 +2401,15 @@ pub fn rebinds_a_name<'a>(kb: &'a Knowledge, cmd: &Cmd, lang: &str) -> Option<&'
 /// `curl … | python` and `python s.py` — name two different off-switches.
 pub fn runs_file_positional(kb: &Knowledge, cmd: &Cmd) -> (bool, Option<String>) {
     let head = base(&cmd.head);
+    let all_wrap_flags: Vec<String> = kb
+        .program
+        .iter()
+        .filter(|p| {
+            receiver_gate_holds(kb, p, &cmd.receiver_origin)
+                && p.match_names.iter().any(|n| n.to_ascii_lowercase() == head)
+        })
+        .flat_map(|p| p.wrap_flags.iter().cloned())
+        .collect();
     for prog in &kb.program {
         if !receiver_gate_holds(kb, prog, &cmd.receiver_origin) {
             continue;
@@ -2411,7 +2420,7 @@ pub fn runs_file_positional(kb: &Knowledge, cmd: &Cmd) -> (bool, Option<String>)
         if prog.runs_file.is_empty() && prog.runs_file_flags.is_empty() {
             continue;
         }
-        if runs_file_in(prog, &cmd.args) {
+        if runs_file_in(prog, &cmd.args, &all_wrap_flags) {
             return (true, wrap_lang_opt(prog));
         }
     }
@@ -2423,6 +2432,15 @@ pub fn runs_file_positional(kb: &Knowledge, cmd: &Cmd) -> (bool, Option<String>)
 /// the target is unknowable (e.g. unreadable flag cluster or undescribed flag), or `None` if it does not run a file.
 pub fn runs_file_target(kb: &Knowledge, cmd: &Cmd) -> Option<Result<String, ()>> {
     let head = base(&cmd.head);
+    let all_wrap_flags: Vec<String> = kb
+        .program
+        .iter()
+        .filter(|p| {
+            receiver_gate_holds(kb, p, &cmd.receiver_origin)
+                && p.match_names.iter().any(|n| n.to_ascii_lowercase() == head)
+        })
+        .flat_map(|p| p.wrap_flags.iter().cloned())
+        .collect();
     for prog in &kb.program {
         if !receiver_gate_holds(kb, prog, &cmd.receiver_origin) {
             continue;
@@ -2433,18 +2451,22 @@ pub fn runs_file_target(kb: &Knowledge, cmd: &Cmd) -> Option<Result<String, ()>>
         if prog.runs_file.is_empty() && prog.runs_file_flags.is_empty() {
             continue;
         }
-        if let Some(target) = runs_file_target_in(prog, &cmd.args) {
+        if let Some(target) = runs_file_target_in(prog, &cmd.args, &all_wrap_flags) {
             return Some(target);
         }
     }
     None
 }
 
-fn runs_file_in(prog: &Program, args: &[String]) -> bool {
-    runs_file_target_in(prog, args).is_some()
+fn runs_file_in(prog: &Program, args: &[String], all_wrap_flags: &[String]) -> bool {
+    runs_file_target_in(prog, args, all_wrap_flags).is_some()
 }
 
-fn runs_file_target_in(prog: &Program, args: &[String]) -> Option<Result<String, ()>> {
+fn runs_file_target_in(
+    prog: &Program,
+    args: &[String],
+    all_wrap_flags: &[String],
+) -> Option<Result<String, ()>> {
     let want = prog.runs_file.strip_prefix("arg_").and_then(|n| n.parse::<usize>().ok());
     let vocab = crate::flags::vocab_for(prog, wrap_abbrev(prog));
     let mut walk = crate::flags::ArgWalk::new(&vocab);
@@ -2470,7 +2492,12 @@ fn runs_file_target_in(prog: &Program, args: &[String]) -> Option<Result<String,
         // it. Testing the spelling regardless of the walk's state read that
         // as "the wrap arm owns this line" and allowed the file unread.
         if !options_ended {
-            for f in &prog.wrap_flags {
+            let wrap_list: &[String] = if prog.wrap_flags.is_empty() {
+                all_wrap_flags
+            } else {
+                &prog.wrap_flags
+            };
+            for f in wrap_list {
                 if matches!(crate::flags::spells(f, raw, &vocab), crate::flags::Spell::Yes(_))
                     || matches!(cluster_switch(prog, f, raw), ClusterHit::Yes)
                 {
@@ -4546,6 +4573,7 @@ fn scan_snippet(
         redirect_scope: Vec::new(),
         redirect_chain: Vec::new(),
         constructs: Vec::new(),
+        construct_details: Vec::new(),
         heredocs: Vec::new(),
         commands: Vec::new(),
     });
@@ -4561,6 +4589,7 @@ fn scan_snippet(
             srcs[entry_idx].redirect_scope = s.redirect_scope.clone();
             srcs[entry_idx].redirect_chain = s.redirect_chain.clone();
             srcs[entry_idx].constructs = s.constructs.clone();
+            srcs[entry_idx].construct_details = s.construct_details.clone();
             srcs[entry_idx].heredocs = s.heredocs.clone();
             srcs[entry_idx].commands = s.commands.clone();
             let assigns: Vec<String> = s.assignments.iter().map(|(n, _)| n.clone()).collect();
@@ -4901,6 +4930,7 @@ pub struct SnippetSource {
     pub redirect_scope: Vec<Option<usize>>,
     pub redirect_chain: Vec<Option<crate::syntax::ChainPos>>,
     pub constructs: Vec<String>,
+    pub construct_details: Vec<(String, String)>,
     pub heredocs: Vec<crate::syntax::Heredoc>,
     pub commands: Vec<Cmd>,
 }

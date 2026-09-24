@@ -2068,7 +2068,7 @@ fn walk_command(
             // knowable while the body is being walked (the redirects are read
             // afterwards), so it is a fix-up over the range the body pushed.
             if own_stdin.is_some() || pipe_input {
-                blank_inherited_input(out, range);
+                blank_inherited_input(out, range, &walk.explicit_stdins);
             }
         }
         ast::Command::Function(f) => {
@@ -2082,7 +2082,7 @@ fn walk_command(
             // boundary of its own — `Passthrough` walks it straight into the
             // scope the definition itself sits in, unchanged from today.
             let range = walk_compound(&f.body.0, out, walk, BodyScoping::Passthrough { scope }, env, fns, src);
-            blank_inherited_input(out, range);
+            blank_inherited_input(out, range, &walk.explicit_stdins);
             // The definition's OWN redirect list (`f() { :; } > $(…)`) is
             // performed at every future call, exactly as unplaceable as the
             // body it belongs to — `Order::Unordered`, no chain, no pending
@@ -2176,10 +2176,14 @@ fn visit_test_words(
 /// here-document or descriptor-0 redirect overrides whatever the enclosing
 /// construct supplied, and a pipeline member inside the compound reads the
 /// inner pipe rather than the outer redirect.
-fn blank_inherited_input(out: &mut Parsed, range: std::ops::Range<usize>) {
+fn blank_inherited_input(
+    out: &mut Parsed,
+    range: std::ops::Range<usize>,
+    explicit_stdins: &std::collections::HashSet<usize>,
+) {
     for i in range {
-        if let Some(slot) = out.input_source.get_mut(i) {
-            if matches!(slot, crate::syntax::InputSource::Nothing) {
+        if !explicit_stdins.contains(&i) {
+            if let Some(slot) = out.input_source.get_mut(i) {
                 *slot = crate::syntax::InputSource::Unknown;
             }
         }
@@ -2463,7 +2467,7 @@ fn walk_compound(
             let mut coproc_env = env.clone();
             let mut coproc_fns = fns.clone();
             walk_command(&c.body, out, &mut counter, unordered, false, None, walk, s, &mut coproc_env, &mut coproc_fns, src);
-            blank_inherited_input(out, start..out.commands.len());
+            blank_inherited_input(out, start..out.commands.len(), &walk.explicit_stdins);
         }
         ast::CompoundCommand::Arithmetic(a) => {
             // Which of the two things this node is comes from the SOURCE
@@ -2623,6 +2627,32 @@ struct WalkState {
     /// the top level, checked against `SUBSTITUTION_DEPTH_CAP` by
     /// `walk_substitution_body`.
     depth: usize,
+    /// Standard input source set by bare `exec` redirection per scope level (M2.101).
+    seq_stdins: std::collections::HashMap<usize, crate::syntax::InputSource>,
+    /// Command indices that had an explicit stdin redirect or pipeline input.
+    explicit_stdins: std::collections::HashSet<usize>,
+}
+
+/// Resolves the active sequential standard input source in `scope` or its parent
+/// scopes if set by a prior `exec` redirection (M2.101).
+fn current_seq_stdin(
+    walk: &WalkState,
+    out: &Parsed,
+    mut scope: usize,
+) -> Option<crate::syntax::InputSource> {
+    loop {
+        if let Some(src) = walk.seq_stdins.get(&scope) {
+            return Some(src.clone());
+        }
+        if scope == 0 {
+            return None;
+        }
+        let scan_scope = match out.scan_scopes.get(scope - 1) {
+            Some(s) => s,
+            None => return None,
+        };
+        scope = scan_scope.parent;
+    }
 }
 
 /// Walk every substitution body a word's raw text runs, each as the
@@ -2924,6 +2954,19 @@ fn walk_simple(
     }
     if !cmd.head.is_empty() {
         cmd.is_intra_command_function = fns.contains(&cmd.head);
+
+        let is_bare_exec = cmd.head == "exec"
+            && cmd.args.iter().all(|a| a == "--")
+            && landing.stdin.is_some();
+        if is_bare_exec {
+            let src = landing.stdin.as_ref().unwrap().clone();
+            if unordered {
+                walk.seq_stdins.insert(scope, crate::syntax::InputSource::Unknown);
+            } else {
+                walk.seq_stdins.insert(scope, src);
+            }
+        }
+
         // `landing.stdin` already carries the correct, final
         // `InputSource::Heredoc(id)` when a pending record claimed
         // descriptor 0 — the id was stamped once, at `alloc_heredoc_id`, and
@@ -2934,13 +2977,28 @@ fn walk_simple(
         //
         // With no redirect of its own claiming standard input, it comes from
         // outside: the pipe when this is a pipeline member after the first,
-        // otherwise nothing. An enclosing construct can still override this to
-        // `Unknown` — see `walk_compound`'s range fix-up.
-        let source = match landing.stdin {
-            Some(other) => other,
-            None if pipe_input => crate::syntax::InputSource::Pipe,
-            None => crate::syntax::InputSource::Nothing,
+        // or inherited from a prior sequenced `exec` redirection in this scope
+        // or an ancestor scope (M2.101), otherwise nothing. An enclosing
+        // construct can still override this to `Unknown` — see `walk_compound`'s
+        // range fix-up.
+        let cmd_idx = out.commands.len();
+        let (source, has_explicit) = match landing.stdin {
+            Some(other) => (other, true),
+            None if pipe_input => (crate::syntax::InputSource::Pipe, true),
+            None => match current_seq_stdin(walk, out, scope) {
+                Some(inherited) => {
+                    if unordered {
+                        (crate::syntax::InputSource::Unknown, false)
+                    } else {
+                        (inherited, false)
+                    }
+                }
+                None => (crate::syntax::InputSource::Nothing, false),
+            },
         };
+        if has_explicit {
+            walk.explicit_stdins.insert(cmd_idx);
+        }
         out.push_cmd(
             cmd.head.clone(),
             cmd.args.clone(),

@@ -155,6 +155,7 @@ fn describe(name: &str) -> &'static str {
         "unreadable_language" => "this hands off a snippet in a language vouch has no scanner for, so it cannot tell what the snippet does — not even whether it writes anything",
         "unread_verb" => "vouch cannot determine which operation this command names because quoting, expansion, or an undescribed flag makes the verb unreadable",
         "brace_expansion" => "the shell rewrites a braced word into several words before the program runs, and this one is a form vouch does not reproduce — so the arguments the program really receives are not the ones on the line",
+        "unmodeled_import" => "a top-level import statement names an unmodeled module outside the curated known-inert standard library set, executing code at import time",
         _ => "vouch recognises this but cannot follow what it does",
     }
 }
@@ -1211,7 +1212,7 @@ fn judge_once(
     // `dynamic_call` nested in a bash line is settable as
     // `lang.python.constructs.dynamic_call`, not bash's (spec's
     // shared-vocabulary paragraph, "on every path").
-    let mut snippet_constructs: Vec<(String, String)> = Vec::new();
+    let mut snippet_constructs: Vec<(String, String, String)> = Vec::new();
     // Engine scopes for the redirects the fold below appends, parallel to
     // `scan.redirect_targets` and `None` for every redirect the outer scan
     // found itself.
@@ -1253,13 +1254,19 @@ fn judge_once(
         scan.redirect_targets.extend(site.redirect_targets.iter().cloned());
         scan.redirect_env.extend(site.redirect_env.iter().cloned());
         for c in &site.constructs {
-            snippet_constructs.push((plang.clone(), c.clone()));
+            let detail = site
+                .construct_details
+                .iter()
+                .find(|(n, _)| n == c)
+                .map(|(_, d)| d.clone())
+                .unwrap_or_default();
+            snippet_constructs.push((plang.clone(), c.clone(), detail));
         }
         for heredoc in &site.heredocs {
             if let Some(consumer) = site.commands.get(heredoc.cmd_index) {
                 let standalone_eligible = true;
                 if crate::guards::heredoc_feeds(kb, consumer, plang, heredoc, standalone_eligible).is_none() {
-                    snippet_constructs.push((plang.clone(), "heredoc".to_string()));
+                    snippet_constructs.push((plang.clone(), "heredoc".to_string(), String::new()));
                 }
             }
         }
@@ -2604,13 +2611,16 @@ fn judge_once(
     // resolve under the snippet's OWN language, never the host's — channel 2
     // (`lang` shadowed here on purpose: the source shape criterion 2's
     // coverage scan looks for).
-    for (plang, name) in &snippet_constructs {
+    for (plang, name, detail) in &snippet_constructs {
         let lang = plang.as_str();
         let (a, key) = construct_action_for(cfg, lang, name);
         if a == Action::Allow {
             remember(&mut grants, construct_grant(lang, &key));
         }
-        let reason = construct_reason(lang, &key);
+        let mut reason = construct_reason(lang, &key);
+        if !detail.is_empty() {
+            reason = format!("{reason}\n  could not read: {detail}");
+        }
         if wins_reason_slot(a, &reason, &worst) {
             worst = Some((a, reason));
         }
@@ -3575,6 +3585,7 @@ struct SnippetSite {
     redirect_scope: Vec<Option<usize>>,
     redirect_chain: Vec<Option<crate::syntax::ChainPos>>,
     constructs: Vec<String>,
+    construct_details: Vec<(String, String)>,
     heredocs: Vec<crate::syntax::Heredoc>,
     commands: Vec<crate::syntax::Cmd>,
 }
@@ -3811,6 +3822,7 @@ fn collect_expanded(
                 redirect_scope: src.redirect_scope,
                 redirect_chain: src.redirect_chain,
                 constructs: src.constructs,
+                construct_details: src.construct_details,
                 heredocs: src.heredocs,
                 commands: src.commands,
             });

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.48.0 (2026-09-24)
+
+
+### Features
+
+* deduplicate on-demand verdict measurement dumps into single-pass execution
+* emit unmodeled_import construct on unmodeled Python top-level imports
+* extend runs_file script-file ask mechanism to node, perl, ruby, and bun interpreters
+* model bare exec redirection sequences across subsequent shell pipeline commands
+* smoke test macOS release asset execution before release publishing
+
 ## 0.47.0 (2026-09-24)
 
 
