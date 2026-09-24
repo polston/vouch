@@ -176,27 +176,130 @@ fn contains_as_literal(src: &str, name: &str) -> bool {
 /// word (`"foo" "bar"` must not read as containing `foobar`). Escape
 /// handling mirrors `strip_rust_comments`: `\"` does not end the literal
 /// early, and the character following a backslash is copied as-is.
+/// Both normal string literals (`"..."`) and raw string literals (`r"..."`,
+/// `r#"..."#`) are recognized.
 fn string_literal_contents(src: &str) -> String {
     let mut out = String::with_capacity(src.len());
-    let mut chars = src.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '"' {
-            while let Some(c2) = chars.next() {
-                if c2 == '\\' {
-                    if let Some(escaped) = chars.next() {
-                        out.push(escaped);
+    let chars: Vec<char> = src.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        // Raw string literal: r"...", r#"..."#, r##"..."##
+        if chars[i] == 'r' && i + 1 < len && (chars[i + 1] == '"' || chars[i + 1] == '#') {
+            let mut j = i + 1;
+            while j < len && chars[j] == '#' {
+                j += 1;
+            }
+            if j < len && chars[j] == '"' {
+                let hashes = j - (i + 1);
+                i = j + 1;
+                let start = i;
+                while i < len {
+                    if chars[i] == '"' {
+                        let mut match_hashes = 0;
+                        while i + 1 + match_hashes < len && chars[i + 1 + match_hashes] == '#' && match_hashes < hashes {
+                            match_hashes += 1;
+                        }
+                        if match_hashes == hashes {
+                            for k in start..i {
+                                out.push(chars[k]);
+                            }
+                            out.push('\n');
+                            i += 1 + hashes;
+                            break;
+                        }
                     }
-                    continue;
+                    i += 1;
                 }
-                if c2 == '"' {
+                continue;
+            }
+        }
+
+        // Standard string literal: "..."
+        if chars[i] == '"' {
+            i += 1;
+            while i < len {
+                if chars[i] == '\\' {
+                    if i + 1 < len {
+                        out.push(chars[i + 1]);
+                        i += 2;
+                        continue;
+                    }
+                }
+                if chars[i] == '"' {
+                    i += 1;
                     break;
                 }
-                out.push(c2);
+                out.push(chars[i]);
+                i += 1;
             }
             out.push('\n');
+            continue;
         }
+
+        i += 1;
     }
     out
+}
+
+/// Truncate text at `#[cfg(test)]` outside of any string literals.
+fn truncate_before_test_module(src: &str) -> &str {
+    let chars: Vec<(usize, char)> = src.char_indices().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        if src[chars[i].0..].starts_with("#[cfg(test)]") {
+            return &src[..chars[i].0];
+        }
+
+        // Raw string literal: skip over
+        if chars[i].1 == 'r' && i + 1 < len && (chars[i + 1].1 == '"' || chars[i + 1].1 == '#') {
+            let mut j = i + 1;
+            while j < len && chars[j].1 == '#' {
+                j += 1;
+            }
+            if j < len && chars[j].1 == '"' {
+                let hashes = j - (i + 1);
+                i = j + 1;
+                while i < len {
+                    if chars[i].1 == '"' {
+                        let mut match_hashes = 0;
+                        while i + 1 + match_hashes < len && chars[i + 1 + match_hashes].1 == '#' && match_hashes < hashes {
+                            match_hashes += 1;
+                        }
+                        if match_hashes == hashes {
+                            i += 1 + hashes;
+                            break;
+                        }
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+        }
+
+        // Standard string literal: skip over
+        if chars[i].1 == '"' {
+            i += 1;
+            while i < len {
+                if chars[i].1 == '\\' {
+                    i += 2;
+                    continue;
+                }
+                if chars[i].1 == '"' {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+
+        i += 1;
+    }
+    src
 }
 
 /// Whether `name` appears as a whole word INSIDE A STRING LITERAL in `src`,
@@ -210,10 +313,7 @@ fn contains_as_shipped_name(src: &str, name: &str) -> bool {
         return false;
     }
     let stripped = strip_rust_comments(src);
-    let scanned = match stripped.find("#[cfg(test)]") {
-        Some(idx) => &stripped[..idx],
-        None => stripped.as_str(),
-    };
+    let scanned = truncate_before_test_module(&stripped);
     let contents = string_literal_contents(scanned);
     let is_ident = |c: char| c.is_alphanumeric() || c == '_';
     contents.match_indices(name).any(|(idx, m)| {
@@ -241,6 +341,28 @@ fn the_literal_occurrence_check_fires_on_code_and_not_on_comments() {
     assert!(
         !contains_as_literal(in_doc_comment, "shutil.rmtree"),
         "must NOT fire when the name only appears in a /* */ or /// comment"
+    );
+}
+
+#[test]
+fn literal_occurrence_check_recognizes_raw_string_literals() {
+    let in_raw = "let x = r\"shutil.rmtree\";\n";
+    assert!(contains_as_shipped_name(in_raw, "shutil.rmtree"), "must fire on raw string literal");
+
+    let in_raw_hashes = "let x = r#\"shutil.rmtree\"#;\n";
+    assert!(contains_as_shipped_name(in_raw_hashes, "shutil.rmtree"), "must fire on raw string literal with hashes");
+}
+
+#[test]
+fn test_module_truncation_ignores_embedded_test_marker_in_string_literals() {
+    let code_with_embedded_marker = "let marker = \"#[cfg(test)]\";\nlet actual = \"shutil.rmtree\";\n#[cfg(test)]\nlet dead = \"os.remove\";\n";
+    assert!(
+        contains_as_shipped_name(code_with_embedded_marker, "shutil.rmtree"),
+        "must not prematurely truncate on #[cfg(test)] inside string literal"
+    );
+    assert!(
+        !contains_as_shipped_name(code_with_embedded_marker, "os.remove"),
+        "must truncate after the real #[cfg(test)] module header"
     );
 }
 

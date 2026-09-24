@@ -1152,6 +1152,21 @@ fn effective_python_arguments_distinguish_padding_and_literal_marker_text() {
         "literal marker text is still readable"
     );
     assert!(literal.padding.is_empty());
+    assert_eq!(padded.token(0), Some(&vouch::guards::ArgToken::PaddingMarker));
+    assert_eq!(padded.token(1), Some(&vouch::guards::ArgToken::Literal("w".to_string())));
+    assert!(!padded.is_occupied(0));
+    assert!(padded.is_occupied(1));
+
+    assert_eq!(literal.token(0), Some(&vouch::guards::ArgToken::Literal("$?".to_string())));
+    assert_eq!(literal.token(1), Some(&vouch::guards::ArgToken::Literal("w".to_string())));
+    assert!(literal.is_occupied(0));
+
+    let kb = open_kb();
+    let written_literal = py_written(&kb, r#"open(file="$?", mode="w")"#);
+    assert_eq!(written_literal.paths, vec!["$?"]);
+
+    let written_padded = py_written(&kb, r#"open(mode="w")"#);
+    assert_eq!(written_padded.paths, vec!["$?"]); // unaddressed parameter resolves to marker
 }
 
 #[test]

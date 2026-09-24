@@ -876,6 +876,55 @@ pub fn resolve_with_assignments(
     unquote(&text).to_string()
 }
 
+/// Destination refusal reasons when checking a sample dump path.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DestinationRefusal {
+    NotAbsolute,
+    NoExistingAncestor,
+    InsideGitWorktree(std::path::PathBuf),
+}
+
+/// Check whether `p` is an absolute path that does not sit inside a git worktree,
+/// and that resolves to an existing ancestor directory.
+pub fn check_sample_destination(p: &std::path::Path) -> Result<std::path::PathBuf, DestinationRefusal> {
+    check_sample_destination_with(p, |path| path.canonicalize())
+}
+
+/// Same as `check_sample_destination`, but with a customizable canonicalizer for testing.
+pub fn check_sample_destination_with<F>(
+    p: &std::path::Path,
+    mut canonicalizer: F,
+) -> Result<std::path::PathBuf, DestinationRefusal>
+where
+    F: FnMut(&std::path::Path) -> std::io::Result<std::path::PathBuf>,
+{
+    if !p.is_absolute() {
+        return Err(DestinationRefusal::NotAbsolute);
+    }
+    let mut probe = p;
+    let canon = loop {
+        match canonicalizer(probe) {
+            Ok(c) => break Some(c),
+            Err(_) => match probe.parent() {
+                Some(par) => probe = par,
+                None => break None,
+            },
+        }
+    };
+    let canon = match canon {
+        Some(c) => c,
+        None => return Err(DestinationRefusal::NoExistingAncestor),
+    };
+    let mut anc = Some(canon.as_path());
+    while let Some(d) = anc {
+        if d.join(".git").exists() {
+            return Err(DestinationRefusal::InsideGitWorktree(d.to_path_buf()));
+        }
+        anc = d.parent();
+    }
+    Ok(canon)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

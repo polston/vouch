@@ -16,6 +16,8 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use std::collections::HashSet;
 
+pub use crate::syntax::ArgToken;
+
 pub const KNOWN_GUARDS: &[&str] = &[
     "bypass_enforcement",
     "confidential_output",
@@ -5340,7 +5342,7 @@ pub fn expand_wrappers_forking(
                                     "evaluated_input".to_string(),
                                     format!(
                                         "`{}` is handed a command string vouch could not read the \
-                                     value of",
+                                      value of",
                                         cmd.head
                                     ),
                                     Some(lang.to_string()),
@@ -6140,7 +6142,23 @@ fn is_unresolved_marker(a: &str) -> bool {
 /// the index set, and no shipped python entry uses them. Keep the spelling
 /// grammar-safe anyway: the two defences are deliberately independent, and
 /// the second one existing is not a reason to weaken the first.
-const PADDING_MARKER: &str = "$,";
+pub const PADDING_MARKER: &str = "$,";
+
+/// Translates a declaration-space parameter index (e.g. from `arg_names`)
+/// into the effective-arguments index space, accounting for whether the
+/// command head is method-shaped (where index 0 is occupied by the receiver).
+pub fn resolve_param_index(param_idx: usize, base_off: usize) -> usize {
+    param_idx + base_off
+}
+
+/// Looks up parameter `name` in `prog.arg_names` and resolves its position in
+/// the effective argument index space using `base_off`.
+pub fn param_name_to_eff_index(prog: &Program, name: &str, base_off: usize) -> Option<usize> {
+    prog.arg_names
+        .iter()
+        .position(|n| n == name)
+        .map(|p| resolve_param_index(p, base_off))
+}
 
 /// Whether `eff[i]` is a REAL occupant — something a token in the call
 /// actually addressed, whether resolved or not — as opposed to a gap
@@ -6187,11 +6205,28 @@ fn has_unpack_arg(cmd: &Cmd) -> bool {
 /// parameter) contributes no position here, matching `arg_names`'s own doc
 /// comment on `callback_args`.
 fn callback_arg_positions(prog: &Program, base_off: usize) -> HashSet<usize> {
-    prog.callback_args.iter().filter_map(|c| prog.arg_names.iter().position(|n| n == c)).map(|p| p + base_off).collect()
+    prog.callback_args
+        .iter()
+        .filter_map(|c| param_name_to_eff_index(prog, c, base_off))
+        .collect()
 }
 
 fn invokes_methods_positions(prog: &Program, base_off: usize) -> HashSet<usize> {
-    prog.invokes_methods.iter().filter_map(|c| prog.arg_names.iter().position(|n| n == c)).map(|p| p + base_off).collect()
+    prog.invokes_methods
+        .iter()
+        .filter_map(|c| param_name_to_eff_index(prog, c, base_off))
+        .collect()
+}
+
+/// Pushes a strongly-typed argument token as a write target, ensuring literal
+/// paths equal to sentinel strings are not conflated with unread markers.
+pub(crate) fn push_write_target_token(out: &mut WriteTargets, token: &ArgToken) {
+    match token {
+        ArgToken::Literal(s) => out.paths.push(s.clone()),
+        ArgToken::UnreadMarker | ArgToken::UnpackMarker | ArgToken::PaddingMarker => {
+            out.paths.push(crate::python::MARKER.to_string());
+        }
+    }
 }
 
 /// The one place a write-target CANDIDATE becomes a write target vouch will
@@ -6285,6 +6320,18 @@ pub struct EffectiveArgs {
     /// identically — the same reason `unread` is folded.
     pub callable: HashSet<usize>,
     pub base_offset: usize,
+    /// Typed tokens distinguishing readable arguments from internal sentinels.
+    pub tokens: Vec<ArgToken>,
+}
+
+impl EffectiveArgs {
+    pub fn token(&self, i: usize) -> Option<&ArgToken> {
+        self.tokens.get(i)
+    }
+
+    pub fn is_occupied(&self, i: usize) -> bool {
+        i < self.values.len() && !self.padding.contains(&i)
+    }
 }
 
 /// Arguments in the positions an entry's `arg_names` declares.
@@ -6296,12 +6343,26 @@ pub struct EffectiveArgs {
 pub fn effective_args(prog: &Program, cmd: &Cmd) -> EffectiveArgs {
     let base = usize::from(head_is_method_shaped(&cmd.head));
     if prog.arg_names.is_empty() {
+        let tokens = (0..cmd.args.len())
+            .map(|i| {
+                if cmd.unread_args.contains(&i) {
+                    if cmd.args[i] == crate::python::UNPACK_MARKER {
+                        ArgToken::UnpackMarker
+                    } else {
+                        ArgToken::UnreadMarker
+                    }
+                } else {
+                    ArgToken::Literal(cmd.args[i].clone())
+                }
+            })
+            .collect();
         return EffectiveArgs {
             values: cmd.args.clone(),
             padding: HashSet::new(),
             unread: cmd.unread_args.clone(),
             callable: cmd.callable_args.keys().copied().collect(),
             base_offset: base,
+            tokens,
         };
     }
     let mut eff: Vec<String> = Vec::new();
@@ -6359,12 +6420,28 @@ pub fn effective_args(prog: &Program, cmd: &Cmd) -> EffectiveArgs {
             eff.push(value); // first occupant wins
         }
     }
+    let tokens = (0..eff.len())
+        .map(|i| {
+            if padding.contains(&i) {
+                ArgToken::PaddingMarker
+            } else if unread.contains(&i) {
+                if eff[i] == crate::python::UNPACK_MARKER {
+                    ArgToken::UnpackMarker
+                } else {
+                    ArgToken::UnreadMarker
+                }
+            } else {
+                ArgToken::Literal(eff[i].clone())
+            }
+        })
+        .collect();
     EffectiveArgs {
         values: eff,
         padding,
         unread,
         callable,
         base_offset: base,
+        tokens,
     }
 }
 
@@ -6395,7 +6472,7 @@ fn mode_says_write(prog: &Program, eff: &[String], padding: &HashSet<usize>, bas
     // "mode" whenever `writes_only_with_file_mode = true` is set on a loaded
     // file; a caller that builds a `Program` without going through that
     // check gets the fail-safe reading — treat it as a possible write.
-    let Some(p) = prog.arg_names.iter().position(|n| n == "mode") else {
+    let Some(eff_idx) = param_name_to_eff_index(prog, "mode", base) else {
         return true;
     };
     // A PADDED position (task 2b fix round 4) means the call never
@@ -6403,10 +6480,10 @@ fn mode_says_write(prog: &Program, eff: &[String], padding: &HashSet<usize>, bas
     // an unreadable value. Without this, folding a LATER keyword
     // (`open("f.txt", encoding="utf-8")`) pads straight through mode's own
     // position, and a plain read call starts asking about a write.
-    if !eff_position_occupied(eff, padding, base + p) {
+    if !eff_position_occupied(eff, padding, eff_idx) {
         return has_unpack; // absent → a read, UNLESS an unpack could be supplying it invisibly
     }
-    let v = &eff[base + p];
+    let v = &eff[eff_idx];
     let is_mode = !v.is_empty() && v.len() <= 4 && v.chars().all(|c| "rwaxbtU+".contains(c));
     if is_mode {
         v.chars().any(|c| "wax+".contains(c))
@@ -6555,8 +6632,8 @@ pub fn written_paths_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> WriteTargets {
         // why occupancy is tracked by index rather than by comparing a
         // position's text against `PADDING_MARKER`.
         let effective = effective_args(prog, cmd);
-        let eff = effective.values;
-        let padding = effective.padding;
+        let eff = &effective.values;
+        let padding = &effective.padding;
         let base_off = effective.base_offset;
         // A flag's VALUE is not a positional argument. Without this,
         // `truncate -s 0 <file>` records `0` as a written path, and the
@@ -6594,11 +6671,12 @@ pub fn written_paths_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> WriteTargets {
         // `eff_position_occupied`, not a bare index check: "skipped rather
         // than pushed as a write path" for BOTH `all_args` and `last_arg`,
         // the two arms that ever read this list).
-        let non_flags_paths: Vec<&String> = non_flags
+        let non_flags_entries: Vec<(usize, &String)> = non_flags
             .iter()
             .filter(|(i, _)| !callback_positions.contains(i) && !invokes_methods_positions.contains(i) && eff_position_occupied(&eff, &padding, *i))
-            .map(|(_, a)| *a)
+            .map(|(i, a)| (*i, *a))
             .collect();
+        let non_flags_paths: Vec<&String> = non_flags_entries.iter().map(|(_, a)| *a).collect();
         // "Writes where it stands": a declared shape whose destination is the
         // directory the command runs in (M2.129). Decided BEFORE the position
         // arms and winning over them, because for the shape it describes the
@@ -6648,14 +6726,18 @@ pub fn written_paths_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> WriteTargets {
         match prog.writes.as_str() {
             "last_arg" => {
                 let min_pos = prog.min_positional_write.unwrap_or(1);
-                if non_flags_paths.len() >= min_pos {
+                if non_flags_entries.len() >= min_pos {
                     let pick = if prog.positional_write_takes.as_deref() == Some("first") {
-                        non_flags_paths.first()
+                        non_flags_entries.first()
                     } else {
-                        non_flags_paths.last()
+                        non_flags_entries.last()
                     };
-                    if let Some(last) = pick {
-                        push_write_target(&mut out, last);
+                    if let Some((idx, s)) = pick {
+                        if let Some(tok) = effective.token(*idx) {
+                            push_write_target_token(&mut out, tok);
+                        } else {
+                            push_write_target(&mut out, s);
+                        }
                     }
                 } else if cmd.by_reference {
                     // A by-reference invocation, judged with no arguments
@@ -6672,23 +6754,31 @@ pub fn written_paths_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> WriteTargets {
             }
             "positional" => {
                 let min_pos = prog.min_positional_write.unwrap_or(1);
-                if non_flags_paths.len() >= min_pos {
+                if non_flags_entries.len() >= min_pos {
                     let pick = if prog.positional_write_takes.as_deref() == Some("first") {
-                        non_flags_paths.first()
+                        non_flags_entries.first()
                     } else {
-                        non_flags_paths.last()
+                        non_flags_entries.last()
                     };
-                    if let Some(target) = pick {
-                        push_write_target(&mut out, target);
+                    if let Some((idx, s)) = pick {
+                        if let Some(tok) = effective.token(*idx) {
+                            push_write_target_token(&mut out, tok);
+                        } else {
+                            push_write_target(&mut out, s);
+                        }
                     }
                 } else if cmd.by_reference {
                     push_write_target(&mut out, crate::python::MARKER);
                 }
             }
             "all_args" => {
-                if !non_flags_paths.is_empty() {
-                    for a in &non_flags_paths {
-                        push_write_target(&mut out, a);
+                if !non_flags_entries.is_empty() {
+                    for (idx, s) in &non_flags_entries {
+                        if let Some(tok) = effective.token(*idx) {
+                            push_write_target_token(&mut out, tok);
+                        } else {
+                            push_write_target(&mut out, s);
+                        }
                     }
                 } else if cmd.by_reference {
                     push_write_target(&mut out, crate::python::MARKER);
@@ -6719,7 +6809,7 @@ pub fn written_paths_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> WriteTargets {
             "named" | "flags_only" => {
                 let mut take_next = false;
                 let mut found = false;
-                for a in &eff {
+                for a in eff {
                     if take_next {
                         push_write_target(&mut out, a);
                         found = true;
@@ -6738,7 +6828,7 @@ pub fn written_paths_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> WriteTargets {
                                 break;
                             }
                             crate::flags::Spell::RefusedAbbrev { .. } => {
-                                out.unknowable.push(a.clone());
+                                out.unknowable.push(a.to_string());
                                 break;
                             }
                             crate::flags::Spell::No => {}
@@ -6752,16 +6842,20 @@ pub fn written_paths_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> WriteTargets {
                 // last — the default, when the entry does not say.
                 if !found && prog.writes == "named" {
                     let min_pos = prog.min_positional_write.unwrap_or(1);
-                    if non_flags_paths.len() >= min_pos {
+                    if non_flags_entries.len() >= min_pos {
                         let pick = if prog.positional_write_takes.as_deref() == Some("first")
                             || prog.named_positional.as_deref() == Some("first")
                         {
-                            non_flags_paths.first()
+                            non_flags_entries.first()
                         } else {
-                            non_flags_paths.last()
+                            non_flags_entries.last()
                         };
-                        if let Some(p) = pick {
-                            push_write_target(&mut out, p);
+                        if let Some((idx, p)) = pick {
+                            if let Some(tok) = effective.token(*idx) {
+                                push_write_target_token(&mut out, tok);
+                            } else {
+                                push_write_target(&mut out, p);
+                            }
                             found = true;
                         }
                     }
@@ -6782,7 +6876,7 @@ pub fn written_paths_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> WriteTargets {
                 }
             }
             "of_prefix" => {
-                for a in &eff {
+                for a in eff {
                     if let Some(v) = a.strip_prefix("of=") {
                         push_write_target(&mut out, v);
                     }
@@ -6813,23 +6907,18 @@ pub fn written_paths_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> WriteTargets {
                         // position reads exactly like a genuinely absent one
                         // — both are "unresolved", never the padding text
                         // itself.
-                        let target = if !eff_position_occupied(&eff, &padding, i) {
-                            crate::python::MARKER.to_string()
+                        if prog.arg_names.is_empty() && cmd.keyword_args.contains(&i) {
+                            push_write_target(&mut out, crate::python::MARKER);
                         } else {
-                            let v = &eff[i];
-                            // A structurally marked but unfolded keyword never
-                            // names a resolved position: with no `arg_names`
-                            // to map it through, it is no more trustworthy
-                            // than an absent one. Literal positional
-                            // `name=value` text is not a keyword and remains
-                            // the real target.
-                            if prog.arg_names.is_empty() && cmd.keyword_args.contains(&i) {
-                                crate::python::MARKER.to_string()
-                            } else {
-                                v.clone()
+                            match effective.token(i) {
+                                Some(tok @ ArgToken::Literal(_)) => {
+                                    push_write_target_token(&mut out, tok);
+                                }
+                                Some(ArgToken::UnreadMarker | ArgToken::UnpackMarker | ArgToken::PaddingMarker) | None => {
+                                    push_write_target(&mut out, crate::python::MARKER);
+                                }
                             }
-                        };
-                        push_write_target(&mut out, &target);
+                        }
                     }
                 }
             }
@@ -6958,7 +7047,7 @@ pub fn written_paths_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> WriteTargets {
         for so in &matched_sub_opts {
             if !so.write_flags.is_empty() {
                 let mut take_next = false;
-                for a in &eff {
+                for a in eff {
                     if take_next {
                         push_write_target(&mut out, a);
                         take_next = false;
@@ -6975,7 +7064,7 @@ pub fn written_paths_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> WriteTargets {
                                 break;
                             }
                             crate::flags::Spell::RefusedAbbrev { .. } => {
-                                out.unknowable.push(a.clone());
+                                out.unknowable.push(a.to_string());
                                 break;
                             }
                             crate::flags::Spell::No => {}

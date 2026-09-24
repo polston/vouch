@@ -3335,14 +3335,94 @@ pub(crate) fn arithmetic_opening(src: &str, start: usize) -> Opening {
     }
 }
 
+/// Parsing errors from shell source parsing.
+#[derive(Debug)]
+pub enum ShellParseError {
+    DescriptorOutOfRange,
+    ParserPanic,
+    Brush(brush_parser::ParseError),
+}
+
+impl std::fmt::Display for ShellParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DescriptorOutOfRange => write!(f, "redirection descriptor out of range"),
+            Self::ParserPanic => write!(f, "syntax error: parser internal failure"),
+            Self::Brush(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for ShellParseError {}
+
+/// Pre-scans unquoted shell text for redirection descriptor candidate tokens immediately preceding
+/// `<` or `>` operators. If an unquoted digit sequence overflows `i32` bounds, returns
+/// `Err(ShellParseError::DescriptorOutOfRange)` preventing upstream peg parser unwrap panics.
+fn check_redirection_descriptor_bounds(text: &str) -> Result<(), ShellParseError> {
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let len = chars.len();
+    let mut q = Quoting::default();
+    let mut i = 0;
+    let mut at_word_start = true;
+
+    while i < len {
+        if let Some(next) = q.step(&chars, i) {
+            i = next;
+            at_word_start = false;
+            continue;
+        }
+        let (_, c) = chars[i];
+        if c == '#' && at_word_start {
+            while i < len && chars[i].1 != '\n' {
+                i += 1;
+            }
+            at_word_start = true;
+            continue;
+        }
+        if c.is_ascii_whitespace() || c == ';' || c == '&' || c == '|' || c == '(' || c == ')' {
+            at_word_start = true;
+            i += 1;
+            continue;
+        }
+
+        if at_word_start && c.is_ascii_digit() {
+            let start = i;
+            while i < len && chars[i].1.is_ascii_digit() {
+                i += 1;
+            }
+            let digits_end = i;
+            if digits_end < len && (chars[digits_end].1 == '<' || chars[digits_end].1 == '>') {
+                let digit_str: String = chars[start..digits_end].iter().map(|(_, ch)| *ch).collect();
+                if digit_str.parse::<i32>().is_err() {
+                    return Err(ShellParseError::DescriptorOutOfRange);
+                }
+            }
+            at_word_start = false;
+            continue;
+        }
+
+        at_word_start = false;
+        i += 1;
+    }
+    Ok(())
+}
+
 /// The one parser construction in this file. Both entry points go through it,
 /// so a future change to the options cannot reach `parse` and miss the
 /// recovered-text re-read — which a comment saying "keep these in sync" was
 /// the only thing preventing.
-fn parse_source(text: &str) -> Result<brush_parser::ast::Program, brush_parser::ParseError> {
-    let options = brush_parser::ParserOptions::default();
-    let mut parser = brush_parser::Parser::new(std::io::Cursor::new(text), &options);
-    parser.parse_program()
+fn parse_source(text: &str) -> Result<brush_parser::ast::Program, ShellParseError> {
+    check_redirection_descriptor_bounds(text)?;
+    let parse_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let options = brush_parser::ParserOptions::default();
+        let mut parser = brush_parser::Parser::new(std::io::Cursor::new(text), &options);
+        parser.parse_program()
+    }));
+    match parse_res {
+        Ok(Ok(program)) => Ok(program),
+        Ok(Err(e)) => Err(ShellParseError::Brush(e)),
+        Err(_) => Err(ShellParseError::ParserPanic),
+    }
 }
 
 /// The same parse, for a caller that has no error to report — a re-read of

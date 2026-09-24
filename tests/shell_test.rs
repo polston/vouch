@@ -693,3 +693,38 @@ fn chained_variable_assignment_in_compound_command() {
     assert_eq!(p.commands[0].env_assigns.get("A").cloned().flatten(), Some("hello".to_string()));
     assert_eq!(p.commands[0].env_assigns.get("B").cloned().flatten(), Some("hello world".to_string()));
 }
+
+#[test]
+fn out_of_range_redirection_descriptor_returns_parse_error() {
+    let err = parse("echo hi 99999999999999999999>&1").unwrap_err();
+    assert!(
+        err.contains("redirection descriptor out of range"),
+        "expected descriptor out of range, got {err}"
+    );
+
+    let err_in = parse("cat 10000000000000000000<file").unwrap_err();
+    assert!(
+        err_in.contains("redirection descriptor out of range"),
+        "expected descriptor out of range, got {err_in}"
+    );
+}
+
+#[test]
+fn redirection_descriptor_i32_boundaries() {
+    // i32::MAX is 2147483647
+    let valid = parse("echo hi 2147483647>&1");
+    assert!(valid.is_ok(), "i32::MAX must parse cleanly");
+
+    // i32::MAX + 1 is 2147483648
+    let overflow = parse("echo hi 2147483648>&1");
+    assert!(
+        overflow.is_err(),
+        "i32::MAX + 1 must be rejected as out of range"
+    );
+}
+
+#[test]
+fn out_of_range_descriptor_in_quotes_is_not_treated_as_redirection() {
+    let p = parse("echo \"99999999999999999999>&1\"").unwrap();
+    assert_eq!(p.commands[0].args, vec!["\"99999999999999999999>&1\"".to_string()]);
+}

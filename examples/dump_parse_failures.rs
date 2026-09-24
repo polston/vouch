@@ -83,30 +83,25 @@ fn elide_quoted(text: &str) -> String {
     out
 }
 
+use vouch::paths::{check_sample_destination, DestinationRefusal};
+
 fn main() {
     if let Some(dest) = std::env::var_os(SAMPLES_VAR) {
         let p = std::path::PathBuf::from(&dest);
-        if !p.is_absolute() {
-            eprintln!("{SAMPLES_VAR} must be an absolute path");
-            std::process::exit(1);
-        }
-        let mut probe = p.as_path();
-        let canon = loop {
-            match probe.canonicalize() {
-                Ok(c) => break Some(c),
-                Err(_) => match probe.parent() {
-                    Some(par) => probe = par,
-                    None => break None,
-                },
+        match check_sample_destination(&p) {
+            Err(DestinationRefusal::NotAbsolute) => {
+                eprintln!("{SAMPLES_VAR} must be an absolute path");
+                std::process::exit(1);
             }
-        };
-        let mut anc = canon.as_deref();
-        while let Some(d) = anc {
-            if d.join(".git").exists() {
+            Err(DestinationRefusal::NoExistingAncestor) => {
+                eprintln!("{SAMPLES_VAR} destination has no existing ancestor directory");
+                std::process::exit(1);
+            }
+            Err(DestinationRefusal::InsideGitWorktree(_)) => {
                 eprintln!("{SAMPLES_VAR} must not resolve inside a git worktree");
                 std::process::exit(1);
             }
-            anc = d.parent();
+            Ok(_) => {}
         }
     }
 

@@ -329,3 +329,9 @@ fn resolved_outside_targets_still_meet_write_policy() {
     assert_eq!(verdict, "ask", "{command}\n{reason}");
     assert!(!reason.contains("unresolved_path"), "the mapping never reached write policy: {reason}");
 }
+
+#[test]
+fn literal_marker_text_as_argument_is_not_confused_with_unread_marker() {
+    let command = r#"python -c "import sys; open(sys.argv[1], 'w', encoding='$?')" C:/work/direct.txt"#;
+    assert_allows("python-argv-literal-marker-arg", command);
+}

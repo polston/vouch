@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.47.0 (2026-09-24)
+
+
+### Features
+
+* separate internal sentinels into typed tokens and unify position offset indexing across write arms
+* support gitignored operator patterns file in private data scanner and git hooks
+
+
+### Bug Fixes
+
+* check redirection descriptor bounds in shell parser to prevent integer overflow panics
+* handle raw strings and structural test markers in Python scanner test harness
+* refuse sample destination when no existing ancestor path can be canonicalized in parse failure dumps
+
 ## 0.46.0 (2026-09-23)
 
 

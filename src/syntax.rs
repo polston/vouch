@@ -70,6 +70,64 @@ impl Cmd {
     pub fn resolved_args(&self, pwd: Option<&str>) -> Vec<String> {
         self.args.iter().map(|a| self.resolve_arg(a, pwd)).collect()
     }
+
+    /// Returns the typed argument token at index `i`, distinguishing real
+    /// command argument text from unread or unpack markers.
+    pub fn arg_token(&self, i: usize) -> Option<ArgToken> {
+        let v = self.args.get(i)?;
+        if self.unread_args.contains(&i) {
+            if v == crate::python::UNPACK_MARKER {
+                Some(ArgToken::UnpackMarker)
+            } else {
+                Some(ArgToken::UnreadMarker)
+            }
+        } else {
+            Some(ArgToken::Literal(v.clone()))
+        }
+    }
+}
+
+/// Strongly-typed argument token representation distinguishing real command
+/// text from scanner or folding sentinels.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArgToken {
+    /// A literal, readable argument text.
+    Literal(String),
+    /// An unresolvable/unread argument value (e.g. `$?`).
+    UnreadMarker,
+    /// A nameless `**` keyword unpack (e.g. `$**`).
+    UnpackMarker,
+    /// A padded gap position never addressed in the call (e.g. `$,`).
+    PaddingMarker,
+}
+
+impl ArgToken {
+    pub fn is_unresolved(&self) -> bool {
+        matches!(
+            self,
+            ArgToken::UnreadMarker | ArgToken::UnpackMarker | ArgToken::PaddingMarker
+        )
+    }
+
+    pub fn is_padding(&self) -> bool {
+        matches!(self, ArgToken::PaddingMarker)
+    }
+
+    pub fn as_literal(&self) -> Option<&str> {
+        match self {
+            ArgToken::Literal(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    pub fn to_marker_string(&self) -> String {
+        match self {
+            ArgToken::Literal(s) => s.clone(),
+            ArgToken::UnreadMarker => crate::python::MARKER.to_string(),
+            ArgToken::UnpackMarker => crate::python::UNPACK_MARKER.to_string(),
+            ArgToken::PaddingMarker => crate::guards::PADDING_MARKER.to_string(),
+        }
+    }
 }
 
 /// A scanner's language-neutral account of where a runtime value came from.

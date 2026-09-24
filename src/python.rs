@@ -87,19 +87,17 @@ pub const KNOWN_CONSTRUCTS: &[&str] = &[
 
 /// A call whose target vouch cannot name: `f()` where `f` is a parameter, or
 /// a call on something built by an expression rather than a plain name.
-/// Marks the head so the engine can tell "a call vouch has no description
-/// of" from "a call vouch could not even identify" — different problems, and
-/// the second one is vouch's own limit.
-const UNNAMEABLE: &str = "?";
-
-/// A call target whose plain name (or whose dotted head's root) was bound by
-/// an ordinary binding form somewhere in this same snippet — assignment, a
-/// `def`, a `class`, a loop/with/except/comprehension/match target, or a
-/// function parameter. The name no longer means what the knowledge
-/// describes, so `Walk::call` refuses to read it as the original rather than
-/// matching an entry the snippet itself invalidated. Distinct from
-/// `UNNAMEABLE`: a poisoned name IS nameable, it is just no longer trusted.
-const REBOUND: &str = "!";
+/// What a Python call target expression resolved to as its invocation head.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TargetHead {
+    /// A named call head, e.g. "open", "os.mkdir", or ".write_text".
+    Named(String),
+    /// A dynamic or unnameable call head (e.g. `(f or g)()`, `x[0]()`).
+    Unnameable,
+    /// A name rebound within the snippet, which can no longer be trusted to
+    /// match a knowledge entry.
+    Rebound,
+}
 
 /// Marks a head as a Python call rather than a program name.
 ///
@@ -701,12 +699,11 @@ impl Flow {
             }
             ast::Expr::Attribute(_) => {
                 let path = dotted(expr)?;
-                let (root, rest) = path.split_once('.')?;
-                if self.poisoned.contains(root) && self.env.imported.contains_key(root) {
-                    return None;
-                }
-                if let Some(module) = self.env.imported.get(root) {
-                    return Some(CallableRef { head: format!("{module}.{rest}"), receiver: None });
+                if let Some((resolved, root)) = self.resolve_imported_dotted(&path) {
+                    if self.poisoned.contains(root) {
+                        return None;
+                    }
+                    return Some(CallableRef { head: resolved, receiver: None });
                 }
                 let ast::Expr::Attribute(attribute) = expr else {
                     return None;
@@ -718,6 +715,14 @@ impl Flow {
             }
             _ => None,
         }
+    }
+
+    /// Resolves an attribute path whose root component is an imported module name,
+    /// returning the fully qualified name and the root component name.
+    fn resolve_imported_dotted<'a>(&'a self, path: &'a str) -> Option<(String, &'a str)> {
+        let (root, rest) = path.split_once('.')?;
+        let module = self.env.imported.get(root)?;
+        Some((format!("{module}.{rest}"), root))
     }
 
     /// The structural answer for one argument expression (spec §3.3).
@@ -752,27 +757,25 @@ impl Flow {
         }
     }
 
-    fn target_origin(&self, func: &ast::Expr) -> (String, Option<crate::syntax::ValueOrigin>, Option<String>) {
+    fn target_origin(&self, func: &ast::Expr) -> (TargetHead, Option<crate::syntax::ValueOrigin>, Option<String>) {
         if let ast::Expr::Name(name) = func {
             if let Some(alias) = self.env.callable_aliases.get(name.id.as_str()) {
                 let receiver_name = alias.receiver.as_ref().map(|_| name.id.to_string());
-                return (alias.head.clone(), alias.receiver.clone(), receiver_name);
+                return (TargetHead::Named(alias.head.clone()), alias.receiver.clone(), receiver_name);
             }
             let resolved = self.env.imported.get(name.id.as_str()).cloned().unwrap_or_else(|| name.id.to_string());
-            return (resolved, None, None);
+            return (TargetHead::Named(resolved), None, None);
         }
         if let Some(path) = dotted(func) {
-            if let Some((root, rest)) = path.split_once('.') {
-                if let Some(module) = self.env.imported.get(root) {
-                    return (format!("{module}.{rest}"), None, None);
-                }
+            if let Some((resolved, _)) = self.resolve_imported_dotted(&path) {
+                return (TargetHead::Named(resolved), None, None);
             }
         }
         if let ast::Expr::Attribute(attribute) = func {
             let direct_name = mutation_root(&attribute.value).map(str::to_string);
-            return (format!(".{}", attribute.attr), Some(self.origin(&attribute.value)), direct_name);
+            return (TargetHead::Named(format!(".{}", attribute.attr)), Some(self.origin(&attribute.value)), direct_name);
         }
-        (UNNAMEABLE.to_string(), None, None)
+        (TargetHead::Unnameable, None, None)
     }
 
     fn origin(&self, expr: &ast::Expr) -> crate::syntax::ValueOrigin {
@@ -815,14 +818,13 @@ impl Flow {
             }
             ast::Expr::Call(call) => self.call_results.get(&call_key(call)).cloned().unwrap_or_else(|| {
                 let (head, receiver, _) = self.target_origin(&call.func);
-                if head == UNNAMEABLE {
-                    ValueOrigin::Unknown
-                } else {
-                    ValueOrigin::Call {
+                match head {
+                    TargetHead::Unnameable | TargetHead::Rebound => ValueOrigin::Unknown,
+                    TargetHead::Named(head) => ValueOrigin::Call {
                         head: format!("{PREFIX}{head}"),
                         receiver: receiver.map(Box::new),
                         arguments: call_arguments(call),
-                    }
+                    },
                 }
             }),
             _ => ValueOrigin::Unknown,
@@ -1275,14 +1277,13 @@ impl<'a> Visitor<'a> for Flow {
             if !found.positional.is_empty() || !found.keyword.is_empty() {
                 self.call_arg_callables.insert(call_key(call), found);
             }
-            let result = if head == UNNAMEABLE {
-                crate::syntax::ValueOrigin::Unknown
-            } else {
-                crate::syntax::ValueOrigin::Call {
+            let result = match head {
+                TargetHead::Unnameable | TargetHead::Rebound => crate::syntax::ValueOrigin::Unknown,
+                TargetHead::Named(head) => crate::syntax::ValueOrigin::Call {
                     head: format!("{PREFIX}{head}"),
                     receiver: receiver.map(Box::new),
                     arguments: call_arguments(call),
-                }
+                },
             };
             self.call_results.insert(key, result);
             if let Some(name) = direct_receiver {
@@ -1383,7 +1384,7 @@ impl Walk {
     /// method call on something vouch could not name as a module
     /// (`Path(p).unlink()`, `d.get(…)`), reported as `.name` with the
     /// receiver carried alongside it — the receiver often IS the path.
-    fn target(&self, func: &ast::Expr) -> (String, Option<ArgumentValue>) {
+    fn target(&self, func: &ast::Expr) -> (TargetHead, Option<ArgumentValue>) {
         if let Some(d) = dotted(func) {
             // Computed once and reused below: `split_once` is pure, so the
             // root/rebound check and the module-resolution match are
@@ -1401,16 +1402,16 @@ impl Walk {
             // poisoned local variable's method occurrence is still emitted
             // and its knowledge gate decides whether any claim applies.
             if self.poisoned.contains(root) && (split.is_none() || self.imported.contains_key(root)) {
-                return (REBOUND.to_string(), None);
+                return (TargetHead::Rebound, None);
             }
             match split {
                 // A bare name: `open(…)`, or a function pulled in by
                 // `from shutil import rmtree`, which resolves to the dotted
                 // name an entry is written against.
-                None => return (self.imported.get(&d).cloned().unwrap_or(d), None),
+                None => return (TargetHead::Named(self.imported.get(&d).cloned().unwrap_or(d)), None),
                 Some((first, rest)) => {
                     if let Some(module) = self.imported.get(first) {
-                        return (format!("{module}.{rest}"), None);
+                        return (TargetHead::Named(format!("{module}.{rest}")), None);
                     }
                 }
             }
@@ -1424,9 +1425,9 @@ impl Walk {
         // so testing the shape a second time would only re-derive it.
         if let ast::Expr::Attribute(a) = func {
             let recv = self.receiver_path(&a.value).unwrap_or_else(|| ArgumentValue::unread(MARKER));
-            return (format!(".{}", a.attr), Some(recv));
+            return (TargetHead::Named(format!(".{}", a.attr)), Some(recv));
         }
-        (UNNAMEABLE.to_string(), None)
+        (TargetHead::Unnameable, None)
     }
 
     /// The text a call's receiver stands for, when it can be read.
@@ -1460,8 +1461,8 @@ impl Walk {
         match e {
             ast::Expr::Call(c) if c.arguments.args.len() == 1 && c.arguments.keywords.is_empty() => {
                 match self.target(&c.func) {
-                    (_, None) => Some(argument_value(&c.arguments.args[0], &self.assigned)),
-                    (_, Some(_)) => None,
+                    (TargetHead::Named(_), None) => Some(argument_value(&c.arguments.args[0], &self.assigned)),
+                    _ => None,
                 }
             }
             _ => None,
@@ -1480,17 +1481,20 @@ impl Walk {
 
     fn call(&mut self, node: &ast::ExprCall) {
         let (head, receiver) = match self.call_heads.get(&call_key(node)) {
-            Some(alias) => (alias.head.clone(), alias.receiver.as_ref().map(|_| ArgumentValue::unread(MARKER))),
+            Some(alias) => (TargetHead::Named(alias.head.clone()), alias.receiver.as_ref().map(|_| ArgumentValue::unread(MARKER))),
             None => self.target(&node.func),
         };
-        if head == UNNAMEABLE {
-            self.out.note("dynamic_call");
-            return;
-        }
-        if head == REBOUND {
-            self.out.note("rebound_name");
-            return;
-        }
+        let head = match head {
+            TargetHead::Unnameable => {
+                self.out.note("dynamic_call");
+                return;
+            }
+            TargetHead::Rebound => {
+                self.out.note("rebound_name");
+                return;
+            }
+            TargetHead::Named(h) => h,
+        };
         for a in &node.arguments.args {
             if self.is_rebound_import(a) {
                 self.out.note("rebound_name");
