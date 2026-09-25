@@ -9,7 +9,7 @@
       "name": "vouch",
       "source": "./plugin",
       "description": "Skills for running vouch with Claude Code, Codex, or Google Antigravity: evidence-first setup, read-only version status, verified release updates, and safe program recognition.",
-      "version": "0.49.0",
+      "version": "0.50.0",
       "keywords": [
         "permissions",
         "security",

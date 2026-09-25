@@ -351,6 +351,11 @@ pub struct LangConfig {
     /// wrapper walk, not by this file.
     #[serde(default)]
     pub wrap_depth: Option<u8>,
+    /// Maximum size in bytes of a script file to inspect at decision time.
+    /// Files exceeding this limit are not read and fall back to evaluated_input.
+    /// Defaults to 65536 (64 KiB) when unset.
+    #[serde(default)]
+    pub max_script_bytes: Option<usize>,
 }
 
 /// The `[write]` table: what vouch does about a write it can see, and where
@@ -535,6 +540,13 @@ impl Config {
 
     pub fn lang_default(&self, lang: &str) -> Action {
         self.langs.get(lang).map(|l| l.default).unwrap_or(Action::Ask)
+    }
+
+    pub fn max_script_bytes(&self, lang: &str) -> usize {
+        self.langs
+            .get(lang)
+            .and_then(|l| l.max_script_bytes)
+            .unwrap_or(65536)
     }
 
     /// The stand-down toggle in force: `Off` unless a `[shadow]` section

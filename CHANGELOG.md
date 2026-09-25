@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.50.0 (2026-09-25)
+
+
+### Features
+
+* **Consolidate git hook dispatcher maintenance into a shared library**
+  - **Problem & Explanation:** Repository and global git hook installation scripts previously duplicated boilerplate hook dispatcher generation, validation, and self-repair code across multiple shell scripts. The shared logic is now consolidated into scripts/lib/hook-dispatcher.sh, providing unified dispatcher templates and verification routines across both repository and global hook installers.
+  - **Example Scenario:** Installing or updating git hooks via scripts/install-hooks.sh or scripts/install-global-hooks.sh.
+  - **Delta:**
+    - *Configuration Delta:* Extracted shared dispatcher logic into scripts/lib/hook-dispatcher.sh.
+    - *Behavior Contrast:* Before: duplicated hook generation logic across scripts. After: single source of truth for hook dispatcher generation and validation.
+
+* **Curate flag vocabularies and directory-changing flags for sudo and doas rest wrappers**
+  - **Problem & Explanation:** Privilege elevation tools sudo and doas share a rest wrapper mode, but previously lacked explicit flag vocabularies in knowledge.toml. Flag arguments with trailing values or flags changing working directories (such as sudo -D /path or --chdir=/path) were misparsed as wrapper heads or obscured the wrapped command. vouch now decouples sudo and doas entries with verified flag lists, value-taking flag declarations, and run_dir_flags.
+  - **Example Scenario:**
+    ```bash
+    sudo -u dev -D /repo git status
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Separated sudo and doas in knowledge.toml, defining standalone_flags, value_flags, and run_dir_flags = ["-D", "--chdir"].
+    - *Behavior Contrast:* Before: flag options interfered with finding the wrapped command head, causing false-positive unmodeled prompts. After: flags are parsed cleanly and directory changes update execution context for path validation.
+
+* **Implement native AWK syntax scanner for inline scripts and file programs**
+  - **Problem & Explanation:** AWK programs passed via inline arguments (awk '{print $1}' f) or script files (awk -f script.awk) were previously classified as an unreadable snippet language, causing all AWK invocations to halt autonomous workflows with unreadable_language prompts. A dedicated AWK syntax scanner in src/awk.rs now parses print statements, variable assignments, system calls, command pipes, and output redirections into structural commands for engine adjudication, retiring awk from unreadable languages into the registered scanner suite.
+  - **Example Scenario:**
+    ```bash
+    awk '{print $1, $2}' input.txt
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Retired awk from unreadable_language in knowledge.toml and registered awk as a full syntax scanner under [lang.awk].
+    - *Behavior Contrast:* Before: every safe AWK invocation prompted on unreadable_language. After: safe AWK invocations are recognized and allowed, while dangerous operations (system("rm -rf ...") or output file redirection to protected paths) are caught by guards.
+
+* **Inspect interpreter script files at read time within safety limits and evaluate inner commands**
+  - **Problem & Explanation:** When an interpreter (bash, node, python, awk) was invoked with a script file argument (bash script.sh), vouch previously had not read the script content, falling back to evaluated_input (which inherits dynamic_command = "ask"). vouch now inspects regular script files on disk up to a configurable safety limit (max_script_bytes, default 64KiB) at decision time and evaluates inner parsed commands against guards, allowing safe scripts and catching destructive actions without false-positive prompt fatigue. Oversized, missing, or unreadable scripts fail closed to evaluated_input.
+  - **Example Scenario:**
+    ```bash
+    bash safe_build_script.sh
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Added optional max_script_bytes under [lang.<name>] in configuration (defaults to 65536 bytes).
+    - *Behavior Contrast:* Before: executing any script file prompted on evaluated_input / dynamic_command. After: regular script files within limit are inspected at read time; safe scripts are allowed and inner guarded operations trip their specific guards.
+
+* **Normalize executable heads case-insensitively and resolve bash.exe to logical bash**
+  - **Problem & Explanation:** On Windows and WSL environments, launcher executables like bash.exe and wsl.exe invoke shell interpreters, but casing or the .exe extension caused executable matching to miss knowledge.toml entries defined for bash. vouch now normalizes executable heads case-insensitively by stripping .exe extensions, resolving bash.exe to logical bash across wrap claims, argument indexing, and scanner routing.
+  - **Example Scenario:**
+    ```powershell
+    bash.exe -c "git status"
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged; knowledge mapping resolves .exe binaries to canonical heads.
+    - *Behavior Contrast:* Before: bash.exe failed to match logical bash rules and prompted as unmodeled. After: bash.exe normalizes to bash, inheriting wrap semantics and scanner inspection.
+
 ## 0.49.0 (2026-09-25)
 
 

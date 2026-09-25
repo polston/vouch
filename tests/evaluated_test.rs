@@ -71,14 +71,11 @@ fn a_shell_given_code_vouch_has_read_is_not_evaluating_anything() {
 
 #[test]
 fn a_shell_given_a_script_file_has_not_read_what_runs() {
-    // The two script-file lines below were on the allow list above until
-    // M2.118, on the reasoning that "the code IS in the command". It is not:
-    // the FILE NAME is in the command and its contents are not, so vouch has
-    // read exactly as much of what will run as it has of `curl … | bash` —
-    // none. The same blindness, named by the same construct; reading the file
-    // in order to allow it is a separate piece of work (M2.133).
+    // When a script file cannot be inspected (e.g. absent from disk), vouch
+    // has read none of what will run, falling back to evaluated_input (which
+    // inherits from dynamic_command per M2.118).
     let cfg = with("dynamic_command = \"ask\"");
-    for cmd in ["bash scripts/verify.sh", "sh ./configure"] {
+    for cmd in ["bash scripts/nonexistent.sh", "sh ./configure"] {
         match decide(&cfg, cmd) {
             Decision::Ask(r) => assert!(r.contains("dynamic_command"), "{cmd}: {r}"),
             other => panic!("{cmd}: expected Ask, got {other:?}"),
@@ -658,12 +655,12 @@ fn a_javascript_snippet_names_javascripts_own_setting() {
 #[test]
 fn an_awk_program_names_awks_own_setting() {
     let cfg = host_allows_plus(
-        "[lang.awk]\ndefault = \"allow\"\n\
-         [lang.awk.constructs]\nunreadable_language = \"allow\"\n",
+        "[lang.awk]\ndefault = \"ask\"\n\
+         [lang.awk.constructs]\nparse_failure = \"allow\"\n",
     );
-    match decide_command_in(&cfg, "bash", "awk '{print $1}' f", Some("C:/Users/dev"), None) {
+    match decide_command_in(&cfg, "bash", r#"awk 'BEGIN {'"#, Some("C:/Users/dev"), None) {
         Decision::Allow(r) => assert!(
-            r.contains("lang.awk.constructs.unreadable_language"),
+            r.contains("lang.awk.constructs.parse_failure"),
             "allowed for the wrong reason: {r}"
         ),
         other => panic!("expected Allow keyed to awk, got {other:?}"),

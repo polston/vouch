@@ -775,6 +775,10 @@ fn javascript_scanner() -> Box<dyn Scanner> {
     Box::new(crate::javascript::JavaScript)
 }
 
+fn awk_scanner() -> Box<dyn Scanner> {
+    Box::new(crate::awk::Awk)
+}
+
 /// The one registration seam for scanner-backed languages.
 ///
 /// Runtime dispatch and every exhaustive consumer enumerate this table, so
@@ -796,6 +800,10 @@ const SCANNERS: &[ScannerRegistration] = &[
     ScannerRegistration {
         lang: "javascript",
         construct: javascript_scanner,
+    },
+    ScannerRegistration {
+        lang: "awk",
+        construct: awk_scanner,
     },
 ];
 

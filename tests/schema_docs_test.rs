@@ -843,8 +843,8 @@ fn check_documentation_scanners_and_hosts(
     let mut findings = Vec::new();
     let lower_readme = readme.to_ascii_lowercase();
 
-    // 1. Registered scanners in README: bash, powershell, python, javascript
-    let required_scanners = ["bash", "powershell", "python", "javascript"];
+    // 1. Registered scanners in README: bash, powershell, python, javascript, awk
+    let required_scanners = ["bash", "powershell", "python", "javascript", "awk"];
     for scanner in required_scanners {
         if !lower_readme.contains(scanner) {
             findings.push(format!("README.md is missing mention of scanner '{scanner}'"));
@@ -905,17 +905,17 @@ fn documentation_enumerates_all_registered_scanners_and_hosts() {
 
 #[test]
 fn documentation_scanners_and_hosts_check_catches_omissions() {
-    let complete_readme = "vouch supports bash, powershell, python, and javascript across Claude Code, Codex, and Google Antigravity.";
+    let complete_readme = "vouch supports bash, powershell, python, javascript, and awk across Claude Code, Codex, and Google Antigravity.";
     let complete_manifests = [("manifest.json", "Integrates with Claude Code, Codex, and Google Antigravity.")];
     assert!(check_documentation_scanners_and_hosts(complete_readme, &complete_manifests).is_empty());
 
     // Missing scanner in README
-    let missing_scanner = "vouch supports bash, powershell, and python across Claude Code, Codex, and Google Antigravity.";
+    let missing_scanner = "vouch supports bash, powershell, python, and awk across Claude Code, Codex, and Google Antigravity.";
     let f1 = check_documentation_scanners_and_hosts(missing_scanner, &complete_manifests);
     assert_eq!(f1, vec!["README.md is missing mention of scanner 'javascript'"]);
 
     // Missing host in README
-    let missing_host_readme = "vouch supports bash, powershell, python, and javascript across Claude Code and Codex.";
+    let missing_host_readme = "vouch supports bash, powershell, python, javascript, and awk across Claude Code and Codex.";
     let f2 = check_documentation_scanners_and_hosts(missing_host_readme, &complete_manifests);
     assert_eq!(f2, vec!["README.md is missing mention of host 'antigravity'"]);
 

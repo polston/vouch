@@ -1,4 +1,5 @@
 pub mod approval;
+pub mod awk;
 pub mod cli;
 pub mod codex_broker;
 pub mod config;

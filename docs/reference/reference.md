@@ -70,6 +70,7 @@ Settings for one language: `[lang.bash]`, `[lang.powershell]`,
 |---|---|---|---|
 | `constructs` | map of string to Action | (none) | Per-construct verdicts, written as `[lang.<name>.constructs]`. A construct with no entry here defaults to `ask`, never to `default` above — absence of a setting must never become permission. |
 | `default` | Action | (none) | Verdict when nothing this language's scanner recognised objected. Never applies to a construct — an unset construct always resolves to `ask`, whatever this says. |
+| `max_script_bytes` | integer (optional) | (unset) | Maximum size in bytes of a script file to inspect at decision time. Files exceeding this limit are not read and fall back to evaluated_input. Defaults to 65536 (64 KiB) when unset. |
 | `wrap_depth` | integer (optional) | (unset) | How many layers of wrapper nesting are scanned before a deeper nest trips `wrap_depth_exceeded` and asks. `None` means the operator has not set it, so the built-in cap (4) applies. Read by the engine's wrapper walk, not by this file. |
 
 ### `ProgramLocationTrust`

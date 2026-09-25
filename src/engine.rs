@@ -477,7 +477,15 @@ pub fn trace_command_at(
     let kb = crate::guards::in_effect();
     let caps = |l: &str| cfg.lang(l).and_then(|lc| lc.wrap_depth).unwrap_or(4);
     let mut fork = crate::guards::ForkCursor::new(&[]);
-    let expanded = collect_expanded(kb, &scan, lang, &caps, &mut fork);
+    let expanded = collect_expanded(
+        kb,
+        &scan,
+        lang,
+        &caps,
+        &mut fork,
+        start.known_dir(),
+        Some(cfg.max_script_bytes(lang)),
+    );
 
     // Step 1: Syntax & Tokenization
     let mut step1_details = Vec::new();
@@ -1099,7 +1107,15 @@ fn judge_once(
         inherited_run_dir: all_inherited,
         top_level_owner: _,
         assignments: all_assignments,
-    } = collect_expanded(kb, &scan, lang, &caps, &mut fork);
+    } = collect_expanded(
+        kb,
+        &scan,
+        lang,
+        &caps,
+        &mut fork,
+        start.known_dir(),
+        Some(cfg.max_script_bytes(lang)),
+    );
 
     // Heredocs captured in THIS text that the locator (inside
     // `collect_expanded` -> `expand_wrappers_with_sources`) did not consume
@@ -2116,6 +2132,9 @@ fn judge_once(
     // program's one blindness in two spellings, and they must name one
     // off-switch (`lang.python.constructs.evaluated_input`) rather than two.
     for (i, c) in all_cmds.iter().enumerate() {
+        if all_provenance.get(i).copied() == Some(crate::guards::SourceProvenance::InspectedScript) {
+            continue;
+        }
         let (triggered, wrap_lang) = crate::guards::runs_file_positional(kb, c);
         if !triggered {
             continue;
@@ -3647,6 +3666,8 @@ fn collect_expanded(
     lang: &str,
     caps: &dyn Fn(&str) -> u8,
     fork: &mut crate::guards::ForkCursor,
+    cwd: Option<&str>,
+    max_script_bytes: Option<usize>,
 ) -> Expanded {
     let mut out = Expanded {
         cmds: Vec::new(),
@@ -3726,7 +3747,7 @@ fn collect_expanded(
         // is numbered by its position in the whole line's walk. Numbering per
         // command would make the same choice vector select different readings
         // depending on which command it reached first.
-        let ex = crate::guards::expand_wrappers_forking(
+        let ex = crate::guards::expand_wrappers_forking_with_context(
             kb,
             std::slice::from_ref(c),
             &heredocs,
@@ -3736,6 +3757,8 @@ fn collect_expanded(
             lang,
             caps,
             fork,
+            cwd,
+            max_script_bytes,
         );
         let command_offset = out.cmds.len();
         let scope_offset = out.scope_parents.len();
@@ -3875,6 +3898,8 @@ pub fn count_unknown_run_place_commands(lang: &str, src: &str) -> usize {
         lang,
         &|_| 4,
         &mut crate::guards::ForkCursor::new(&[]),
+        None,
+        None,
     );
     // Mirror the engine's resolve enough to be honest: same-command literal
     // assignments resolve (scan.assignments), env lookups stay out — an env
@@ -4005,7 +4030,15 @@ pub fn measure_program_locations(
         parse_failures,
         wrap_depth_exceeded,
         ..
-    } = collect_expanded(kb, &scan, lang, &caps, &mut fork);
+    } = collect_expanded(
+        kb,
+        &scan,
+        lang,
+        &caps,
+        &mut fork,
+        cwd,
+        Some(cfg.max_script_bytes(lang)),
+    );
     measured.unresolved_residual += parse_failures.len();
     measured.unresolved_residual += usize::from(wrap_depth_exceeded.is_some());
     measured.unresolved_residual += fork

@@ -611,10 +611,53 @@ no_value_options = ["-p"]
 # fail-closed direction. `runas`'s switches are slash-shaped with
 # colon-attached values (`/user:name`), a spelling the shared flag rule does
 # not classify today; recorded in ROADMAP.md rather than guessed at here.
+# `sudo` privilege wrapper. Verified against macOS /usr/bin/sudo (Sudo 1.9.17p2).
+# Options taking values consume the argument rather than forking ambiguity checks.
+# `-D`/`--chdir` changes directory before running the command, declared as run_dir_flags.
 [[program]]
-match = ["sudo", "doas"]
+match = ["sudo"]
 wraps = "rest"
 case_sensitive_flags = true
+run_dir_flags = ["-D", "--chdir"]
+value_options = [
+  "-C", "--close-from",
+  "-D", "--chdir",
+  "-g", "--group",
+  "--host",
+  "-p", "--prompt",
+  "-R", "--chroot",
+  "-T", "--command-timeout",
+  "-U", "--other-user",
+  "-u", "--user",
+]
+no_value_options = [
+  "-A", "--askpass",
+  "-b", "--background",
+  "-B", "--bell",
+  "-E", "--preserve-env",
+  "-e", "--edit",
+  "-H", "--set-home",
+  "-h", "--help",
+  "-i", "--login",
+  "-K", "--remove-timestamp",
+  "-k", "--reset-timestamp",
+  "-l", "--list",
+  "-n", "--non-interactive",
+  "-P", "--preserve-groups",
+  "-S", "--stdin",
+  "-s", "--shell",
+  "-V", "--version",
+  "-v", "--validate",
+]
+
+# `doas` privilege wrapper (OpenBSD/Linux doas).
+# Options taking values consume the argument rather than forking ambiguity checks.
+[[program]]
+match = ["doas"]
+wraps = "rest"
+case_sensitive_flags = true
+value_options = ["-u", "-C"]
+no_value_options = ["-n", "-s", "-L"]
 
 # `runas [/noprofile | /profile] [/env] [/savecred | /netonly] [/smartcard] [/user:<UserName>] [/showtrustlevels] [/trustlevel:<Level>] <Program>`
 # Windows privilege wrapper (M2.136).
@@ -860,16 +903,10 @@ flag_prefix = ["/"]
 wrap_join = true
 
 [[program]]
-# `wsl.exe` is dropped for the same unreachable-suffix reason (M2.121): the
-# trim already lands it on `wsl`. `bash.exe` is dropped too, but for a
-# DIFFERENT reason than the other four names in this changeset: it is not
-# a redundant alias of a name already in THIS entry — trimmed, `bash.exe`
-# lands on the separate POSIX-shell entry above (`sh`/`bash`/…), not here,
-# so removing it is a real behaviour change, not a no-op cleanup. Whether
-# any entry shape can honestly claim `bash.exe` (WSL's own launcher vs.
-# git-bash, which one it is depends on what is actually on PATH) is a
-# knowledge question of its own, deferred to ROADMAP M2.135 rather than
-# silently re-added here.
+# `wsl.exe` is normalized to `wsl` by `base_name` (.exe trim, M2.121).
+# `bash.exe` normalizes via `base_name` to logical `bash` per §8 path/head parity (M2.135),
+# routing to the POSIX-shell entry above where `-c` snippets are scanned and guarded as bash.
+# `wsl` / `wsl.exe` remains the dedicated WSL distribution launcher rest-wrapper below.
 match = ["wsl"]
 wraps = "rest"
 # `wsl --help` on this machine. `--exec`/`-e` is a SWITCH here, not a value
@@ -1069,6 +1106,14 @@ always = true
 match = ["python:os.system", "python:os.popen"]
 wraps = "arg_0"
 wrap_lang = "bash"
+
+# AWK process execution: `system("cmd")` and pipes (`print | "cmd"`).
+# Wraps argument 0 to bash so commands are inspected and guarded.
+[[program]]
+match = ["awk:system", "awk:pipe_to"]
+wraps = "arg_0"
+wrap_lang = "bash"
+
 
 # An argv VECTOR or run-time string — nothing shell-shaped to scan (the
 # design records reading the readable subset as M2.74). The exec/spawn
@@ -2092,9 +2137,15 @@ source = "inferred: the cmd.exe spelling of rm -r"
 any_flag = ["/s", "/S", "-recurse"]
 
 [[program]]
-match = ["sudo", "doas"]
-# unix, case-sensitive flags (M2.119 knowledge audit). No flags in this
-# rule (always = true), so the key is inert here today.
+match = ["sudo"]
+case_sensitive_flags = true
+[[program.rule]]
+guard = "privilege_escalation"
+source = "inferred: never fired in the recorded corpus"
+always = true
+
+[[program]]
+match = ["doas"]
 case_sensitive_flags = true
 [[program.rule]]
 guard = "privilege_escalation"
@@ -2273,10 +2324,12 @@ case_sensitive_flags = true
 # with it. Naming it is also what an awk scanner would need in place first.
 [[program]]
 match = ["awk", "gawk", "mawk", "nawk"]
-wraps = "after_flag"
-wrap_flags = ["-f", "--file"]
+runs_file_flags = ["-f", "--file"]
 wrap_lang = "awk"
 case_sensitive_flags = true
+value_options = ["-f", "--file", "-F", "-v"]
+no_value_options = ["--version", "--help"]
+standalone_flags = ["--version", "--help"]
 
 # The entry above only covers `-f progfile`. The ordinary inline spelling,
 # `awk 'program' file ...`, has no flag at all — verified by running
@@ -2292,6 +2345,7 @@ case_sensitive_flags = true
 match = ["awk", "gawk", "mawk", "nawk"]
 wraps = "arg_0"
 wrap_lang = "awk"
+case_sensitive_flags = true
 
 # Path arithmetic and lookups. These compute strings; they touch nothing.
 #

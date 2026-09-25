@@ -24,6 +24,8 @@ default = "allow"
 # Nesting layers scanned before a deeper wrapper nest trips wrap_depth_exceeded
 # (below); unset = the built-in 4.
 wrap_depth = 4
+# Maximum size in bytes of a script file to inspect at decision time; unset = 65536.
+max_script_bytes = 65536
 
 [lang.bash.constructs]
 # A variable used as the program name:  PY="/usr/bin/python"; "$PY" script.py
@@ -303,6 +305,22 @@ unmodeled_command = "ask"
 dynamic_call = "ask"
 # The snippet's parser could not read it at all.
 parse_failure = "ask"
+# A written path that stayed unresolved.
+unresolved_path = "ask"
+# A wrap arm located a snippet in a language vouch has no scanner for.
+unreadable_language = "ask"
+
+[lang.awk]
+# Verdict when no construct objected.
+default = "allow"
+
+[lang.awk.constructs]
+# The snippet's parser could not read it at all.
+parse_failure = "ask"
+# A command or pipeline execution no entry describes, e.g. awk:system(...).
+unmodeled_command = "ask"
+# An output redirection whose destination path is computed dynamically.
+dynamic_redirect = "ask"
 # A written path that stayed unresolved.
 unresolved_path = "ask"
 # A wrap arm located a snippet in a language vouch has no scanner for.

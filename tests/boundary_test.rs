@@ -614,7 +614,7 @@ fn m2_124_piped_stdin_into_interpreter() {
 #[test]
 fn m2_124_awk_inline_program_writes_unseen() {
     let cfg = common::realistic_config();
-    assert_verdict(&cfg, OUTSIDE, r#"awk 'BEGIN{print > "C:/x/f"}'"#, "ask", Some("unreadable_language"));
+    assert_verdict(&cfg, OUTSIDE, r#"awk 'BEGIN{print > "C:/x/f"}'"#, "ask", Some("write"));
 }
 
 /// The opaque interpreters list one eval flag but not its siblings.

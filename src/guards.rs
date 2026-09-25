@@ -1178,7 +1178,8 @@ pub(crate) fn base(head: &str) -> String {
     // ASCII-only: full-Unicode lowercasing folds characters the shell and
     // the filesystem keep distinct (the Kelvin sign onto ASCII `k`,
     // measured live on NTFS) — vouch must keep them distinct too (M2.121).
-    last.trim_end_matches(".exe").to_ascii_lowercase()
+    let lower = last.to_ascii_lowercase();
+    lower.strip_suffix(".exe").unwrap_or(&lower).to_string()
 }
 
 /// The program name with any path and `.exe` removed, lowercased.
@@ -4945,12 +4946,58 @@ pub enum SourceProvenance {
     ConsumedHeredoc,
     /// Unread code from standard input (curl | bash).
     StandardInput,
+    /// Inspected script file read from disk (e.g. python script.py, bash script.sh).
+    InspectedScript,
 }
 
 impl SourceProvenance {
     /// True if vouch holds or located the code, so standard input is not the source.
     pub fn is_code_held(&self) -> bool {
-        matches!(self, SourceProvenance::LocatedSnippet | SourceProvenance::ConsumedHeredoc)
+        matches!(
+            self,
+            SourceProvenance::LocatedSnippet
+                | SourceProvenance::ConsumedHeredoc
+                | SourceProvenance::InspectedScript
+        )
+    }
+}
+
+/// Errors when inspecting a script file on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InspectScriptError {
+    Missing,
+    NotAFile,
+    Oversized { size: u64, limit: usize },
+    Unreadable(String),
+}
+
+/// Safely inspects a script file at decision time.
+/// Resolves symlinks and relative paths against `cwd`.
+/// Checks that the file exists, is a regular file, and its size does not exceed `max_bytes`.
+pub fn inspect_script_file(
+    path: &str,
+    cwd: Option<&str>,
+    max_bytes: usize,
+) -> Result<String, InspectScriptError> {
+    let resolved = crate::paths::resolve_links_with_base(path, cwd.map(std::path::Path::new));
+    let p = std::path::Path::new(&resolved);
+    let meta = match std::fs::metadata(p) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(InspectScriptError::Missing),
+        Err(e) => return Err(InspectScriptError::Unreadable(e.to_string())),
+    };
+    if !meta.is_file() {
+        return Err(InspectScriptError::NotAFile);
+    }
+    if meta.len() > max_bytes as u64 {
+        return Err(InspectScriptError::Oversized {
+            size: meta.len(),
+            limit: max_bytes,
+        });
+    }
+    match std::fs::read_to_string(p) {
+        Ok(content) => Ok(content),
+        Err(e) => Err(InspectScriptError::Unreadable(e.to_string())),
     }
 }
 
@@ -5067,6 +5114,35 @@ pub fn expand_wrappers_forking(
     caps: &dyn Fn(&str) -> u8,
     fork: &mut ForkCursor,
 ) -> ExpandedWrappers {
+    expand_wrappers_forking_with_context(
+        kb,
+        cmds,
+        heredocs,
+        input_source,
+        args_complete,
+        assignments,
+        lang,
+        caps,
+        fork,
+        None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn expand_wrappers_forking_with_context(
+    kb: &Knowledge,
+    cmds: &[Cmd],
+    heredocs: &[crate::syntax::Heredoc],
+    input_source: &[crate::syntax::InputSource],
+    args_complete: &[bool],
+    assignments: &[String],
+    lang: &str,
+    caps: &dyn Fn(&str) -> u8,
+    fork: &mut ForkCursor,
+    cwd: Option<&str>,
+    max_script_bytes: Option<usize>,
+) -> ExpandedWrappers {
     #[allow(clippy::too_many_arguments)]
     fn go(
         kb: &Knowledge,
@@ -5096,6 +5172,8 @@ pub fn expand_wrappers_forking(
         // `xargs prog` does.
         from_input: bool,
         fork: &mut ForkCursor,
+        cwd: Option<&str>,
+        max_script_bytes: Option<usize>,
         out: &mut WalkOut,
     ) {
         // Reaching the cap is an ASK, never a silent truncation (M2.55): the
@@ -5340,25 +5418,28 @@ pub fn expand_wrappers_forking(
                     // string is known to EXIST and known to be unreadable,
                     // which is not the same as an empty scan (M2.123).
                     s if s.starts_with("arg_") => {
-                        let arg_idx = s.strip_prefix("arg_").and_then(|n| n.parse::<usize>().ok());
-                        match arg_idx.and_then(|i| cmd.args.get(i).map(|v| (i, v))) {
-                            Some((i, v)) if !cmd.unread_args.contains(&i) && !is_unresolved_marker(v) => {
-                                let unquoted = crate::paths::unquote_snippet(v);
-                                let (scan, lang) = scan_wrap_snippet(
-                                    &cmd.head,
-                                    &prog.wrap_lang,
-                                    &unquoted,
-                                    &mut out.srcs,
-                                    &mut out.failures,
-                                    &mut out.constructs,
-                                );
-                                // Same reasoning as the `after_flag` arm above:
-                                // this occurrence's own positional vocabulary
-                                // located the payload (M2.98).
-                                out.occurrences[self_idx].provenance = SourceProvenance::LocatedSnippet;
-                                next_lang = lang;
-                                scan
-                            }
+                        if runs_file_target(kb, cmd).is_some() {
+                            SnippetScan::default()
+                        } else {
+                            let arg_idx = s.strip_prefix("arg_").and_then(|n| n.parse::<usize>().ok());
+                            match arg_idx.and_then(|i| cmd.args.get(i).map(|v| (i, v))) {
+                                Some((i, v)) if !cmd.unread_args.contains(&i) && !is_unresolved_marker(v) => {
+                                    let unquoted = crate::paths::unquote_snippet(v);
+                                    let (scan, lang) = scan_wrap_snippet(
+                                        &cmd.head,
+                                        &prog.wrap_lang,
+                                        &unquoted,
+                                        &mut out.srcs,
+                                        &mut out.failures,
+                                        &mut out.constructs,
+                                    );
+                                    // Same reasoning as the `after_flag` arm above:
+                                    // this occurrence's own positional vocabulary
+                                    // located the payload (M2.98).
+                                    out.occurrences[self_idx].provenance = SourceProvenance::LocatedSnippet;
+                                    next_lang = lang;
+                                    scan
+                                }
                             Some(_) => {
                                 // Keyed to the OCCURRENCE's own declared wrap
                                 // language rather than the host line's, the way
@@ -5385,6 +5466,7 @@ pub fn expand_wrappers_forking(
                             None => SnippetScan::default(),
                         }
                     }
+                }
                     // `python:subprocess.run`-shaped calls: the wrapped command
                     // is either an argv vector (list/tuple of strings), a shell
                     // snippet when `shell=True`, or a single program head (M2.74).
@@ -5640,6 +5722,8 @@ pub fn expand_wrappers_forking(
                         inner_run_dir,
                         from_input || prog.args_from_input,
                         fork,
+                        cwd,
+                        max_script_bytes,
                         out,
                     );
                 }
@@ -5761,8 +5845,121 @@ pub fn expand_wrappers_forking(
                             None,
                             from_input,
                             fork,
+                            cwd,
+                            max_script_bytes,
                             out,
                         );
+                    }
+                }
+            }
+
+            // Script file inspection (M2.133):
+            // When this command runs a script file via `runs_file` or `runs_file_flags`,
+            // and neither a wrapper snippet nor a here-document has already consumed it,
+            // inspect the script file at decision time within safety and size limits.
+            if out.occurrences[self_idx].provenance == SourceProvenance::Direct {
+                if let Some(Ok(target_file)) = runs_file_target(kb, cmd) {
+                    let (_, wrap_lang_opt) = runs_file_positional(kb, cmd);
+                    let head_lower = base(&cmd.head);
+                    let script_lang = wrap_lang_opt
+                        .filter(|l| !l.is_empty())
+                        .or_else(|| {
+                            if head_lower == "bash"
+                                || head_lower == "sh"
+                                || head_lower == "dash"
+                                || head_lower == "zsh"
+                                || head_lower == "ksh"
+                            {
+                                Some("bash".to_string())
+                            } else if head_lower == "powershell" || head_lower == "pwsh" {
+                                Some("powershell".to_string())
+                            } else if head_lower == "python" || head_lower == "python3" || head_lower == "py" {
+                                Some("python".to_string())
+                            } else if head_lower == "node" || head_lower == "nodejs" || head_lower == "bun" {
+                                Some("javascript".to_string())
+                            } else if head_lower == "awk" || head_lower == "gawk" || head_lower == "mawk" || head_lower == "nawk" {
+                                Some("awk".to_string())
+                            } else if head_lower == "source" || head_lower == "." {
+                                Some(lang.to_string())
+                            } else {
+                                None
+                            }
+                        });
+
+                    if let Some(ref slang) = script_lang {
+                        if crate::syntax::scanner_for(slang).is_some() {
+                            let unquoted = crate::paths::unquote_snippet(&target_file);
+                            let resolved = crate::paths::resolve_with_assignments(
+                                &unquoted,
+                                &cmd.env_assigns,
+                                cwd,
+                            );
+                            let max_bytes = max_script_bytes.unwrap_or(65536);
+                            if let Ok(content) = inspect_script_file(&resolved, cwd, max_bytes) {
+                                let script_src_mark = out.srcs.len();
+                                let (mut scan, consumed_lang) = scan_wrap_snippet(
+                                    &cmd.head,
+                                    slang,
+                                    &content,
+                                    &mut out.srcs,
+                                    &mut out.failures,
+                                    &mut out.constructs,
+                                );
+                                out.occurrences[self_idx].provenance =
+                                    SourceProvenance::InspectedScript;
+                                for inner_cmd in &mut scan.cmds {
+                                    for (k, v) in &cmd.env_assigns {
+                                        inner_cmd
+                                            .env_assigns
+                                            .entry(k.clone())
+                                            .or_insert_with(|| v.clone());
+                                    }
+                                }
+                                let mut inner_scopes: Vec<usize> = Vec::new();
+                                let (
+                                    inner_scope,
+                                    inner_orders,
+                                    inherited_inner_order,
+                                    inner_run_dir,
+                                ) = if scan.parsed {
+                                    let (body, per_command) = allocate_snippet_scopes(
+                                        &scan,
+                                        self_idx,
+                                        script_src_mark,
+                                        out,
+                                    );
+                                    inner_scopes = per_command;
+                                    (body, scan.order.as_slice(), None, None)
+                                } else {
+                                    (own_scope, &[][..], own_order.as_ref(), pass_down)
+                                };
+                                let mut child_assigns = assignments.to_vec();
+                                child_assigns.extend(scan.assignments.iter().cloned());
+                                child_assigns.sort();
+                                child_assigns.dedup();
+                                go(
+                                    kb,
+                                    &scan.cmds,
+                                    &scan.heredocs,
+                                    &scan.input_source,
+                                    &scan.args_complete,
+                                    &child_assigns,
+                                    &consumed_lang,
+                                    inner_scope,
+                                    &inner_scopes,
+                                    inner_orders,
+                                    inherited_inner_order,
+                                    depth + 1,
+                                    caps,
+                                    inner_run_dir,
+                                    from_input,
+                                    fork,
+                                    cwd,
+                                    max_script_bytes,
+                                    out,
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -5789,6 +5986,8 @@ pub fn expand_wrappers_forking(
         None,
         false,
         fork,
+        cwd,
+        max_script_bytes,
         &mut walked,
     );
     ExpandedWrappers {

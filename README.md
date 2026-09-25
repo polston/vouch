@@ -13,8 +13,8 @@ policy fully authoritative. For Google Antigravity, safe workspace operations
 requesting `BypassSandbox` are automatically demoted to run inside the local
 sandbox.
 
-The judging is not pattern matching on the text of a command. vouch has four
-scanners (bash, PowerShell, python, JavaScript) and walks what the command
+The judging is not pattern matching on the text of a command. vouch has five
+scanners (bash, PowerShell, python, JavaScript, AWK) and walks what the command
 actually does: which program runs, from which directory, what it writes and
 where, what it hands to another interpreter, and which parts of it could not be
 read at all. A line with several commands in it gets the strictest answer any one
