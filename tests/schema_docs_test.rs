@@ -4,7 +4,7 @@
 //! knowledge loaders actually read (`vouch::cli::generate_schema_docs`), and
 //! two more tests hold the release-flow invariants to the same standard.
 //!
-//! Eight independent gates:
+//! Ten independent gates:
 //!   1. the committed files must match what the structs generate RIGHT NOW —
 //!      otherwise the reference page is describing a shape the loader no
 //!      longer accepts, or has stopped accepting a shape it still does.
@@ -29,6 +29,11 @@
 //!   8. all shipped and development skills must have valid frontmatter, reference
 //!      only valid CLAUDE.md sections, and carry no anti-patterns contradicting
 //!      repository invariants (M2.234).
+//!   9. public documentation and plugin manifests enumerate all registered
+//!      scanners (bash, powershell, python, javascript) and all supported agent
+//!      hosts (Claude Code, Codex, Google Antigravity).
+//!  10. recent tracked CHANGELOG.md entries (v0.38.0+) preserve demonstrative
+//!      patch notes with problem explanations, examples, and deltas.
 
 /// `core.autocrlf` on a Windows checkout rewrites a committed LF file to
 /// CRLF on disk; the generator always emits LF. Normalizing before compare
@@ -828,4 +833,246 @@ fn skill_invariant_linter_catches_intentional_violations() {
     assert!(check_skill_claude_anchors("refer to CLAUDE.md §0.0 glossary", &sections).is_empty());
     let bad_anchor = check_skill_claude_anchors("refer to CLAUDE.md §99.9 for details", &sections);
     assert_eq!(bad_anchor.len(), 1);
+}
+
+/// Gate 9: Public documentation and manifests enumerate all registered scanners and supported hosts.
+fn check_documentation_scanners_and_hosts(
+    readme: &str,
+    manifests: &[(&str, &str)],
+) -> Vec<String> {
+    let mut findings = Vec::new();
+    let lower_readme = readme.to_ascii_lowercase();
+
+    // 1. Registered scanners in README: bash, powershell, python, javascript
+    let required_scanners = ["bash", "powershell", "python", "javascript"];
+    for scanner in required_scanners {
+        if !lower_readme.contains(scanner) {
+            findings.push(format!("README.md is missing mention of scanner '{scanner}'"));
+        }
+    }
+
+    // 2. Supported hosts in README: claude, codex, antigravity
+    let required_hosts = ["claude", "codex", "antigravity"];
+    for host in required_hosts {
+        if !lower_readme.contains(host) {
+            findings.push(format!("README.md is missing mention of host '{host}'"));
+        }
+    }
+
+    // 3. Supported hosts across plugin manifests
+    for (name, content) in manifests {
+        let lower_manifest = content.to_ascii_lowercase();
+        for host in required_hosts {
+            if !lower_manifest.contains(host) {
+                findings.push(format!("manifest '{name}' is missing mention of host '{host}'"));
+            }
+        }
+    }
+
+    findings
+}
+
+#[test]
+fn documentation_enumerates_all_registered_scanners_and_hosts() {
+    let root = manifest_dir();
+    let readme_path = root.join("README.md");
+    let readme = std::fs::read_to_string(&readme_path)
+        .unwrap_or_else(|e| panic!("failed to read README.md: {e}"));
+
+    let manifest_paths = [
+        ("plugin/.claude-plugin/plugin.json", root.join("plugin/.claude-plugin/plugin.json")),
+        (".claude-plugin/marketplace.json", root.join(".claude-plugin/marketplace.json")),
+        ("plugin/.codex-plugin/plugin.json", root.join("plugin/.codex-plugin/plugin.json")),
+    ];
+
+    let mut manifests = Vec::new();
+    for (label, path) in &manifest_paths {
+        if path.is_file() {
+            let content = std::fs::read_to_string(path)
+                .unwrap_or_else(|e| panic!("failed to read {label}: {e}"));
+            manifests.push((*label, content));
+        }
+    }
+
+    let manifest_refs: Vec<(&str, &str)> = manifests.iter().map(|(l, c)| (*l, c.as_str())).collect();
+    let findings = check_documentation_scanners_and_hosts(&readme, &manifest_refs);
+    assert!(
+        findings.is_empty(),
+        "documentation or manifests missing scanners or hosts:\n{}",
+        findings.join("\n")
+    );
+}
+
+#[test]
+fn documentation_scanners_and_hosts_check_catches_omissions() {
+    let complete_readme = "vouch supports bash, powershell, python, and javascript across Claude Code, Codex, and Google Antigravity.";
+    let complete_manifests = [("manifest.json", "Integrates with Claude Code, Codex, and Google Antigravity.")];
+    assert!(check_documentation_scanners_and_hosts(complete_readme, &complete_manifests).is_empty());
+
+    // Missing scanner in README
+    let missing_scanner = "vouch supports bash, powershell, and python across Claude Code, Codex, and Google Antigravity.";
+    let f1 = check_documentation_scanners_and_hosts(missing_scanner, &complete_manifests);
+    assert_eq!(f1, vec!["README.md is missing mention of scanner 'javascript'"]);
+
+    // Missing host in README
+    let missing_host_readme = "vouch supports bash, powershell, python, and javascript across Claude Code and Codex.";
+    let f2 = check_documentation_scanners_and_hosts(missing_host_readme, &complete_manifests);
+    assert_eq!(f2, vec!["README.md is missing mention of host 'antigravity'"]);
+
+    // Missing host in manifest
+    let missing_host_manifest = [("manifest.json", "Integrates with Claude Code and Codex.")];
+    let f3 = check_documentation_scanners_and_hosts(complete_readme, &missing_host_manifest);
+    assert_eq!(f3, vec!["manifest 'manifest.json' is missing mention of host 'antigravity'"]);
+}
+
+/// Gate 10: Recent tracked CHANGELOG.md entries (v0.38.0+) preserve demonstrative patch notes.
+fn parse_changelog_semver(s: &str) -> Option<(u32, u32, u32)> {
+    let clean = s.trim().trim_start_matches('v');
+    let mut parts = clean.split('.');
+    let major: u32 = parts.next()?.parse().ok()?;
+    let minor: u32 = parts.next()?.parse().ok()?;
+    let patch_part = parts.next()?;
+    let patch_str: String = patch_part.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let patch: u32 = patch_str.parse().ok()?;
+    Some((major, minor, patch))
+}
+
+fn check_changelog_richness(content: &str, min_semver: (u32, u32, u32)) -> Vec<String> {
+    let mut findings = Vec::new();
+    let mut current_version: Option<String> = None;
+    let mut in_target_section = false;
+    let mut current_entry_title: Option<String> = None;
+    let mut current_entry_body = String::new();
+
+    let flush_entry = |findings: &mut Vec<String>, ver: &str, title: &str, body: &str| {
+        let mut missing = Vec::new();
+        if !body.contains("**Problem & Explanation:**") {
+            missing.push("Problem & Explanation");
+        }
+        if !body.contains("**Example Scenario:**") {
+            missing.push("Example Scenario");
+        }
+        if !body.contains("**Delta:**") {
+            missing.push("Delta");
+        }
+        if !missing.is_empty() {
+            findings.push(format!("{ver}: entry '{title}' missing: {}", missing.join(", ")));
+        }
+    };
+
+    for line in content.lines() {
+        if line.starts_with("## ") {
+            if let (Some(ver), Some(title)) = (current_version.as_ref(), current_entry_title.take()) {
+                if in_target_section {
+                    flush_entry(&mut findings, ver, &title, &current_entry_body);
+                }
+            }
+            current_entry_body.clear();
+
+            let header = line.trim_start_matches('#').trim();
+            let ver_str = header.split_whitespace().next().unwrap_or("");
+            if let Some(semver) = parse_changelog_semver(ver_str) {
+                in_target_section = semver >= min_semver;
+                current_version = Some(ver_str.to_string());
+            } else {
+                in_target_section = false;
+                current_version = None;
+            }
+            continue;
+        }
+
+        if !in_target_section {
+            continue;
+        }
+
+        if line.starts_with("* ") {
+            if let (Some(ver), Some(title)) = (current_version.as_ref(), current_entry_title.take()) {
+                flush_entry(&mut findings, ver, &title, &current_entry_body);
+            }
+            current_entry_title = Some(line.trim_start_matches("* ").trim().to_string());
+            current_entry_body.clear();
+        } else if current_entry_title.is_some() {
+            if line.starts_with("### ") {
+                if let (Some(ver), Some(title)) = (current_version.as_ref(), current_entry_title.take()) {
+                    flush_entry(&mut findings, ver, &title, &current_entry_body);
+                }
+                current_entry_body.clear();
+            } else {
+                current_entry_body.push_str(line);
+                current_entry_body.push('\n');
+            }
+        }
+    }
+
+    if let (Some(ver), Some(title)) = (current_version.as_ref(), current_entry_title.take()) {
+        if in_target_section {
+            flush_entry(&mut findings, ver, &title, &current_entry_body);
+        }
+    }
+
+    findings
+}
+
+#[test]
+fn tracked_changelog_preserves_rich_demonstrative_structure() {
+    let path = manifest_dir().join("CHANGELOG.md");
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let min_semver = (0, 38, 0);
+    let findings = check_changelog_richness(&content, min_semver);
+    assert!(
+        findings.is_empty(),
+        "CHANGELOG.md entries below standard for versions >= 0.38.0:\n{}",
+        findings.join("\n")
+    );
+}
+
+#[test]
+fn changelog_richness_check_catches_omissions() {
+    let valid_changelog = r#"## 0.40.0 (2026-09-18)
+
+### Features
+
+* **Feature One**
+  - **Problem & Explanation:** Problem description.
+  - **Example Scenario:** An example.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+"#;
+    assert!(check_changelog_richness(valid_changelog, (0, 38, 0)).is_empty());
+
+    let missing_problem = r#"## 0.40.0 (2026-09-18)
+
+### Features
+
+* **Feature One**
+  - **Example Scenario:** An example.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+"#;
+    let f1 = check_changelog_richness(missing_problem, (0, 38, 0));
+    assert_eq!(f1.len(), 1);
+    assert!(f1[0].contains("missing: Problem & Explanation"));
+
+    let missing_delta = r#"## 0.40.0 (2026-09-18)
+
+### Features
+
+* **Feature One**
+  - **Problem & Explanation:** Problem description.
+  - **Example Scenario:** An example.
+"#;
+    let f2 = check_changelog_richness(missing_delta, (0, 38, 0));
+    assert_eq!(f2.len(), 1);
+    assert!(f2[0].contains("missing: Delta"));
+
+    // Releases older than min_semver are not flagged
+    let old_bare_changelog = r#"## 0.37.0 (2026-09-18)
+
+### Features
+
+* bare feature
+"#;
+    assert!(check_changelog_richness(old_bare_changelog, (0, 38, 0)).is_empty());
 }

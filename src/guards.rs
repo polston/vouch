@@ -205,12 +205,12 @@ pub struct Program {
     #[serde(default)]
     pub wrap_flags: Vec<String>,
     /// Which language the wrapped snippet is written in: a scanner language
-    /// (`bash`, `powershell`, `python`), a language vouch recognises but
-    /// cannot read (`javascript`, `awk`, `perl`), `cmd` (cmd.exe batch — not
-    /// bash, so it is scanned no more than any other unreadable language), or
-    /// `opaque` (a language vouch does not model at all) — a closed set,
-    /// checked in `knowledge::validate`. A snippet vouch cannot read still
-    /// asks (`unreadable_language`, spec 2026-08-14 §5.2) rather than passing
+    /// (`bash`, `powershell`, `python`, `javascript`), a language vouch recognises
+    /// but cannot read (`awk`, `perl`), `cmd` (cmd.exe batch — not bash, so it
+    /// is scanned no more than any other unreadable language), or `opaque` (a
+    /// language vouch does not model at all) — a closed set, checked in
+    /// `knowledge::validate`. A snippet vouch cannot read still asks
+    /// (`unreadable_language`, spec 2026-08-14 §5.2) rather than passing
     /// unread.
     ///
     /// The named-but-unreadable group is not a scanner list and never was:

@@ -1,22 +1,24 @@
 # vouch
 
-A permission gate for Claude Code and Codex. It runs as a `PreToolUse` hook:
-every tool call the host exposes is parsed, judged against declared knowledge
-of what programs do, and answered before it runs.
+A permission gate for Claude Code, Codex, and Google Antigravity. It runs as a
+`PreToolUse` hook: every tool call the host exposes is parsed, judged against
+declared knowledge of what programs do, and answered before it runs.
 
-Claude Code supports vouch's native allow / ask / deny response. Codex does
-not currently support `ask` from `PreToolUse`, so vouch blocks the first
-attempt and routes the human decision through Codex's native approval prompt
-for a local MCP broker. An approved broker call grants one exact retry. An
-allow emits nothing to Codex, leaving its native sandbox and approval policy
-fully authoritative.
+Claude Code and Google Antigravity support vouch's native allow / ask / deny
+response. Codex does not currently support `ask` from `PreToolUse`, so vouch
+blocks the first attempt and routes the human decision through Codex's native
+approval prompt for a local MCP broker. An approved broker call grants one exact
+retry. An allow emits nothing to Codex, leaving its native sandbox and approval
+policy fully authoritative. For Google Antigravity, safe workspace operations
+requesting `BypassSandbox` are automatically demoted to run inside the local
+sandbox.
 
-The judging is not pattern matching on the text of a command. vouch has three
-scanners (bash, PowerShell, python) and walks what the command actually does:
-which program runs, from which directory, what it writes and where, what it
-hands to another interpreter, and which parts of it could not be read at all.
-A line with several commands in it gets the strictest answer any one of them
-earns.
+The judging is not pattern matching on the text of a command. vouch has four
+scanners (bash, PowerShell, python, JavaScript) and walks what the command
+actually does: which program runs, from which directory, what it writes and
+where, what it hands to another interpreter, and which parts of it could not be
+read at all. A line with several commands in it gets the strictest answer any one
+of them earns.
 
 The decision set has a fourth member, `abstain` — emit nothing and let the
 harness's own rules decide. It is deliberately unreachable while vouch is
@@ -31,13 +33,13 @@ A prompt with no named setting is a bug in vouch, whatever else is true about
 it.
 
 One exception is deliberate. The protected paths — vouch's own `config.toml`
-and the hook registration in Claude's `settings.json` or Codex's `hooks.json`
-— always prompt, and no
-`write.allow_paths` entry can open one however broadly it is written. The
-protected list is checked first and wins. That list is itself the setting, and
-the prompt says so: removing a line from `[protected] paths` removes the
-protection. A prompt that claimed to be unsettable while being settable would
-be worse than one that admits where its off-switch is.
+and the hook registration in Claude's `settings.json`, Codex's `hooks.json`, or
+Antigravity's `hooks.json` — always prompt, and no `write.allow_paths` entry can
+open one however broadly it is written. The protected list is checked first and
+wins. That list is itself the setting, and the prompt says so: removing a line
+from `[protected] paths` removes the protection. A prompt that claimed to be
+unsettable while being settable would be worse than one that admits where its
+off-switch is.
 
 ## Why an allow-list
 
@@ -142,8 +144,9 @@ Three pieces make a working install, and they arrive differently:
 
 - **The gate** — `vouch`, `vouch-codex-broker`, and `knowledge.toml`, from one commit.
 - **The wiring** — Claude uses four entries in `~/.claude/settings.json`;
-  Codex uses two in `~/.codex/hooks.json` plus the local approval broker.
-  Hook documents are always saved by a human; see below.
+  Codex uses two in `~/.codex/hooks.json` plus the local approval broker;
+  Antigravity uses `~/.gemini/antigravity-cli/hooks.json`. Hook documents are
+  always saved by a human; see below.
 - **The procedures** — the skills, including `vouch-setup`, which walks a
   machine through the rest.
 
@@ -334,9 +337,11 @@ two different texts of the same skill under two different names. Use
 
 Version numbers and `CHANGELOG.md` are generated from structured `feat`/`fix`
 entries recorded in each release-bearing commit. The private subject summarizes
-the changeset; one nested entry names each independently visible public outcome.
-Each release lands as one reviewed change, and the public-mirror tag that
-follows triggers the build workflow to attach the binaries.
+the changeset; nested entries name each independently visible public outcome,
+expanded into demonstrative patch notes with plain-language problem explanations,
+concrete command examples, and configuration/behavioral deltas. Each release lands
+as one reviewed change, and the public-mirror tag that follows triggers the build
+workflow to attach the binaries.
 
 The mirror publisher scans the configured Git identity and the exact candidate
 message, metadata, paths, patch, and files before it pushes a review branch.

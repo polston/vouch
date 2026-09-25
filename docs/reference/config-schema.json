@@ -12,7 +12,7 @@
       }
     },
     "lang": {
-      "description": "Every language section, written as `[lang.<name>]` — `bash`,\n`powershell`, and `python` ship with vouch. One map, so a new scanner\nneeds no new key here.",
+      "description": "Every language section, written as `[lang.<name>]` — `bash`,\n`powershell`, `python`, and `javascript` ship with vouch. One map, so\na new scanner needs no new key here.",
       "type": "object",
       "additionalProperties": {
         "$ref": "#/$defs/LangConfig"

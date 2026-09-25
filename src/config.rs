@@ -451,8 +451,8 @@ struct Raw {
     #[schemars(skip)]
     powershell: Option<toml::Value>,
     /// Every language section, written as `[lang.<name>]` — `bash`,
-    /// `powershell`, and `python` ship with vouch. One map, so a new scanner
-    /// needs no new key here.
+    /// `powershell`, `python`, and `javascript` ship with vouch. One map, so
+    /// a new scanner needs no new key here.
     #[serde(default)]
     lang: HashMap<String, LangConfig>,
     /// What commands DO, written as `[guards]`. Shared across every

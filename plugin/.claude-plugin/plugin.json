@@ -1,7 +1,7 @@
 {
   "name": "vouch",
-  "version": "0.48.0",
-  "description": "An allow-list permission gate for Claude Code and Codex: every observed tool call is judged against declared knowledge, and every prompt names the setting that turns it off. /vouch:setup provisions a machine from evidence; /vouch:status reports installed versus released versions; /vouch:update moves the gate on an explicit accept.",
+  "version": "0.49.0",
+  "description": "An allow-list permission gate for Claude Code, Codex, and Google Antigravity: every observed tool call is judged against declared knowledge, and every prompt names the setting that turns it off. /vouch:setup provisions a machine from evidence; /vouch:status reports installed versus released versions; /vouch:update moves the gate on an explicit accept.",
   "author": {
     "name": "vouch"
   },

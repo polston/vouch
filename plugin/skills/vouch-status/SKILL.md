@@ -17,7 +17,8 @@ read.
    backup, no install, no config edit, no accept to give. A lag it finds is
    reported with the one command that acts on it (`/vouch:update`), and that
    is the whole handoff.
-2. **It never opens `~/.claude/settings.json` or `~/.codex/hooks.json`.**
+2. **It never opens `~/.claude/settings.json`, `~/.codex/hooks.json`, or
+   `~/.gemini/antigravity-cli/hooks.json`.**
    Versions do not live there, and whole host documents never enter a
    conversation.
 

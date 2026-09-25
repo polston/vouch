@@ -1,160 +1,539 @@
 # Changelog
 
-## 0.48.0 (2026-09-24)
+## 0.49.0 (2026-09-25)
 
 
 ### Features
 
-* deduplicate on-demand verdict measurement dumps into single-pass execution
-* emit unmodeled_import construct on unmodeled Python top-level imports
-* extend runs_file script-file ask mechanism to node, perl, ruby, and bun interpreters
-* model bare exec redirection sequences across subsequent shell pipeline commands
-* smoke test macOS release asset execution before release publishing
+* **Add mechanical CI gates for documentation host completeness and changelog richness**
+  - **Problem & Explanation:** CI previously lacked mechanical tests to enforce that README documentation, plugin manifests, and changelog release notes accurately enumerate supported agent hosts, registered language scanners, and demonstrative patch notes. Gates 9 and 10 in schema_docs_test now mechanically prevent documentation drift.
+  - **Example Scenario:** Running cargo test to verify repository documentation and release note richness invariants.
+  - **Delta:**
+    - *Configuration Delta:* Added Gate 9 and Gate 10 assertions in schema_docs_test.rs.
+    - *Behavior Contrast:* Before: documentation and manifest drift went undetected by CI. After: mechanical gates assert host/scanner completeness and four-part patch note richness.
+
+* **Demonstrative changelog patch notes and automated release note enrichment**
+  - **Problem & Explanation:** Release notes previously contained bare one-line commit summaries without explaining problem context, reproducing scenarios, or deltas. CHANGELOG.md entries from v0.48.0 back through v0.38.0 are now expanded into demonstrative four-part patch notes, and the release-please plugin runner now automates enrichment on candidate releases.
+  - **Example Scenario:** Viewing release notes in CHANGELOG.md or GitHub release pages.
+  - **Delta:**
+    - *Configuration Delta:* Enhanced release-please plugin runner with enrichChangelog.
+    - *Behavior Contrast:* Before: bare single-line summaries. After: rich patch notes detailing problem explanations, example scenarios, configuration deltas, and behavioral contrasts.
+
+* **Reconcile public documentation and plugin manifests across all supported hosts and native scanners**
+  - **Problem & Explanation:** Public documentation and plugin manifests omitted Google Antigravity and JavaScript scanner support, and schema docs had drifted from struct definitions. Documentation and manifests now declare all three hosts (Claude Code, Codex, Google Antigravity) and all four native scanners (bash, powershell, python, javascript).
+  - **Example Scenario:** Reading README.md or inspecting plugin metadata in Claude Code, Codex, or Google Antigravity.
+  - **Delta:**
+    - *Configuration Delta:* Reconciled schema reference documentation and plugin manifests.
+    - *Behavior Contrast:* Before: omitted newly supported agent hosts and native scanners. After: accurate enumeration across all manifests and user-facing documentation.
+
+## 0.48.0 (2026-09-24)
+
+### Features
+
+* **Emit `unmodeled_import` construct on unmodeled Python top-level imports**
+  - **Problem & Explanation:** When running Python inline snippets (`python -c "..."`), importing a module executes its top-level code immediately. Previously, vouch only recorded imported names to resolve function calls, but did not analyze the `import` statements themselves. Untrusted or unvetted package imports had no security check and were silently allowed. vouch now inspects top-level imports and flags any module outside a curated inert standard library list as an unmodeled import.
+  - **Example Scenario:**
+    ```bash
+    python -c "import untrusted_pkg; print('done')"
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Added construct `unmodeled_import` under `[lang.python.constructs]`:
+      ```toml
+      [lang.python.constructs]
+      unmodeled_import = "allow"
+      ```
+    - *Behavior Contrast:* Before: evaluated as `ALLOW` with 0 commands detected. After: prompts with `ASK` citing construct `unmodeled_import (untrusted_pkg)` with an actionable configuration off-switch.
+
+* **Model bare `exec` redirection sequences across subsequent shell pipeline commands**
+  - **Problem & Explanation:** In shell scripts, `exec < file` redirects descriptor 0 (standard input) for subsequent commands. Previously, `exec` was treated as an isolated command without propagating stdin to later commands, causing subsequent commands to evaluate input as empty instead of file-backed. vouch now tracks sequential descriptor 0 redirections from bare `exec` commands and propagates input provenance across same-scope and child-scope subsequent commands.
+  - **Example Scenario:**
+    ```bash
+    exec < /etc/passwd; cat
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: `cat` evaluated with empty stdin (`Nothing`). After: `cat` inherits descriptor 0 file provenance (`File`) and is evaluated against file read/guard rules.
+
+* **Extend `runs_file` script-file ask mechanism to Node, Perl, Ruby, and Bun interpreters**
+  - **Problem & Explanation:** Executing unmodeled external script files via interpreters (`node script.js`, `ruby app.rb`, `perl script.pl`, `bun index.ts`) previously bypassed script gating because `runs_file` was only declared for Python and shells. vouch now declares `runs_file = "arg_0"` for `node`, `perl`, `ruby`, and `bun` in shipped knowledge, while allowing inline code flags (`node -e`, `perl -e`) to bypass `runs_file` and evaluate inline syntax directly.
+  - **Example Scenario:**
+    ```bash
+    node untrusted_script.js
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Declared `runs_file = "arg_0"` for `node`, `perl`, `ruby`, and `bun` in `knowledge.toml`.
+    - *Behavior Contrast:* Before: script file execution bypassed file gating. After: script file execution prompts with `ASK` on `runs_file (untrusted_script.js)`. Inline code evaluations (`node -e "..."`) continue to evaluate inline AST directly.
+
+* **Deduplicate on-demand verdict measurement dumps into single-pass execution**
+  - **Problem & Explanation:** Measurement test suites previously evaluated the entire test corpus twice when writing both TSV decisions and JSONL per-row dumps, doubling test execution time and CPU overhead. The test harness now unifies evaluation passes so both TSV decisions and JSONL per-row dumps are generated from a single pass over the decision engine.
+  - **Example Scenario:** Running `cargo test --test measurement_dump_test`.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Tooling & Performance Contrast:* Before: two complete passes over the decision engine. After: unified single-pass evaluation emitting both TSV and JSONL formats simultaneously.
+
+* **Smoke test macOS release asset execution before release publishing**
+  - **Problem & Explanation:** The automated release workflow built macOS Apple Silicon binaries without verifying they execute properly on native runners before packaging and uploading release bundles, risking publishing broken binary assets. The release build matrix now runs native execution smoke tests on each runner before asset staging and upload.
+  - **Example Scenario:** GitHub Actions release workflow execution during release publishing.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Workflow Contrast:* Before: packaged and uploaded binary bundles directly. After: runs `vouch --version`, `vouch-mcp-broker --version`, and smoke probes on the native runner before packaging.
 
 ## 0.47.0 (2026-09-24)
 
-
 ### Features
 
-* separate internal sentinels into typed tokens and unify position offset indexing across write arms
-* support gitignored operator patterns file in private data scanner and git hooks
+* **Separate internal sentinels into typed tokens and unify position offset indexing across write arms**
+  - **Problem & Explanation:** Internal string sentinel markers (`"$?"`, `"$**"`, `"$,"`) previously shared string representations with potential user arguments, risking unread marker collisions during write destination resolution. vouch now separates sentinels into strongly-typed `ArgToken` and `TargetHead` enums and unifies position offset indexing across write evaluation arms.
+  - **Example Scenario:** A command passing literal argument `"$?"` to an executable.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: literal argument matching sentinel spelling could resolve as an unread marker. After: strongly-typed tokens distinguish internal markers from real literal paths, resolving arguments deterministically.
 
+* **Support gitignored operator patterns file in private data scanner and git hooks**
+  - **Problem & Explanation:** Operators needing custom privacy scans for internal identifiers or project-specific secrets previously had to edit tracked scanner regexes, risking leaking sensitive patterns into repository history. vouch now supports an uncommitted, gitignored operator patterns file (`.vouch-private-patterns` or `VOUCH_PRIVATE_PATTERNS_FILE`).
+  - **Example Scenario:** Staging an internal secret matching a pattern in `.vouch-private-patterns`.
+  - **Delta:**
+    - *Configuration Delta:* Uncommitted file `.vouch-private-patterns` read by `scan-private-data.sh`.
+    - *Behavior Contrast:* Before: scanner only checked built-in generic patterns. After: checks operator-defined patterns case-insensitively, redacts pattern values in diagnostics, and refuses staging the patterns file.
 
 ### Bug Fixes
 
-* check redirection descriptor bounds in shell parser to prevent integer overflow panics
-* handle raw strings and structural test markers in Python scanner test harness
-* refuse sample destination when no existing ancestor path can be canonicalized in parse failure dumps
+* **Check redirection descriptor bounds in shell parser to prevent integer overflow panics**
+  - **Problem & Explanation:** When parsing shell redirection operators with very large descriptor numbers (e.g. `9999999999999>&1`), standard integer conversion could overflow and cause a panic in the parser thread. Pre-parse descriptor bounds checking now ensures descriptor tokens fit safely within 32-bit signed integer limits.
+  - **Example Scenario:**
+    ```bash
+    echo test 9999999999999999>&1
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Diagnostic Contrast:* Before: thread panic on integer overflow. After: parser safely catches bounds errors and returns a structured parse diagnostic without crashing.
+
+* **Handle raw strings and structural test markers in Python scanner test harness**
+  - **Problem & Explanation:** The Python scanner test harness previously truncated test modules across arbitrary boundaries, occasionally slicing through raw string literals and producing invalid AST parse errors during test runs. The harness now respects raw string boundaries and structural module markers.
+  - **Example Scenario:** Running Python scanner property and AST tests with raw string regex literals (`r"..."`).
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Tooling Contrast:* Before: test harness truncation caused spurious syntax errors on raw strings. After: parses raw strings cleanly and bounds module slices to valid AST statements.
+
+* **Refuse sample destination when no existing ancestor path can be canonicalized in parse failure dumps**
+  - **Problem & Explanation:** In parse failure sample dumps (`examples/dump_parse_failures.rs`), providing an output destination whose parent directories did not exist resulted in unhandled raw I/O errors rather than clear refusal diagnostics.
+  - **Example Scenario:** Running `cargo run --example dump_parse_failures -- /nonexistent/dir/out.tsv`.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Diagnostic Contrast:* Before: raw filesystem I/O panic. After: cleanly refuses with `DestinationRefusal::NoExistingAncestor` and reports actionable remediation.
 
 ## 0.46.0 (2026-09-23)
 
-
 ### Features
 
-* reconcile skill installation destination files, prune bytecode cache directories, and report file-level progress
-* record verified minimum supported Rust version 1.96 in package manifest
+* **Reconcile skill installation destination files, prune bytecode cache directories, and report file-level progress**
+  - **Problem & Explanation:** Installing developer skills previously copied directory trees wholesale without pruning Python bytecode caches (`__pycache__`, `*.pyc`), cluttering installation directories and leaving orphaned skill files behind when skills were renamed or removed. The skill installer now reconciles destination files, deletes orphaned files, strips cache directories, and reports explicit file-level progress.
+  - **Example Scenario:** Running `scripts/install-skill.sh`.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Tooling Contrast:* Before: stale files and bytecode caches lingered in skill install directories. After: destination directories match source trees exactly with clean file-level reporting.
 
+* **Record verified minimum supported Rust version 1.96 in package manifest**
+  - **Problem & Explanation:** `Cargo.toml` lacked an explicit `rust-version` field, allowing users on older unsupported compilers to encounter confusing syntax or feature compilation errors instead of clear compatibility diagnostics.
+  - **Example Scenario:** Building vouch on an outdated Rust toolchain.
+  - **Delta:**
+    - *Configuration Delta:* Added `rust-version = "1.96"` in `Cargo.toml`.
+    - *Build Contrast:* Before: build failed late with internal macro/compiler errors. After: cargo warns or errors immediately with the exact required compiler floor.
 
 ### Bug Fixes
 
-* clarify host plugin tooling version warning contract and align documentation with present-tense rules
-* harden setup replay verification assertions, isolate run paths, and partition stood-down denials
-* optimize advisory predictor module lookups, unify false-positive ledger lists, and eliminate redundant tree hashing
+* **Clarify host plugin tooling version warning contract and align documentation with present-tense rules**
+  - **Problem & Explanation:** Documentation previously described future or past mechanisms in ambiguous tenses, creating confusion about whether plugin version mismatch warnings were advisory or blocking. Documentation was aligned to present-tense rules and the advisory warning contract clarified.
+  - **Example Scenario:** Inspecting plugin version warnings in status output.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Documentation Contrast:* Before: ambiguous predictive phrasing. After: crisp, present-tense statements defining the advisory warning boundary.
+
+* **Harden setup replay verification assertions, isolate run paths, and partition stood-down denials**
+  - **Problem & Explanation:** In the setup replay test harness (`scripts/verify_settings.py`), test assertions did not strictly partition stood-down permission denials from live gate denials, risking masked regressions. The harness now runs across isolated temporary state directories and partitions verdict classes strictly.
+  - **Example Scenario:** Running `python3 scripts/verify_settings.py`.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Tooling Contrast:* Before: potential test state crosstalk between replay runs. After: fully isolated scratch environments with independent verdict assertions.
+
+* **Optimize advisory predictor module lookups, unify false-positive ledger lists, and eliminate redundant tree hashing**
+  - **Problem & Explanation:** The test-impact predictor (`scripts/predict_affected_tests.py`) repeatedly rehashed git trees and performed redundant file lookups across candidate test modules, adding noticeable delay to pre-commit checks. Lookups were memoized and unified into single-pass tree traversals.
+  - **Example Scenario:** Running `scripts/test-predict-affected.sh`.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Performance Contrast:* Before: multi-second tree hashing per test prediction. After: instant single-pass module lookups.
 
 ## 0.45.0 (2026-09-23)
 
-
 ### Features
 
-* declarative parameter vocabulary for handed-over receiver object method execution
-* declarative program rule veto argument positions in knowledge schema
-* isolate measurement session records from production journal traffic and doctor statistics
+* **Isolate measurement session records from production journal traffic and doctor statistics**
+  - **Problem & Explanation:** Verification and measurement test runs (`cargo test`, benchmark runs) recorded dummy decisions into the live audit journal, inflating decision counts and skewing `vouch doctor` diagnostic reports. Journal records now carry a measurement marker under `VOUCH_MEASUREMENT=1` and are filtered from production views.
+  - **Example Scenario:** Running `vouch doctor` after executing test suites.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: doctor showed thousands of test decisions mixed with user commands. After: test records are cleanly separated and excluded from production statistics.
 
+* **Declarative program rule veto argument positions in knowledge schema**
+  - **Problem & Explanation:** In `knowledge.toml`, `unless_flags` vetoes previously evaluated flags across all argument positions or hardcoded positions in Rust logic. Knowledge rules now declaratively specify `unless_position = "arg_0"` or `"any"`, allowing fine-grained position matching for commands like `kill -0 1234`.
+  - **Example Scenario:** `kill -0 1234` (process ping) vs `kill 1234` (process termination).
+  - **Delta:**
+    - *Configuration Delta:* Added `unless_position` to `[[program.rule]]` in `knowledge.toml`.
+    - *Behavior Contrast:* Before: positional flag matching required custom Rust code. After: declaratively vetted in knowledge schema v19.
+
+* **Declarative parameter vocabulary for handed-over receiver object method execution**
+  - **Problem & Explanation:** In Python snippets, passing objects whose own methods are invoked internally (e.g. `datetime.now(tz=timezone.utc)`) triggered false `callable_argument` or write prompts because vouch could not express receiver method delegation. Knowledge program entries now declare `invokes_methods`.
+  - **Example Scenario:**
+    ```bash
+    python -c "import datetime; datetime.datetime.now(datetime.timezone.utc)"
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Added `invokes_methods` to `[[program]]` in `knowledge.toml`.
+    - *Behavior Contrast:* Before: prompted on `callable_argument` or unmodeled method. After: allows safe receiver method execution cleanly.
 
 ### Bug Fixes
 
-* canonicalize git hook path comparisons across drive-letter and posix representations
+* **Canonicalize git hook path comparisons across drive-letter and posix representations**
+  - **Problem & Explanation:** On Windows, git hook installers comparing `core.hooksPath` between Windows drive-letter format (`C:/...`) and POSIX format (`/c/...`) reported false configuration mismatches and prompted for redundant reinstalls. Paths are now canonicalized before comparison.
+  - **Example Scenario:** Running `scripts/install-hooks.sh` in Git Bash on Windows.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Tooling Contrast:* Before: false mismatch error on drive representation. After: idempotent execution recognizing matching physical paths.
 
 ## 0.44.0 (2026-09-23)
 
-
 ### Features
 
-* add duplicate match checks and directory changer claim guarding to vouch trust
-* add mechanical verification of shipped and development skills against repository invariants
-* add synthetic PowerShell corpus and section 5 net property test coverage across all constructs
+* **Add synthetic PowerShell corpus and section 5 net property test coverage across all constructs**
+  - **Problem & Explanation:** Property tests previously verified the Section 5 invariant ("every prompt names the setting that turns it off") exclusively over bash command syntax. PowerShell constructs were only tested by individual unit tests. A synthetic PowerShell corpus and generator now tests the Section 5 invariant exhaustively across all 27 PowerShell constructs.
+  - **Example Scenario:** Running `cargo test --test property_test`.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Test Coverage Contrast:* Before: Section 5 property checks covered bash only. After: automated property verification covers all PowerShell AST syntax trees.
 
+* **Add duplicate match checks and directory changer claim guarding to `vouch trust`**
+  - **Problem & Explanation:** Running `vouch trust <program>` blindly appended new entries to `my-knowledge.toml` without checking if the entry already existed, allowing bare entries to shadow richer existing rules. It also allowed directory changers to be trusted without specifying `changes_dir`. `vouch trust` now detects duplicates and rejects unbacked directory changer claims.
+  - **Example Scenario:** Running `vouch trust git` when `git` already has custom knowledge rules.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Tooling Contrast:* Before: shadowed existing custom rules with duplicate entries. After: warns or updates in place without clobbering rich definitions.
+
+* **Add mechanical verification of shipped and development skills against repository invariants**
+  - **Problem & Explanation:** Documentation and procedures in skill files (`.claude/skills/`, `plugin/skills/`) previously had no automated validation against repository rules, allowing outdated advice or broken section references to ship unnoticed. Gate 8 in `tests/schema_docs_test.rs` now verifies frontmatter, anti-patterns, and section anchors.
+  - **Example Scenario:** Running `cargo test --test schema_docs_test`.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Quality Contrast:* Before: skill file drift discovered only through manual review. After: mechanical CI gate fails builds on any skill invariant violation.
 
 ### Bug Fixes
 
-* break engine verdict ties by diagnostic specificity to preserve by-reference and guard reasons
-* order config migration instructions to prioritize moving legacy vouch.toml before example templates
+* **Break engine verdict ties by diagnostic specificity to preserve by-reference and guard reasons**
+  - **Problem & Explanation:** When a command triggered multiple checks at the same decision priority, the first writer retained the reason slot, allowing a generic write prompt to mask a more informative guard or callable reference diagnostic. The engine now breaks ties by diagnostic specificity.
+  - **Example Scenario:** A Python snippet triggering both a generic write check and a specific guard check.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Diagnostic Contrast:* Before: displayed generic prompt reason. After: presents the most specific diagnostic reason explaining the exact risk.
+
+* **Order config migration instructions to prioritize moving legacy `vouch.toml` before example templates**
+  - **Problem & Explanation:** When migrating from older setups, initialization diagnostics suggested copying the example config and moving old configs in an ambiguous order that could lead operators to overwrite their custom configurations. Instructions were reordered to prioritize preserving existing configs.
+  - **Example Scenario:** Running `vouch` on a machine with legacy `~/.config/vouch.toml`.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Diagnostic Contrast:* Before: risk of clobbering user config by following instructions in printed order. After: strictly ordered safe migration steps.
 
 ## 0.43.0 (2026-09-22)
 
-
 ### Features
 
-* compact audit journals and outcome logs during review and doctor passes to enforce bounded storage while preserving recent decisions
-* declare literalpath destination flag for powershell pushd and push-location
+* **Compact audit journals and outcome logs during review and doctor passes to enforce bounded storage while preserving recent decisions**
+  - **Problem & Explanation:** The audit journal in `~/.local/state/vouch/journal.jsonl` grew unboundedly with every tool call, consuming disk space and slowing review passes. Journaling now features atomic deduplicating compaction, preserving a recent window (1,000 records) and collapsing historical duplicates with aggregated counts under a hard cap (5,000 records).
+  - **Example Scenario:** Running `vouch doctor` or `vouch review` on a high-traffic host.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Performance Contrast:* Before: unbounded log file growth. After: automatic bounded storage with sub-millisecond tail reads.
 
+* **Declare literalpath destination flag for powershell pushd and push-location**
+  - **Problem & Explanation:** Navigating directories in PowerShell using `pushd -LiteralPath <path>` triggered undeclared option prompts because `-LiteralPath` was missing from knowledge definitions.
+  - **Example Scenario:**
+    ```powershell
+    pushd -LiteralPath "C:/Users/dev/[project]"
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Added `"-literalpath"` to `dest_dir_flags` for `pushd` and `push-location` in `knowledge.toml`.
+    - *Behavior Contrast:* Before: prompted on undeclared option `-literalpath`. After: allows directory stack navigation to paths containing bracket wildcards cleanly.
 
 ### Bug Fixes
 
-* cap doctor undeclared options display at twenty items and anchor option line parsing
-* clean up newly written my-knowledge on failed trust rollback and route slash-shaped flags into member validation
-* isolate relative directory navigation from ambient CDPATH search diversion
+* **Cap doctor undeclared options display at twenty items and anchor option line parsing**
+  - **Problem & Explanation:** On developer hosts with many custom scripts, `vouch doctor` could print thousands of lines of undeclared options, scrolling actionable diagnostics off screen. Display is now capped at 20 representative items with total counts reported in the header.
+  - **Example Scenario:** Running `vouch doctor` on a machine with varied tool invocations.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Diagnostic Contrast:* Before: unbounded terminal output flooding stdout. After: concise 20-item preview with total unique count.
+
+* **Clean up newly written `my-knowledge` on failed trust rollback and route slash-shaped flags into member validation**
+  - **Problem & Explanation:** If `vouch trust` failed verification during rollback, newly created zero-byte `my-knowledge.toml` files could be left on disk. Rollback now cleans up newly created files. Slash-shaped flags (`/flag`) are also routed into member validation to reject invalid subcommands.
+  - **Example Scenario:** `vouch trust tool /invalid-flag`.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Tooling Contrast:* Before: empty zero-byte residue left on disk. After: atomic cleanup and rejection of slash-shaped invalid subcommands.
+
+* **Isolate relative directory navigation from ambient CDPATH search diversion**
+  - **Problem & Explanation:** In bash, relative directory navigation (`cd dirname`) can be diverted to unrelated locations if the `CDPATH` environment variable is set. Unanchored relative directory changes now fail closed to Ask under ambient `CDPATH`, while dot-anchored (`cd ./dirname`) and absolute paths remain allowed.
+  - **Example Scenario:**
+    ```bash
+    export CDPATH="/other/dir"; cd project
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: evaluated directory change against local cwd, ignoring `CDPATH` diversion. After: detects ambient `CDPATH` and prompts on unanchored relative moves.
 
 ## 0.42.0 (2026-09-21)
 
 
 ### Features
 
-* automatically detect parent shell environment for explain and why commands
-* evaluate higher-order callable references in functools.reduce
-* recognize standard stream writes on sys.stdout and sys.stderr
+* **Automatically detect parent shell environment for explain and why commands**
+  - **Problem & Explanation:** When developers queried `vouch explain` or `vouch why` from a PowerShell prompt, vouch defaulted to POSIX bash syntax unless `--shell powershell` was passed explicitly, showing bash-oriented quoting and diagnostics. Vouch now inspects the parent process environment to detect PowerShell and automatically format diagnostics for the calling shell.
+  - **Example Scenario:** Running `vouch explain "Get-ChildItem -Path C:\Project"` from a PowerShell terminal.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: required `--shell powershell` or defaulted to bash parsing rules. After: automatically detects parent PowerShell shell and parses with native PowerShell syntax.
+
+* **Evaluate higher-order callable references in functools.reduce**
+  - **Problem & Explanation:** Python scripts passing write or destructive functions into `functools.reduce` (such as `functools.reduce(os.remove, items)`) bypassed callable target detection because `reduce` was not modeled as taking a callable in its first argument position. The Python scanner now models callback positions in `functools.reduce`, accurately detecting write targets passed by reference.
+  - **Example Scenario:**
+    ```python
+    import functools, os
+    functools.reduce(os.remove, file_list)
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Modeled in knowledge schema callback declarations.
+    - *Behavior Contrast:* Before: treated `os.remove` as an uninvoked reference and missed write tracking. After: intercepts higher-order call and gates write paths against allowed write destinations.
+
+* **Recognize standard stream writes on sys.stdout and sys.stderr**
+  - **Problem & Explanation:** Python code writing to `sys.stdout.write(...)` or `sys.stderr.write(...)` triggered unmodeled filesystem write prompts because any method named `write` was conservatively classified as a file-modification side effect. Standard stream writes are now explicitly recognized as terminal handle writes, keeping harmless console output unblocked.
+  - **Example Scenario:**
+    ```python
+    import sys
+    sys.stdout.write("task complete\n")
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Standard stream handles modeled in built-in Python knowledge.
+    - *Diagnostic Contrast:* Before: prompted operator for permission to write to unmodeled file targets. After: recognizes standard stream handle writes and allows console output without interruption.
 
 
 ### Bug Fixes
 
-* halt on rebound_name when shadowed imported callables are passed by reference
-* provide actionable build and copy guidance on absent corpus in test gate
+* **Halt on rebound_name when shadowed imported callables are passed by reference**
+  - **Problem & Explanation:** If a script imported a safe function and later rebound that name to a different function or variable in local scope, passing that identifier by reference could incorrectly resolve to the original imported symbol. Vouch now halts resolution on rebound names and asks the operator rather than dispatching under false assumptions.
+  - **Example Scenario:**
+    ```python
+    from os import path
+    path = custom_mutator
+    dispatch(path)
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: evaluated reference using original imported target. After: halts on `rebound_name` and safely prompts when local reassignments shadow imported symbols.
+
+* **Provide actionable build and copy guidance on absent corpus in test gate**
+  - **Problem & Explanation:** When property or measurement tests ran in environments where the private real-traffic corpus was absent, tests emitted ambiguous skip or failure notices that did not explain how to acquire or regenerate the dataset. The gate runner now displays direct commands for building or copying the corpus.
+  - **Example Scenario:** Running cargo test on a fresh machine without local fixture cache.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Diagnostic Contrast:* Before: vague test skip message without remediation steps. After: prints exact copy and build commands (`tests/fixtures/build_fixture.py`).
 
 ## 0.41.0 (2026-09-18)
 
 
 ### Features
 
-* detect unified diff added environment dumps in pre-push hook
-* evaluate mode-conditioned writes by reference as unresolved invocations
-* exempt literal None in higher-order callback argument positions
-* format unresolved python variable targets with unresolved marker token
-* replace phantom reconcile skill with inline remediation in config diagnostics
+* **Detect unified diff added environment dumps in pre-push hook**
+  - **Problem & Explanation:** The pre-push git hook safety scanner checked committed file content but did not inspect patch hunks specifically for added lines that dump process environments or secret variables (`env`, `printenv`, `export -p`). The scanner now scans unified diff additions specifically, catching accidental leak inclusions before push.
+  - **Example Scenario:** A commit adding `env > /tmp/debug.log` to a deployment script.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Tooling Contrast:* Before: only full tracked file scans ran, missing transient patch hunk additions. After: pre-push hook verifies added patch lines and blocks credential/environment dumps.
+
+* **Evaluate mode-conditioned writes by reference as unresolved invocations**
+  - **Problem & Explanation:** When a Python file opener or handler was passed as a function reference without an explicit mode argument, vouch assumed default read mode (`r`) even when the callable was invoked downstream for writing. Mode-conditioned references are now conservatively marked as unresolved invocations that require operator permission when writing cannot be ruled out.
+  - **Example Scenario:** Passing an uninvoked `open` reference to a helper function that chooses write mode at runtime.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: assumed read mode and allowed potentially destructive file opening. After: flags mode-conditioned callable references as unresolved and prompts safely.
+
+* **Exempt literal None in higher-order callback argument positions**
+  - **Problem & Explanation:** In Python idioms like `filter(None, sequence)`, passing literal `None` as the callback function caused vouch to report an unmodeled callable error, prompting the operator even though `filter(None, ...)` is standard Python for filtering truthy elements. Literal `None` in callback positions is now exempted as a built-in identity filter.
+  - **Example Scenario:**
+    ```python
+    truthy_items = list(filter(None, raw_items))
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: raised unmodeled callable diagnostic on `None`. After: evaluates `filter(None, ...)` as safe in-memory filtering without prompting.
+
+* **Format unresolved python variable targets with unresolved marker token**
+  - **Problem & Explanation:** When a Python script wrote to an expression that could not be statically evaluated, the resulting diagnostic output rendered shell variable syntax (`$VAR`) instead of Python notation, confusing operators reviewing the prompt. Unresolved Python targets now use the canonical `<?>` marker token.
+  - **Example Scenario:** `f = open(get_dynamic_target(), "w")`.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Diagnostic Contrast:* Before: printed `$target` in prompt summary. After: displays `<?>` with context explaining that the write target could not be statically derived.
+
+* **Replace phantom reconcile skill with inline remediation in config diagnostics**
+  - **Problem & Explanation:** Configuration diagnostics and parse errors directed operators to invoke a non-existent `/vouch-reconcile` agent skill when configuration keys were missing or drifted. These messages have been replaced with clear inline remediation steps and suggestions to run `vouch doctor`.
+  - **Example Scenario:** Encountering a deprecated or drifted key in `config.toml`.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Diagnostic Contrast:* Before: advised running `/vouch-reconcile`. After: provides concrete inline remediation and points directly to `vouch doctor`.
 
 ## 0.40.0 (2026-09-18)
 
 
 ### Features
 
-* guard vocabulary is declared in knowledge schema version 17 with prompt effect descriptions
-* in-snippet PowerShell environment variable assignments evaluate against rebound name lookup checks
-* mechanical lint test and path helper prevent un-drive-qualified test fixture paths
-* slash-shaped flags support colon-attached values and runas is modeled as a rest wrapper
+* **Guard vocabulary is declared in knowledge schema version 17 with prompt effect descriptions**
+  - **Problem & Explanation:** Security guard names and categories were hardcoded in Rust source code, making it impossible for knowledge files to declare human-readable prompt explanations for custom guards. Knowledge schema version 17 moves guard definitions into data declarations with clear effect descriptions that display in prompts.
+  - **Example Scenario:** A guard triggering on recursive directory deletion explains the exact risk in plain language.
+  - **Delta:**
+    - *Configuration Delta:* Schema version bumped to 17 with new `[guards]` tables.
+    - *Diagnostic Contrast:* Before: cryptic internal guard identifiers shown to the operator. After: human-readable explanation of why the guard fired and what destructive effect it prevents.
+
+* **In-snippet PowerShell environment variable assignments evaluate against rebound name lookup checks**
+  - **Problem & Explanation:** When PowerShell scripts executed through `-Command` set environment variables (`$env:TARGET = "val"`), subsequent commands within the same snippet that referenced `$env:TARGET` failed rebound variable lookup checks and caused false-positive unmodeled prompts. In-snippet environment assignments are now tracked across statements.
+  - **Example Scenario:**
+    ```powershell
+    $env:DEST = "C:\Allowed\dest"; Copy-Item src.txt $env:DEST
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: treated `$env:DEST` as an unknown external variable and prompted. After: tracks in-snippet assignment and resolves the destination path within the allowed zone.
+
+* **Mechanical lint test and path helper prevent un-drive-qualified test fixture paths**
+  - **Problem & Explanation:** Integration tests on Windows runners frequently broke when fixture paths used Unix-style `/tmp` paths that lacked drive qualifiers (`C:`), leading to platform-specific test flake. A mechanical lint test and shared path helper now prevent un-drive-qualified paths from entering test fixtures.
+  - **Example Scenario:** Creating a temporary directory fixture in an integration test.
+  - **Delta:**
+    - *Configuration Delta:* Shared test helper in `tests/common`.
+    - *Tooling Contrast:* Before: platform-dependent test failures on Windows runners. After: mechanical CI gate enforces normalized drive-qualified paths across all platforms.
+
+* **Slash-shaped flags support colon-attached values and runas is modeled as a rest wrapper**
+  - **Problem & Explanation:** Windows command-line utilities frequently use slash-style flags with colon separators (such as `/user:Administrator`). Vouch's flag parser previously split on whitespace only, misparsing colon-attached arguments. Slash flags with attached values are now parsed properly, enabling wrapper tools like `runas` to be modeled accurately.
+  - **Example Scenario:** `runas /user:Administrator "cmd.exe /c cleanup.bat"`.
+  - **Delta:**
+    - *Configuration Delta:* `runas` modeled as a rest wrapper in Windows knowledge definitions.
+    - *Behavior Contrast:* Before: misidentified `/user:Administrator` as an invalid flag. After: parses slash flag values and unpacks wrapped commands for security evaluation.
 
 
 ### Bug Fixes
 
-* git hook scanner excludes consecutive assignments containing command substitutions from dump backstops
+* **Git hook scanner excludes consecutive assignments containing command substitutions from dump backstops**
+  - **Problem & Explanation:** Pre-commit hooks designed to block accidental environment dumps falsely flagged shell scripts containing consecutive local variable assignments when those assignments included command substitutions (`VAR=$(cmd)`). The hook scanner now distinguishes shell variable assignments from bulk environment dumping.
+  - **Example Scenario:**
+    ```bash
+    FIRST=$(git rev-parse HEAD)
+    SECOND=$(git rev-parse HEAD~1)
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged in git hook definitions.
+    - *Tooling Contrast:* Before: hook rejected legitimate multi-line assignment scripts as potential credential dumps. After: allows consecutive assignments containing command substitutions.
 
 ## 0.39.0 (2026-09-18)
 
 
 ### Features
 
-* enumerate command substitution positions via canonical AST visitors shared between the shell parser and measurement harnesses
-* introduce unified restriction, grant, and ranked reduction combinators on candidate base sets
-* support subcommand-specific option definitions and output destination derivation in knowledge schemas
-* unify wrapper expansion state into structured occurrence records with consolidated source provenance
+* **Support subcommand-specific option definitions and output destination derivation in knowledge schemas**
+  - **Problem & Explanation:** Many CLI tools use the same flag letter for different purposes depending on the subcommand (for example, `-o` meaning output file in one verb but something unrelated in another). Knowledge definitions previously applied options globally across a program, leading to false destination inferences. Schema version 16 introduced subcommand-scoped option definitions.
+  - **Example Scenario:** A multi-verb tool where `tool build -o file.bin` writes to a file, but `tool query -o json` specifies formatting.
+  - **Delta:**
+    - *Configuration Delta:* Knowledge schemas support `[commands.tool.subcommands.verb.options]`.
+    - *Behavior Contrast:* Before: global flag definitions caused false write prompts on query verbs. After: resolves options and write destinations specific to the invoked subcommand.
+
+* **Enumerate command substitution positions via canonical AST visitors shared between the shell parser and measurement harnesses**
+  - **Problem & Explanation:** The shell execution parser and the fixture measurement harnesses previously used independent AST traversal logic to find `$(...)` and backtick substitutions. Slight differences in traversal led to subtle mismatches during verification. A shared canonical AST visitor now guarantees identical command substitution enumeration.
+  - **Example Scenario:** Nested command substitutions inside arithmetic expressions and heredocs.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Tooling Contrast:* Before: potential discrepancies between production gating and offline measurement scripts. After: single canonical AST visitor shared across engine and test harnesses.
+
+* **Introduce unified restriction, grant, and ranked reduction combinators on candidate base sets**
+  - **Problem & Explanation:** Decision resolution across trust zones, distrust zones, guards, and knowledge grants used ad-hoc boolean logic in multiple evaluation paths, making precedence order subtle and difficult to audit. Base set combinators now unify candidate evaluation into formal ranked restriction and grant reductions.
+  - **Example Scenario:** Evaluating a command that touches both an allowed read path and a distrusted zone.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: scattered conditional checks for zone precedence. After: deterministic ranked reduction combinators with transparent decision auditing in `vouch why`.
+
+* **Unify wrapper expansion state into structured occurrence records with consolidated source provenance**
+  - **Problem & Explanation:** When unwrapping commands inside `sudo`, `xargs`, or `sh -c`, the parser maintained parallel arrays of command names, arguments, and sources. If these arrays fell out of sync, error messages could report misleading source line numbers. Wrapper expansion now uses strongly typed occurrence records with consolidated provenance.
+  - **Example Scenario:** `sudo sh -c "echo clean > /tmp/out"`.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Diagnostic Contrast:* Before: error messages could point to outer wrapper positions instead of inner commands. After: each unwrapped command retains exact source provenance back to its original location.
 
 
 ### Bug Fixes
 
-* skip parameter expansions as units and enforce arithmetic context for heredoc operators in substitution parsing
+* **Skip parameter expansions as units and enforce arithmetic context for heredoc operators in substitution parsing**
+  - **Problem & Explanation:** The command substitution boundary scanner previously misidentified parameter expansions containing braces (such as `${VAR//foo/bar}`) or arithmetic shift operators (`<<`) inside heredocs as nested substitutions or heredoc delimiters, triggering false syntax errors. The parser now handles parameter expansions as atomic units and verifies arithmetic context.
+  - **Example Scenario:**
+    ```bash
+    echo "${PATH//:/ }"
+    cat <<EOF
+    $(( 1 << 4 ))
+    EOF
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: failed parsing with syntax error prompts. After: accurately identifies parameter expansion boundaries and heredoc contents without false alarms.
 
 ## 0.38.0 (2026-09-18)
 
 
 ### Features
 
-* deduplicate wrapped snippet AST scans across decision evaluations
-* distinguish literal single-quoted tokens from expandable arguments in PowerShell
-* report trigger-specific diagnostic details for scanner constructs
-* support bash 5.3 non-forking value substitutions in same-process scopes
+* **Support bash 5.3 non-forking value substitutions in same-process scopes**
+  - **Problem & Explanation:** Bash 5.3 introduced non-forking value substitutions (`${ cmd; }`), which execute inside the main shell process without creating a subshell. Vouch treated all substitutions as subshells, missing variable modifications or triggering subshell warnings. Vouch now models non-forking substitutions as same-process child scopes while still enforcing safety checks.
+  - **Example Scenario:**
+    ```bash
+    val=${ cat /tmp/token.txt; }
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: flagged non-forking substitutions as unmodeled syntax or subshell constructs. After: walks substitution commands in a same-process scope, accurately tracking effects.
+
+* **Deduplicate wrapped snippet AST scans across decision evaluations**
+  - **Problem & Explanation:** Scripts passed into interpreters via `-c` or `-Command` were being parsed twice: once during initial occurrence discovery and again during policy gating. On large shell scripts or wrapped Python commands, this redundant parsing added measurable latency to agent tool calls. Snippet ASTs are now scanned once and cached on the occurrence record.
+  - **Example Scenario:** Multi-line inline scripts invoked via `bash -c "..."` or `python -c "..."`.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Performance Contrast:* Before: redundant AST traversals on every wrapper evaluation. After: single-pass scan cached on occurrence records, cutting tool-call gating overhead.
+
+* **Distinguish literal single-quoted tokens from expandable arguments in PowerShell**
+  - **Problem & Explanation:** In PowerShell, single-quoted strings are verbatim literals, whereas double-quoted strings can expand variables. Vouch's token scanner previously treated single-quoted tokens containing `$` signs as expandable variables, prompting operators for unbound variable names that were actually string literals.
+  - **Example Scenario:**
+    ```powershell
+    Write-Output 'Price is $100'
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: prompted operator for undefined variable `$100`. After: recognizes verbatim single-quoted strings and suppresses false variable expansion prompts.
+
+* **Report trigger-specific diagnostic details for scanner constructs**
+  - **Problem & Explanation:** When a scanner rejected a command due to an unmodeled syntax construct (such as process substitutions or coprocesses), the diagnostic prompt only reported a generic construct error without explaining which token triggered it. An out-of-band diagnostic channel now surfaces the specific token and reason in prompts.
+  - **Example Scenario:** Running a command using bash process substitution `<(cmd)`.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Diagnostic Contrast:* Before: generic "unmodeled construct" message. After: detailed prompt naming the exact construct (`ProcessSubstitution`), token location, and explaining why it was gated.
 
 
 ### Bug Fixes
 
-* cap nested subshell recursion depth to prevent stack exhaustion
+* **Cap nested subshell recursion depth to prevent stack exhaustion**
+  - **Problem & Explanation:** Malicious or deeply nested command inputs containing hundreds of nested subshells or arithmetic groups (`$(( $(( $(( ... )) )) ))`) could cause deep recursion in the parser and exhaust the thread stack. A recursion depth limit now halts traversal cleanly with a contextual error prompt.
+  - **Example Scenario:** Highly nested generated shell expressions.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: potential stack overflow crash on deeply nested syntax trees. After: safely caps recursion depth and returns a clean parse failure prompt.
 
 ## 0.37.0 (2026-09-18)
 

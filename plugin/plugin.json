@@ -1,6 +1,6 @@
 {
   "name": "vouch",
-  "version": "0.48.0",
+  "version": "0.49.0",
   "description": "An allow-list permission gate for coding agents (Claude Code, Codex, and Antigravity): every observed tool call is judged against declared knowledge, and every prompt names the setting that turns it off. Safe workspace operations with BypassSandbox are automatically demoted to run inside the local sandbox.",
   "author": {
     "name": "vouch"

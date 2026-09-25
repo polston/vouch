@@ -1,7 +1,7 @@
 {
   "name": "vouch",
-  "version": "0.48.0",
-  "description": "Skills for installing and operating the vouch allow-list permission gate with Codex and Claude Code; vouch-setup provisions from evidence, vouch-status reports installed versus released versions, and vouch-update moves the gate on an explicit accept.",
+  "version": "0.49.0",
+  "description": "Skills for installing and operating the vouch allow-list permission gate with Codex, Claude Code, and Google Antigravity; vouch-setup provisions from evidence, vouch-status reports installed versus released versions, and vouch-update moves the gate on an explicit accept.",
   "author": {
     "name": "vouch"
   },
@@ -16,7 +16,7 @@
   "interface": {
     "displayName": "Vouch",
     "shortDescription": "An allow-list gate for coding agents",
-    "longDescription": "Install, configure, inspect, and operate vouch as a local tool-call gate for Codex or Claude Code.",
+    "longDescription": "Install, configure, inspect, and operate vouch as a local tool-call gate for Codex, Claude Code, or Google Antigravity.",
     "developerName": "vouch",
     "category": "Developer Tools",
     "capabilities": [

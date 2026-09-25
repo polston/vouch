@@ -33,7 +33,8 @@ and hard rule 5 reports it and stops rather than silently downgrading.
    reported as "probably fine".
 4. **Hook wiring and `config.toml` are never touched.** The archive carries
    neither; this skill opens neither. There is no reason for this skill to
-   read `~/.claude/settings.json` or `~/.codex/hooks.json` at all.
+   read `~/.claude/settings.json`, `~/.codex/hooks.json`, or
+   `~/.gemini/antigravity-cli/hooks.json` at all.
 5. **Never downgrade silently.** An installed version NEWER than the latest
    release is a dev build or a pulled release — report it and stop unless the
    operator explicitly asks for the older version.
