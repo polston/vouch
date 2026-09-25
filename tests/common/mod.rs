@@ -447,11 +447,25 @@ fn emitted_pair(v: &serde_json::Value) -> (String, String) {
 /// The TOML text of `realistic_config` with `(lang, construct, action)` overrides
 /// folded into the construct tables. Used by child-process harnesses that take
 /// config as text, and also usable via `vouch::config::load` for in-process tests
+pub const SUPPORTED_TEST_LANGUAGES: &[&str] = &["bash", "powershell", "python", "javascript", "awk"];
+
+/// The TOML text of `realistic_config` with `(lang, construct, action)` overrides
+/// applied. Used by tests that need specific construct behaviors without
 /// needing keys in two language sections at once.
 ///
 /// Overrides are substituted into each `[lang.<l>.constructs]` table; there is a
 /// single `[write]` table and appending a second is a duplicate-key parse error.
 pub fn config_text_with(overrides: &[(&str, &str, &str)]) -> String {
+    // Validate language overrides (M2.141(1)): reject typos that would otherwise
+    // silently pass tests against unconfigured defaults.
+    for (lang, _, _) in overrides {
+        if !SUPPORTED_TEST_LANGUAGES.contains(lang) {
+            panic!(
+                "config_text_with: unrecognized or unsupported language override '{lang}'; known languages are: {SUPPORTED_TEST_LANGUAGES:?}"
+            );
+        }
+    }
+
     let mut construct_strs = std::collections::HashMap::new();
 
     // Start with the base constructs from realistic_config
@@ -475,6 +489,16 @@ pub fn config_text_with(overrides: &[(&str, &str, &str)]) -> String {
         ("unmodeled_command", "allow"),
         ("dynamic_call", "allow"),
         ("evaluated_input", "allow"),
+        ("parse_failure", "ask"),
+    ]);
+
+    construct_strs.insert("javascript", vec![
+        ("unmodeled_command", "allow"),
+        ("parse_failure", "ask"),
+    ]);
+
+    construct_strs.insert("awk", vec![
+        ("unmodeled_command", "allow"),
         ("parse_failure", "ask"),
     ]);
 
@@ -526,6 +550,26 @@ default = "allow"
     result.push_str("# replay measures vouch's defects, not the operator's unset policy.\n");
     for (construct, action) in &construct_strs["python"] {
         result.push_str(&format!("{} = \"{}\"\n", construct, action));
+    }
+
+    // Include javascript if configured
+    if let Some(js) = construct_strs.get("javascript") {
+        result.push_str("[lang.javascript]\n");
+        result.push_str("default = \"allow\"\n");
+        result.push_str("[lang.javascript.constructs]\n");
+        for (construct, action) in js {
+            result.push_str(&format!("{} = \"{}\"\n", construct, action));
+        }
+    }
+
+    // Include awk if configured
+    if let Some(awk) = construct_strs.get("awk") {
+        result.push_str("[lang.awk]\n");
+        result.push_str("default = \"allow\"\n");
+        result.push_str("[lang.awk.constructs]\n");
+        for (construct, action) in awk {
+            result.push_str(&format!("{} = \"{}\"\n", construct, action));
+        }
     }
 
     result.push_str("[write]\n");

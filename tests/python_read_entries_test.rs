@@ -189,15 +189,14 @@ fn every_declared_callback_slot_asks_for_an_unreadable_occupant() {
                 let cmd = format!("python -c \"{snippet}\"");
                 match decide_with(&guards_off, &cmd) {
                     Decision::Ask(r) => {
-                        // A subscript is not a callable reference (see the
-                        // comment above), so the generic `callback_argument`
-                        // claim is the only thing left to fire.
+                        // Under M2.215, a subscript in a callback slot is an
+                        // unresolved callable reference and trips callable_argument.
                         assert!(
-                            r.contains("callback_argument"),
-                            "{name}/{slot}: reason does not name callback_argument: {r}"
+                            r.contains("callable_argument"),
+                            "{name}/{slot}: reason does not name callable_argument: {r}"
                         );
                         assert!(
-                            r.contains("lang.python.constructs.callback_argument"),
+                            r.contains("lang.python.constructs.callable_argument"),
                             "{name}/{slot}: reason does not name the setting: {r}"
                         );
                         checked += 1;
@@ -456,11 +455,10 @@ fn defaultdicts_callable_factory_resolves_by_reference_and_the_bare_call_allows(
         other => panic!("expected Allow, got {other:?}"),
     }
     // The declared slot is still live: an occupant the scanner cannot
-    // resolve to a callable reference at all (a subscript — see
-    // `every_declared_callback_slot_asks_for_an_unreadable_occupant`'s
-    // comment) still trips the generic construct.
+    // resolve to a named callable reference (a subscript — M2.215)
+    // trips callable_argument as an unresolved callable reference.
     match decide(r#"python -c "import collections; collections.defaultdict(other[0])""#) {
-        Decision::Ask(r) => assert!(r.contains("callback_argument"), "got: {r}"),
+        Decision::Ask(r) => assert!(r.contains("callable_argument"), "got: {r}"),
         other => panic!("expected Ask, got {other:?}"),
     }
 }

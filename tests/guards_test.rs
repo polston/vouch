@@ -1188,13 +1188,21 @@ callback_args = ["opener"]
         &kb,
         &py_cmd(r#"open("$**")"#)
     ));
-    // A subscript is neither a plain literal (so it is `unread`) nor
-    // `Name`/`Attribute`/`Lambda` (so `argument_callable`, src/python.rs,
-    // never marks it `CallableArg` at all) — the genuine "occupied, unread,
-    // not callable" shape rule 1 exists for, unchanged by finding 1.
-    assert!(vouch::guards::callback_argument_used(
+    // Under M2.215, a subscript in a callback slot is classified as an
+    // unresolved callable reference (tripping unresolved_callback_argument)
+    // rather than falling to generic data callback_argument_used.
+    assert!(vouch::guards::unresolved_callback_argument(
         &kb,
         &py_cmd(r#"open("x", opener=handlers[0])"#)
+    ));
+    assert!(!vouch::guards::callback_argument_used(
+        &kb,
+        &py_cmd(r#"open("x", opener=handlers[0])"#)
+    ));
+    // A keyword unpack into a callback entry still trips callback_argument_used.
+    assert!(vouch::guards::callback_argument_used(
+        &kb,
+        &py_cmd(r#"open("x", **handlers)"#)
     ));
 }
 

@@ -62,10 +62,10 @@ fn a_string_literal_in_a_callback_position_is_not_marked() {
 }
 
 #[test]
-fn a_call_result_and_a_subscript_are_values_not_references() {
+fn a_call_result_and_a_subscript_are_unresolved_references() {
     let s = scan("import re\nre.sub('a', g(), 'x')\nre.sub('a', xs[0], 'y')\n");
     for c in s.commands.iter().filter(|c| c.head == "python:re.sub") {
-        assert!(c.callable_args.is_empty(), "got {:?}", c.callable_args);
+        assert!(matches!(c.callable_args.get(&1), Some(CallableArg::Unresolved)));
     }
 }
 
@@ -241,22 +241,21 @@ mod m2_92 {
         assert_ne!(a, Action::Ask, "a string replacement must not raise a callback ask");
     }
 
-    /// Finding 1 (review round 1): a subscript occupying a declared slot is
-    /// UNREAD, not "read and not callable" — `cbs[0]` can name a function at
-    /// runtime exactly as easily as `os.remove` can. Narrowing rule 1 to
-    /// `effective.callable` alone silently allowed this; it must still ask.
+    /// Finding 1 (review round 1, M2.215): a subscript occupying a declared slot is
+    /// routed through callable_argument as an unresolved reference rather than
+    /// falling to generic callback_argument data asks.
     #[test]
     fn a_subscript_occupant_in_a_declared_callback_slot_still_asks() {
         let (_, reason) = common_decide(r#"python -c "import re; re.sub('a', cbs[0], s)""#);
-        assert!(reason.contains("callback_argument"), "reason was: {reason}");
+        assert!(reason.contains("callable_argument"), "reason was: {reason}");
     }
 
-    /// Finding 1 (review round 1): a call result is likewise UNREAD, not a
-    /// value vouch has read and ruled out.
+    /// Finding 1 (review round 1, M2.215): a call result is likewise routed
+    /// through callable_argument as an unresolved reference.
     #[test]
     fn a_call_result_occupant_in_a_declared_callback_slot_still_asks() {
         let (_, reason) = common_decide(r#"python -c "import re; re.sub('a', g(), s)""#);
-        assert!(reason.contains("callback_argument"), "reason was: {reason}");
+        assert!(reason.contains("callable_argument"), "reason was: {reason}");
     }
 
     /// Finding 1 (review round 1): a starred spread has no explicit
@@ -802,5 +801,59 @@ mod vocabulary {
             reason.contains("rebound_name"),
             "expected direct call to halt on rebound_name, got: {reason}"
         );
+    }
+
+    #[test]
+    fn subscript_in_callback_slot_classified_as_unresolved_callable() {
+        let s = scan("import re\nre.sub('a', cbs[0], 'x')\n");
+        let c = cmd_for(&s, "re.sub");
+        assert!(matches!(c.callable_args.get(&1), Some(CallableArg::Unresolved)));
+
+        // Under default config, halts on callable_argument rather than generic callback_argument
+        let (a, reason) = common_decide("python -c 'import re; re.sub(\"a\", cbs[0], \"x\")'");
+        assert_eq!(a, Action::Ask);
+        assert!(
+            reason.contains("callable_argument"),
+            "expected callable_argument ask, got: {reason}"
+        );
+
+        // Under callback_argument = allow alone, subscript callback does NOT silently allow (M2.215)
+        let cfg_cb_allow = vouch::config::load(
+            "version = 1\n[lang.bash]\ndefault = \"allow\"\n[lang.bash.constructs]\nunmodeled_command = \"allow\"\n\
+             [lang.python]\ndefault = \"allow\"\n[lang.python.constructs]\nunmodeled_command = \"ask\"\n\
+             callback_argument = \"allow\"\n\
+             [write]\ndefault = \"ask\"\nallow_paths = [\"C:/work/**\"]\n",
+        ).unwrap();
+        let d = vouch::engine::decide_command_at(
+            &cfg_cb_allow,
+            "bash",
+            "python -c 'import re; re.sub(\"a\", cbs[0], \"x\")'",
+            None,
+            None,
+            Some("C:/Users/dev"),
+        );
+        match d {
+            vouch::protocol::Decision::Ask(r) => {
+                assert!(r.contains("callable_argument"), "must still ask on callable_argument, got: {r}");
+            }
+            other => panic!("expected Ask on callable_argument, got {other:?}"),
+        }
+
+        // Under callable_argument = allow, it allows
+        let cfg_callable_allow = vouch::config::load(
+            "version = 1\n[lang.bash]\ndefault = \"allow\"\n[lang.bash.constructs]\nunmodeled_command = \"allow\"\n\
+             [lang.python]\ndefault = \"allow\"\n[lang.python.constructs]\nunmodeled_command = \"ask\"\n\
+             callable_argument = \"allow\"\n\
+             [write]\ndefault = \"ask\"\nallow_paths = [\"C:/work/**\"]\n",
+        ).unwrap();
+        let d2 = vouch::engine::decide_command_at(
+            &cfg_callable_allow,
+            "bash",
+            "python -c 'import re; re.sub(\"a\", cbs[0], \"x\")'",
+            None,
+            None,
+            Some("C:/Users/dev"),
+        );
+        assert!(matches!(d2, vouch::protocol::Decision::Allow(_)), "expected Allow under callable_argument=allow, got: {d2:?}");
     }
 }

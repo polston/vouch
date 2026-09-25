@@ -135,11 +135,11 @@ fn a_bare_source_stays_quiet() {
     assert_verdict(&cfg, OUTSIDE, "source", "allow", None);
 }
 
-/// `trap` left the shell-state builtins entry's match list (spec §9.2) — it
-/// is now an unrecognised program and asks like any other, fail-closed with
-/// the honest-but-generic reason rather than a false "no effect" claim.
+/// `trap` registers an action to run on signals or exit (M2.152 Half 2).
+/// Positional argument 0 is scanned as a bash snippet — safe handlers allow,
+/// while unmodeled commands inside the handler ask.
 #[test]
-fn trap_asks_as_unknown() {
+fn trap_handler_scanned_as_bash_snippet() {
     let cfg = vouch::config::load(&common::config_text_with(&[(
         "bash",
         "unmodeled_command",
@@ -150,6 +150,13 @@ fn trap_asks_as_unknown() {
         &cfg,
         OUTSIDE,
         r#"trap "echo x" EXIT"#,
+        "allow",
+        None,
+    );
+    assert_verdict(
+        &cfg,
+        OUTSIDE,
+        r#"trap "unmodeled_handler_xyz" EXIT"#,
         "ask",
         Some("unmodeled_command"),
     );

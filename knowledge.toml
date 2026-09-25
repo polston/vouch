@@ -2415,11 +2415,17 @@ match = [
 # re-derives that set on demand, so the next drift is a command away rather
 # than a discovery.
 #
-# `trap` LEFT this list (spec 2026-08-20 §9.2): its first argument is a
-# command string registered to run later, and vouch never scans it — the
-# same shape `eval` was left out for above. Deliberately not vouched for
-# rather than claimed "no effect"; the honest later fix (scan the handler as
-# a bash snippet) lives on the absorbed roadmap row, not in this change.
+# `trap` registers an action to run on signals or exit (M2.152 Half 2).
+# Positional argument 0 is the handler string, scanned as a bash snippet.
+# `standalone_flags` covers listing flags (`-p`, `-l`).
+[[program]]
+match = ["trap"]
+languages = ["bash"]
+wraps = "arg_0"
+wrap_lang = "bash"
+case_sensitive_flags = true
+standalone_flags = ["-p", "-l"]
+
 [[program]]
 match = [
   "export", "set", "unset", "shift", "exit", "return",

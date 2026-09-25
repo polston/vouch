@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.51.0 (2026-09-25)
+
+
+### Features
+
+* **Modernize GitHub Actions release workflow pins to Node-24-supported releases**
+  - **Problem & Explanation:** Pinned actions in `.github/workflows/release.yml` and `release-please.yml` previously targeted the deprecated Node.js 20 runner runtime, generating runner deprecation warning annotations across release and publication workflows. Workflow pins are now modernized to `actions/checkout@v4.2.2`, `actions/upload-artifact@v4.6.1`, and `actions/download-artifact@v4.1.9`.
+  - **Example Scenario:** Automated CI release builds and release-please automation runs on GitHub Actions runners.
+  - **Delta:**
+    - *Configuration Delta:* Updated action version tags in `.github/workflows/release.yml` and `.github/workflows/release-please.yml`.
+    - *Behavior Contrast:* Before: runner logs emitted deprecation warnings on Node.js 20 runtimes. After: clean execution under modern runner releases without deprecation annotations.
+
+* **Route subscript and call-result callback occupants to `callable_argument`**
+  - **Problem & Explanation:** Subscript and call-result expressions passed in declared callback argument positions (such as `re.sub('a', cbs[0], s)`) were previously classified by nothing, bypassing by-reference callable evaluation and falling to generic `callback_argument` asks. When an operator configured `callback_argument = "allow"`, unreadable subscripted callbacks silently allowed while named callables still asked, creating a knowability security inversion. `src/python.rs` now classifies `Expr::Subscript` and `Expr::Call` as `CallableArg::Unresolved`, routing unreadable callback occupants to `callable_argument` via `unresolved_callback_argument`.
+  - **Example Scenario:**
+    ```python
+    re.sub('pattern', callbacks[0], text)
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: unreadable subscripted callbacks allowed under `callback_argument = "allow"` while named callables asked. After: unreadable subscript expressions route consistently to `callable_argument` and prompt unless `callable_argument = "allow"` is set.
+
+* **Scan `trap` handler arguments as inline bash snippets and validate flags**
+  - **Problem & Explanation:** The `trap` shell builtin was previously unmodeled, causing all `trap` commands in shell scripts (including harmless cleanup handlers like `trap 'rm -f "$tmp"' EXIT`) to prompt as unknown programs, while never scanning the registered handler for destructive operations. In `knowledge.toml`, `trap` is now modeled as an `arg_0` bash snippet wrapper with verified standalone flags (`-p`, `-l`). Registered trap handler strings are recursively scanned and evaluated as bash code, while listing/inspection invocations (`trap -p`, `trap -l`) are recognized without wrapping.
+  - **Example Scenario:**
+    ```bash
+    trap 'rm -f "$temp_file"' EXIT
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Added program entry for `trap` in `knowledge.toml` with `wraps = "arg_0"`, `wrap_lang = "bash"`, `case_sensitive_flags = true`, and `standalone_flags = ["-p", "-l"]`.
+    - *Behavior Contrast:* Before: `trap` prompted unconditionally as an unmodeled command. After: harmless cleanup traps within allowed write paths are allowed, dangerous commands inside traps trip guards, and inspection flags (`-p`, `-l`) are recognized without argument wrapping.
+
+* **Split wrapper fork enumeration discovery from terminal adjudication**
+  - **Problem & Explanation:** The wrapper fork enumeration driver in `src/engine.rs` previously computed full decisions for every intermediate prefix of the wrapper reading tree, even though non-terminal prefixes encountering subsequent forks only require branch fork discovery. On command lines with multiple undescribed wrapper flags, intermediate evaluations were immediately discarded, causing unnecessary latency overhead. `src/engine.rs` now separates `discover_fork_points` from terminal `judge_parsed` adjudication, evaluating full verdicts only on terminal leaves.
+  - **Example Scenario:** Evaluating commands wrapped with multiple wrapper flags and arguments (e.g. `sudo -u dev env VAR=val command`).
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: evaluated full decisions across 11 internal passes on multi-wrapper lines. After: discovers fork points without full evaluation and adjudicates only the 4 terminal leaves, reducing decision latency.
+
+* **Validate language overrides in test configuration builder**
+  - **Problem & Explanation:** Test configuration helpers in `tests/common/mod.rs` previously ignored language override table entries that specified unrecognized language names. A typo in a test fixture's language name (e.g. `[lang.javascrip]`) silently dropped the override and ran tests against default settings without failing, masking broken tests. The test configuration builder now validates language keys against `SUPPORTED_TEST_LANGUAGES`, panics on unrecognized language names, and formats configuration tables across all supported scanner languages.
+  - **Example Scenario:** Authoring unit and integration tests using `config_text_with` with language table overrides.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: typos in language names in test builders passed silently without applying overrides. After: builder panics with an informative error message listing supported languages when an unrecognized language is specified.
+
 ## 0.50.0 (2026-09-25)
 
 

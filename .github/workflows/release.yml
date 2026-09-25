@@ -15,7 +15,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
       - uses: dtolnay/rust-toolchain@stable
       - name: test (fails on any ignored)
         shell: bash
@@ -47,7 +47,7 @@ jobs:
             broker: vouch-codex-broker
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.triple }}
@@ -76,7 +76,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: Compress-Archive -Path stage/* -DestinationPath "vouch-${{ matrix.triple }}.zip"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4.6.1
         with:
           name: vouch-${{ matrix.triple }}
           path: vouch-${{ matrix.triple }}.zip
@@ -86,7 +86,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4.1.9
         with: { merge-multiple: true }
       - name: checksums
         run: sha256sum vouch-*.zip > SHA256SUMS

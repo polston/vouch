@@ -688,18 +688,52 @@ fn decide_command_from(
     project_root: Option<&str>,
     start: CdState,
 ) -> Decision {
-    // Enumerated breadth-first over choice PREFIXES: one pass under a prefix
-    // reports every fork it met, so a fork beyond the prefix's length is one
-    // nobody has chosen yet and splits into its own readings. Every split
-    // consumes at least one more argument token, so this terminates on its
-    // own; the cap is about how many verdicts are worth composing, not about
-    // termination.
-    let mut frontier: Vec<Vec<usize>> = vec![Vec::new()];
+    let scanner = match crate::syntax::scanner_for(lang) {
+        Some(s) => s,
+        None => return Decision::Abstain,
+    };
+    let scan = match scanner.scan(src) {
+        Ok(s) => s,
+        Err(e) => {
+            let reason = format!(
+                "vouch could not read this {lang} command ({e})\n  \
+                 either the command is malformed, or vouch's parser has a gap — \
+                 this is not a judgement about what the command does\n  \
+                 setting: lang.{lang}.constructs.parse_failure"
+            );
+            return act(cfg.construct_action(lang, "parse_failure"), reason);
+        }
+    };
+
+    let kb = crate::guards::in_effect();
+
+    // Fast path: evaluate reading 0 (all choices 0).
+    let (base_verdict, root_points) =
+        judge_parsed(cfg, lang, scan.clone(), home, project_root, start.clone(), &[]);
+
+    // If no fork offers choices (factor > 1), pass 0 is the entire answer.
+    let root_split = root_points.iter().enumerate().find(|(_, p)| p.factor > 1);
+    let Some((root_at, root_point)) = root_split else {
+        return base_verdict;
+    };
+
+    // Splitting discovery from judgement (M2.142(a)):
+    // Prefixes that encounter subsequent forks only require the branch fork list,
+    // discovered cheaply via wrapper expansion without running guards, write checks,
+    // or place scopes. Full decision evaluation is performed only for terminal leaf readings.
+    let mut frontier: Vec<Vec<usize>> = Vec::new();
     let mut done: Vec<(Vec<usize>, Decision)> = Vec::new();
-    let mut split: Option<crate::guards::ForkPoint> = None;
+    let mut split: Option<crate::guards::ForkPoint> = Some(root_point.clone());
+
+    for k in 0..root_point.factor {
+        let mut next = Vec::new();
+        next.resize(root_at, 0);
+        next.push(k);
+        frontier.push(next);
+    }
+
     while let Some(prefix) = frontier.pop() {
-        let (verdict, points) =
-            judge_once(cfg, lang, src, home, project_root, start.clone(), &prefix);
+        let points = discover_fork_points(kb, cfg, &scan, lang, &start, &prefix);
         match points.iter().enumerate().skip(prefix.len()).find(|(_, p)| p.factor > 1) {
             Some((at, point)) => {
                 if split.is_none() {
@@ -707,14 +741,20 @@ fn decide_command_from(
                 }
                 for k in 0..point.factor {
                     let mut next = prefix.clone();
-                    // Forks between the prefix's end and this one offered no
-                    // choice, so reading 0 is the only reading they have.
                     next.resize(at, 0);
                     next.push(k);
                     frontier.push(next);
                 }
             }
-            None => done.push((prefix, verdict)),
+            None => {
+                let verdict = if prefix.iter().all(|k| *k == 0) {
+                    base_verdict.clone()
+                } else {
+                    let (v, _) = judge_parsed(cfg, lang, scan.clone(), home, project_root, start.clone(), &prefix);
+                    v
+                };
+                done.push((prefix, verdict));
+            }
         }
         if done.len() + frontier.len() > MAX_WRAPPER_READINGS {
             let detail = match &split {
@@ -725,32 +765,17 @@ fn decide_command_from(
                 ),
                 None => "this line has more wrapper readings than vouch will judge".to_string(),
             };
-            // Composed with a real judgement, never returned on its own.
-            // Returning `act(a, …)` here (fix round 1) meant that with this
-            // construct set to "allow" the WHOLE LINE allowed before guards,
-            // write rules or protected paths were consulted — while the
-            // reason it printed still said "guards still apply". Every
-            // sibling channel folds instead: `wrap_depth_exceeded`, the
-            // closest one, is a cap on this same walk and leaves the guards
-            // to decide. The reading judged here is the one the entries'
-            // vocabularies imply, which is the same reading the agreement
-            // path speaks with.
-            let (base, _) = judge_once(cfg, lang, src, home, project_root, start.clone(), &[]);
             let (a, key) = construct_action_for(cfg, lang, "wrap_unlocated");
             let reason = format!("{}\n  {detail}", construct_reason(lang, &key));
             return match a {
-                // The construct itself is allowed, so what the walk DID find
-                // decides the line — and where that is an allow, it says
-                // which setting let the cap through, the same sentence
-                // `construct_grant` records on every other channel.
-                Action::Allow => match base {
+                Action::Allow => match base_verdict {
                     Decision::Allow(_) => {
-                        with_extra_reason(base, &construct_grant(lang, &key))
+                        with_extra_reason(base_verdict, &construct_grant(lang, &key))
                     }
                     stricter => stricter,
                 },
-                _ if rank(a) > decision_rank(&base) => act(a, reason),
-                _ => with_extra_reason(base, &reason),
+                _ if rank(a) > decision_rank(&base_verdict) => act(a, reason),
+                _ => with_extra_reason(base_verdict, &reason),
             };
         }
     }
@@ -1017,12 +1042,37 @@ fn resolve_guard_target_for(
     (None, None)
 }
 
+/// Discover fork points for one prefix of ambiguous wrapper choices using only
+/// the expansion walk (M2.142(a)), without running full decision adjudication.
+fn discover_fork_points(
+    kb: &crate::guards::Knowledge,
+    cfg: &Config,
+    scan: &crate::syntax::Scan,
+    lang: &str,
+    start: &CdState,
+    picks: &[usize],
+) -> Vec<crate::guards::ForkPoint> {
+    let caps = |l: &str| cfg.lang(l).and_then(|lc| lc.wrap_depth).unwrap_or(4);
+    let mut fork = crate::guards::ForkCursor::new(picks);
+    let _ = collect_expanded(
+        kb,
+        scan,
+        lang,
+        &caps,
+        &mut fork,
+        start.known_dir(),
+        Some(cfg.max_script_bytes(lang)),
+    );
+    fork.points().to_vec()
+}
+
 /// The whole decision, under ONE reading of every ambiguous wrapper.
 ///
 /// `picks` selects a reading at each fork the walk meets, in visit order; an
 /// empty vector takes the reading each entry's own vocabulary implies. The
 /// fork points it met come back alongside the verdict, so the driver above
 /// can enumerate the readings it has not tried yet.
+#[allow(dead_code)]
 fn judge_once(
     cfg: &Config,
     lang: &str,
@@ -1032,14 +1082,13 @@ fn judge_once(
     start: CdState,
     picks: &[usize],
 ) -> (Decision, Vec<crate::guards::ForkPoint>) {
-    let mut fork = crate::guards::ForkCursor::new(picks);
     let scanner = match crate::syntax::scanner_for(lang) {
         Some(s) => s,
         // A language with no scanner is not something vouch can judge.
         None => return (Decision::Abstain, Vec::new()),
     };
 
-    let mut scan = match scanner.scan(src) {
+    let scan = match scanner.scan(src) {
         Ok(s) => s,
         Err(e) => {
             let reason = format!(
@@ -1052,6 +1101,20 @@ fn judge_once(
         }
     };
 
+    judge_parsed(cfg, lang, scan, home, project_root, start, picks)
+}
+
+/// The whole decision, under ONE reading of every ambiguous wrapper, over an already-parsed Scan.
+fn judge_parsed(
+    cfg: &Config,
+    lang: &str,
+    mut scan: crate::syntax::Scan,
+    home: Option<&str>,
+    project_root: Option<&str>,
+    start: CdState,
+    picks: &[usize],
+) -> (Decision, Vec<crate::guards::ForkPoint>) {
+    let mut fork = crate::guards::ForkCursor::new(picks);
     let mut worst: Option<(Action, String)> = None;
 
     // Variables assigned in this same text. A later assignment to the same

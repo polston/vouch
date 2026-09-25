@@ -5418,27 +5418,31 @@ pub fn expand_wrappers_forking_with_context(
                     // string is known to EXIST and known to be unreadable,
                     // which is not the same as an empty scan (M2.123).
                     s if s.starts_with("arg_") => {
-                        if runs_file_target(kb, cmd).is_some() {
+                        if runs_file_target(kb, cmd).is_some() || standalone_run(prog, cmd, None, true) {
                             SnippetScan::default()
                         } else {
                             let arg_idx = s.strip_prefix("arg_").and_then(|n| n.parse::<usize>().ok());
                             match arg_idx.and_then(|i| cmd.args.get(i).map(|v| (i, v))) {
                                 Some((i, v)) if !cmd.unread_args.contains(&i) && !is_unresolved_marker(v) => {
                                     let unquoted = crate::paths::unquote_snippet(v);
-                                    let (scan, lang) = scan_wrap_snippet(
-                                        &cmd.head,
-                                        &prog.wrap_lang,
-                                        &unquoted,
-                                        &mut out.srcs,
-                                        &mut out.failures,
-                                        &mut out.constructs,
-                                    );
-                                    // Same reasoning as the `after_flag` arm above:
-                                    // this occurrence's own positional vocabulary
-                                    // located the payload (M2.98).
-                                    out.occurrences[self_idx].provenance = SourceProvenance::LocatedSnippet;
-                                    next_lang = lang;
-                                    scan
+                                    if unquoted.is_empty() || unquoted == "-" {
+                                        SnippetScan::default()
+                                    } else {
+                                        let (scan, lang) = scan_wrap_snippet(
+                                            &cmd.head,
+                                            &prog.wrap_lang,
+                                            &unquoted,
+                                            &mut out.srcs,
+                                            &mut out.failures,
+                                            &mut out.constructs,
+                                        );
+                                        // Same reasoning as the `after_flag` arm above:
+                                        // this occurrence's own positional vocabulary
+                                        // located the payload (M2.98).
+                                        out.occurrences[self_idx].provenance = SourceProvenance::LocatedSnippet;
+                                        next_lang = lang;
+                                        scan
+                                    }
                                 }
                             Some(_) => {
                                 // Keyed to the OCCURRENCE's own declared wrap

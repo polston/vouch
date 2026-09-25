@@ -876,6 +876,7 @@ impl Flow {
                 }
                 Some(CallableArg::Unresolved)
             }
+            ast::Expr::Subscript(_) | ast::Expr::Call(_) => Some(CallableArg::Unresolved),
             _ => None,
         }
     }
