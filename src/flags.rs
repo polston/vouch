@@ -62,8 +62,8 @@ pub enum Abbrev {
 
 /// What a single raw token turned out to be, once unquoted and read against
 /// a `Vocab`.
-#[derive(Debug, PartialEq)]
-pub enum Class {
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum Class<'a> {
     /// Not shaped like a flag under this vocabulary's `flag_prefix` at all —
     /// a positional argument, a subcommand, a value.
     NotFlag,
@@ -77,7 +77,7 @@ pub enum Class {
     /// `-Name:value`. `flag` is always the CANONICAL declared spelling, not
     /// the raw text — an abbreviated or case-folded token normalises to the
     /// same string a full, exact spelling would.
-    Value { flag: String, attached: Option<String> },
+    Value { flag: &'a str, attached: Option<&'a str> },
     /// A flag from `no_value_options`, matched whole (exact or accepted
     /// abbreviation) or as a member of an all-described cluster
     /// (`-abc` where every letter is a declared no-value flag) — in the
@@ -85,17 +85,17 @@ pub enum Class {
     /// because `Bool` has nowhere to put more than one name; a caller that
     /// needs to know whether one particular letter is in the cluster asks
     /// `spells` instead.
-    Bool { flag: String },
+    Bool { flag: &'a str },
     /// Flag-shaped, but nothing in this vocabulary describes it — not a
     /// whole-token match, not an accepted abbreviation, not any attached
     /// form, and, if it looked like a cluster, at least one of its letters
     /// was itself undescribed (round-1 finding: an undescribed letter
     /// poisons the whole cluster, it does not just drop out of it).
-    Undescribed { token: String },
+    Undescribed { token: &'a str },
     /// Flag-shaped, prefix-matches exactly one declared long flag, and this
     /// vocabulary's policy is `Abbrev::Refuse`. `declared` names what it
     /// prefixes, so the prompt this produces can say so.
-    RefusedAbbrev { token: String, declared: String },
+    RefusedAbbrev { token: &'a str, declared: &'a str },
 }
 
 /// What `spells` found, once it checked whether `raw` names one specific
@@ -109,22 +109,22 @@ pub enum Class {
 /// miss class this module exists to close: an operator who refused
 /// abbreviation for a case-sensitive unix entry would have that refusal
 /// mean nothing the moment a consumer used `spells` instead of `classify`.
-#[derive(Debug, PartialEq)]
-pub enum Spell {
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum Spell<'a> {
     /// `raw` does not name `flag` in any accepted shape.
     No,
     /// `raw` names `flag`, exactly, as an accepted abbreviation, or in an
     /// attached/cluster shape — carrying the attached value, if any.
-    Yes(Option<String>),
+    Yes(Option<&'a str>),
     /// `raw` prefix-matches `flag` (whole-token or through a colon-attach
     /// pre-colon reading) and this vocabulary's policy is `Abbrev::Refuse`.
     /// Loud, like `Class::RefusedAbbrev` — never folded into `No`.
-    RefusedAbbrev { declared: String },
+    RefusedAbbrev { declared: &'a str },
 }
 
 /// Per-token classification. Unquotes internally (`paths::unquote`) — the
 /// same view heads and write-path candidates already get (CLAUDE.md §8).
-pub fn classify(raw: &str, v: &Vocab) -> Class {
+pub fn classify<'a>(raw: &'a str, v: &Vocab<'a>) -> Class<'a> {
     let s = paths::unquote(raw);
     let prefixes = effective_prefixes(v.flag_prefix);
 
@@ -151,7 +151,7 @@ pub fn classify(raw: &str, v: &Vocab) -> Class {
         }
         return match v.abbreviation {
             Abbrev::Accept => kind.class(canon, None),
-            Abbrev::Refuse => Class::RefusedAbbrev { token: s.to_string(), declared: canon.to_string() },
+            Abbrev::Refuse => Class::RefusedAbbrev { token: s, declared: canon },
         };
     }
 
@@ -164,13 +164,13 @@ pub fn classify(raw: &str, v: &Vocab) -> Class {
         if let Some((pre, post)) = s.split_once(':') {
             if let Some((kind, canon, exact)) = find_declared(pre, v) {
                 if exact || v.abbreviation == Abbrev::Accept {
-                    return kind.class(canon, Some(post.to_string()));
+                    return kind.class(canon, Some(post));
                 }
                 // The pre-colon text is a refused-abbreviation candidate,
                 // same as a whole-token one above — loud, not a silent fall
                 // through to `=`/short-attach/cluster/Undescribed, which
                 // would drop the declared name it prefixes.
-                return Class::RefusedAbbrev { token: s.to_string(), declared: canon.to_string() };
+                return Class::RefusedAbbrev { token: s, declared: canon };
             }
         }
     }
@@ -181,7 +181,7 @@ pub fn classify(raw: &str, v: &Vocab) -> Class {
     if let Some((name, value)) = s.split_once('=') {
         if let Some((Kind::Value, canon, exact)) = find_declared(name, v) {
             if exact || v.abbreviation == Abbrev::Accept {
-                return Class::Value { flag: canon.to_string(), attached: Some(value.to_string()) };
+                return Class::Value { flag: canon, attached: Some(value) };
             }
         }
     }
@@ -194,7 +194,7 @@ pub fn classify(raw: &str, v: &Vocab) -> Class {
         if let Some(head) = s.get(..2) {
             for d in v.value_options {
                 if d.len() == 2 && d.starts_with('-') && eq_case(head, d, v.case_sensitive) {
-                    return Class::Value { flag: d.clone(), attached: Some(s[2..].to_string()) };
+                    return Class::Value { flag: d.as_str(), attached: Some(&s[2..]) };
                 }
             }
         }
@@ -207,19 +207,11 @@ pub fn classify(raw: &str, v: &Vocab) -> Class {
     // an otherwise-recognised cluster, because that would let an operator's
     // description of `-a` and `-c` silently vouch for whatever `-b` turns
     // out to mean.
-    if s.starts_with('-') && !s.starts_with("--") && s.len() > 2 {
-        let letters: Vec<char> = s[1..].chars().collect();
-        let all_described = !letters.is_empty()
-            && letters.iter().all(|c| {
-                let short = format!("-{c}");
-                v.no_value_options.iter().any(|d| eq_case(d, &short, v.case_sensitive))
-            });
-        if all_described {
-            return Class::Bool { flag: s.to_string() };
-        }
+    if is_fully_described_cluster(s, v) {
+        return Class::Bool { flag: s };
     }
 
-    Class::Undescribed { token: s.to_string() }
+    Class::Undescribed { token: s }
 }
 
 /// Membership: does `raw` spell `flag` in any accepted shape?
@@ -241,7 +233,7 @@ pub fn classify(raw: &str, v: &Vocab) -> Class {
 /// for call `spells`, not `classify`, so folding a refused abbreviation into
 /// plain non-match here would silently reopen the miss class this module
 /// exists to close, one call site later than `classify` closed it.
-pub fn spells(flag: &str, raw: &str, v: &Vocab) -> Spell {
+pub fn spells<'a>(flag: &'a str, raw: &'a str, v: &Vocab) -> Spell<'a> {
     let s = paths::unquote(raw);
     let prefixes = effective_prefixes(v.flag_prefix);
 
@@ -256,19 +248,19 @@ pub fn spells(flag: &str, raw: &str, v: &Vocab) -> Spell {
     if is_abbrev(s, flag, v.case_sensitive) {
         return match v.abbreviation {
             Abbrev::Accept => Spell::Yes(None),
-            Abbrev::Refuse => Spell::RefusedAbbrev { declared: flag.to_string() },
+            Abbrev::Refuse => Spell::RefusedAbbrev { declared: flag },
         };
     }
 
     if v.colon_attach {
         if let Some((pre, post)) = s.split_once(':') {
             if eq_case(pre, flag, v.case_sensitive) {
-                return Spell::Yes(Some(post.to_string()));
+                return Spell::Yes(Some(post));
             }
             if is_abbrev(pre, flag, v.case_sensitive) {
                 return match v.abbreviation {
-                    Abbrev::Accept => Spell::Yes(Some(post.to_string())),
-                    Abbrev::Refuse => Spell::RefusedAbbrev { declared: flag.to_string() },
+                    Abbrev::Accept => Spell::Yes(Some(post)),
+                    Abbrev::Refuse => Spell::RefusedAbbrev { declared: flag },
                 };
             }
         }
@@ -276,12 +268,12 @@ pub fn spells(flag: &str, raw: &str, v: &Vocab) -> Spell {
 
     if let Some((name, value)) = s.split_once('=') {
         if eq_case(name, flag, v.case_sensitive) {
-            return Spell::Yes(Some(value.to_string()));
+            return Spell::Yes(Some(value));
         }
         if is_abbrev(name, flag, v.case_sensitive) {
             return match v.abbreviation {
-                Abbrev::Accept => Spell::Yes(Some(value.to_string())),
-                Abbrev::Refuse => Spell::RefusedAbbrev { declared: flag.to_string() },
+                Abbrev::Accept => Spell::Yes(Some(value)),
+                Abbrev::Refuse => Spell::RefusedAbbrev { declared: flag },
             };
         }
     }
@@ -298,21 +290,14 @@ pub fn spells(flag: &str, raw: &str, v: &Vocab) -> Spell {
     if is_bare_short(flag) && s.len() > 2 && !declared_no_value {
         if let Some(head) = s.get(..2) {
             if eq_case(head, flag, v.case_sensitive) {
-                return Spell::Yes(Some(s[2..].to_string()));
+                return Spell::Yes(Some(&s[2..]));
             }
         }
     }
 
-    if is_bare_short(flag) && s.starts_with('-') && !s.starts_with("--") && s.len() > 2 {
-        let letters: Vec<char> = s[1..].chars().collect();
-        let all_described = !letters.is_empty()
-            && letters.iter().all(|c| {
-                let short = format!("-{c}");
-                v.no_value_options.iter().any(|d| eq_case(d, &short, v.case_sensitive))
-            });
-        // Safe: `is_bare_short` guarantees `flag` is exactly `-` plus one
-        // ASCII character, so `chars().nth(1)` is always `Some`.
-        if all_described && letters.contains(&flag.chars().nth(1).unwrap()) {
+    if is_bare_short(flag) && is_fully_described_cluster(s, v) {
+        let target_ch = flag.chars().nth(1).unwrap();
+        if s[1..].chars().any(|c| eq_case_char(c, target_ch, v.case_sensitive)) {
             return Spell::Yes(None);
         }
     }
@@ -333,7 +318,10 @@ impl<'a> ArgWalk<'a> {
         Self { v, options_ended: false }
     }
 
-    pub fn next(&mut self, raw: &str) -> Class {
+    pub fn next<'b>(&mut self, raw: &'b str) -> Class<'b>
+    where
+        'a: 'b,
+    {
         if self.options_ended {
             return Class::NotFlag;
         }
@@ -343,6 +331,43 @@ impl<'a> ArgWalk<'a> {
         }
         class
     }
+
+    /// Advance through `args` at `*i`. Returns the classified token and advances `*i`.
+    /// If the token takes a separate value (`Class::Value { attached: None, .. }`),
+    /// it consumes the next token from `args` (if available), advancing `*i` past it,
+    /// and returning `(class, Some(val))`.
+    pub fn consume_step<'b>(&mut self, args: &'b [String], i: &mut usize) -> (Class<'b>, Option<&'b str>)
+    where
+        'a: 'b,
+    {
+        if *i >= args.len() {
+            return (Class::NotFlag, None);
+        }
+        let raw = args[*i].as_str();
+        let class = self.next(raw);
+        *i += 1;
+        if let Class::Value { attached: None, .. } = &class {
+            if *i < args.len() {
+                let val = args[*i].as_str();
+                *i += 1;
+                return (class, Some(val));
+            }
+        }
+        (class, None)
+    }
+}
+
+/// Classify the flag token at `*i` in `args` and consume its following value token
+/// if it takes a separate value, advancing `*i` past both tokens.
+pub fn consume_flag_value<'a, 'b>(
+    walk: &mut ArgWalk<'a>,
+    args: &'b [String],
+    i: &mut usize,
+) -> (Class<'b>, Option<&'b str>)
+where
+    'a: 'b,
+{
+    walk.consume_step(args, i)
 }
 
 /// The one construction policy (round-1: per-caller ad-hoc construction
@@ -379,10 +404,10 @@ enum Kind {
 }
 
 impl Kind {
-    fn class(&self, flag: &str, attached: Option<String>) -> Class {
+    fn class<'a>(&self, flag: &'a str, attached: Option<&'a str>) -> Class<'a> {
         match self {
-            Kind::Value => Class::Value { flag: flag.to_string(), attached },
-            Kind::NoValue => Class::Bool { flag: flag.to_string() },
+            Kind::Value => Class::Value { flag, attached },
+            Kind::NoValue => Class::Bool { flag },
         }
     }
 }
@@ -496,13 +521,43 @@ fn is_slash_flag(s: &str) -> bool {
     }
 }
 
+fn eq_case_char(a: char, b: char, case_sensitive: bool) -> bool {
+    if case_sensitive {
+        a == b
+    } else {
+        a.eq_ignore_ascii_case(&b)
+    }
+}
+
+/// True when `s` is a short-flag cluster (e.g. `-abc`) where every letter after the
+/// initial dash is a declared no-value flag in `v`.
+fn is_fully_described_cluster(s: &str, v: &Vocab) -> bool {
+    if !s.starts_with('-') || s.starts_with("--") || s.len() <= 2 {
+        return false;
+    }
+    let mut buf = [b'-', 0, 0, 0, 0];
+    let mut has_chars = false;
+    for c in s[1..].chars() {
+        has_chars = true;
+        let len = c.encode_utf8(&mut buf[1..]).len();
+        let short = match std::str::from_utf8(&buf[..1 + len]) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        if !v.no_value_options.iter().any(|d| eq_case(d, short, v.case_sensitive)) {
+            return false;
+        }
+    }
+    has_chars
+}
+
 /// True when `s` is shaped like SOME flag under this vocabulary's declared
 /// prefixes — says nothing about whether any declared flag actually
 /// matches it.
 fn flag_shaped(s: &str, prefixes: &[&str]) -> bool {
     prefixes.iter().any(|p| match *p {
         "/" => is_slash_flag(s),
-        _ => s.starts_with('-') && s.len() > 1,
+        p => s.starts_with(p) && s.len() > p.len(),
     })
 }
 
@@ -531,14 +586,14 @@ mod tests {
     fn classify_unquotes_before_matching_a_declared_flag() {
         let no_value = strs(&["--force"]);
         let v = vocab(&[], &no_value, &[], true, Abbrev::Refuse, false);
-        assert_eq!(classify("\"--force\"", &v), Class::Bool { flag: "--force".to_string() });
+        assert_eq!(classify("\"--force\"", &v), Class::Bool { flag: "--force" });
     }
 
     #[test]
     fn classify_reads_a_single_quoted_flag_the_same_way() {
         let no_value = strs(&["--force"]);
         let v = vocab(&[], &no_value, &[], true, Abbrev::Refuse, false);
-        assert_eq!(classify("'--force'", &v), Class::Bool { flag: "--force".to_string() });
+        assert_eq!(classify("'--force'", &v), Class::Bool { flag: "--force" });
     }
 
     // -- rule 2: attached forms ------------------------------------------
@@ -549,7 +604,7 @@ mod tests {
         let v = vocab(&value, &[], &[], true, Abbrev::Refuse, false);
         assert_eq!(
             classify("--output=/tmp/p", &v),
-            Class::Value { flag: "--output".to_string(), attached: Some("/tmp/p".to_string()) }
+            Class::Value { flag: "--output", attached: Some("/tmp/p") }
         );
     }
 
@@ -559,7 +614,7 @@ mod tests {
         let v = vocab(&value, &[], &[], true, Abbrev::Refuse, false);
         assert_eq!(
             classify("-o/tmp/p", &v),
-            Class::Value { flag: "-o".to_string(), attached: Some("/tmp/p".to_string()) }
+            Class::Value { flag: "-o", attached: Some("/tmp/p") }
         );
     }
 
@@ -569,7 +624,7 @@ mod tests {
         let v = vocab(&value, &[], &[], false, Abbrev::Accept, true);
         assert_eq!(
             classify("-Path:/tmp/p", &v),
-            Class::Value { flag: "-Path".to_string(), attached: Some("/tmp/p".to_string()) }
+            Class::Value { flag: "-Path", attached: Some("/tmp/p") }
         );
     }
 
@@ -579,7 +634,7 @@ mod tests {
         // just part of an unrecognised token, not an attach form.
         let value = strs(&["-Path"]);
         let v = vocab(&value, &[], &[], false, Abbrev::Accept, false);
-        assert_eq!(classify("-Path:/tmp/p", &v), Class::Undescribed { token: "-Path:/tmp/p".to_string() });
+        assert_eq!(classify("-Path:/tmp/p", &v), Class::Undescribed { token: "-Path:/tmp/p" });
     }
 
     // -- rule 3: clustered short flags ------------------------------------
@@ -588,21 +643,21 @@ mod tests {
     fn classify_explodes_a_fully_described_cluster_of_short_flags() {
         let no_value = strs(&["-r", "-f"]);
         let v = vocab(&[], &no_value, &[], true, Abbrev::Refuse, false);
-        assert_eq!(classify("-rf", &v), Class::Bool { flag: "-rf".to_string() });
+        assert_eq!(classify("-rf", &v), Class::Bool { flag: "-rf" });
     }
 
     #[test]
     fn classify_refuses_a_cluster_with_one_undescribed_letter() {
         let no_value = strs(&["-r"]);
         let v = vocab(&[], &no_value, &[], true, Abbrev::Refuse, false);
-        assert_eq!(classify("-rf", &v), Class::Undescribed { token: "-rf".to_string() });
+        assert_eq!(classify("-rf", &v), Class::Undescribed { token: "-rf" });
     }
 
     #[test]
     fn classify_does_not_explode_a_double_dash_token() {
         let no_value = strs(&["-f", "-o", "-r", "-c", "-e"]);
         let v = vocab(&[], &no_value, &[], true, Abbrev::Refuse, false);
-        assert_eq!(classify("--force", &v), Class::Undescribed { token: "--force".to_string() });
+        assert_eq!(classify("--force", &v), Class::Undescribed { token: "--force" });
     }
 
     // -- rule 4: `--` end of options ---------------------------------------
@@ -618,7 +673,7 @@ mod tests {
         let value = strs(&["-o"]);
         let v = vocab(&value, &[], &[], true, Abbrev::Refuse, false);
         let mut walk = ArgWalk::new(&v);
-        assert_eq!(walk.next("-o"), Class::Value { flag: "-o".to_string(), attached: None });
+        assert_eq!(walk.next("-o"), Class::Value { flag: "-o", attached: None });
         assert_eq!(walk.next("--"), Class::EndOfOptions);
         assert_eq!(walk.next("-o"), Class::NotFlag);
         assert_eq!(walk.next("--anything"), Class::NotFlag);
@@ -631,7 +686,7 @@ mod tests {
         let no_value = strs(&["/s"]);
         let prefix = strs(&["/"]);
         let v = vocab(&[], &no_value, &prefix, false, Abbrev::Refuse, false);
-        assert_eq!(classify("/S", &v), Class::Bool { flag: "/s".to_string() });
+        assert_eq!(classify("/S", &v), Class::Bool { flag: "/s" });
     }
 
     #[test]
@@ -647,8 +702,8 @@ mod tests {
         let no_value = strs(&["/s", "-r"]);
         let prefix = strs(&["/", "-"]);
         let v = vocab(&[], &no_value, &prefix, false, Abbrev::Refuse, false);
-        assert_eq!(classify("/S", &v), Class::Bool { flag: "/s".to_string() });
-        assert_eq!(classify("-R", &v), Class::Bool { flag: "-r".to_string() });
+        assert_eq!(classify("/S", &v), Class::Bool { flag: "/s" });
+        assert_eq!(classify("-R", &v), Class::Bool { flag: "-r" });
     }
 
     // -- rule 6: case per entry ---------------------------------------------
@@ -657,14 +712,14 @@ mod tests {
     fn case_sensitive_vocab_refuses_a_folded_spelling() {
         let value = strs(&["-C"]);
         let v = vocab(&value, &[], &[], true, Abbrev::Refuse, false);
-        assert_eq!(classify("-c", &v), Class::Undescribed { token: "-c".to_string() });
+        assert_eq!(classify("-c", &v), Class::Undescribed { token: "-c" });
     }
 
     #[test]
     fn case_insensitive_vocab_accepts_a_folded_spelling() {
         let value = strs(&["-C"]);
         let v = vocab(&value, &[], &[], false, Abbrev::Refuse, false);
-        assert_eq!(classify("-c", &v), Class::Value { flag: "-C".to_string(), attached: None });
+        assert_eq!(classify("-c", &v), Class::Value { flag: "-C", attached: None });
     }
 
     // -- rule 7: abbreviation ------------------------------------------------
@@ -675,7 +730,7 @@ mod tests {
         // `-Recurse`) — a `--` GNU-style flag never does, covered below.
         let no_value = strs(&["-Recurse"]);
         let v = vocab(&[], &no_value, &[], false, Abbrev::Accept, false);
-        assert_eq!(classify("-Recu", &v), Class::Bool { flag: "-Recurse".to_string() });
+        assert_eq!(classify("-Recu", &v), Class::Bool { flag: "-Recurse" });
     }
 
     #[test]
@@ -684,7 +739,7 @@ mod tests {
         let v = vocab(&[], &no_value, &[], true, Abbrev::Refuse, false);
         assert_eq!(
             classify("-recu", &v),
-            Class::RefusedAbbrev { token: "-recu".to_string(), declared: "-recurse".to_string() }
+            Class::RefusedAbbrev { token: "-recu", declared: "-recurse" }
         );
     }
 
@@ -692,7 +747,7 @@ mod tests {
     fn a_double_dash_long_flag_never_abbreviates() {
         let no_value = strs(&["--recursive"]);
         let v = vocab(&[], &no_value, &[], false, Abbrev::Accept, false);
-        assert_eq!(classify("--recu", &v), Class::Undescribed { token: "--recu".to_string() });
+        assert_eq!(classify("--recu", &v), Class::Undescribed { token: "--recu" });
     }
 
     // -- the two attach forms, colon precedence over short-attach ----------
@@ -703,7 +758,7 @@ mod tests {
         let v = vocab(&value, &[], &[], false, Abbrev::Accept, true);
         assert_eq!(
             classify("-c:value", &v),
-            Class::Value { flag: "-c".to_string(), attached: Some("value".to_string()) }
+            Class::Value { flag: "-c", attached: Some("value") }
         );
     }
 
@@ -713,7 +768,7 @@ mod tests {
         let v = vocab(&value, &[], &[], false, Abbrev::Accept, true);
         assert_eq!(
             classify("-cd:value", &v),
-            Class::Value { flag: "-c".to_string(), attached: Some("d:value".to_string()) }
+            Class::Value { flag: "-c", attached: Some("d:value") }
         );
     }
 
@@ -795,7 +850,7 @@ mod tests {
         // `wrap_flags` entry), not only names also present in
         // `value_options`/`no_value_options`.
         let v = vocab(&[], &[], &[], true, Abbrev::Refuse, false);
-        assert_eq!(spells("-c", "-cvalue", &v), Spell::Yes(Some("value".to_string())));
+        assert_eq!(spells("-c", "-cvalue", &v), Spell::Yes(Some("value")));
     }
 
     #[test]
@@ -812,7 +867,7 @@ mod tests {
         let v = vocab(&[], &[], &[], true, Abbrev::Refuse, false);
         assert_eq!(
             spells("-recurse", "-recu", &v),
-            Spell::RefusedAbbrev { declared: "-recurse".to_string() }
+            Spell::RefusedAbbrev { declared: "-recurse" }
         );
     }
 
@@ -827,7 +882,7 @@ mod tests {
         let v = vocab(&[], &[], &[], false, Abbrev::Refuse, true);
         assert_eq!(
             spells("-Recurse", "-Recu:value", &v),
-            Spell::RefusedAbbrev { declared: "-Recurse".to_string() }
+            Spell::RefusedAbbrev { declared: "-Recurse" }
         );
     }
 
@@ -841,7 +896,37 @@ mod tests {
         let v = vocab(&[], &no_value, &[], false, Abbrev::Refuse, true);
         assert_eq!(
             classify("-Recu:value", &v),
-            Class::RefusedAbbrev { token: "-Recu:value".to_string(), declared: "-Recurse".to_string() }
+            Class::RefusedAbbrev { token: "-Recu:value", declared: "-Recurse" }
         );
+    }
+
+    #[test]
+    fn consume_step_advances_over_separate_value() {
+        let val_opts = strs(&["-C", "--output"]);
+        let no_val_opts = strs(&["-v"]);
+        let v = vocab(&val_opts, &no_val_opts, &[], true, Abbrev::Refuse, false);
+        let mut walk = ArgWalk::new(&v);
+        let args = strs(&["-v", "-C", "/repo", "--output=/tmp/out", "file.txt"]);
+        let mut i = 0;
+
+        let (c1, v1) = walk.consume_step(&args, &mut i);
+        assert_eq!(c1, Class::Bool { flag: "-v" });
+        assert_eq!(v1, None);
+        assert_eq!(i, 1);
+
+        let (c2, v2) = walk.consume_step(&args, &mut i);
+        assert_eq!(c2, Class::Value { flag: "-C", attached: None });
+        assert_eq!(v2, Some("/repo"));
+        assert_eq!(i, 3);
+
+        let (c3, v3) = walk.consume_step(&args, &mut i);
+        assert_eq!(c3, Class::Value { flag: "--output", attached: Some("/tmp/out") });
+        assert_eq!(v3, None);
+        assert_eq!(i, 4);
+
+        let (c4, v4) = walk.consume_step(&args, &mut i);
+        assert_eq!(c4, Class::NotFlag);
+        assert_eq!(v4, None);
+        assert_eq!(i, 5);
     }
 }

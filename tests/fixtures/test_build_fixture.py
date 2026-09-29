@@ -4,6 +4,7 @@ Verifies that credential patterns, tokens, and active session transcripts are
 properly sanitized or excluded when harvesting replay corpus fixtures.
 """
 
+import json
 import os
 import sys
 import tempfile
@@ -128,6 +129,120 @@ class TestActiveSessionExclusion(unittest.TestCase):
         finally:
             os.environ.clear()
             os.environ.update(old_env)
+
+
+class TestCwdSanitization(unittest.TestCase):
+    def test_sanitize_home_and_user_profiles(self):
+        # POSIX /Users/<user>
+        res = build_fixture.sanitize_cwd("/Users/alice/Desktop", home_dir="/Users/alice")  # scan-allow
+        self.assertEqual(res, "C:/Users/dev/Desktop")
+
+        # POSIX /home/<user>
+        res = build_fixture.sanitize_cwd("/home/bob/docs", home_dir="/home/bob")  # scan-allow
+        self.assertEqual(res, "C:/Users/dev/docs")
+
+        # Windows profile
+        res = build_fixture.sanitize_cwd("C:\\Users\\charlie\\Desktop", home_dir="C:/Users/charlie")  # scan-allow
+        self.assertEqual(res, "C:/Users/dev/Desktop")
+
+    def test_sanitize_checkout_root(self):
+        checkout = "/Users/dev/projects/my-app"
+        res = build_fixture.sanitize_cwd(checkout, checkout_root=checkout)
+        self.assertEqual(res, "C:/Users/dev/workspace")
+
+        res_sub = build_fixture.sanitize_cwd(f"{checkout}/src/core", checkout_root=checkout)
+        self.assertEqual(res_sub, "C:/Users/dev/workspace/src/core")
+
+    def test_sanitize_other_projects_under_home(self):
+        home = "/Users/dev"
+        res = build_fixture.sanitize_cwd(f"{home}/git/some-project/tests", home_dir=home)
+        self.assertEqual(res, "C:/Users/dev/workspace/tests")
+
+    def test_sanitize_temp_directories(self):
+        res1 = build_fixture.sanitize_cwd("/private/tmp/test_dir")
+        self.assertEqual(res1, "/tmp/test_dir")
+
+        res2 = build_fixture.sanitize_cwd("/var/folders/ab/cd12345/T/build_scratch")
+        self.assertEqual(res2, "/tmp/build_scratch")
+
+    def test_sanitize_embedded_token_in_path(self):
+        gh_tok = "gh" + "p_1234567890123456"  # scan-allow
+        res = build_fixture.sanitize_cwd(f"/tmp/tokens/{gh_tok}/dir")
+        self.assertNotIn(gh_tok, res)
+        self.assertIn("<REDACTED_TOKEN>", res)
+
+
+class TestHarvesterCwdExtraction(unittest.TestCase):
+    def test_harvest_cwd_across_hosts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # 1. Mock AGY transcript
+            agy_dir = os.path.join(tmpdir, "agy", "session1")
+            os.makedirs(agy_dir, exist_ok=True)
+            agy_file = os.path.join(agy_dir, "transcript.jsonl")
+            with open(agy_file, "w", encoding="utf-8") as f:
+                rec_agy = {
+                    "tool_calls": [
+                        {
+                            "name": "run_command",
+                            "args": {
+                                "CommandLine": "cargo test --test foo",
+                                "Cwd": "/Users/alice/projects/testapp",  # scan-allow
+                            },
+                            "verdict": "allow",
+                        }
+                    ]
+                }
+                f.write(json.dumps(rec_agy) + "\n")
+
+            # 2. Mock Codex transcript
+            codex_dir = os.path.join(tmpdir, "codex", "sessions")
+            os.makedirs(codex_dir, exist_ok=True)
+            codex_file = os.path.join(codex_dir, "rollout-session.jsonl")
+            with open(codex_file, "w", encoding="utf-8") as f:
+                meta = {
+                    "type": "session_meta",
+                    "payload": {"cwd": "/Users/bob/workspace/myapp"},  # scan-allow
+                }
+                f.write(json.dumps(meta) + "\n")
+                call = {
+                    "payload": {
+                        "type": "custom_tool_call",
+                        "name": "exec",
+                        "input": '{"cmd": "git status"}',
+                        "verdict": "allow",
+                    }
+                }
+                f.write(json.dumps(call) + "\n")
+
+            dest_json = os.path.join(tmpdir, "corpus.json")
+            old_argv = sys.argv
+            try:
+                sys.argv = [
+                    "build_fixture.py",
+                    "--host", "all",
+                    "--roots", tmpdir,
+                    "--dest", dest_json,
+                ]
+                build_fixture.main()
+            finally:
+                sys.argv = old_argv
+
+            self.assertTrue(os.path.exists(dest_json))
+            with open(dest_json, "r", encoding="utf-8") as f:
+                rows = json.load(f)
+
+            row_map = {r["cmd"]: r for r in rows}
+            self.assertIn("cargo test --test foo", row_map)
+            self.assertIn("cwd", row_map["cargo test --test foo"])
+            # Alice's username should be neutralized
+            self.assertNotIn("alice", row_map["cargo test --test foo"]["cwd"])
+            self.assertEqual(row_map["cargo test --test foo"]["cwd"], "C:/Users/dev/projects/testapp")
+
+            self.assertIn("git status", row_map)
+            self.assertIn("cwd", row_map["git status"])
+            # Bob's username should be neutralized
+            self.assertNotIn("bob", row_map["git status"]["cwd"])
+            self.assertEqual(row_map["git status"]["cwd"], "C:/Users/dev/workspace/myapp")
 
 
 if __name__ == "__main__":

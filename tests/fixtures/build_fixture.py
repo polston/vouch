@@ -125,6 +125,71 @@ def redact_secrets(cmd: str):
     return cmd, count
 
 
+def sanitize_cwd(raw_cwd: str, checkout_root: str = None, home_dir: str = None) -> str:
+    """Sanitize and normalize a working directory path to neutral fixture paths.
+
+    Replaces user home with C:/Users/dev, repository checkouts with C:/Users/dev/workspace
+    or neutral dummy paths, normalizes slashes, redacts any tokens/secrets,
+    and strips machine-specific usernames and temp prefixes.
+    """
+    if not raw_cwd:
+        return ""
+
+    norm = raw_cwd.replace("\\", "/")
+    norm, _ = redact_secrets(norm)
+
+    if checkout_root is None:
+        try:
+            import subprocess
+            res = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if res.returncode == 0:
+                checkout_root = res.stdout.strip()
+        except Exception:
+            pass
+
+    if checkout_root:
+        norm_cr = checkout_root.replace("\\", "/").rstrip("/")
+        if norm == norm_cr:
+            return "C:/Users/dev/workspace"
+        if norm.startswith(norm_cr + "/"):
+            sub = norm[len(norm_cr) + 1 :]
+            return f"C:/Users/dev/workspace/{sub}"
+
+    if home_dir is None:
+        home_dir = os.path.expanduser("~")
+    norm_home = home_dir.replace("\\", "/").rstrip("/") if home_dir else ""
+    if norm_home:
+        if norm == norm_home:
+            return "C:/Users/dev"
+        if norm.startswith(norm_home + "/"):
+            sub = norm[len(norm_home) + 1 :]
+            parts = sub.split("/")
+            if len(parts) >= 2 and parts[0] in ("git", "projects", "code", "repos", "workspace", "work"):
+                rest = "/".join(parts[2:])
+                return f"C:/Users/dev/workspace/{rest}" if rest else "C:/Users/dev/workspace"
+            return f"C:/Users/dev/{sub}"
+
+    norm = re.sub(r'^(?:/Users|/home|[a-zA-Z]:/Users)/[^/]+', 'C:/Users/dev', norm)
+
+    if norm.startswith("/private/tmp"):
+        norm = norm.replace("/private/tmp", "/tmp", 1)
+    if re.match(r'^/var/folders/[^/]+/[^/]+', norm):
+        norm = re.sub(r'^/var/folders/[^/]+/[^/]+(?:/T)?', '/tmp', norm)
+
+    account = os.environ.get("USER") or os.environ.get("USERNAME")
+    if not account and norm_home:
+        account = os.path.basename(norm_home)
+    if account and account not in ("dev", "user", "users", "runner"):
+        norm = re.sub(r'\b' + re.escape(account) + r'\b', 'dev', norm)
+
+    return norm
+
+
 def get_active_session_ids():
     """Derive active session identifiers from environment variables."""
     active = set()
@@ -330,19 +395,39 @@ def main():
                 cmd, n_redacted = redact_secrets(raw_cmd)
                 redactions_total += n_redacted
 
+                raw_cwd = (
+                    (inp.get("cwd") if isinstance(inp, dict) else None)
+                    or (att.get("hookEvent") or {}).get("cwd")
+                    or rec.get("cwd")
+                )
+                clean_cwd = sanitize_cwd(raw_cwd) if raw_cwd and str(raw_cwd).strip() else None
+
                 counts[verdict] += 1
                 by_host["claude"] += 1
                 prev = rows.get(cmd)
                 if prev is None or (prev["verdict"] == "allow" and verdict != "allow"):
-                    rows[cmd] = {"cmd": cmd, "verdict": verdict}
+                    entry = {"cmd": cmd, "verdict": verdict}
+                    if clean_cwd:
+                        entry["cwd"] = clean_cwd
+                    elif prev and "cwd" in prev:
+                        entry["cwd"] = prev["cwd"]
+                    rows[cmd] = entry
+                elif clean_cwd and "cwd" not in prev:
+                    prev["cwd"] = clean_cwd
 
         elif host == "codex":
+            session_cwd = None
             for line in lines:
-                if '"custom_tool_call"' not in line:
-                    continue
                 try:
                     rec = json.loads(line)
                 except Exception:
+                    continue
+                if rec.get("type") == "session_meta":
+                    payload = rec.get("payload") or {}
+                    if isinstance(payload, dict) and payload.get("cwd"):
+                        session_cwd = payload.get("cwd")
+
+                if '"custom_tool_call"' not in line:
                     continue
                 payload = rec.get("payload") or rec.get("item")
                 if not isinstance(payload, dict):
@@ -353,11 +438,20 @@ def main():
                         cmd, n_redacted = redact_secrets(raw_cmd.strip())
                         redactions_total += n_redacted
                         verdict = payload.get("verdict", "allow")
+                        raw_cwd = payload.get("cwd") or session_cwd
+                        clean_cwd = sanitize_cwd(raw_cwd) if raw_cwd and str(raw_cwd).strip() else None
                         counts[verdict] += 1
                         by_host["codex"] += 1
                         prev = rows.get(cmd)
                         if prev is None or (prev["verdict"] == "allow" and verdict != "allow"):
-                            rows[cmd] = {"cmd": cmd, "verdict": verdict}
+                            entry = {"cmd": cmd, "verdict": verdict}
+                            if clean_cwd:
+                                entry["cwd"] = clean_cwd
+                            elif prev and "cwd" in prev:
+                                entry["cwd"] = prev["cwd"]
+                            rows[cmd] = entry
+                        elif clean_cwd and "cwd" not in prev:
+                            prev["cwd"] = clean_cwd
 
         elif host == "agy":
             for line in lines:
@@ -383,11 +477,20 @@ def main():
                                 cmd, n_redacted = redact_secrets(raw_cmd)
                                 redactions_total += n_redacted
                                 verdict = tc.get("verdict", "allow")
+                                raw_cwd = args_tc.get("Cwd") or args_tc.get("cwd")
+                                clean_cwd = sanitize_cwd(raw_cwd) if raw_cwd and str(raw_cwd).strip() else None
                                 counts[verdict] += 1
                                 by_host["agy"] += 1
                                 prev = rows.get(cmd)
                                 if prev is None or (prev["verdict"] == "allow" and verdict != "allow"):
-                                    rows[cmd] = {"cmd": cmd, "verdict": verdict}
+                                    entry = {"cmd": cmd, "verdict": verdict}
+                                    if clean_cwd:
+                                        entry["cwd"] = clean_cwd
+                                    elif prev and "cwd" in prev:
+                                        entry["cwd"] = prev["cwd"]
+                                    rows[cmd] = entry
+                                elif clean_cwd and "cwd" not in prev:
+                                    prev["cwd"] = clean_cwd
 
     out = list(rows.values())
     with open(args.dest, "w", encoding="utf-8") as f:
@@ -418,6 +521,7 @@ def main():
           sum(1 for r in out if r["verdict"] != "allow"))
     print("longest command:", max((len(r["cmd"]) for r in out), default=0))
     print("secrets redacted:", redactions_total)
+    print("records with recorded cwd:", sum(1 for r in out if "cwd" in r))
     print("active session transcripts excluded:", excluded_files_count)
     print("bytes:", os.path.getsize(args.dest))
 

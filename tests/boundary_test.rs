@@ -300,24 +300,28 @@ fn m2_119_git_push_force_quoted() {
 fn m2_119_git_reset_hard_quoted() {
     let cfg = common::realistic_config();
     assert_pair(&cfg, OUTSIDE, "git reset --hard", "git reset \"--hard\"", "ask", Some("history_rewrite"));
+    assert_pair(&cfg, OUTSIDE, "git reset --hard", "git reset '--hard'", "ask", Some("history_rewrite"));
 }
 
 #[test]
 fn m2_119_git_branch_dash_d_quoted() {
     let cfg = common::realistic_config();
     assert_pair(&cfg, OUTSIDE, "git branch -D b", "git branch \"-D\" b", "ask", Some("history_rewrite"));
+    assert_pair(&cfg, OUTSIDE, "git branch -D b", "git branch '-D' b", "ask", Some("history_rewrite"));
 }
 
 #[test]
 fn m2_119_sed_dash_i_quoted() {
     let cfg = common::realistic_config();
     assert_pair(&cfg, OUTSIDE, "sed -i s/a/b/ f", "sed \"-i\" s/a/b/ f", "ask", Some("in_place_edit"));
+    assert_pair(&cfg, OUTSIDE, "sed -i s/a/b/ f", "sed '-i' s/a/b/ f", "ask", Some("in_place_edit"));
 }
 
 #[test]
 fn m2_119_find_delete_quoted() {
     let cfg = common::realistic_config();
     assert_pair(&cfg, OUTSIDE, "find d -delete", "find d \"-delete\"", "ask", Some("delete_recursive"));
+    assert_pair(&cfg, OUTSIDE, "find d -delete", "find d '-delete'", "ask", Some("delete_recursive"));
 }
 
 /// `rm "-r" d` still asks, but on the WRITE rule (the path check) rather
@@ -328,7 +332,42 @@ fn m2_119_find_delete_quoted() {
 fn m2_119_rm_dash_r_quoted() {
     let cfg = common::realistic_config();
     assert_pair(&cfg, OUTSIDE, "rm -r d", "rm \"-r\" d", "ask", Some("delete_recursive"));
+    assert_pair(&cfg, OUTSIDE, "rm -r d", "rm '-r' d", "ask", Some("delete_recursive"));
 }
+
+#[test]
+fn dest_dir_flags_case_sensitive_abbreviation_refusal_fails_closed_to_ask() {
+    let cfg = common::realistic_config();
+    let kb_text = r#"
+version = 2
+[[program]]
+match = ["gotodir"]
+languages = ["bash"]
+changes_dir = "stated"
+dest_dir_flags = ["--dest"]
+case_sensitive_flags = true
+"#;
+    let kb = vouch::guards::load(kb_text).expect("valid knowledge");
+    let decision = vouch::engine::decide_command_at_with_knowledge(
+        &cfg,
+        "bash",
+        "gotodir --des /tmp/allowed; echo hi > probe.txt",
+        Some(common::HOOK_HOME),
+        None,
+        Some(OUTSIDE),
+        Some(&kb),
+    );
+    match decision {
+        vouch::protocol::Decision::Ask(r) => {
+            assert!(
+                r.contains("the option '--des' is not described for 'gotodir'") || r.contains("unresolved_path"),
+                "expected undeclared option or unresolved path in reason, got: {r}"
+            );
+        }
+        other => panic!("expected Ask for refused abbreviation under case-sensitive dest_dir_flags, got: {other:?}"),
+    }
+}
+
 
 // ============================================================================
 // M2.120 — an assignment prefix that changes where programs are found, or

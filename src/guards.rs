@@ -1285,7 +1285,7 @@ pub fn resolve_verb(cmd: &Cmd, vocab: &crate::flags::Vocab, lang: &str) -> Verb 
             crate::flags::Class::Bool { .. } => {}
             crate::flags::Class::Undescribed { token } | crate::flags::Class::RefusedAbbrev { token, .. } => {
                 if uncertainty.is_none() {
-                    uncertainty = Some(token);
+                    uncertainty = Some(token.to_string());
                 }
             }
         }
@@ -1357,14 +1357,13 @@ fn entry_subcommand_path_matches(p: &Program, cmd: &Cmd, lang: &str) -> bool {
     let mut walk = crate::flags::ArgWalk::new(&vocab);
     let mut candidates: Vec<&Vec<String>> = paths.iter().collect();
     let mut word_index = 0usize;
-    let mut skip_next = false;
+    let mut i = 0;
 
-    for (arg_index, arg) in cmd.args.iter().enumerate() {
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-        match walk.next(arg) {
+    while i < cmd.args.len() {
+        let arg_index = i;
+        let arg = &cmd.args[arg_index];
+        let (class, _) = walk.consume_step(&cmd.args, &mut i);
+        match class {
             crate::flags::Class::NotFlag => {
                 if token_is_unreadable(cmd, arg_index, lang) {
                     return false;
@@ -1382,13 +1381,9 @@ fn entry_subcommand_path_matches(p: &Program, cmd: &Cmd, lang: &str) -> bool {
                 }
             }
             crate::flags::Class::EndOfOptions => {}
-            crate::flags::Class::Value { attached: None, .. } => skip_next = true,
-            crate::flags::Class::Value {
-                attached: Some(_), ..
-            }
-            | crate::flags::Class::Bool { .. } => {}
+            crate::flags::Class::Value { .. } | crate::flags::Class::Bool { .. } => {}
             crate::flags::Class::Undescribed { .. } | crate::flags::Class::RefusedAbbrev { .. } => {
-                return false
+                return false;
             }
         }
     }
@@ -1788,53 +1783,33 @@ pub fn run_dir_with_flag_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> (RunDir, O
     };
     let mut found: Option<(String, String)> = None;
     let mut walk = crate::flags::ArgWalk::new(&vocab);
-    // A token consumed as some OTHER flag's value is never itself a run-dir
-    // flag candidate — `-x -C` with `-x` in value_options means `-C` here is
-    // `-x`'s value, not a run-dir flag. `skip_next` carries that state across
-    // iterations exactly the way `subcommand_index` does, so the two can
-    // never disagree about which tokens are "spoken for".
-    let mut skip_next = false;
     let mut i = 0;
     while i < end {
-        let a = cmd.args[i].as_str();
-        if skip_next {
-            skip_next = false;
-            i += 1;
-            continue;
-        }
-        match walk.next(a) {
+        let raw_idx = i;
+        let (class, sep_val) = walk.consume_step(&cmd.args, &mut i);
+        match class {
             crate::flags::Class::Value { flag, attached: Some(v) } => {
-                // An attached value is a self-contained token — nothing
-                // further to consume, whichever list `flag` came from.
-                if run_dir_flags.iter().any(|f| f == &flag) {
+                if run_dir_flags.iter().any(|f| f == flag) {
                     if found.is_some() {
                         return (RunDir::Unresolvable("two run-dir flags"), None);
                     }
-                    found = Some((flag, v));
+                    found = Some((flag.to_string(), v.to_string()));
                 }
-                i += 1;
             }
             crate::flags::Class::Value { flag, attached: None } => {
-                if run_dir_flags.iter().any(|f| f == &flag) {
-                    match cmd.args.get(i + 1) {
-                        Some(v) if i + 1 < end => {
+                if run_dir_flags.iter().any(|f| f == flag) {
+                    match sep_val {
+                        Some(v) if raw_idx + 1 < end => {
                             if found.is_some() {
                                 return (RunDir::Unresolvable("two run-dir flags"), None);
                             }
-                            found = Some((flag, v.clone()));
-                            skip_next = true;
-                            i += 1;
+                            found = Some((flag.to_string(), v.to_string()));
                         }
                         _ => return (RunDir::Unresolvable("run-dir flag with no value"), None),
                     }
-                } else {
-                    // Rule 2's shape: this OTHER value-taking flag's bare
-                    // value is consumed and never itself a run-dir candidate.
-                    skip_next = true;
-                    i += 1;
                 }
             }
-            _ => i += 1,
+            _ => {}
         }
     }
     match found {
@@ -1856,15 +1831,13 @@ fn sub_arg_0<'a>(cmd: &'a Cmd, vocab: &crate::flags::Vocab, lang: &str, verb: &V
         Verb::Unreadable { token, .. } => return WordRead::Unreadable(token.clone()),
     };
     let mut walk = crate::flags::ArgWalk::new(vocab);
-    let mut skip_next = false;
-    for (offset, a) in cmd.args[start..].iter().enumerate() {
-        let index = start + offset;
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-        match walk.next(a) {
+    let mut i = start;
+    while i < cmd.args.len() {
+        let index = i;
+        let (class, _) = walk.consume_step(&cmd.args, &mut i);
+        match class {
             crate::flags::Class::NotFlag => {
+                let a = &cmd.args[index];
                 return if token_is_unreadable(cmd, index, lang) {
                     WordRead::Unreadable(a.clone())
                 } else {
@@ -1872,10 +1845,9 @@ fn sub_arg_0<'a>(cmd: &'a Cmd, vocab: &crate::flags::Vocab, lang: &str, verb: &V
                 };
             }
             crate::flags::Class::EndOfOptions => {}
-            crate::flags::Class::Value { attached: None, .. } => skip_next = true,
-            crate::flags::Class::Value { attached: Some(_), .. } | crate::flags::Class::Bool { .. } => {}
+            crate::flags::Class::Value { .. } | crate::flags::Class::Bool { .. } => {}
             crate::flags::Class::Undescribed { token } | crate::flags::Class::RefusedAbbrev { token, .. } => {
-                return WordRead::Unreadable(token);
+                return WordRead::Unreadable(token.to_string());
             }
         }
     }
@@ -2513,7 +2485,7 @@ fn runs_file_target_in(
             crate::flags::Class::Value { ref flag, ref attached } => {
                 if prog.runs_file_flags.iter().any(|f| f == flag) {
                     if let Some(att) = attached {
-                        return Some(Ok(att.clone()));
+                        return Some(Ok(att.to_string()));
                     } else if let Some(next) = args.get(idx + 1) {
                         return Some(Ok(next.clone()));
                     } else {
@@ -4059,19 +4031,10 @@ pub fn after_flag_snippet(prog: &Program, args: &[String]) -> Option<String> {
 fn locate_after_flag(prog: &Program, args: &[String]) -> Payload {
     let vocab = crate::flags::vocab_for(prog, wrap_abbrev(prog));
     let mut walk = crate::flags::ArgWalk::new(&vocab);
-    let mut skip_next = false;
-    for (i, raw) in args.iter().enumerate() {
-        // A token already spoken for as some other flag's value is not itself
-        // a candidate, and must not be fed to the walk either — its text
-        // could be `--`, which would end option scanning that never started.
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-        let class = walk.next(raw);
-        if let crate::flags::Class::Value { attached: None, .. } = class {
-            skip_next = true;
-        }
+    let mut i = 0;
+    while i < args.len() {
+        let raw_idx = i;
+        let (class, _) = walk.consume_step(args, &mut i);
         // After `--` nothing is this program's flag any more (spec §4.1.4).
         // This deliberately INVERTS the old over-read, which found `-c` after
         // a bare `--` by raw text: real python treats what follows as a
@@ -4080,16 +4043,17 @@ fn locate_after_flag(prog: &Program, args: &[String]) -> Payload {
         if matches!(class, crate::flags::Class::NotFlag | crate::flags::Class::EndOfOptions) {
             continue;
         }
+        let raw = &args[raw_idx];
         for f in &prog.wrap_flags {
             match crate::flags::spells(f, raw, &vocab) {
                 crate::flags::Spell::Yes(Some(v)) => {
                     return Payload::Found(LocatedSnippet {
                         source: crate::paths::unquote_snippet(&v),
                         source_spelling: f.clone(),
-                        trailing: args[i + 1..].to_vec(),
+                        trailing: args[raw_idx + 1..].to_vec(),
                     });
                 }
-                crate::flags::Spell::Yes(None) => return payload_after(prog, args, i, f),
+                crate::flags::Spell::Yes(None) => return payload_after(prog, args, raw_idx, f),
                 crate::flags::Spell::RefusedAbbrev { declared } => {
                     return Payload::Unlocated(format!(
                         "`{raw}` reads as an abbreviation of `{declared}`, which this program's \
@@ -4104,10 +4068,10 @@ fn locate_after_flag(prog: &Program, args: &[String]) -> Payload {
                     return Payload::Found(LocatedSnippet {
                         source: crate::paths::unquote_snippet(&v),
                         source_spelling: f.clone(),
-                        trailing: args[i + 1..].to_vec(),
+                        trailing: args[raw_idx + 1..].to_vec(),
                     });
                 }
-                Some(None) => return payload_after(prog, args, i, f),
+                Some(None) => return payload_after(prog, args, raw_idx, f),
                 None => {}
             }
             if matches!(cluster_switch(prog, f, raw), ClusterHit::Unreadable) {
@@ -4168,24 +4132,18 @@ enum ListPayload {
 fn start_process_args(prog: &Program, args: &[String]) -> ListPayload {
     let vocab = crate::flags::vocab_for(prog, wrap_abbrev(prog));
     let mut walk = crate::flags::ArgWalk::new(&vocab);
-    let mut skip_next = false;
     let mut at: Option<usize> = None;
-    for (i, raw) in args.iter().enumerate() {
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-        let class = walk.next(raw);
-        if let crate::flags::Class::Value { attached: None, .. } = class {
-            skip_next = true;
-        }
+    let mut i = 0;
+    while i < args.len() {
+        let raw_idx = i;
+        let raw = &args[raw_idx];
         for f in &prog.wrap_flags {
             match crate::flags::spells(f, raw, &vocab) {
                 crate::flags::Spell::Yes(Some(v)) => {
                     return ListPayload::Found(split_list(&v));
                 }
                 crate::flags::Spell::Yes(None) => {
-                    at = Some(i);
+                    at = Some(raw_idx);
                 }
                 crate::flags::Spell::RefusedAbbrev { declared } => {
                     return ListPayload::Unlocated(format!(
@@ -4196,6 +4154,7 @@ fn start_process_args(prog: &Program, args: &[String]) -> ListPayload {
                 crate::flags::Spell::No => {}
             }
         }
+        let _ = walk.consume_step(args, &mut i);
         if at.is_some() {
             break;
         }
@@ -4260,20 +4219,14 @@ fn start_process_args(prog: &Program, args: &[String]) -> ListPayload {
 fn start_process_head(prog: &Program, args: &[String], fork: &mut ForkCursor) -> Option<String> {
     let vocab = crate::flags::vocab_for(prog, wrap_abbrev(prog));
     let mut walk = crate::flags::ArgWalk::new(&vocab);
-    let mut skip_next = false;
-    for (i, raw) in args.iter().enumerate() {
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-        let class = walk.next(raw);
-        if let crate::flags::Class::Value { attached: None, .. } = class {
-            skip_next = true;
-        }
+    let mut i = 0;
+    while i < args.len() {
+        let raw_idx = i;
+        let raw = &args[raw_idx];
         for f in &prog.wrap_head_flags {
             match crate::flags::spells(f, raw, &vocab) {
                 crate::flags::Spell::Yes(Some(v)) => return Some(crate::paths::unquote(&v).to_string()),
-                crate::flags::Spell::Yes(None) => return args.get(i + 1).map(|v| crate::paths::unquote(v).to_string()),
+                crate::flags::Spell::Yes(None) => return args.get(raw_idx + 1).map(|v| crate::paths::unquote(v).to_string()),
                 // Loud, like everywhere else: a refused abbreviation is not a
                 // token that failed to be this flag, it is one vouch will not
                 // guess about. Answering `None` here reaches the arm's
@@ -4282,6 +4235,7 @@ fn start_process_head(prog: &Program, args: &[String], fork: &mut ForkCursor) ->
                 crate::flags::Spell::No => {}
             }
         }
+        let _ = walk.consume_step(args, &mut i);
     }
     let walk = operand_walk(prog, args, None, fork);
     if walk.unlocated.is_some() {
@@ -4455,12 +4409,13 @@ fn operand_walk(prog: &Program, args: &[String], wrap_flag: Option<&[String]>, f
         }
         if let Some(flags) = wrap_flag {
             for f in flags {
+                let hit = cluster_switch(prog, f, raw);
                 let seen = matches!(crate::flags::spells(f, raw, &vocab), crate::flags::Spell::Yes(_))
-                    || matches!(cluster_switch(prog, f, raw), ClusterHit::Yes);
+                    || matches!(hit, ClusterHit::Yes);
                 if seen {
                     out.flag_seen = true;
                 }
-                if matches!(cluster_switch(prog, f, raw), ClusterHit::Unreadable) {
+                if matches!(hit, ClusterHit::Unreadable) {
                     out.unlocated = Some(format!(
                         "`{raw}` groups `{f}` with a letter `{name}`'s entry does not describe, \
                          so vouch cannot tell where the script begins"
@@ -6244,20 +6199,16 @@ fn walk_post_subcommand<'a>(args: &'a [String], vocab: &crate::flags::Vocab) -> 
     let mut walk = crate::flags::ArgWalk::new(vocab);
     let mut positionals: Vec<&String> = Vec::new();
     let mut unknowable: Vec<String> = Vec::new();
-    let mut skip_next = false;
-    for a in args {
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-        match walk.next(a) {
-            crate::flags::Class::NotFlag => positionals.push(a),
+    let mut i = 0;
+    while i < args.len() {
+        let raw_idx = i;
+        let (class, _) = walk.consume_step(args, &mut i);
+        match class {
+            crate::flags::Class::NotFlag => positionals.push(&args[raw_idx]),
             crate::flags::Class::EndOfOptions => {}
-            crate::flags::Class::Value { attached: None, .. } => skip_next = true,
-            crate::flags::Class::Value { attached: Some(_), .. } => {}
-            crate::flags::Class::Bool { .. } => {}
-            crate::flags::Class::Undescribed { token } => unknowable.push(token),
-            crate::flags::Class::RefusedAbbrev { token, .. } => unknowable.push(token),
+            crate::flags::Class::Value { .. } | crate::flags::Class::Bool { .. } => {}
+            crate::flags::Class::Undescribed { token } => unknowable.push(token.to_string()),
+            crate::flags::Class::RefusedAbbrev { token, .. } => unknowable.push(token.to_string()),
         }
     }
     (positionals, unknowable)

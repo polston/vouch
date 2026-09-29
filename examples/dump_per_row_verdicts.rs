@@ -22,10 +22,9 @@
 //! — the gated test pins an invariant, this harness measures movement — which
 //! is exactly why the judging directory is printed rather than assumed.
 //!
-//! The corpus row schema carries `cmd` and `verdict` and no directory, so the
-//! fixed cwd is a stated convention, not a reconstruction of where each row
-//! really ran. Recording a directory per row in the fixture builder is
-//! M2.231's larger half and stays open.
+//! The corpus row schema carries `cmd`, `verdict`, and optional `cwd`
+//! provenance. When `cwd` is recorded, it is used directly; otherwise it
+//! falls back to the stated convention `HOOK_HOME`.
 //!
 //! The destination comes from `VOUCH_DUMP_PER_ROW` rather than a fixed path. That
 //! fixed M2.81, and the defect it recorded is worth keeping in view: this used to
@@ -141,13 +140,12 @@ fn main() {
     };
     let mut out = String::new();
     let mut current = Vec::with_capacity(rows.len());
+    let any_row_has_cwd = rows.iter().any(|r| r.cwd.is_some());
     for (i, r) in rows.iter().enumerate() {
-        // Through the shared helper, not a hand-typed `decide_command_at`.
-        // That helper exists for exactly the drift M2.231 turned out to be —
-        // its own doc says so — and the census this harness is now aligned
-        // with already calls it. Fixing the missing cwd by retyping the call
-        // would have left a second copy for the next signature change to miss.
-        let (v, reason) = common::decision_at(&cfg, &r.cmd, common::HOOK_HOME);
+        // Through the shared helper, passing row-recorded cwd when available
+        // or falling back to HOOK_HOME.
+        let effective_cwd = r.cwd.as_deref().unwrap_or(common::HOOK_HOME);
+        let (v, reason) = common::decision_at(&cfg, &r.cmd, effective_cwd);
         let cause = match v.as_str() {
             "allow" => "allow",
             "abstain" => "abstain",
@@ -157,10 +155,15 @@ fn main() {
         current.push((v, cause));
     }
     std::fs::write(&path, out).unwrap();
+    let judging_summary = if any_row_has_cwd {
+        "per-row cwd (falling back to HOOK_HOME)"
+    } else {
+        common::HOOK_HOME
+    };
     println!(
         "MEASURE per-row dump written to {path}: {} rows, under {which}, judged at {}",
         rows.len(),
-        common::HOOK_HOME
+        judging_summary
     );
 
     if let Ok(baseline) = std::env::var("VOUCH_DUMP_COMPARE") {
@@ -194,12 +197,12 @@ fn main() {
         // nobody can reproduce, and this line is the one most often quoted on
         // its own (M2.231).
         if transitions.is_empty() {
-            println!("MEASURE movement: 0 rows (judged at {})", common::HOOK_HOME);
+            println!("MEASURE movement: 0 rows (judged at {})", judging_summary);
         }
         for ((old, new, cause), count) in transitions {
             println!(
                 "MEASURE movement {old}->{new} via {cause}: {count} rows (judged at {})",
-                common::HOOK_HOME
+                judging_summary
             );
         }
     }

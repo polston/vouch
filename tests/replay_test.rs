@@ -116,3 +116,37 @@ fn old_noise_prompts_are_gone_and_guard_prompts_are_accounted_for() {
     // something that turns it off — is asserted in `property_test.rs`, where
     // it runs over the synthetic corpus too and so survives a fresh clone.
 }
+
+#[test]
+fn replay_evaluates_placement_sensitive_relative_writes() {
+    let cfg = realistic_config();
+    let cmd = "echo test > relative_output.txt";
+
+    // At allowed workspace cwd
+    let d_allowed = vouch::engine::decide_command_at(
+        &cfg,
+        "bash",
+        cmd,
+        Some("C:/Users/dev"),
+        None,
+        Some("C:/workspace"),
+    );
+    // At disallowed system cwd
+    let d_denied = vouch::engine::decide_command_at(
+        &cfg,
+        "bash",
+        cmd,
+        Some("C:/Users/dev"),
+        None,
+        Some("C:/Windows/System32"),
+    );
+
+    assert!(
+        matches!(d_allowed, Decision::Allow(_)),
+        "expected allow in C:/workspace, got: {d_allowed:?}"
+    );
+    assert!(
+        matches!(d_denied, Decision::Ask(_)),
+        "expected ask in C:/Windows/System32, got: {d_denied:?}"
+    );
+}

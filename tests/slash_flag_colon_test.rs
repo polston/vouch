@@ -22,8 +22,8 @@ fn test_slash_flag_colon_classification() {
     assert_eq!(
         c1,
         Class::Value {
-            flag: "/user".to_string(),
-            attached: Some("Administrator".to_string()),
+            flag: "/user",
+            attached: Some("Administrator"),
         }
     );
 
@@ -32,8 +32,8 @@ fn test_slash_flag_colon_classification() {
     assert_eq!(
         c2,
         Class::Value {
-            flag: "/user".to_string(),
-            attached: Some("dev".to_string()),
+            flag: "/user",
+            attached: Some("dev"),
         }
     );
 
@@ -42,7 +42,7 @@ fn test_slash_flag_colon_classification() {
     assert_eq!(
         c3,
         Class::Bool {
-            flag: "/noprofile".to_string(),
+            flag: "/noprofile",
         }
     );
 
@@ -50,7 +50,7 @@ fn test_slash_flag_colon_classification() {
     assert_eq!(
         c4,
         Class::Bool {
-            flag: "/savecred".to_string(),
+            flag: "/savecred",
         }
     );
 

@@ -296,3 +296,48 @@ fn a_snippet_construct_resolves_under_its_own_language() {
         "got: {reason}"
     );
 }
+
+#[test]
+fn explicit_knowledge_can_be_passed_without_global_state() {
+    let cfg = load(
+        r#"
+version = 1
+[lang.bash]
+default = "allow"
+[lang.bash.constructs]
+unmodeled_command = "ask"
+"#,
+    )
+    .expect("parses");
+
+    let cmd = "invented_custom_cli_tool_99 --flag value";
+
+    // Without custom knowledge, unmodeled_command asks:
+    let d_default = vouch::engine::decide_command(&cfg, "bash", cmd);
+    match &d_default {
+        Decision::Ask(r) => assert!(r.contains("unmodeled_command"), "expected unmodeled prompt, got: {r}"),
+        other => panic!("expected Ask for unmodeled tool, got {other:?}"),
+    }
+
+    // With custom knowledge passed explicitly, the tool is recognized and allows:
+    let kb_text = r#"
+version = 2
+[[program]]
+match = ["invented_custom_cli_tool_99"]
+"#;
+    let custom_kb = vouch::guards::load(kb_text).expect("parses custom knowledge");
+    let d_custom = vouch::engine::decide_command_with_knowledge(
+        &cfg,
+        "bash",
+        cmd,
+        Some(&custom_kb),
+    );
+    match &d_custom {
+        Decision::Allow(_) => {}
+        other => panic!("expected Allow with custom knowledge, got {other:?}"),
+    }
+
+    // Calling decide_command again still asks, proving global state was not mutated:
+    let d_after = vouch::engine::decide_command(&cfg, "bash", cmd);
+    assert!(matches!(d_after, Decision::Ask(_)));
+}

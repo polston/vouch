@@ -44,28 +44,28 @@ fn test_sudo_flag_vocabulary_classification() {
     assert_eq!(
         classify("-u", &vocab),
         Class::Value {
-            flag: "-u".to_string(),
+            flag: "-u",
             attached: None,
         }
     );
     assert_eq!(
         classify("--user", &vocab),
         Class::Value {
-            flag: "--user".to_string(),
+            flag: "--user",
             attached: None,
         }
     );
     assert_eq!(
         classify("-D", &vocab),
         Class::Value {
-            flag: "-D".to_string(),
+            flag: "-D",
             attached: None,
         }
     );
     assert_eq!(
         classify("--chdir", &vocab),
         Class::Value {
-            flag: "--chdir".to_string(),
+            flag: "--chdir",
             attached: None,
         }
     );
@@ -74,19 +74,19 @@ fn test_sudo_flag_vocabulary_classification() {
     assert_eq!(
         classify("-n", &vocab),
         Class::Bool {
-            flag: "-n".to_string(),
+            flag: "-n",
         }
     );
     assert_eq!(
         classify("-E", &vocab),
         Class::Bool {
-            flag: "-E".to_string(),
+            flag: "-E",
         }
     );
     assert_eq!(
         classify("-s", &vocab),
         Class::Bool {
-            flag: "-s".to_string(),
+            flag: "-s",
         }
     );
 
@@ -115,20 +115,20 @@ fn test_doas_flag_vocabulary_classification() {
     assert_eq!(
         classify("-u", &vocab),
         Class::Value {
-            flag: "-u".to_string(),
+            flag: "-u",
             attached: None,
         }
     );
     assert_eq!(
         classify("-s", &vocab),
         Class::Bool {
-            flag: "-s".to_string(),
+            flag: "-s",
         }
     );
     assert_eq!(
         classify("-n", &vocab),
         Class::Bool {
-            flag: "-n".to_string(),
+            flag: "-n",
         }
     );
 }

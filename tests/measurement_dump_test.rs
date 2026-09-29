@@ -67,3 +67,29 @@ fn dual_dump_writes_both_formats_in_single_evaluation() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn corpus_row_deserializes_optional_cwd_and_evaluates_with_it() {
+    let json_data = r#"[
+        {"cmd": "echo 1 > a.txt", "verdict": "allow", "cwd": "C:/workspace"},
+        {"cmd": "echo 2 > b.txt", "verdict": "allow"}
+    ]"#;
+    let raw: Vec<common::Row> = serde_json::from_str::<Vec<serde_json::Value>>(json_data)
+        .unwrap()
+        .into_iter()
+        .map(|v| common::Row {
+            cmd: v["cmd"].as_str().unwrap().to_string(),
+            verdict: v["verdict"].as_str().unwrap().to_string(),
+            cwd: v.get("cwd").and_then(|c| c.as_str()).map(ToString::to_string),
+        })
+        .collect();
+
+    assert_eq!(raw[0].cwd.as_deref(), Some("C:/workspace"));
+    assert_eq!(raw[1].cwd, None);
+
+    let cfg = common::realistic_config();
+    let decisions = common::evaluate_corpus_rows(&cfg, &raw);
+    assert_eq!(decisions.len(), 2);
+    // In C:/workspace, relative write is allowed under realistic_config
+    assert!(matches!(decisions[0].1, vouch::protocol::Decision::Allow(_)));
+}

@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.52.0 (2026-09-29)
+
+
+### Features
+
+* **Decouple decision engine evaluation from process-global knowledge state for offline measurements**
+  - **Problem & Explanation:** Engine evaluation pathways previously coupled directly to process-global `Knowledge` state initialized in a static OnceLock. Offline measurement utilities, custom harness replay runs, and unit tests requiring alternative or overlay knowledge configurations could not evaluate commands against distinct knowledge instances without mutating or conflicting with process-wide state. `src/engine.rs` now provides `decide_command_with_knowledge`, `decide_command_in_with_knowledge`, and scoped directory traversal variants that accept an explicit `Option<&Knowledge>`, enabling hermetic offline measurements and isolated evaluation.
+  - **Example Scenario:**
+    ```rust
+    let custom_kb = Knowledge::from_file("tests/fixtures/overlay.toml")?;
+    let verdict = decide_command_with_knowledge("git reset --hard", &cfg, Some(&custom_kb));
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: engine decisions always accessed the process-global static knowledge cache, preventing hermetic multi-knowledge evaluation. After: callers can pass an explicit knowledge reference for isolated evaluations while default functions continue using the shared cache.
+
+* **Eliminate heap allocations in flag token classification and consolidate wrapper value-consumption loops**
+  - **Problem & Explanation:** Flag token classification and argument walking previously allocated transient `String` objects on every token inspection during wrapper command analysis. In addition, twelve-line option consumption loops were duplicated across wrapper command walkers. `src/flags.rs` now introduces zero-allocation borrowed string slice tokens (`Class<'a>`, `Spell<'a>`) deriving `Copy`, alongside consolidated helper functions (`consume_flag_value`, `ArgWalk::consume_step`) that eliminate heap allocations across hot wrapper evaluation paths.
+  - **Example Scenario:** Evaluating chained wrapper commands with long option sequences (e.g. `sudo -u dev env VAR=val command --flag=val`).
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: repeated heap allocations on every flag and argument token during wrapper parsing. After: zero heap allocations in flag token classification and unified option value consumption across all wrapper walks.
+
+* **Record sanitized working directory provenance in corpus rows for placement-sensitive replay**
+  - **Problem & Explanation:** Harvested session transcripts did not capture the working directory context associated with executed commands. Replaying corpus rows evaluated relative paths and directory-sensitive commands against a single synthetic root, hiding placement-dependent regressions. The transcript harvester in `tests/fixtures/build_fixture.py` now extracts and sanitizes working directories across Claude, Codex, and Antigravity logs to neutral fixture paths (`C:/Users/dev`, `C:/Users/dev/workspace`), and `tests/common/mod.rs` records the sanitized `cwd` in corpus rows for placement-sensitive replay.
+  - **Example Scenario:** Replaying corpus entries with relative paths (e.g. `rm -rf ./build`) where verdict validity depends on the execution working directory.
+  - **Delta:**
+    - *Configuration Delta:* Added optional `cwd` field to corpus row representations in test fixtures.
+    - *Behavior Contrast:* Before: corpus replay executed in a uniform fixed directory without working directory context. After: corpus rows replay within their sanitized execution directory, preserving path resolution accuracy.
+
+
+### Bug Fixes
+
+* **Enforce single-quoted flag guard coverage across destructive tools and pin directory abbreviation refusals**
+  - **Problem & Explanation:** Destructive command guards previously lacked explicit regression tests for single-quoted option spellings (such as `git reset '--hard'` or `rm '-r'`), risking silent bypass if tokenizer handling diverged. Additionally, directory option abbreviation refusals lacked end-to-end integration test pins against active knowledge entries. Comprehensive single-quoted test fixtures across all guarded commands and abbreviation refusal pins have been added to ensure fail-closed prompt guarantees.
+  - **Example Scenario:**
+    ```bash
+    git reset '--hard' HEAD~1
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: single-quoted flag variations were not pinned across all guarded tools in test coverage. After: single-quoted options are comprehensively pinned across destructive tools and fail-closed abbreviation refusals are verified end-to-end.
+
 ## 0.51.0 (2026-09-25)
 
 

@@ -355,6 +355,16 @@ pub fn decide_command(cfg: &Config, lang: &str, src: &str) -> Decision {
     decide_command_in(cfg, lang, src, None, None)
 }
 
+/// Same as `decide_command`, with an optional explicit knowledge reference.
+pub fn decide_command_with_knowledge(
+    cfg: &Config,
+    lang: &str,
+    src: &str,
+    kb: Option<&crate::guards::Knowledge>,
+) -> Decision {
+    decide_command_in_with_knowledge(cfg, lang, src, None, None, kb)
+}
+
 /// Same, with the context needed to check file writes the command performs.
 pub fn decide_command_in(
     cfg: &Config,
@@ -364,6 +374,18 @@ pub fn decide_command_in(
     project_root: Option<&str>,
 ) -> Decision {
     decide_command_at(cfg, lang, src, home, project_root, None)
+}
+
+/// Same as `decide_command_in`, with an optional explicit knowledge reference.
+pub fn decide_command_in_with_knowledge(
+    cfg: &Config,
+    lang: &str,
+    src: &str,
+    home: Option<&str>,
+    project_root: Option<&str>,
+    kb: Option<&crate::guards::Knowledge>,
+) -> Decision {
+    decide_command_at_with_knowledge(cfg, lang, src, home, project_root, None, kb)
 }
 
 /// With the working directory, so relative write targets resolve. Without it,
@@ -383,7 +405,20 @@ pub fn decide_command_at(
     project_root: Option<&str>,
     cwd: Option<&str>,
 ) -> Decision {
-    decide_command_from(cfg, lang, src, home, project_root, start_state(cwd))
+    decide_command_at_with_knowledge(cfg, lang, src, home, project_root, cwd, None)
+}
+
+/// Same as `decide_command_at`, with an optional explicit knowledge reference.
+pub fn decide_command_at_with_knowledge(
+    cfg: &Config,
+    lang: &str,
+    src: &str,
+    home: Option<&str>,
+    project_root: Option<&str>,
+    cwd: Option<&str>,
+    kb: Option<&crate::guards::Knowledge>,
+) -> Decision {
+    decide_command_from_with_knowledge(cfg, lang, src, home, project_root, start_state(cwd), kb)
 }
 
 /// For a caller that knows the command runs SOMEWHERE it cannot name, and
@@ -408,15 +443,30 @@ pub fn decide_command_in_unknown_dir(
     project_root: Option<&str>,
     cause: &str,
 ) -> Decision {
-    decide_command_from(
+    decide_command_in_unknown_dir_with_knowledge(cfg, lang, src, home, project_root, cause, None)
+}
+
+/// Same as `decide_command_in_unknown_dir`, with an optional explicit knowledge reference.
+pub fn decide_command_in_unknown_dir_with_knowledge(
+    cfg: &Config,
+    lang: &str,
+    src: &str,
+    home: Option<&str>,
+    project_root: Option<&str>,
+    cause: &str,
+    kb: Option<&crate::guards::Knowledge>,
+) -> Decision {
+    decide_command_from_with_knowledge(
         cfg,
         lang,
         src,
         home,
         project_root,
         CdState::Unknown(cause.to_string()),
+        kb,
     )
 }
+
 
 /// Traces command execution through all six stages of the decision pipeline:
 /// 1. Syntax & Tokenization
@@ -511,6 +561,7 @@ pub fn trace_command_at(
     // Step 2: Working Directory Context
     let resolve = |c: &crate::shell::Cmd, raw: &str| resolve_with_assignments(raw, &c.env_assigns, start.known_dir());
     let timeline = scoped_cd_timelines(
+        kb,
         &expanded.cmds,
         &expanded.execution_sites,
         &expanded.scope_parents,
@@ -680,13 +731,14 @@ const MAX_WRAPPER_READINGS: usize = 8;
 /// A superseded design removed the wrapped command from judgement altogether
 /// when its position was ambiguous; that was found unsound, because the
 /// reading it dropped is the one that runs.
-fn decide_command_from(
+fn decide_command_from_with_knowledge(
     cfg: &Config,
     lang: &str,
     src: &str,
     home: Option<&str>,
     project_root: Option<&str>,
     start: CdState,
+    kb_opt: Option<&crate::guards::Knowledge>,
 ) -> Decision {
     let scanner = match crate::syntax::scanner_for(lang) {
         Some(s) => s,
@@ -705,11 +757,18 @@ fn decide_command_from(
         }
     };
 
-    let kb = crate::guards::in_effect();
+    let in_effect_kb;
+    let kb = match kb_opt {
+        Some(k) => k,
+        None => {
+            in_effect_kb = crate::guards::in_effect();
+            in_effect_kb
+        }
+    };
 
     // Fast path: evaluate reading 0 (all choices 0).
     let (base_verdict, root_points) =
-        judge_parsed(cfg, lang, scan.clone(), home, project_root, start.clone(), &[]);
+        judge_parsed(cfg, lang, scan.clone(), home, project_root, start.clone(), &[], kb);
 
     // If no fork offers choices (factor > 1), pass 0 is the entire answer.
     let root_split = root_points.iter().enumerate().find(|(_, p)| p.factor > 1);
@@ -750,7 +809,7 @@ fn decide_command_from(
                 let verdict = if prefix.iter().all(|k| *k == 0) {
                     base_verdict.clone()
                 } else {
-                    let (v, _) = judge_parsed(cfg, lang, scan.clone(), home, project_root, start.clone(), &prefix);
+                    let (v, _) = judge_parsed(cfg, lang, scan.clone(), home, project_root, start.clone(), &prefix, kb);
                     v
                 };
                 done.push((prefix, verdict));
@@ -1101,7 +1160,7 @@ fn judge_once(
         }
     };
 
-    judge_parsed(cfg, lang, scan, home, project_root, start, picks)
+    judge_parsed(cfg, lang, scan, home, project_root, start, picks, crate::guards::in_effect())
 }
 
 /// The whole decision, under ONE reading of every ambiguous wrapper, over an already-parsed Scan.
@@ -1113,6 +1172,7 @@ fn judge_parsed(
     project_root: Option<&str>,
     start: CdState,
     picks: &[usize],
+    kb: &crate::guards::Knowledge,
 ) -> (Decision, Vec<crate::guards::ForkPoint>) {
     let mut fork = crate::guards::ForkCursor::new(picks);
     let mut worst: Option<(Action, String)> = None;
@@ -1148,7 +1208,6 @@ fn judge_parsed(
     // synthetic wrapper occurrences inherit attribution without claiming a
     // scanner event. Expanding the whole list and indexing `scan.order` by
     // position in the result would read some other command's order.
-    let kb = crate::guards::in_effect();
     // How many layers of wrapper nesting the walk below scans before it stops
     // and reports rather than silently dropping the rest (M2.55): the
     // operator's own `lang.<name>.wrap_depth`, or the built-in default when
@@ -1237,6 +1296,7 @@ fn judge_parsed(
     // `home` is now handed over as the `Option` it already was, and the write
     // pass still refuses to run without one.
     let timeline = scoped_cd_timelines(
+        kb,
         &all_cmds,
         &all_execution_sites,
         &scope_parents,
@@ -3985,6 +4045,7 @@ pub fn count_unknown_run_place_commands(lang: &str, src: &str) -> usize {
     };
     let start = CdState::NoDirectory;
     let timeline = scoped_cd_timelines(
+        kb,
         &all_cmds,
         &execution_sites,
         &scope_parents,
@@ -4112,6 +4173,7 @@ pub fn measure_program_locations(
 
     let start = start_state(cwd);
     let timeline = scoped_cd_timelines(
+        kb,
         &cmds,
         &execution_sites,
         &scope_parents,
@@ -5463,6 +5525,7 @@ fn scoped_base_at_parts(
 }
 
 fn scoped_cd_timelines(
+    kb: &crate::guards::Knowledge,
     cmds: &[crate::shell::Cmd],
     sites: &[ExpandedExecutionSite],
     scope_parents: &[ScopeParent],
@@ -5473,7 +5536,6 @@ fn scoped_cd_timelines(
     cdpath_bound: bool,
     start: &CdState,
 ) -> ScopedCdTimelines {
-    let kb = crate::guards::in_effect();
     let scope_count = scope_parents.len() + 1;
 
     // Taint pre-pass (design §3.2/§3.3): which scopes contain a directory
@@ -5757,6 +5819,7 @@ fn scoped_cd_timelines(
             }
         };
         let timeline = cd_timeline(
+            kb,
             cmds,
             sites,
             scope,
@@ -6252,21 +6315,21 @@ fn dir_change_candidates(
                 i += 1;
             }
             crate::flags::Class::Value { flag, attached: Some(v) } => {
-                if dest_dir_flags.iter().any(|d| d == &flag) {
+                if dest_dir_flags.iter().any(|d| d == flag) {
                     // Rule 1: an attached value is unambiguous — the token's
                     // own attach syntax (`=`, colon, short-joined) already
                     // bound it to this flag, so there is no PowerShell
                     // parameter-binding ambiguity for the amended rule 1
                     // guard below to worry about (a BARE next token can bind
                     // to a later switch instead; an attached one cannot).
-                    candidates.push(v);
+                    candidates.push(v.to_string());
                 }
                 // else: rule 2, consumed as this OTHER flag's value, not a
                 // candidate — attached means nothing further to consume.
                 i += 1;
             }
             crate::flags::Class::Value { flag, attached: None } => {
-                if dest_dir_flags.iter().any(|d| d == &flag) {
+                if dest_dir_flags.iter().any(|d| d == flag) {
                     // Rule 1 (AMENDED 2026-08-02, commit 5de2603): the value
                     // IS a destination candidate — UNLESS the value itself
                     // is option-shaped, `-`, or `+`. `Set-Location -Path
@@ -6299,7 +6362,7 @@ fn dir_change_candidates(
                 // Named, not just failed — doctor's third bucket (spec §9.1)
                 // aggregates exactly this token out of the reason it ends up
                 // in.
-                return Err(Some(token));
+                return Err(Some(token.to_string()));
             }
             crate::flags::Class::RefusedAbbrev { token, .. } => {
                 // Same rule-4 treatment as `Undescribed`, not a plain
@@ -6309,7 +6372,7 @@ fn dir_change_candidates(
                 // and never silently dropped as if it were merely undeclared
                 // (that would lose the fact that it prefixes a real declared
                 // flag from the reason vouch gives).
-                return Err(Some(token));
+                return Err(Some(token.to_string()));
             }
         }
     }
@@ -6451,6 +6514,7 @@ fn stack_destination(
 /// `sl` inside a `powershell -Command "…"` snippet on a bash line is still
 /// found as PowerShell's mover, not silently missed as bash's non-mover.
 fn cd_timeline(
+    kb: &crate::guards::Knowledge,
     cmds: &[crate::shell::Cmd],
     sites: &[ExpandedExecutionSite],
     scope: usize,
@@ -6480,7 +6544,6 @@ fn cd_timeline(
     // poison FROM; its parent keeps the whole-scope flag.
     force_unplaceable: bool,
 ) -> CdTimeline {
-    let kb = crate::guards::in_effect();
     // The Program entry travels alongside the kind, from here on: the kind
     // says WHETHER this command moves the shell, the entry's own
     // `dest_dir_flags`/`value_options`/`no_value_options`/

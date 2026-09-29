@@ -42,16 +42,21 @@ pub const REQUIRE_REAL: &str = "VOUCH_REQUIRE_REAL_CORPUS";
 pub struct Row {
     pub cmd: String,
     pub verdict: String,
+    pub cwd: Option<String>,
 }
 
-/// Both fields are required on purpose. If `build_fixture.py` ever stops
+/// Both cmd and verdict are required on purpose. If `build_fixture.py` ever stops
 /// emitting `verdict`, defaulting it would silently deflate every
 /// "the old tool prompted on N" figure toward zero and print an improvement
 /// that never happened (CLAUDE.md §6.6). Fail loudly instead.
+///
+/// An optional `cwd` records sanitized execution directory provenance when available.
 #[derive(Deserialize)]
 struct RawRow {
     cmd: String,
     verdict: String,
+    #[serde(default)]
+    cwd: Option<String>,
 }
 
 /// The package root, read at RUN time.
@@ -102,6 +107,7 @@ fn load(rel: &str) -> Option<Vec<Row>> {
             .map(|r| Row {
                 cmd: r.cmd,
                 verdict: r.verdict,
+                cwd: r.cwd,
             })
             .collect(),
     )
@@ -888,7 +894,14 @@ pub fn evaluate_corpus_rows(
     rows.iter()
         .enumerate()
         .map(|(i, row)| {
-            let d = vouch::engine::decide_command_in(cfg, "bash", &row.cmd, Some("C:/Users/dev"), None);
+            let d = vouch::engine::decide_command_at(
+                cfg,
+                "bash",
+                &row.cmd,
+                Some(HOOK_HOME),
+                None,
+                row.cwd.as_deref(),
+            );
             (i, d)
         })
         .collect()
