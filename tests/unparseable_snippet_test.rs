@@ -5,25 +5,30 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_vouch")
 }
 
-fn pinned_home() -> String {
-    let dir = std::env::temp_dir().join(format!("vouch_test_home_{}", std::process::id()));
+static TEST_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn pinned_home(id: u64) -> String {
+    let dir = std::env::temp_dir().join(format!("vouch_test_home_{}_{id}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     dir.to_string_lossy().replace('\\', "/")
 }
 
 fn run_hook_with_config(config_toml: &str, raw_input: &str, host: &str) -> (bool, String) {
+    let id = TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     let state = std::env::temp_dir().join(format!(
-        "vouch_unparseable_test_{}_{}",
+        "vouch_unparseable_test_{}_{}_{}",
         std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+        id,
+        nonce
     ));
     let _ = std::fs::create_dir_all(&state);
     let cfg_file = state.join("config.toml");
     std::fs::write(&cfg_file, config_toml).unwrap();
-    let home = pinned_home();
+    let home = pinned_home(id);
 
     let mut cmd = Command::new(bin());
     cmd.arg("--hook")
@@ -53,6 +58,7 @@ fn run_hook_with_config(config_toml: &str, raw_input: &str, host: &str) -> (bool
         String::from_utf8_lossy(&out.stderr)
     );
     let _ = std::fs::remove_dir_all(&state);
+    let _ = std::fs::remove_dir_all(&home);
     (out.status.success(), combined)
 }
 

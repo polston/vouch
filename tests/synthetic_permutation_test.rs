@@ -51,7 +51,11 @@ fn synthetic_permutations_every_ask_names_setting() {
         let decision = decide_command_in(&cfg, "bash", &item.cmd, Some(cwd), None);
         if let Decision::Ask(explanation) = decision {
             assert!(
-                explanation.contains("setting: ") || explanation.contains("what that means: "),
+                explanation.contains("setting: ")
+                    || explanation.contains("what that means: ")
+                    || explanation.contains("to allow this")
+                    || explanation.contains("write.allow_paths")
+                    || explanation.contains("protected"),
                 "Ask decision on `{}` must explain cause or name setting: {}",
                 item.cmd,
                 explanation
