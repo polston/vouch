@@ -3,6 +3,7 @@ pub mod awk;
 pub mod cli;
 pub mod codex_broker;
 pub mod config;
+pub mod daemon;
 pub mod engine;
 pub mod flags;
 pub mod guards;

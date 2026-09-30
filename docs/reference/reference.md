@@ -14,6 +14,7 @@ setting must never become permission.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
+| `daemon` | DaemonConfig | (none) | `[daemon]`: persistent gating daemon configuration. |
 | `guards` | map of string to Action | (none) | What commands DO, written as `[guards]`. Shared across every language: a guard fires the same way whichever scanner recognised the command that tripped it. Every key must be one of vouch's known guard names (`bypass_enforcement`, `confidential_output`, `delete_recursive`, `grant_execute`, `history_rewrite`, `publish_outward`, `process_control`, `privilege_escalation`, `disk_or_system`, `in_place_edit`, `local_state_write`, `remote_execution`); an unset guard always resolves to `ask`. |
 | `lang` | map of string to LangConfig | (none) | Every language section, written as `[lang.<name>]` — `bash`, `powershell`, `python`, and `javascript` ship with vouch. One map, so a new scanner needs no new key here. |
 | `protected` | ProtectedSection | (none) | `[protected]`: paths no `allow_paths` entry can ever open. |
@@ -33,6 +34,16 @@ through, stop and ask the operator, or refuse it outright.
 - `allow` — Let it through with no prompt.
 - `ask` — Stop and show the operator what was recognised, before it runs.
 - `deny` — Refuse it outright, with no prompt.
+
+### `DaemonConfig`
+
+The `[daemon]` table: persistent gating daemon runtime options.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `fail_closed` | boolean | true | Whether the daemon fails closed on internal errors. |
+| `socket_path` | string | "~/.config/vouch/vouch.sock" | Local socket path (Unix domain socket or Windows named pipe/socket). |
+| `timeout_ms` | integer | 50 | Client connect and read timeout in milliseconds before local fallback. |
 
 ### `FileConfig`
 
@@ -189,6 +200,15 @@ A shape that derives an output write destination when specific mode flags are pr
 | `unless_flags` | array of string | [] | Flags that suppress write target derivation (e.g. listing or extraction modes). |
 | `when_flags` | array of string | [] | Flags indicating archive creation or output generation mode (e.g. `["-c", "--create"]`). |
 
+### `ContainerVolume`
+
+Container volume mount declarations.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `mount_flags` | array of string | [] | Flags specifying structured mounts, e.g. ["--mount"]. |
+| `volume_flags` | array of string | [] | Flags specifying short volume mounts, e.g. ["-v", "--volume"]. |
+
 ### `EnvName`
 
 An environment-variable name the SHELL ITSELF reads — not data the
@@ -257,6 +277,7 @@ name.
 | `case_sensitive_flags` | boolean (optional) | (unset) | Whether `write_flags` must match case exactly.  PowerShell parameter names are case-insensitive, so `-Path` is declared lowercase and matched loosely. Unix flags are NOT: `tar -C` is the destination directory while `tar -c` means create, and matching them loosely would record the token after `-c` as a written path.  `None` means the entry did not say. That differs from `Some(false)` once two files describe the same program: unset means "keep what the other file said", and only an entry that spells it out changes it. |
 | `changes_dir` | string (optional) | (unset) | The dir-change kind: what the walk can KNOW about where the shell goes after this program runs. One of `"no"`, `"stated"`, `"stack"`, `"unstated"` — a closed set, checked in `knowledge::validate`.  `"no"` exists so an operator can RETRACT a shipped claim: without it, a false "this moves the shell" has no operator-side fix.  `None` means the entry did not say. That differs from `Some("no")` once two files describe the same program: unset means "keep what the other file said", and only an entry that spells it out changes it — the same rule `case_sensitive_flags` follows. |
 | `conditional_write` | array of ConditionalWrite | (none) | Shapes in which this program writes an output file conditionally based on mode flags (e.g. creating an archive with `tar -cf <archive>`), written as `[[program.conditional_write]]`. |
+| `container_volume` | ContainerVolume (optional) | (none) | Container volume mount declarations for container tools (e.g. docker, podman). |
 | `dest_dir_flags` | array of string | [] | Options that consume the following token AND that token is the destination the SHELL moves to for everything after this command — sibling of `run_dir_flags` (where THIS command runs) but for where the shell goes next. |
 | `evaluates_input` | string | "" | This program runs text it obtains at execution time, so the thing that actually runs is not in the command vouch was given — unless vouch can prove it IS: a here-document on the same command, consumed and scanned, satisfies the "stdin" claim, because then the code is in the command after all.   "always" — e.g. Invoke-Expression, whatever its argument turns out to be   "stdin"  — a shell with no script and no -c snippet is reading code              from its standard input, as in `curl … \| bash` |
 | `flag_prefix` | array of string | [] | How this program spells flags. cmd.exe uses `/s`, not `-s`; without this its flags read as paths and its paths read as flags, so both the guard rules and the written-path list come out wrong.  A list, because one name can belong to two languages: `del /s` is cmd, `del -Recurse` is the PowerShell alias for Remove-Item. Empty means "-". |
@@ -379,11 +400,25 @@ A harness tool vouch has no scanner for, and what is claimed about it.
 | `cwd_from_call` | boolean (optional) | (unset) | This tool executes its snippet (or writes its path) in the calling session's own working directory. Only when true does a relative target get resolved against the hook's cwd; absent or false leaves it unresolvable, which asks (fail closed). |
 | `match` | array of string | [] | Optional, unlike `Program::match_names` — a `server` entry (spec 2026-08-05 §Schema) names no individual tool at all, and without `default` here `deny_unknown_fields` would refuse it with "missing field `match`" before `knowledge::validate_tool` ever got to say why a match-less, server-less entry is wrong. |
 | `read_path_field` | string (optional) | (unset) | The `tool_input` field whose value is the path this tool reads. |
+| `rule` | array of ToolRule | (none) | Structured argument rules for predicate matching on JSON input fields. |
 | `server` | string (optional) | (unset) | A whole-server grant, said out loud (spec 2026-08-05 §Schema): matches `<server>__<tool>` for every tool that server exposes, instead of one tool by name. Mutually exclusive with a non-empty `match` — checked in `knowledge::validate_tool`. |
 | `snippet` | array of ToolSnippet (optional) | (none) | Which named `tool_input` fields carry a script vouch should decide on. `None` means "keep what the shipped entry declares" — the same `Option` merge rule every other per-entry claim in this file follows. `Some(vec![])` is a load error (`knowledge::validate_tool`): there is no legitimate "explicitly no snippets" spelling, because that reading would let one silent my-knowledge line turn off snippet inspection for a shipped entry it only meant to add a `source` to. The actual off-switch is `tools.<name>` in config. |
 | `source` | string | "" | Why this tool is described. Shown in `vouch doctor` and in the prompt, and it is the claim someone has to stand behind. |
 | `write_path` | array of ToolWritePath (optional) | (none) | Structured write declarations. This is a list so one tool can carry multiple independent path-bearing fields; every declaration is evaluated and the worst result governs the call. |
 | `write_path_field` | string (optional) | (unset) | The `tool_input` field whose value is the path this tool writes. What `Write` and `Edit` were hardcoded to do. |
+
+### `ToolRule`
+
+A structured argument gating rule for harness or MCP tools.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `action` | Action | (required) | Action to take when the predicate matches (ask, deny, allow). |
+| `field` | string | (required) | Field path in tool_input JSON, supporting dot-notation for nested fields (e.g. "query" or "params.sql"). |
+| `guard` | string (optional) | (unset) | Optional guard category name associated with this rule. |
+| `reason` | string (optional) | (unset) | Human-readable explanation formatted in prompt and journal diagnostics. |
+| `when_exact` | string (optional) | (unset) | Exact string match evaluated against the field string value. |
+| `when_pattern` | string (optional) | (unset) | Regular expression pattern evaluated against the field string value. |
 
 ### `ToolSnippet`
 

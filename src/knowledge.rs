@@ -26,6 +26,11 @@ pub const KNOWLEDGE_ENV: &str = "VOUCH_KNOWLEDGE";
 /// Overrides the path to `my-knowledge.toml`.
 pub const MY_KNOWLEDGE_ENV: &str = "VOUCH_MY_KNOWLEDGE";
 
+/// Header comment written at top of a newly created `my-knowledge.toml`.
+pub const MY_KNOWLEDGE_HEADER: &str =
+    "# Tools and programs you have vouched for.\n\
+     # This file ADDS to what ships with vouch; it does not replace it.\n";
+
 /// Which file a [`Gap`] is about.
 ///
 /// [review] The banner used to say the same fixed sentence — "vouch has no
@@ -520,6 +525,24 @@ pub(crate) fn validate(kb: &Knowledge) -> Result<(), String> {
                             prog.match_names, wf
                         ));
                     }
+                }
+            }
+        }
+        if let Some(cv) = &prog.container_volume {
+            for f in &cv.volume_flags {
+                if !f.starts_with('-') {
+                    return Err(format!(
+                        "[[program]] {:?}: container_volume volume_flags must start with '-', got {:?}",
+                        prog.match_names, f
+                    ));
+                }
+            }
+            for f in &cv.mount_flags {
+                if !f.starts_with('-') {
+                    return Err(format!(
+                        "[[program]] {:?}: container_volume mount_flags must start with '-', got {:?}",
+                        prog.match_names, f
+                    ));
                 }
             }
         }
@@ -1352,6 +1375,34 @@ fn validate_tool(t: &Tool) -> Result<(), String> {
         }
     }
 
+    for rule in &t.rule {
+        if rule.field.trim().is_empty() {
+            return Err(format!("[[tool]] {ident}: rule field is empty"));
+        }
+        if rule.when_pattern.is_none() && rule.when_exact.is_none() {
+            return Err(format!(
+                "[[tool]] {ident}: rule for field {:?} must specify at least one of when_pattern or when_exact",
+                rule.field
+            ));
+        }
+        if let Some(pat) = &rule.when_pattern {
+            regex::Regex::new(pat).map_err(|e| {
+                format!(
+                    "[[tool]] {ident}: rule pattern {:?} for field {:?} is not a valid regex: {e}",
+                    pat, rule.field
+                )
+            })?;
+        }
+        if let Some(guard) = &rule.guard {
+            if !crate::guards::KNOWN_GUARDS.contains(&guard.as_str()) {
+                return Err(format!(
+                    "[[tool]] {ident}: rule guard {:?} is not a recognized guard",
+                    guard
+                ));
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -1906,6 +1957,9 @@ fn overlay(base: &mut Program, mine: &Program) {
     if !mine.sub_capability.is_empty() {
         base.sub_capability = mine.sub_capability.clone();
     }
+    if mine.container_volume.is_some() {
+        base.container_volume = mine.container_volume.clone();
+    }
     // `languages` is deliberately NOT field-copied here. Which language scope
     // a split-off piece of an overlay ends up with is computed by
     // `overlay_all` itself (`Entry::set_scope_tags`, called AFTER `lay()`),
@@ -2025,6 +2079,10 @@ fn overlay(base: &mut Program, mine: &Program) {
         }
     }
     base.subcommand_options = laid_sub_opts;
+
+    if mine.container_volume.is_some() {
+        base.container_volume = mine.container_volume.clone();
+    }
 }
 
 /// Lay the operator's tool entry over a shipped one. Unset means keep — the
@@ -2083,6 +2141,9 @@ fn overlay_tool(base: &mut Tool, mine: &Tool) {
     }
     if mine.cwd_from_call.is_some() {
         base.cwd_from_call = mine.cwd_from_call;
+    }
+    if !mine.rule.is_empty() {
+        base.rule.extend(mine.rule.clone());
     }
     // `server` is identity, not a claim to lay — `overlay_all` only ever
     // calls `lay` on two entries `same_name` already agreed are the SAME

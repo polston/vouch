@@ -13,6 +13,9 @@
 //! report of which tool ran. A selector exists only for the manual commands,
 //! where there is no tool call to read that from.
 
+pub mod model;
+pub mod trust;
+
 /// What to explain, in which language, and from which directory if the
 /// caller said one.
 #[derive(Debug, PartialEq, Eq)]

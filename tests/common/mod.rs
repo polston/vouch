@@ -28,8 +28,11 @@
 
 use serde::Deserialize;
 
+pub mod generator;
+
 pub const REAL: &str = "tests/fixtures/bash_corpus.json";
 pub const SYNTHETIC: &str = "tests/fixtures/synthetic_corpus.json";
+pub const SYNTHETIC_GRAMMAR: &str = "tests/fixtures/synthetic_grammar_corpus.json";
 pub const REAL_POWERSHELL: &str = "tests/fixtures/powershell_corpus.json";
 pub const SYNTHETIC_POWERSHELL: &str = "tests/fixtures/synthetic_powershell_corpus.json";
 
@@ -123,9 +126,17 @@ pub fn synthetic() -> Vec<Row> {
     load(SYNTHETIC).expect("synthetic_corpus.json is committed; the checkout is incomplete")
 }
 
+/// The committed synthetic grammar permutation corpus. Absence is a broken checkout, not a skip.
+pub fn synthetic_grammar() -> Vec<Row> {
+    load(SYNTHETIC_GRAMMAR).expect("synthetic_grammar_corpus.json is committed; the checkout is incomplete")
+}
+
 /// Every corpus available here: synthetic always, real when it exists.
 pub fn all() -> Vec<(&'static str, Vec<Row>)> {
-    let mut v = vec![("synthetic", synthetic())];
+    let mut v = vec![
+        ("synthetic", synthetic()),
+        ("synthetic_grammar", synthetic_grammar()),
+    ];
     if let Some(r) = real() {
         v.push(("real", r));
     }

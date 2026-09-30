@@ -150,3 +150,23 @@ fn replay_evaluates_placement_sensitive_relative_writes() {
         "expected ask in C:/Windows/System32, got: {d_denied:?}"
     );
 }
+
+#[test]
+fn synthetic_grammar_permutations_replay() {
+    let rows = common::synthetic_grammar();
+    let cfg = realistic_config();
+    assert!(rows.len() >= 500, "expected at least 500 synthetic grammar rows, got {}", rows.len());
+
+    let mut allowed = 0;
+    let mut asked = 0;
+    for row in &rows {
+        let cwd = row.cwd.as_deref().unwrap_or("C:/Users/dev");
+        let d = decide_command_in(&cfg, "bash", &row.cmd, Some(cwd), None);
+        match d {
+            Decision::Allow(_) => allowed += 1,
+            Decision::Ask(_) => asked += 1,
+            _ => {}
+        }
+    }
+    assert!(allowed > 0 && asked > 0, "synthetic grammar replay should exercise both allow and ask");
+}

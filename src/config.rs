@@ -429,6 +429,43 @@ struct ProtectedSection {
     paths: Vec<String>,
 }
 
+/// The `[daemon]` table: persistent gating daemon runtime options.
+#[derive(Debug, Deserialize, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DaemonConfig {
+    /// Local socket path (Unix domain socket or Windows named pipe/socket).
+    #[serde(default = "default_daemon_socket_path")]
+    pub socket_path: String,
+    /// Client connect and read timeout in milliseconds before local fallback.
+    #[serde(default = "default_daemon_timeout_ms")]
+    pub timeout_ms: u64,
+    /// Whether the daemon fails closed on internal errors.
+    #[serde(default = "default_true")]
+    pub fail_closed: bool,
+}
+
+fn default_daemon_socket_path() -> String {
+    "~/.config/vouch/vouch.sock".to_string()
+}
+
+fn default_daemon_timeout_ms() -> u64 {
+    50
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            socket_path: default_daemon_socket_path(),
+            timeout_ms: default_daemon_timeout_ms(),
+            fail_closed: true,
+        }
+    }
+}
+
 /// `config.toml` (`~/.config/vouch/config.toml`): what the operator has told
 /// vouch to do. Anything not named here resolves to `ask` — absence of a
 /// setting must never become permission.
@@ -500,6 +537,9 @@ struct Raw {
     /// paths are protected from silent exposure into transcripts.
     #[serde(default)]
     read: ReadConfig,
+    /// `[daemon]`: persistent gating daemon configuration.
+    #[serde(default)]
+    daemon: DaemonConfig,
 }
 
 #[derive(Debug, Default)]
@@ -513,6 +553,7 @@ pub struct Config {
     pub shadow: Option<ShadowSection>,
     pub unparseable_snippet: Option<Action>,
     pub read: ReadConfig,
+    pub daemon: DaemonConfig,
     /// True only for `Config::nothing_configured()` — there is no config file
     /// on disk at all. Distinguishes that from a real, loaded config that
     /// simply names no tools yet (`tools` empty either way, so `tools` alone
@@ -706,6 +747,7 @@ pub fn load(text: &str) -> Result<Config, String> {
         shadow: raw.shadow,
         unparseable_snippet: raw.unparseable_snippet,
         read: raw.read,
+        daemon: raw.daemon,
         no_config_file: false,
     };
     validate(&cfg)?;

@@ -1,21 +1,20 @@
 ---
 name: vouch-trust
-description: Use when vouch reports an undescribed program, a generated path-spelled program family, or an MCP tool with no scanner — proposes the narrowest recognition rule, writes only on explicit accept, and proves its boundaries
+description: Use when authorizing execution boundaries, write scratch paths, trust zones, or repository build program families in config.toml — manages policy grants safely while syntax modeling lives in vouch-model
 ---
 
-# vouch-trust — recognise a program or MCP tool without trusting more than was asked
+# vouch-trust — manage authorization policies and boundaries in config.toml
 
-A vouch `unmodeled_command` prompt means: this exact command contains
-something vouch has no entry that covers. An `unmodeled_tool` prompt is the
-same gap one layer up: the harness ran a tool (an `mcp__server__tool` name,
-almost always) vouch has no `[[tool]]` entry for. This skill turns either
-into a verified recognition rule — config or knowledge, according to the
-boundary being trusted. It exists because a printed one-line
-instruction cannot check what it is about to write, and four measured
-defects came from that (vouch ROADMAP, M2.12) — the MCP-tool half exists
-because the same failure mode, guessing instead of checking, is worse one
-layer up: a program's man page is one `--help` away, but an MCP tool's
-fields are only what the harness actually declares (rule 6 below).
+Vouch strictly separates **objective syntax description** (`my-knowledge.toml`, governed by `CLAUDE.md §3` and managed by `vouch model`) from **subjective policy authorization** (`config.toml`, governed by `CLAUDE.md §4` and managed by `vouch trust`).
+
+Use this skill when you need to:
+1. **Authorize write paths (`write.allow_paths`):**
+   `vouch trust path <dir>` appends `<dir>/**` to `write.allow_paths` in `config.toml`. Protected paths (e.g. config and settings files) are strictly refused.
+2. **Configure place-scoped trust zones (`run.trust_all_under`):**
+   `vouch trust zone <dir>` allows commands running inside that workspace tree without prompt fatigue.
+3. **Trust generated or build-spelled program families (`[[run.trust_program]]`):**
+   `vouch trust program-location <under> <name>` recognizes executables built in specific directories (e.g. `target/debug`).
+4. **Model syntax or tools:** For describing program verbs, CLI flags, write channels, or MCP tool parameters in `my-knowledge.toml`, invoke the `vouch-model` skill and use `vouch model`.
 
 ## Hard rules
 

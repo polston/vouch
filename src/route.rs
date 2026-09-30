@@ -163,9 +163,16 @@ fn decide_tool(
     //    machine, once Task 8 makes `Bash` an entry — to ask.
     let declared = match (entry, server) {
         (Some(e), Some(s))
-            if e.snippet.is_none() && e.write_path_field.is_none() && e.write_path.is_none() =>
+            if e.snippet.is_none()
+                && e.write_path_field.is_none()
+                && e.write_path.is_none()
+                && e.rule.is_empty() =>
         {
-            if s.snippet.is_some() || s.write_path_field.is_some() || s.write_path.is_some() {
+            if s.snippet.is_some()
+                || s.write_path_field.is_some()
+                || s.write_path.is_some()
+                || !s.rule.is_empty()
+            {
                 let mut inherited = s.clone();
                 if e.cwd_from_call.is_some() {
                     inherited.cwd_from_call = e.cwd_from_call;
@@ -179,12 +186,18 @@ fn decide_tool(
             }
         }
         (Some(e), _)
-            if e.snippet.is_some() || e.write_path_field.is_some() || e.write_path.is_some() =>
+            if e.snippet.is_some()
+                || e.write_path_field.is_some()
+                || e.write_path.is_some()
+                || !e.rule.is_empty() =>
         {
             Some(e.clone())
         }
         (None, Some(s))
-            if s.snippet.is_some() || s.write_path_field.is_some() || s.write_path.is_some() =>
+            if s.snippet.is_some()
+                || s.write_path_field.is_some()
+                || s.write_path.is_some()
+                || !s.rule.is_empty() =>
         {
             Some(s.clone())
         }
@@ -377,6 +390,79 @@ fn decide_declared(
             };
             worst = worse(worst, decision);
         }
+    }
+
+    for rule in &entry.rule {
+        if let Some(val_str) = extract_field_str(&fields, &rule.field) {
+            let mut matches = false;
+            if let Some(exact) = &rule.when_exact {
+                if val_str == *exact {
+                    matches = true;
+                }
+            }
+            if !matches {
+                if let Some(pat) = &rule.when_pattern {
+                    if let Ok(re) = regex::Regex::new(pat) {
+                        if re.is_match(&val_str) {
+                            matches = true;
+                        }
+                    }
+                }
+            }
+            if matches {
+                let reason = match (rule.action, &rule.reason) {
+                    (Action::Ask, Some(r)) => {
+                        if r.contains("to allow this") || r.contains("tools.") {
+                            r.clone()
+                        } else {
+                            format!(
+                                "vouch stopped on: tool rule\n  tool: {tool}\n  field: {}\n  {r}{}",
+                                rule.field,
+                                blanket(tool)
+                            )
+                        }
+                    }
+                    (Action::Deny, Some(r)) => {
+                        format!("vouch denied: tool rule\n  tool: {tool}\n  field: {}\n  {r}", rule.field)
+                    }
+                    (Action::Allow, Some(r)) => r.clone(),
+                    (Action::Ask, None) => {
+                        let guard_tag = rule
+                            .guard
+                            .as_deref()
+                            .map(|g| format!(" ({g})"))
+                            .unwrap_or_default();
+                        format!(
+                            "vouch stopped on: tool rule{guard_tag}\n  tool: {tool}\n  field: {}\n  value matched rule predicate{}",
+                            rule.field,
+                            blanket(tool)
+                        )
+                    }
+                    (Action::Deny, None) => {
+                        let guard_tag = rule
+                            .guard
+                            .as_deref()
+                            .map(|g| format!(" ({g})"))
+                            .unwrap_or_default();
+                        format!(
+                            "vouch denied: tool rule{guard_tag}\n  tool: {tool}\n  field: {}\n  value matched rule predicate",
+                            rule.field
+                        )
+                    }
+                    (Action::Allow, None) => format!("allowed by tool rule for {tool}"),
+                };
+                let dec = match rule.action {
+                    Action::Ask => Decision::Ask(reason),
+                    Action::Deny => Decision::Deny(reason),
+                    Action::Allow => Decision::Allow(reason),
+                };
+                worst = worse(worst, dec);
+            }
+        }
+    }
+
+    if worst.is_none() && !entry.rule.is_empty() {
+        worst = Some(Decision::Allow(format!("allowed by tool rule policy for {tool}")));
     }
 
     // Ask is the empty fold's identity (spec §Schema rule 5): a declaration
@@ -731,6 +817,42 @@ fn merged_fields(t: &ToolInput) -> Map<String, Value> {
         }
     }
     fields
+}
+
+fn extract_field_str(fields: &Map<String, Value>, path: &str) -> Option<String> {
+    if let Some(val) = fields.get(path) {
+        return value_to_str(val);
+    }
+    let parts: Vec<&str> = path.split('.').collect();
+    if parts.len() <= 1 {
+        return None;
+    }
+    let mut current: &Value = fields.get(parts[0])?;
+    for &part in &parts[1..] {
+        match current {
+            Value::Object(map) => {
+                current = map.get(part)?;
+            }
+            Value::Array(arr) => {
+                if let Ok(idx) = part.parse::<usize>() {
+                    current = arr.get(idx)?;
+                } else {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+    }
+    value_to_str(current)
+}
+
+fn value_to_str(val: &Value) -> Option<String> {
+    match val {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
 }
 
 /// A path that already says where it starts, in any spelling the resolver

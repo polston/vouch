@@ -104,6 +104,29 @@
       },
       "additionalProperties": false
     },
+    "ContainerVolume": {
+      "description": "Container volume mount declarations.",
+      "type": "object",
+      "properties": {
+        "mount_flags": {
+          "description": "Flags specifying structured mounts, e.g. [\"--mount\"].",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "volume_flags": {
+          "description": "Flags specifying short volume mounts, e.g. [\"-v\", \"--volume\"].",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "EnvName": {
       "description": "An environment-variable name the SHELL ITSELF reads — not data the\ncommand happens to be handed, but a name that changes which program a\nlater word resolves to, or what code the shell runs before the command\non the line (M2.120).\n\nThe distinction this kind exists to make: `LC_ALL=C sort f` sets\nsomething `sort` reads, and vouch's description of `sort` still holds.\n`PATH=<dir> ls` sets something the SHELL reads, and the `ls` that runs\nis whatever sits in that directory — vouch's description of `ls` is then\na description of a program that is not running. Only names listed here\nare read that way; every other assignment stays inert, which is what\nkeeps the ordinary case quiet.",
       "type": "object",
@@ -249,6 +272,17 @@
           "items": {
             "$ref": "#/$defs/ConditionalWrite"
           }
+        },
+        "container_volume": {
+          "description": "Container volume mount declarations for container tools (e.g. docker, podman).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContainerVolume"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "dest_dir_flags": {
           "description": "Options that consume the following token AND that token is the\ndestination the SHELL moves to for everything after this command —\nsibling of `run_dir_flags` (where THIS command runs) but for where the\nshell goes next.",
@@ -866,6 +900,13 @@
           ],
           "default": null
         },
+        "rule": {
+          "description": "Structured argument rules for predicate matching on JSON input fields.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ToolRule"
+          }
+        },
         "server": {
           "description": "A whole-server grant, said out loud (spec 2026-08-05 §Schema): matches\n`<server>__<tool>` for every tool that server exposes, instead of one\ntool by name. Mutually exclusive with a non-empty `match` — checked in\n`knowledge::validate_tool`.",
           "type": [
@@ -909,6 +950,57 @@
         }
       },
       "additionalProperties": false
+    },
+    "ToolRule": {
+      "description": "A structured argument gating rule for harness or MCP tools.",
+      "type": "object",
+      "properties": {
+        "action": {
+          "description": "Action to take when the predicate matches (ask, deny, allow).",
+          "$ref": "#/$defs/Action"
+        },
+        "field": {
+          "description": "Field path in tool_input JSON, supporting dot-notation for nested fields (e.g. \"query\" or \"params.sql\").",
+          "type": "string"
+        },
+        "guard": {
+          "description": "Optional guard category name associated with this rule.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "reason": {
+          "description": "Human-readable explanation formatted in prompt and journal diagnostics.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "when_exact": {
+          "description": "Exact string match evaluated against the field string value.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "when_pattern": {
+          "description": "Regular expression pattern evaluated against the field string value.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "field",
+        "action"
+      ]
     },
     "ToolSnippet": {
       "description": "One declared snippet of a `[[tool]]` entry: a named `tool_input` field\nthat carries a script vouch should decide on, and how to learn which\nlanguage it is written in.",

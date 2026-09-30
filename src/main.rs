@@ -914,13 +914,51 @@ fn main() {
         std::process::exit(0);
     }
 
-    // `vouch trust <program>…` — describe a program so an allow-list can work.
-    //
-    // An allow-list needs a cheap way to say "I vouch for this". Without one the
-    // only options are hand-editing a file — which the user has said they will
-    // never do — or turning the whole check off. Running this command IS the
-    // explicit accept; nothing is ever written without it.
+    // `vouch model <program|tool> ...` — describe objective syntax in my-knowledge.toml (CLAUDE.md §3).
+    if args.first().map(String::as_str) == Some("model") {
+        match vouch::cli::model::run_model(&args[1..], &home()) {
+            Ok(msg) => {
+                println!("{msg}");
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // `vouch daemon [--socket <path>]` — run persistent background gating daemon (M4.5).
+    if args.first().map(String::as_str) == Some("daemon") {
+        let socket_path = args
+            .get(1)
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| vouch::daemon::default_socket_path(&home()));
+        println!("vouch daemon running on socket: {}", socket_path.display());
+        if let Err(e) = vouch::daemon::run_daemon_server(&socket_path, &home(), None) {
+            eprintln!("vouch daemon error: {e}");
+            std::process::exit(1);
+        }
+        std::process::exit(0);
+    }
+
+    // `vouch trust ...` — manage authorization policies in config.toml, or legacy program modeling.
     if args.first().map(String::as_str) == Some("trust") {
+        if let Some(sub) = args.get(1).map(String::as_str) {
+            if matches!(sub, "path" | "zone" | "program-location") {
+                match vouch::cli::trust::run_trust_policy(&args[1..], &home(), &config_path()) {
+                    Ok(msg) => {
+                        println!("{msg}");
+                        std::process::exit(0);
+                    }
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+
         // Route every trailing token: vouch's own two control flags are
         // reserved before anything else, candidate flags (dash-prefixed or
         // slash-switch shaped) are routed into `flags_typed` so flags can
@@ -1905,6 +1943,31 @@ fn main() {
     if std::io::stdin().read_to_string(&mut raw).is_err() {
         std::process::exit(0);
     }
+
+    // Try query daemon if socket is available, with non-blocking fail-closed fallback
+    let default_sock = vouch::daemon::default_socket_path(&home_dir);
+    let daemon_sock = std::env::var("VOUCH_DAEMON_SOCKET")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .unwrap_or(default_sock);
+
+    if daemon_sock.exists() {
+        let req = vouch::daemon::DaemonRequest {
+            raw: raw.clone(),
+            notice: notice.clone(),
+            host: hook_options.host.as_str().to_string(),
+            shadow: hook_options.shadow,
+            state_dir: state_dir.to_string_lossy().to_string(),
+            home_dir: home_dir.clone(),
+        };
+        if let Ok(resp) = vouch::daemon::try_query_daemon(&daemon_sock, &req, cfg.daemon.timeout_ms) {
+            if let Some(output) = resp.output {
+                println!("{output}");
+            }
+            std::process::exit(0);
+        }
+    }
+
     if let HookCall::Processed(Some(output)) = run_hook_call(
         &raw,
         &cfg,

@@ -1,0 +1,2502 @@
+[
+  {
+    "cmd": "node -e \"require('fs').writeFileSync('C:/work/build/target', 'data')\"",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "ssh -l dev dev.internal",
+    "verdict": "ask",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "cd /tmp && ls -la",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "echo 'tamper' > $HOME/.config/vouch/config.toml",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "git checkout -b feature",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "ssh -l dev dev.internal",
+    "verdict": "ask",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "ssh -l dev example.com",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "node -e \"console.log(process.version)\"",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "git push '-f' origin main",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "git reset \"--hard\" HEAD~1",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "awk 'BEGIN { system(\"ls\") }'",
+    "verdict": "ask",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "for f in /tmp/*.txt; do head -n 1 \"$f\"; done",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "chmod +x /tmp/run/cache.bin",
+    "verdict": "ask",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "awk '{print $1}' /tmp/data.csv",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "cat /tmp/data.csv",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "for f in /tmp/*.txt; do rm -rf \"$f\"; done",
+    "verdict": "ask",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "if [ -f /tmp/test.txt ]; then cat /tmp/test.txt; fi",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "echo 'tamper' > $HOME/.config/vouch/config.toml",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "date",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "tar -czf /tmp/run/cache.bin /tmp/data",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "awk 'BEGIN { system(\"ls\") }'",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "cd /tmp && ls -la",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "curl -sSL -o /tmp/run/cache.bin https://example.com/asset.tar.gz",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "kill -KILL 6927",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "ls C:/work/data.csv",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "cat /tmp/notes.txt | while read -r line; do echo \"$line\"; done",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "git log --oneline -18",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "echo 'tamper' > $HOME/.config/vouch/config.toml",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "python3 -c \"import shutil; shutil.rmtree('C:/work/scratch/out.txt')\"",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "pwd",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "cat /tmp/notes.txt | while read -r line; do echo \"$line\"; done",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "echo 'tamper' > $HOME/.config/vouch/config.toml",
+    "verdict": "ask",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "grep -rn pattern /tmp/readme.md",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "git status",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "awk '{print $1}' C:/work/notes.txt",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "awk 'BEGIN { system(\"ls\") }'",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "printf '%s\\n' 1 2 3 >> /tmp/scratch/out.txt",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "head -n 13 /tmp/readme.md",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "python -c \"import shutil; shutil.rmtree('/tmp/build/target')\"",
+    "verdict": "ask",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "printf '%s\\n' 1 2 3 >> C:/work/build/target",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "cat C:/work/data.csv",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "curl -sSL --output /tmp/scratch/out.txt https://example.com/asset.tar.gz",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "awk 'BEGIN { system(\"ls\") }'",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "grep --recursive --line-number pattern C:/work/data.csv",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "python3 -c \"import sys; sys.stdout.write('clean\\n')\"",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "git reset '--hard' HEAD~1",
+    "verdict": "ask",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "kill -9 2731",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "node -e \"require('fs').writeFileSync('/tmp/scratch/out.txt', 'data')\"",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "awk '{print $1}' C:/work/notes.txt",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "node -e \"require('fs').writeFileSync('/tmp/run/cache.bin', 'data')\"",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "kill -TERM 7897",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "echo 'tamper' > $HOME/.config/vouch/config.toml",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "python3 -c \"print(1 + 2)\"",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "node -e \"require('fs').writeFileSync('C:/work/scratch/out.txt', 'data')\"",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "awk '{print $1}' /tmp/readme.md",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "for f in /tmp/*.txt; do rm -rf \"$f\"; done",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "for f in /tmp/*.txt; do head -n 1 \"$f\"; done",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "for f in /tmp/*.txt; do head -n 1 \"$f\"; done",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "node -e \"console.log(process.version)\"",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "chmod u+w /tmp/run/cache.bin",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "echo 'tamper' > $HOME/.config/vouch/config.toml",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "python -c \"print(1 + 2)\"",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "chmod +x /tmp/scratch/out.txt",
+    "verdict": "ask",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "echo 'hello world' > /tmp/run/cache.bin",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "uname -s",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "git log --oneline -5",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "python3 -c \"import shutil; shutil.rmtree('/tmp/run/cache.bin')\"",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "git status",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "cat /tmp/notes.txt",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "printf '%s\\n' 1 2 3 >> /tmp/run/cache.bin",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "if [ -f /tmp/test.txt ]; then cat /tmp/test.txt; fi",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "node -e \"require('fs').writeFileSync('C:/work/scratch/out.txt', 'data')\"",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "if [ -f /tmp/test.txt ]; then cat /tmp/test.txt; fi",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "awk '{print $1}' /tmp/data.csv",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "awk '{print $1}' /tmp/data.csv",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "cd /tmp && ls -la",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "kill -TERM 9025",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "cat C:/work/notes.txt",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "find /tmp '-maxdepth' 2",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "for f in /tmp/*.txt; do rm -rf \"$f\"; done",
+    "verdict": "ask",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "python3 -c \"print(1 + 2)\"",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "node -e \"console.log(process.version)\"",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "node -e \"console.log(process.version)\"",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "for f in /tmp/*.txt; do rm -rf \"$f\"; done",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "for f in /tmp/*.txt; do head -n 1 \"$f\"; done",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "printf '%s\\n' 1 2 3 >> /tmp/scratch/out.txt",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "node -e \"require('fs').writeFileSync('C:/work/build/target', 'data')\"",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "python3 -c \"print(1 + 2)\"",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "head -n 5 /tmp/readme.md",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "whoami",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "kill -9 2329",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "git push \"-f\" origin master",
+    "verdict": "ask",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "node -e \"require('fs').writeFileSync('C:/work/build/target', 'data')\"",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "node -e \"console.log(process.version)\"",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "pwd",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "python - <<'EOF'\nimport shutil\nshutil.rmtree('C:/work/build/target')\nEOF\n",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "for f in /tmp/*.txt; do head -n 1 \"$f\"; done",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "cat /tmp/readme.md",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "echo 'tamper' > $HOME/.config/vouch/config.toml",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "node -e \"console.log(process.version)\"",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "git reset --hard HEAD~1",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "awk 'BEGIN { system(\"ls\") }'",
+    "verdict": "ask",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "python3 - <<'EOF'\nimport shutil\nshutil.rmtree('C:/work/scratch/out.txt')\nEOF\n",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "grep -rn pattern C:/work/notes.txt",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "cd /tmp && ls -la",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "git log --oneline -4",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "chmod u+w C:/work/scratch/out.txt",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "if [ -f /tmp/test.txt ]; then cat /tmp/test.txt; fi",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "echo 'tamper' > $HOME/.config/vouch/config.toml",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "find /tmp -name '*.txt'",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "find /tmp -name '*.txt'",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "printf '%s\\n' 1 2 3 >> /tmp/scratch/out.txt",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "echo 'tamper' > $HOME/.config/vouch/config.toml",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "awk 'BEGIN { system(\"ls\") }'",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "echo 'tamper' > $HOME/.config/vouch/config.toml",
+    "verdict": "ask",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "ssh -l dev dev.internal",
+    "verdict": "ask",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "cat /tmp/data.csv",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "git push '-f' upstream main",
+    "verdict": "ask",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "python -c \"print(1 + 2)\"",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "node -e \"console.log(process.version)\"",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "python -c \"import shutil; shutil.rmtree('/tmp/scratch/out.txt')\"",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "git log --oneline -14",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "wc -w C:/work/notes.txt",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "grep -rn pattern /tmp/data.csv",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "echo 'hello world' > /tmp/build/target",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "if [ -f /tmp/test.txt ]; then cat /tmp/test.txt; fi",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "git status",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "for f in /tmp/*.txt; do rm -rf \"$f\"; done",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "awk 'BEGIN { system(\"ls\") }'",
+    "verdict": "ask",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "curl -sSL --output C:/work/scratch/out.txt https://example.com/asset.tar.gz",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "if [ -f /tmp/test.txt ]; then cat /tmp/test.txt; fi",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "cat /tmp/notes.txt | grep -i test | wc -l",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "wc /tmp/readme.md",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "kill -KILL 8824",
+    "verdict": "ask",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "node -e \"console.log(process.version)\"",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "cat /tmp/notes.txt | while read -r line; do echo \"$line\"; done",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "for f in /tmp/*.txt; do head -n 1 \"$f\"; done",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "awk 'BEGIN { system(\"ls\") }'",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "echo 'tamper' > $HOME/.config/vouch/config.toml",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "git reset '-hard' HEAD~1",
+    "verdict": "ask",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "whoami",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "awk '{print $1}' /tmp/readme.md",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "git checkout -b fix-bug",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "chmod 755 C:/work/build/target",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "find /tmp -name '*.txt'",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "python -c \"print(1 + 2)\"",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "git checkout -b patch-1",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "git push '--force' upstream master",
+    "verdict": "ask",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "cd /tmp && ls -la",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "kill 6643",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "printf '%s\\n' 1 2 3 >> /tmp/scratch/out.txt",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "for f in /tmp/*.txt; do rm -rf \"$f\"; done",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "node -e \"console.log(process.version)\"",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "awk '{print $1}' /tmp/data.csv",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "node -e \"console.log(process.version)\"",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "for f in /tmp/*.txt; do rm -rf \"$f\"; done",
+    "verdict": "ask",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "chmod 777 C:/work/build/target",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "echo 'hello world' > /tmp/scratch/out.txt",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "curl -sSL --output C:/work/scratch/out.txt https://example.com/asset.tar.gz",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "git push \"-f\" origin master",
+    "verdict": "ask",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "cat C:/work/data.csv",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "printf '%s\\n' 1 2 3 >> /tmp/run/cache.bin",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "python3 -c \"print(1 + 2)\"",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "cat /tmp/notes.txt | while read -r line; do echo \"$line\"; done",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "python3 -c \"import sys; sys.stdout.write('clean\\n')\"",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "if [ -f /tmp/test.txt ]; then cat /tmp/test.txt; fi",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "for f in /tmp/*.txt; do rm -rf \"$f\"; done",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "awk 'BEGIN { system(\"ls\") }'",
+    "verdict": "ask",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "cat /tmp/notes.txt | while read -r line; do echo \"$line\"; done",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "git diff --stat HEAD~1",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "for f in /tmp/*.txt; do rm -rf \"$f\"; done",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "for f in /tmp/*.txt; do rm -rf \"$f\"; done",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "printf '%s\\n' 1 2 3 >> /tmp/scratch/out.txt",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "node -e \"require('fs').writeFileSync('/tmp/scratch/out.txt', 'data')\"",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "printf '%s\\n' 1 2 3 >> C:/work/build/target",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "node -e \"require('fs').writeFileSync('/tmp/build/target', 'data')\"",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "cat /tmp/notes.txt | grep -i test | wc -l",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "curl -sSL -o /tmp/scratch/out.txt https://example.com/asset.tar.gz",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "python3 -c \"open('C:/work/build/target', 'w').write('data')\"",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "cat /tmp/notes.txt | while read -r line; do echo \"$line\"; done",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "git status",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "awk '{print $1}' /tmp/notes.txt",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "node -e \"console.log(process.version)\"",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "kill -TERM 8664",
+    "verdict": "ask",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "python -c \"open('/tmp/scratch/out.txt', 'w').write('data')\"",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "cat /tmp/notes.txt | while read -r line; do echo \"$line\"; done",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "grep -rnI pattern /tmp/data.csv",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "cat /tmp/notes.txt | while read -r line; do echo \"$line\"; done",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "awk 'BEGIN { system(\"ls\") }'",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "node -e \"console.log(process.version)\"",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "git push '-f' origin main",
+    "verdict": "ask",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "kill -KILL 8966",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "node -e \"console.log(process.version)\"",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "kill 5567",
+    "verdict": "ask",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "cat /tmp/notes.txt | while read -r line; do echo \"$line\"; done",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "for f in /tmp/*.txt; do head -n 1 \"$f\"; done",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "tail -n 31 C:/work/data.csv",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "mkdir -p /tmp/scratch/sub && echo hi > /tmp/scratch/sub/f.txt",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "python -c \"import sys; sys.stdout.write('clean\\n')\"",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "grep -rnI pattern /tmp/data.csv",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "echo 'hello world' > C:/work/scratch/out.txt",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "uname",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "printf '%s\\n' 1 2 3 >> C:/work/scratch/out.txt",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "python - <<'EOF'\nimport shutil\nshutil.rmtree('/tmp/build/target')\nEOF\n",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "node -e \"console.log(process.version)\"",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "if [ -f /tmp/test.txt ]; then cat /tmp/test.txt; fi",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "awk '{print $1}' C:/work/data.csv",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "echo 'tamper' > $HOME/.config/vouch/config.toml",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "grep \"-r\" -n pattern C:/work/notes.txt",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "rm -fr C:/work/scratch/out.txt",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "node -e \"console.log(process.version)\"",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "find /tmp -name '*.txt'",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "awk 'BEGIN { system(\"ls\") }'",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "grep -rnI pattern C:/work/notes.txt",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "cat /tmp/notes.txt | while read -r line; do echo \"$line\"; done",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "node -e \"console.log(process.version)\"",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "awk '{print $1}' /tmp/notes.txt",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "mkdir -p /tmp/scratch/sub && echo hi > /tmp/scratch/sub/f.txt",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "git status",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "tar -czf /tmp/run/cache.bin /tmp/data",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "node -e \"require('fs').writeFileSync('/tmp/build/target', 'data')\"",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "kill 4311",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "printf '%s\\n' 1 2 3 >> /tmp/scratch/out.txt",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "tar -czf /tmp/scratch/out.txt /tmp/data",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "curl -sSL --output C:/work/build/target https://example.com/asset.tar.gz",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "node -e \"require('fs').writeFileSync('/tmp/build/target', 'data')\"",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "python3 -c \"open('/tmp/build/target', 'w').write('data')\"",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "mkdir -p /tmp/scratch/sub && echo hi > /tmp/scratch/sub/f.txt",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "node -e \"console.log(process.version)\"",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "cd /tmp && ls -la",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "echo 'tamper' > $HOME/.config/vouch/config.toml",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "uname",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "for f in /tmp/*.txt; do rm -rf \"$f\"; done",
+    "verdict": "ask",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "if [ -f /tmp/test.txt ]; then cat /tmp/test.txt; fi",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "awk 'BEGIN { system(\"ls\") }'",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "node -e \"console.log(process.version)\"",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "awk 'BEGIN { system(\"ls\") }'",
+    "verdict": "ask",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "pwd",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "python -c \"import sys; sys.stdout.write('clean\\n')\"",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "whoami",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "node -e \"console.log(process.version)\"",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "rm \"--recursive\" -f /tmp/scratch/out.txt",
+    "verdict": "ask",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "rm -fr /tmp/run/cache.bin",
+    "verdict": "ask",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "cat /tmp/notes.txt | grep -i test | wc -l",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "git checkout -b patch-1",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "pwd",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "echo 'tamper' > $HOME/.config/vouch/config.toml",
+    "verdict": "ask",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "chmod 755 C:/work/build/target",
+    "verdict": "ask",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "for f in /tmp/*.txt; do head -n 1 \"$f\"; done",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "cat /tmp/notes.txt | while read -r line; do echo \"$line\"; done",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "grep --recursive --line-number pattern C:/work/notes.txt",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "echo 'hello world' > /tmp/run/cache.bin",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "python -c \"import sys; sys.stdout.write('clean\\n')\"",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "python -c \"import shutil; shutil.rmtree('C:/work/build/target')\"",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "printf '%s\\n' 1 2 3 >> /tmp/build/target",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "python3 - <<'EOF'\nimport shutil\nshutil.rmtree('C:/work/build/target')\nEOF\n",
+    "verdict": "ask",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "chmod +x /tmp/run/cache.bin",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "python3 -c \"import shutil; shutil.rmtree('C:/work/scratch/out.txt')\"",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "awk '{print $1}' C:/work/notes.txt",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "cat C:/work/data.csv",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "cat /tmp/notes.txt | grep -i test | wc -l",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "cat /tmp/notes.txt | grep -i test | wc -l",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "awk 'BEGIN { system(\"ls\") }'",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "ssh -l dev example.com",
+    "verdict": "ask",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "rm '-rf' /tmp/build/target",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "echo 'hello world' > /tmp/build/target",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "git reset \"--hard\" HEAD~1",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "if [ -f /tmp/test.txt ]; then cat /tmp/test.txt; fi",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "node -e \"require('fs').writeFileSync('C:/work/build/target', 'data')\"",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "for f in /tmp/*.txt; do rm -rf \"$f\"; done",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "echo 'tamper' > $HOME/.config/vouch/config.toml",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "node -e \"console.log(process.version)\"",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "tar -czf /tmp/run/cache.bin /tmp/data",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "if [ -f /tmp/test.txt ]; then cat /tmp/test.txt; fi",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "printf '%s\\n' 1 2 3 >> /tmp/build/target",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "python - <<'EOF'\nimport shutil\nshutil.rmtree('C:/work/build/target')\nEOF\n",
+    "verdict": "ask",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "echo 'tamper' > $HOME/.config/vouch/config.toml",
+    "verdict": "ask",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "for f in /tmp/*.txt; do head -n 1 \"$f\"; done",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "node -e \"require('fs').writeFileSync('/tmp/run/cache.bin', 'data')\"",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "find /tmp -type f",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "node -e \"require('fs').writeFileSync('/tmp/build/target', 'data')\"",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "tar -czf C:/work/build/target /tmp/data",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "git branch -a",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "cat /tmp/notes.txt | while read -r line; do echo \"$line\"; done",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "chmod 755 C:/work/build/target",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "find /tmp -type f",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "node -e \"console.log(process.version)\"",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "printf '%s\\n' 1 2 3 >> /tmp/scratch/out.txt",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "cat /tmp/notes.txt | grep -i test | wc -l",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "awk 'BEGIN { system(\"ls\") }'",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "for f in /tmp/*.txt; do rm -rf \"$f\"; done",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "node -e \"console.log(process.version)\"",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "git branch -a",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "python - <<'EOF'\nimport shutil\nshutil.rmtree('/tmp/build/target')\nEOF\n",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "node -e \"require('fs').writeFileSync('/tmp/build/target', 'data')\"",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "curl -sSL --output /tmp/build/target https://example.com/asset.tar.gz",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "whoami",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "python -c \"open('/tmp/run/cache.bin', 'w').write('data')\"",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "chmod +x /tmp/run/cache.bin",
+    "verdict": "ask",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "node -e \"console.log(process.version)\"",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "git checkout -b feature",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "head -n 24 /tmp/data.csv",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "if [ -f /tmp/test.txt ]; then cat /tmp/test.txt; fi",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "if [ -f /tmp/test.txt ]; then cat /tmp/test.txt; fi",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "ssh -l dev 192.0.2.1",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "node -e \"require('fs').writeFileSync('/tmp/scratch/out.txt', 'data')\"",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "head -n 31 /tmp/notes.txt",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "awk 'BEGIN { system(\"ls\") }'",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "printf '%s\\n' 1 2 3 >> /tmp/run/cache.bin",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "printf '%s\\n' 1 2 3 >> C:/work/scratch/out.txt",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "git push \"-f\" origin main",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "ssh -l dev 192.0.2.1",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "tar -czf /tmp/build/target /tmp/data",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "ssh -l dev example.com",
+    "verdict": "ask",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "cat /tmp/data.csv",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "kill -9 3566",
+    "verdict": "ask",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "awk '{print $1}' /tmp/notes.txt",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "tar -czf /tmp/build/target /tmp/data",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "git checkout -b feature",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "git checkout -b fix-bug",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "echo 'hello world' > /tmp/run/cache.bin",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "find /tmp -name '*.txt'",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "mkdir -p /tmp/scratch/sub && echo hi > /tmp/scratch/sub/f.txt",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "cd /tmp && ls -la",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "awk '{print $1}' C:/work/notes.txt",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "python3 -c \"import shutil; shutil.rmtree('C:/work/build/target')\"",
+    "verdict": "ask",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "curl -sSL -o C:/work/scratch/out.txt https://example.com/asset.tar.gz",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "git checkout -b patch-1",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "node -e \"require('fs').writeFileSync('C:/work/build/target', 'data')\"",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "cat /tmp/data.csv",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "awk '{print $1}' C:/work/data.csv",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "awk 'BEGIN { system(\"ls\") }'",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "uname -s",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "for f in /tmp/*.txt; do head -n 1 \"$f\"; done",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "python3 -c \"import sys; sys.stdout.write('clean\\n')\"",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "for f in /tmp/*.txt; do head -n 1 \"$f\"; done",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "node -e \"console.log(process.version)\"",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "date",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "python3 -c \"open('C:/work/scratch/out.txt', 'w').write('data')\"",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "git log --oneline -2",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "git checkout -b fix-bug",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "git branch -a",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "cat /tmp/notes.txt | while read -r line; do echo \"$line\"; done",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "cat /tmp/notes.txt | while read -r line; do echo \"$line\"; done",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "cd /tmp && ls -la",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "python -c \"print(1 + 2)\"",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "cat /tmp/notes.txt | grep -i test | wc -l",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "node -e \"console.log(process.version)\"",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "chmod u+w /tmp/scratch/out.txt",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "uname -a",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "echo 'tamper' > $HOME/.config/vouch/config.toml",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "cat /tmp/notes.txt | while read -r line; do echo \"$line\"; done",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "printf '%s\\n' 1 2 3 >> /tmp/scratch/out.txt",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "uname -s",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "echo 'hello world' > /tmp/build/target",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "cat /tmp/notes.txt | while read -r line; do echo \"$line\"; done",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "if [ -f /tmp/test.txt ]; then cat /tmp/test.txt; fi",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "node -e \"console.log(process.version)\"",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "python -c \"import sys; sys.stdout.write('clean\\n')\"",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "ls -lh /tmp/data.csv",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "cat /tmp/notes.txt | grep -i test | wc -l",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "python -c \"print(1 + 2)\"",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "grep '-rn' pattern /tmp/data.csv",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "tar -czf /tmp/run/cache.bin /tmp/data",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "awk 'BEGIN { system(\"ls\") }'",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "grep \"-r\" -n pattern /tmp/notes.txt",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "echo 'tamper' > $HOME/.config/vouch/config.toml",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "chmod 755 /tmp/scratch/out.txt",
+    "verdict": "ask",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "awk '{print $1}' /tmp/data.csv",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "node -e \"console.log(process.version)\"",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "cat /tmp/notes.txt | while read -r line; do echo \"$line\"; done",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "uname -a",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "find /tmp -type f",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "grep \"-r\" -n pattern /tmp/data.csv",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "cat /tmp/notes.txt | grep -i test | wc -l",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "for f in /tmp/*.txt; do rm -rf \"$f\"; done",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "echo 'tamper' > $HOME/.config/vouch/config.toml",
+    "verdict": "ask",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "git branch -a",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "if [ -f /tmp/test.txt ]; then cat /tmp/test.txt; fi",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "printf '%s\\n' 1 2 3 >> C:/work/scratch/out.txt",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "date",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "ssh -l dev example.com",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "awk 'BEGIN { system(\"ls\") }'",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "cat /tmp/notes.txt | while read -r line; do echo \"$line\"; done",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "chmod 755 /tmp/run/cache.bin",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "python3 - <<'EOF'\nimport shutil\nshutil.rmtree('/tmp/run/cache.bin')\nEOF\n",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "for f in /tmp/*.txt; do head -n 1 \"$f\"; done",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "rm \"--recursive\" -f /tmp/run/cache.bin",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "find /tmp -type f",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "git branch -a",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "for f in /tmp/*.txt; do rm -rf \"$f\"; done",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "whoami",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "awk 'BEGIN { system(\"ls\") }'",
+    "verdict": "ask",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "python -c \"print(1 + 2)\"",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "echo 'tamper' > $HOME/.config/vouch/config.toml",
+    "verdict": "ask",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "echo 'tamper' > $HOME/.config/vouch/config.toml",
+    "verdict": "ask",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "echo 'tamper' > $HOME/.config/vouch/config.toml",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "python -c \"import sys; sys.stdout.write('clean\\n')\"",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "chmod 777 /tmp/build/target",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "awk '{print $1}' /tmp/data.csv",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "echo 'tamper' > $HOME/.config/vouch/config.toml",
+    "verdict": "ask",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "python - <<'EOF'\nimport shutil\nshutil.rmtree('C:/work/build/target')\nEOF\n",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "for f in /tmp/*.txt; do head -n 1 \"$f\"; done",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "if [ -f /tmp/test.txt ]; then cat /tmp/test.txt; fi",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "python -c \"import sys; sys.stdout.write('clean\\n')\"",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "echo 'tamper' > $HOME/.config/vouch/config.toml",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "find /tmp -type f",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "ssh -l dev example.com",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "chmod u+w C:/work/build/target",
+    "verdict": "ask",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "tail -n 28 /tmp/data.csv",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "echo 'hello world' > /tmp/scratch/out.txt",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "echo 'tamper' > $HOME/.config/vouch/config.toml",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "if [ -f /tmp/test.txt ]; then cat /tmp/test.txt; fi",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "echo 'tamper' > $HOME/.config/vouch/config.toml",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "python3 -c \"import shutil; shutil.rmtree('C:/work/build/target')\"",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "node -e \"require('fs').writeFileSync('C:/work/scratch/out.txt', 'data')\"",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "kill 9413",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "tar -czf C:/work/build/target /tmp/data",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "python -c \"open('/tmp/build/target', 'w').write('data')\"",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "tail -n 25 C:/work/data.csv",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "cat /tmp/notes.txt | while read -r line; do echo \"$line\"; done",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "python3 - <<'EOF'\nimport shutil\nshutil.rmtree('/tmp/build/target')\nEOF\n",
+    "verdict": "ask",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "curl -sSL -o C:/work/scratch/out.txt https://example.com/asset.tar.gz",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "echo 'hello world' > C:/work/build/target",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "awk 'BEGIN { system(\"ls\") }'",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "python - <<'EOF'\nimport shutil\nshutil.rmtree('C:/work/scratch/out.txt')\nEOF\n",
+    "verdict": "ask",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "for f in /tmp/*.txt; do rm -rf \"$f\"; done",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "ls /tmp/notes.txt",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "python -c \"import shutil; shutil.rmtree('/tmp/build/target')\"",
+    "verdict": "ask",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "rm -r -f /tmp/build/target",
+    "verdict": "ask",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "grep -rn pattern C:/work/notes.txt",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "awk '{print $1}' /tmp/readme.md",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "awk '{print $1}' /tmp/notes.txt",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "echo 'hello world' > /tmp/run/cache.bin",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "cd /tmp && ls -la",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "for f in /tmp/*.txt; do rm -rf \"$f\"; done",
+    "verdict": "ask",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "curl -sSL --output /tmp/scratch/out.txt https://example.com/asset.tar.gz",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "wc -l /tmp/data.csv",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "awk '{print $1}' C:/work/notes.txt",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "chmod 755 /tmp/build/target",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "python3 -c \"print(1 + 2)\"",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "curl -sSL --output C:/work/scratch/out.txt https://example.com/asset.tar.gz",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "if [ -f /tmp/test.txt ]; then cat /tmp/test.txt; fi",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "grep '-rn' pattern C:/work/notes.txt",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "awk '{print $1}' /tmp/data.csv",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "python3 -c \"import shutil; shutil.rmtree('C:/work/scratch/out.txt')\"",
+    "verdict": "ask",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "rm -r -f /tmp/build/target",
+    "verdict": "ask",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "cd /tmp && ls -la",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "node -e \"require('fs').writeFileSync('/tmp/run/cache.bin', 'data')\"",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "echo 'tamper' > $HOME/.config/vouch/config.toml",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "awk '{print $1}' /tmp/notes.txt",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "wc -c /tmp/data.csv",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "if [ -f /tmp/test.txt ]; then cat /tmp/test.txt; fi",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "ssh -l dev dev.internal",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "echo 'hello world' > /tmp/build/target",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "awk '{print $1}' /tmp/data.csv",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "whoami",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "for f in /tmp/*.txt; do head -n 1 \"$f\"; done",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "if [ -f /tmp/test.txt ]; then cat /tmp/test.txt; fi",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "date",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "cd /tmp && ls -la",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "node -e \"require('fs').writeFileSync('/tmp/run/cache.bin', 'data')\"",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "find /tmp '-maxdepth' 2",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "ssh -l dev example.com",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "rm -rf C:/work/scratch/out.txt",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "git log --oneline -3",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "awk 'BEGIN { system(\"ls\") }'",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "for f in /tmp/*.txt; do head -n 1 \"$f\"; done",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "echo 'hello world' > /tmp/scratch/out.txt",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "chmod 777 /tmp/build/target",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "node -e \"require('fs').writeFileSync('C:/work/build/target', 'data')\"",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "python3 - <<'EOF'\nimport shutil\nshutil.rmtree('C:/work/scratch/out.txt')\nEOF\n",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "chmod 777 /tmp/run/cache.bin",
+    "verdict": "ask",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "python3 -c \"import sys; sys.stdout.write('clean\\n')\"",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "node -e \"require('fs').writeFileSync('/tmp/run/cache.bin', 'data')\"",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "git push \"-f\" upstream master",
+    "verdict": "ask",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "rm '-rf' /tmp/build/target",
+    "verdict": "ask",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "node -e \"require('fs').writeFileSync('/tmp/scratch/out.txt', 'data')\"",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "node -e \"require('fs').writeFileSync('/tmp/build/target', 'data')\"",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "curl -sSL -o C:/work/scratch/out.txt https://example.com/asset.tar.gz",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "node -e \"console.log(process.version)\"",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "node -e \"console.log(process.version)\"",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "cd /tmp && ls -la",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "awk '{print $1}' C:/work/notes.txt",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "if [ -f /tmp/test.txt ]; then cat /tmp/test.txt; fi",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "node -e \"console.log(process.version)\"",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "pwd",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "python3 - <<'EOF'\nimport shutil\nshutil.rmtree('C:/work/build/target')\nEOF\n",
+    "verdict": "ask",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "kill 9124",
+    "verdict": "ask",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "if [ -f /tmp/test.txt ]; then cat /tmp/test.txt; fi",
+    "verdict": "allow",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "node -e \"console.log(process.version)\"",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "awk '{print $1}' C:/work/notes.txt",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "awk '{print $1}' C:/work/data.csv",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "awk '{print $1}' /tmp/data.csv",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "cat /tmp/notes.txt | grep -i test | wc -l",
+    "verdict": "allow",
+    "cwd": "/tmp/scratch"
+  },
+  {
+    "cmd": "mkdir -p /tmp/scratch/sub && echo hi > /tmp/scratch/sub/f.txt",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev"
+  },
+  {
+    "cmd": "node -e \"console.log(process.version)\"",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  },
+  {
+    "cmd": "tail -n 7 C:/work/data.csv",
+    "verdict": "allow",
+    "cwd": "C:/work"
+  },
+  {
+    "cmd": "awk 'BEGIN { system(\"ls\") }'",
+    "verdict": "ask",
+    "cwd": "/tmp"
+  },
+  {
+    "cmd": "python3 -c \"open('C:/work/scratch/out.txt', 'w').write('data')\"",
+    "verdict": "allow",
+    "cwd": "C:/Users/dev/workspace"
+  }
+]

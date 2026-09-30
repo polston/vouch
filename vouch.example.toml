@@ -508,3 +508,14 @@ paths = [
 # [shadow]
 # stand_down = "keep-deny"
 # modes = ["auto", "dontAsk", "bypassPermissions"]
+
+# ---------------------------------------------------------------------------
+# Persistent Gating Daemon: optional in-memory evaluation daemon over local
+# IPC socket. Accelerates hook latency to <2ms by keeping AST models, knowledge,
+# and config pre-warmed in memory. If the daemon is unreachable or times out,
+# hooks seamlessly fall back to local direct evaluation without blocking.
+#
+# [daemon]
+# socket_path = "~/.config/vouch/vouch.sock"
+# timeout_ms = 50
+# fail_closed = true

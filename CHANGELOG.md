@@ -1,5 +1,70 @@
 # Changelog
 
+## 0.53.0 (2026-09-30)
+
+
+### Features
+
+* **Container volume bind mount evaluation derives host paths for docker and podman**
+  - **Problem & Explanation:** Container runtime CLI commands (`docker run`, `podman run`) specify host filesystem directories to bind-mount into containers via short flags (`-v`, `--volume`) or structured mount parameters (`--mount`). Previously, vouch did not extract host-side bind mount sources as written paths, allowing container commands to write into protected host directories without gating, or requiring manual command-level prompts. `src/guards.rs` now introduces `ContainerVolume` configuration and bind mount path extraction, deriving host write paths from both `-v <host>:<container>[:options]` and `--mount type=bind,source=<host>,target=<container>`. Read-only mounts (`:ro`) are cleanly excluded from writes, named volumes are ignored, and write paths undergo full destination resolution and guard gating.
+  - **Example Scenario:**
+    ```bash
+    docker run -v /tmp/scratch:/app:rw alpine touch /app/output.txt
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Added `container_volume = { volume_flags = ["-v", "--volume"], mount_flags = ["--mount"] }` to `docker` and `podman` entries in `knowledge.toml`.
+    - *Behavior Contrast:* Before: host paths in container volume arguments were ignored by write path extraction. After: read-write bind mount host paths are extracted and evaluated against `[write]` policy, allowing permitted scratch directories and halting on protected paths.
+
+* **Persistent gating daemon and in-memory IPC runtime accelerate hook evaluation to sub-two-millisecond latency**
+  - **Problem & Explanation:** Hook evaluations invoked per tool call previously incurred cold-start overhead initializing AST parsers, loading configuration files, and compiling knowledge models on every CLI invocation. `src/daemon.rs` introduces an optional resident background daemon maintaining pre-warmed configuration and knowledge state in memory. Communication occurs over a local Unix domain socket (`~/.config/vouch/vouch.sock`) delivering hook decisions in under two milliseconds with hot-reloading on configuration updates and fail-closed local evaluation fallback if the daemon socket is unavailable or times out.
+  - **Example Scenario:**
+    ```bash
+    vouch daemon &
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Added optional `[daemon]` configuration table in `config.toml` with `socket_path`, `timeout_ms = 50`, and `fail_closed = true`.
+    - *Behavior Contrast:* Before: every hook execution performed fresh process initialization and file reads. After: resident daemon answers queries in <2ms with transparent fallback to standalone evaluation if absent.
+
+* **Separate vouch model for knowledge definitions from vouch trust for security policy**
+  - **Problem & Explanation:** Operational responsibilities for knowledge modeling (describing what tools and programs do in `my-knowledge.toml`) and security policy (granting directory and path permissions in `config.toml`) were previously conflated under `vouch trust`. The CLI now cleanly decouples these concerns: `vouch model` manages program descriptions, verbs, flags, and tool definitions in `my-knowledge.toml`, while `vouch trust` manages allow paths, trust zones, and program-location trust in `config.toml`. Full backward compatibility is preserved for existing invocations.
+  - **Example Scenario:**
+    ```bash
+    vouch model mytool --subcommand build --writes all_args
+    vouch trust path C:/workspace/**
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Added `plugin/skills/vouch-model` skill and refactored `plugin/skills/vouch-trust` to focus on `config.toml` policy.
+    - *Behavior Contrast:* Before: `vouch trust` mixed descriptive knowledge modeling with prescriptive security policy. After: `vouch model` and `vouch trust` operate on distinct configuration boundaries with dedicated CLI interfaces.
+
+* **Structured tool argument gating rules support schema-driven field extraction and predicate ranking**
+  - **Problem & Explanation:** Harness and MCP tools frequently pass arguments as structured JSON objects (such as `command`, `query`, or nested parameter dictionaries). Previously, vouch could only inspect string snippets via language scanners or evaluate file write paths. `src/guards.rs` and `src/route.rs` now introduce `[[tool.rule]]` declarations supporting dotted field path resolution (`params.sql`), exact string matching (`when_exact`), and case-insensitive regular expressions (`when_pattern`), with deterministic ranking where deny overrides ask and ask overrides allow.
+  - **Example Scenario:**
+    ```toml
+    [[tool]]
+    match = ["mcp__db__query"]
+    source = "database queries"
+    [[tool.rule]]
+    field = "sql"
+    when_pattern = "(?i)\\b(drop|delete|truncate)\\b"
+    action = "deny"
+    reason = "destructive database operations denied"
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Supported `[[tool.rule]]` table in `knowledge.toml` and `my-knowledge.toml` with `field`, `action`, `when_pattern`, `when_exact`, `reason`, and `guard`.
+    - *Behavior Contrast:* Before: tool inputs could not be gated on structured parameter fields without whole-language snippet parsing. After: schema-driven field extraction applies fine-grained rules directly to tool arguments.
+
+* **Synthetic grammar generator produces permutation corpus for offline property testing**
+  - **Problem & Explanation:** Property and replay test suites previously relied on manual synthetic test cases or private recorded machine history which cannot be committed to public repositories. `tests/common/generator.rs` introduces a deterministic grammar-based synthetic command generator capable of producing thousands of complex command permutations across pipelines, redirections, heredocs, subshells, compound lists, and parameter expansions. A committed, privacy-scanned synthetic grammar corpus enables thorough offline verification across fresh clones without requiring real machine history.
+  - **Example Scenario:** Generating combinatorial syntax permutations across operators and shell constructs:
+    ```rust
+    let mut gen = GrammarGenerator::new(42);
+    let corpus = gen.generate_corpus(500);
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Added `tests/fixtures/synthetic_grammar_corpus.json` and `tests/synthetic_permutation_test.rs`.
+    - *Behavior Contrast:* Before: property testing depended on hand-written synthetic fixtures or uncommitted machine history. After: deterministic grammar generator exercises syntactic edges comprehensively in green standalone clones.
+
+
 ## 0.52.0 (2026-09-29)
 
 

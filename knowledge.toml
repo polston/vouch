@@ -2713,6 +2713,35 @@ no_value_options = [
 ]
 
 
+# Container engine CLIs.
+[[program]]
+match = ["docker", "podman"]
+case_sensitive_flags = true
+standalone_flags = ["--help", "-h", "--version"]
+container_volume = { volume_flags = ["-v", "--volume"], mount_flags = ["--mount"] }
+value_options = [
+  "-w", "--workdir",
+  "--name",
+  "-u", "--user",
+  "-e", "--env",
+  "--env-file",
+  "-p", "--publish",
+  "--network",
+  "--entrypoint",
+  "--platform",
+  "-v", "--volume",
+  "--mount",
+]
+no_value_options = [
+  "-d", "--detach",
+  "-i", "--interactive",
+  "-t", "--tty",
+  "--rm",
+  "--privileged",
+  "--read-only",
+  "--help", "-h",
+]
+
 # ============================================================================
 # HARNESS TOOLS
 #

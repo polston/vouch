@@ -4,8 +4,8 @@
 
 use vouch::config::Action;
 use vouch::guards::{
-    entry_for, is_modeled, load, recognises, tool_entry, Knowledge, Program, Tool, ToolSnippet,
-    ToolWritePath, ToolWritePathFormat,
+    entry_for, is_modeled, load, recognises, tool_entry, Knowledge, Program, Tool, ToolRule,
+    ToolSnippet, ToolWritePath, ToolWritePathFormat,
 };
 use vouch::knowledge::merge;
 use vouch::syntax::Cmd;
@@ -917,6 +917,10 @@ fn overlay_is_exhaustive_over_every_program_field() {
             no_value_options: vec!["--all".to_string()],
             write_flags: vec!["--dest".to_string()],
         }],
+        container_volume: Some(vouch::guards::ContainerVolume {
+            volume_flags: vec!["-v".to_string(), "--volume".to_string()],
+            mount_flags: vec!["--mount".to_string()],
+        }),
     };
     // The shipped side is otherwise blank, except for the two fields whose
     // documented semantics only show up against a non-empty starting point:
@@ -1173,6 +1177,14 @@ fn overlay_is_exhaustive_over_every_program_field() {
     assert_eq!(
         p.conditional_write[0].takes_flag.as_deref(),
         Some("-f"),
+    );
+    assert_eq!(
+        p.container_volume,
+        Some(vouch::guards::ContainerVolume {
+            volume_flags: vec!["-v".to_string(), "--volume".to_string()],
+            mount_flags: vec!["--mount".to_string()],
+        }),
+        "container_volume did not arrive"
     );
 
     // The powershell portion of base's original (unscoped) claim for "p"
@@ -1620,6 +1632,14 @@ fn overlay_is_exhaustive_over_every_tool_field() {
         cwd_from_call: Some(true),
         server: None,
         merge_names: Vec::new(),
+        rule: vec![ToolRule {
+            field: "command".to_string(),
+            action: Action::Deny,
+            when_pattern: None,
+            when_exact: Some("exit".to_string()),
+            reason: None,
+            guard: None,
+        }],
     };
     let base = Tool {
         match_names: vec!["t".to_string()],
@@ -1680,6 +1700,10 @@ fn overlay_is_exhaustive_over_every_tool_field() {
         t.server.is_none(),
         "server must be left alone by the overlay"
     );
+    assert_eq!(t.rule.len(), 1, "rule did not arrive");
+    assert_eq!(t.rule[0].field, "command");
+    assert_eq!(t.rule[0].when_exact.as_deref(), Some("exit"));
+    assert_eq!(t.rule[0].action, Action::Deny);
 }
 
 // --- the overlay matrix, pinned cell by cell (spec 2026-08-20 §3, Task 2) --

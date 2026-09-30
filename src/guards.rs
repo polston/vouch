@@ -126,6 +126,18 @@ pub struct Rule {
     pub capabilities: Vec<String>,
 }
 
+/// Container volume mount declarations.
+#[derive(Debug, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ContainerVolume {
+    /// Flags specifying short volume mounts, e.g. ["-v", "--volume"].
+    #[serde(default)]
+    pub volume_flags: Vec<String>,
+    /// Flags specifying structured mounts, e.g. ["--mount"].
+    #[serde(default)]
+    pub mount_flags: Vec<String>,
+}
+
 /// One indexed argument vector a parsed snippet receives from its enclosing
 /// program invocation.
 #[derive(Debug, Deserialize, Clone, JsonSchema, PartialEq, Eq)]
@@ -327,6 +339,9 @@ pub struct Program {
     /// Subcommand-specific options for programs where flag semantics differ by subcommand.
     #[serde(default)]
     pub subcommand_options: Vec<SubcommandOptions>,
+    /// Container volume mount declarations for container tools (e.g. docker, podman).
+    #[serde(default)]
+    pub container_volume: Option<ContainerVolume>,
     /// Which subcommands this entry recognises.
     ///
     /// Three states (spec 2026-08-20 §3): the key ABSENT (`None`) covers the
@@ -756,6 +771,28 @@ pub struct ToolWritePath {
     pub format: ToolWritePathFormat,
 }
 
+/// A structured argument gating rule for harness or MCP tools.
+#[derive(Debug, Deserialize, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ToolRule {
+    /// Field path in tool_input JSON, supporting dot-notation for nested fields (e.g. "query" or "params.sql").
+    pub field: String,
+    /// Action to take when the predicate matches (ask, deny, allow).
+    pub action: crate::config::Action,
+    /// Regular expression pattern evaluated against the field string value.
+    #[serde(default)]
+    pub when_pattern: Option<String>,
+    /// Exact string match evaluated against the field string value.
+    #[serde(default)]
+    pub when_exact: Option<String>,
+    /// Human-readable explanation formatted in prompt and journal diagnostics.
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// Optional guard category name associated with this rule.
+    #[serde(default)]
+    pub guard: Option<String>,
+}
+
 /// "With this shape and no destination named, this program writes into the
 /// directory it is RUN from" — the write-side twin of `changes_dir` silence
 /// (M2.129). `tar -xf a.tar` puts the archive's members in the run place,
@@ -921,6 +958,9 @@ pub struct Tool {
     /// unresolvable, which asks (fail closed).
     #[serde(default)]
     pub cwd_from_call: Option<bool>,
+    /// Structured argument rules for predicate matching on JSON input fields.
+    #[serde(default)]
+    pub rule: Vec<ToolRule>,
     /// A whole-server grant, said out loud (spec 2026-08-05 §Schema): matches
     /// `<server>__<tool>` for every tool that server exposes, instead of one
     /// tool by name. Mutually exclusive with a non-empty `match` — checked in
@@ -6806,6 +6846,104 @@ pub fn written_paths_in(kb: &Knowledge, cmd: &Cmd, lang: &str) -> WriteTargets {
         } else {
             Vec::new()
         };
+
+        if let Some(cv) = &prog.container_volume {
+            let mut i = 0;
+            while i < cmd.args.len() {
+                let token = &cmd.args[i];
+                let mut vol_spec: Option<String> = None;
+                let mut mount_spec: Option<String> = None;
+
+                for vf in &cv.volume_flags {
+                    if token == vf {
+                        if i + 1 < cmd.args.len() {
+                            vol_spec = Some(cmd.args[i + 1].clone());
+                            i += 1;
+                            break;
+                        }
+                    } else if token.starts_with(vf) && vf.starts_with('-') && !vf.starts_with("--") && token.len() > vf.len() {
+                        vol_spec = Some(token[vf.len()..].to_string());
+                        break;
+                    } else if let Some(stripped) = token.strip_prefix(&format!("{vf}=")) {
+                        vol_spec = Some(stripped.to_string());
+                        break;
+                    }
+                }
+
+                if vol_spec.is_none() {
+                    for mf in &cv.mount_flags {
+                        if token == mf {
+                            if i + 1 < cmd.args.len() {
+                                mount_spec = Some(cmd.args[i + 1].clone());
+                                i += 1;
+                                break;
+                            }
+                        } else if let Some(stripped) = token.strip_prefix(&format!("{mf}=")) {
+                            mount_spec = Some(stripped.to_string());
+                            break;
+                        }
+                    }
+                }
+
+                if let Some(spec) = vol_spec {
+                    let parts: Vec<&str> = spec.split(':').collect();
+                    if !parts.is_empty() {
+                        let raw_src = parts[0];
+                        let (src, opts) = if parts.len() >= 3 && raw_src.len() == 1 && raw_src.chars().next().unwrap().is_ascii_alphabetic() && (parts[1].starts_with('/') || parts[1].starts_with('\\')) {
+                            let win_src = format!("{}:{}", parts[0], parts[1]);
+                            let opts = if parts.len() > 3 { Some(parts[3]) } else { None };
+                            (win_src, opts)
+                        } else {
+                            let opts = if parts.len() >= 3 { Some(parts[2]) } else { None };
+                            (raw_src.to_string(), opts)
+                        };
+
+                        let is_host_path = src.starts_with('/')
+                            || src.starts_with('~')
+                            || src.starts_with('$')
+                            || src.starts_with("./")
+                            || src.starts_with("../")
+                            || src.starts_with(".\\")
+                            || src.starts_with("..\\")
+                            || (src.len() >= 2 && src.as_bytes()[1] == b':');
+
+                        if is_host_path {
+                            let is_readonly = opts.map(|o| o.split(',').any(|opt| opt == "ro" || opt == "readonly")).unwrap_or(false);
+                            if !is_readonly {
+                                out.paths.push(src);
+                            }
+                        }
+                    }
+                } else if let Some(spec) = mount_spec {
+                    let mut is_bind = true;
+                    let mut src_path: Option<String> = None;
+                    let mut is_readonly = false;
+
+                    for part in spec.split(',') {
+                        let kv: Vec<&str> = part.splitn(2, '=').collect();
+                        let k = kv[0].trim();
+                        let v = if kv.len() > 1 { kv[1].trim() } else { "" };
+                        if k == "type" && v != "bind" {
+                            is_bind = false;
+                        } else if k == "source" || k == "src" {
+                            src_path = Some(v.to_string());
+                        } else if k == "readonly" || k == "ro" {
+                            is_readonly = true;
+                        }
+                    }
+
+                    if is_bind {
+                        if let Some(src) = src_path {
+                            if !is_readonly {
+                                out.paths.push(src);
+                            }
+                        }
+                    }
+                }
+
+                i += 1;
+            }
+        }
 
         // Keyword arguments folded onto the positions `arg_names` claims for
         // them (a no-op for every entry that never sets `arg_names`, which is

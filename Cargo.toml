@@ -1,6 +1,6 @@
 [package]
 name = "vouch"
-version = "0.52.0"
+version = "0.53.0"
 edition = "2021"
 rust-version = "1.96"
 license = "WTFPL"
@@ -21,6 +21,7 @@ path = "src/bin/vouch-codex-broker.rs"
 brush-parser = "0.4.0"
 ruff_python_ast = "=0.0.8"
 ruff_python_parser = "=0.0.8"
+regex = "1"
 rmcp = { version = "3.1.4", default-features = false, features = ["client", "server", "macros", "transport-io"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
