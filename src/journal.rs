@@ -235,11 +235,9 @@ fn append_line(dir: &Path, file: &str, line: &str) -> std::io::Result<()> {
 }
 
 pub fn append(dir: &Path, rec: &Record) -> std::io::Result<()> {
-    append_line(
-        dir,
-        "journal.jsonl",
-        &serde_json::to_string(rec).unwrap_or_default(),
-    )
+    let json = serde_json::to_string(rec).unwrap_or_default();
+    let _ = crate::journal_wal::write_wal_frame(dir, &json);
+    append_line(dir, "journal.jsonl", &json)
 }
 
 pub fn append_outcome(dir: &Path, rec: &OutcomeRecord) -> std::io::Result<()> {
@@ -257,6 +255,9 @@ pub fn state_dir() -> std::path::PathBuf {
 }
 
 fn read_lines<T: for<'de> Deserialize<'de>>(dir: &Path, file: &str) -> Vec<T> {
+    if file == "journal.jsonl" {
+        let _ = crate::journal_wal::recover_and_checkpoint(dir);
+    }
     let body = match std::fs::read_to_string(dir.join(file)) {
         Ok(b) => b,
         Err(_) => return Vec::new(),

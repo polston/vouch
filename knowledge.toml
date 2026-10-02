@@ -2715,7 +2715,7 @@ no_value_options = [
 
 # Container engine CLIs.
 [[program]]
-match = ["docker", "podman"]
+match = ["docker", "podman", "nerdctl", "finch"]
 case_sensitive_flags = true
 standalone_flags = ["--help", "-h", "--version"]
 container_volume = { volume_flags = ["-v", "--volume"], mount_flags = ["--mount"] }
@@ -2741,6 +2741,13 @@ no_value_options = [
   "--read-only",
   "--help", "-h",
 ]
+
+# Colima container VM manager & CLI wrapper.
+[[program]]
+match = ["colima"]
+wraps = "rest"
+case_sensitive_flags = true
+standalone_flags = ["--help", "-h", "--version"]
 
 # ============================================================================
 # HARNESS TOOLS

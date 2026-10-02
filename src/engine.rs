@@ -468,6 +468,17 @@ pub fn decide_command_in_unknown_dir_with_knowledge(
 }
 
 
+pub(crate) fn scan_with_config(cfg: &Config, lang: &str, src: &str) -> Result<crate::syntax::Scan, String> {
+    if lang == "powershell" {
+        crate::powershell_worker::parse_with_fallback(src, cfg)
+    } else {
+        match crate::syntax::scanner_for(lang) {
+            Some(s) => s.scan(src),
+            None => Err(format!("unsupported language: {lang}")),
+        }
+    }
+}
+
 /// Traces command execution through all six stages of the decision pipeline:
 /// 1. Syntax & Tokenization
 /// 2. Working Directory Context
@@ -486,23 +497,20 @@ pub fn trace_command_at(
     let decision = decide_command_at(cfg, lang, src, home, project_root, cwd);
     let mut steps = Vec::new();
 
-    let scanner = match crate::syntax::scanner_for(lang) {
-        Some(s) => s,
-        None => {
-            steps.push(PipelineStep {
-                name: "Syntax & Tokenization",
-                title: format!("unsupported language: {lang}"),
-                details: vec!["vouch does not have a parser registered for this language".to_string()],
-            });
-            return DecisionTrace {
-                steps,
-                decision,
-                evaluations: Vec::new(),
-            };
-        }
-    };
+    if crate::syntax::scanner_for(lang).is_none() && lang != "powershell" {
+        steps.push(PipelineStep {
+            name: "Syntax & Tokenization",
+            title: format!("unsupported language: {lang}"),
+            details: vec!["vouch does not have a parser registered for this language".to_string()],
+        });
+        return DecisionTrace {
+            steps,
+            decision,
+            evaluations: Vec::new(),
+        };
+    }
 
-    let mut scan = match scanner.scan(src) {
+    let mut scan = match scan_with_config(cfg, lang, src) {
         Ok(s) => s,
         Err(e) => {
             steps.push(PipelineStep {
@@ -740,12 +748,9 @@ fn decide_command_from_with_knowledge(
     start: CdState,
     kb_opt: Option<&crate::guards::Knowledge>,
 ) -> Decision {
-    let scanner = match crate::syntax::scanner_for(lang) {
-        Some(s) => s,
-        None => return Decision::Abstain,
-    };
-    let scan = match scanner.scan(src) {
+    let scan = match scan_with_config(cfg, lang, src) {
         Ok(s) => s,
+        Err(_) if crate::syntax::scanner_for(lang).is_none() && lang != "powershell" => return Decision::Abstain,
         Err(e) => {
             let reason = format!(
                 "vouch could not read this {lang} command ({e})\n  \
@@ -1141,23 +1146,9 @@ fn judge_once(
     start: CdState,
     picks: &[usize],
 ) -> (Decision, Vec<crate::guards::ForkPoint>) {
-    let scanner = match crate::syntax::scanner_for(lang) {
-        Some(s) => s,
-        // A language with no scanner is not something vouch can judge.
-        None => return (Decision::Abstain, Vec::new()),
-    };
-
-    let scan = match scanner.scan(src) {
+    let scan = match scan_with_config(cfg, lang, src) {
         Ok(s) => s,
-        Err(e) => {
-            let reason = format!(
-                "vouch could not read this {lang} command ({e})\n  \
-                 either the command is malformed, or vouch's parser has a gap — \
-                 this is not a judgement about what the command does\n  \
-                 setting: lang.{lang}.constructs.parse_failure"
-            );
-            return (act(cfg.construct_action(lang, "parse_failure"), reason), Vec::new());
-        }
+        Err(_) => return (Decision::Abstain, Vec::new()),
     };
 
     judge_parsed(cfg, lang, scan, home, project_root, start, picks, crate::guards::in_effect())

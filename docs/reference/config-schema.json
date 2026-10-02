@@ -209,6 +209,32 @@
           "default": null,
           "minimum": 0
         },
+        "parser_mode": {
+          "description": "Parser mode for language execution: \"reference\" (daemon worker with fallback) or \"scanner\" (pure-Rust).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "worker_binary": {
+          "description": "Worker binary name (e.g. \"pwsh\" or \"dotnet\").",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "worker_timeout_ms": {
+          "description": "Timeout in milliseconds for reference worker calls before falling back.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
         "wrap_depth": {
           "description": "How many layers of wrapper nesting are scanned before a deeper nest\ntrips `wrap_depth_exceeded` and asks. `None` means the operator has\nnot set it, so the built-in cap (4) applies. Read by the engine's\nwrapper walk, not by this file.",
           "type": [

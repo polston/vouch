@@ -356,6 +356,15 @@ pub struct LangConfig {
     /// Defaults to 65536 (64 KiB) when unset.
     #[serde(default)]
     pub max_script_bytes: Option<usize>,
+    /// Parser mode for language execution: "reference" (daemon worker with fallback) or "scanner" (pure-Rust).
+    #[serde(default)]
+    pub parser_mode: Option<String>,
+    /// Timeout in milliseconds for reference worker calls before falling back.
+    #[serde(default)]
+    pub worker_timeout_ms: Option<u64>,
+    /// Worker binary name (e.g. "pwsh" or "dotnet").
+    #[serde(default)]
+    pub worker_binary: Option<String>,
 }
 
 /// The `[write]` table: what vouch does about a write it can see, and where

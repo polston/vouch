@@ -17,6 +17,41 @@ pub fn run_model(args: &[String], home: &str) -> Result<String, String> {
 
     let kind = args[0].as_str();
     match kind {
+        "--auto" | "auto" => {
+            if args.len() < 2 {
+                return Err("usage: vouch model --auto <name> [--write]".to_string());
+            }
+            let target = &args[1];
+            let write = args.iter().any(|a| a == "--write");
+            if let Some(cand) = crate::synthesizer::synthesize_candidate(target) {
+                if write {
+                    let path = crate::knowledge::my_knowledge_path(home);
+                    if let Some(parent) = path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    let mut existing = std::fs::read_to_string(&path).unwrap_or_default();
+                    if existing.trim().is_empty() {
+                        existing = crate::knowledge::MY_KNOWLEDGE_HEADER.to_string();
+                    }
+                    existing.push('\n');
+                    existing.push_str(&cand.toml);
+                    std::fs::write(&path, existing)
+                        .map_err(|e| format!("could not write to {}: {e}", path.display()))?;
+                    Ok(format!(
+                        "Synthesized and wrote `{target}` model to {}:\n\n{}",
+                        crate::knowledge::display_path(&path),
+                        cand.toml
+                    ))
+                } else {
+                    Ok(format!(
+                        "# Candidate synthesized model for `{target}` (use --write to append to my-knowledge.toml):\n\n{}",
+                        cand.toml
+                    ))
+                }
+            } else {
+                Err(format!("could not synthesize model for `{target}`"))
+            }
+        }
         "program" => {
             if args.len() < 2 {
                 return Err("usage: vouch model program <name> [--subcommand <verb>...] [--all-subcommands] [--value-flag <flag>...] [--write-flag <flag>...] [--standalone-flag <flag>...] [--changes-dir] [--evaluates-input] [--update]".to_string());
@@ -30,7 +65,7 @@ pub fn run_model(args: &[String], home: &str) -> Result<String, String> {
             model_tool(&args[1..], home)
         }
         other => Err(format!(
-            "unknown model target: '{other}'. Expected 'program' or 'tool'."
+            "unknown model target: '{other}'. Expected 'program', 'tool', or '--auto'."
         )),
     }
 }

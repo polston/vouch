@@ -1,5 +1,61 @@
 # Changelog
 
+## 0.54.0 (2026-10-02)
+
+
+### Features
+
+* **Detect container runtime sockets and normalize bind mount paths**
+  - **Problem & Explanation:** Container orchestration and containerized developer workflows rely on diverse runtimes beyond standard Docker, including Podman, Colima, Lima, Finch, and nerdctl. These runtimes use varied socket locations (`/var/run/docker.sock`, `~/.colima/default/docker.sock`, Podman rootless sockets) and pass host paths via bind mounts. `src/container_runtime.rs` provides cross-platform container runtime detection and socket path resolution across standard Unix socket locations, while expanding knowledge rules to support `colima`, `finch`, and `nerdctl` with bind-mount write path extraction.
+  - **Example Scenario:**
+    ```bash
+    nerdctl run -v /tmp/scratch:/workspace:rw alpine touch /workspace/file.txt
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Added `colima`, `finch`, and `nerdctl` knowledge entries in `knowledge.toml` with container volume extraction rules.
+    - *Behavior Contrast:* Before: alternative container runtimes like nerdctl or Finch were treated as unmodeled generic binaries and their socket paths were undetected. After: container runtimes and their active sockets are detected across platforms, with host bind mounts extracted and evaluated against `[write]` policy.
+
+* **Protect state journal writes with framed write-ahead logging and CRC32 checks**
+  - **Problem & Explanation:** Decision journaling and session state updates previously wrote directly to flat JSON log files. Abrupt process termination, concurrent hook executions, or power failure could result in torn writes, corrupted log lines, or lost decision trails. `src/journal_wal.rs` introduces a framed write-ahead log (WAL) protocol with CRC32 frame checksumming, atomic segment rotation, automated crash recovery replay, and periodic deduplicated checkpointing, ensuring crash resilience and zero data corruption for audit trails.
+  - **Example Scenario:**
+    ```bash
+    vouch explain 'git status'
+    ```
+  - **Delta:**
+    - *Configuration Delta:* State journaling automatically uses `.wal` framed storage with atomic snapshot checkpoints.
+    - *Behavior Contrast:* Before: state journals relied on unstructured append writes susceptible to partial write truncation. After: every journal entry is framed with CRC32 integrity checks and replayed deterministically during crash recovery.
+
+* **Streamline release actions for unified repository publishing**
+  - **Problem & Explanation:** vouch previously maintained release automation workflows tailored to separate split repositories. In preparation for open-source transition and streamlined single-repository development, `.github/workflows/release.yml` was modernized to remove multi-repo synchronization cruft, unify binary asset packaging across Linux, macOS, and Windows runners, and verify release tags hermetically in a single pipeline.
+  - **Example Scenario:**
+    ```bash
+    gh release view v0.54.0
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Simplified `.github/workflows/release.yml` with consolidated multi-platform release matrix and unified packaging artifacts.
+    - *Behavior Contrast:* Before: release automation required coordinated multi-repository mirror steps across separate release workflows. After: single unified release pipeline packages and verifies assets across all supported targets.
+
+* **Support official .NET PowerShell reference AST worker with bounded fallback**
+  - **Problem & Explanation:** PowerShell commands with complex pipelines, scriptblocks, nested quotes, or Windows PowerShell syntax previously had to be parsed using an internal scanner or native AST engine that could diverge from the official System.Management.Automation parser shipped with PowerShell. `src/powershell_worker.rs` and `scripts/worker/PowerShellAstWorker.ps1` introduce an official .NET PowerShell reference AST worker communicating over line-delimited JSON IPC, with configurable parser modes (`worker`, `native`, `auto`), fallback timeouts, and bounded subprocess lifecycle management.
+  - **Example Scenario:**
+    ```bash
+    powershell -Command "Get-ChildItem -Path C:/scratch | Where-Object { $_.Length -gt 1000 } | Remove-Item -Force"
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Added `[parser.powershell]` table in `config.toml` supporting `parser_mode` (`"auto"`, `"native"`, `"worker"`), `worker_binary`, and `worker_timeout_ms`.
+    - *Behavior Contrast:* Before: PowerShell commands were parsed solely by built-in tree scanners without official AST validation. After: `auto` mode delegates to official .NET PowerShell AST worker when available with sub-millisecond execution and graceful bounded fallback to native scanner.
+
+* **Synthesize candidate knowledge entries via doctor and model CLI commands**
+  - **Problem & Explanation:** Operators frequently introduce custom or project-specific developer tools, subcommands, or scripts that lack entries in `knowledge.toml` or `my-knowledge.toml`, resulting in unnecessary interactive prompts during safe workflows. `src/synthesizer.rs` introduces automated knowledge synthesis: `vouch doctor --synthesize` analyzes unmodeled command friction and generates suggested knowledge configurations, while `vouch model --auto <cmd>` inspects tool help output and usage strings to automatically extract subcommands, flag shapes, and write effects into high-confidence TOML definitions.
+  - **Example Scenario:**
+    ```bash
+    vouch doctor --synthesize
+    vouch model --auto mytool
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Added `--synthesize` flag to `vouch doctor` and `--auto` flag to `vouch model`.
+    - *Behavior Contrast:* Before: modeling new tools required manual reverse-engineering of flags and writing TOML entries by hand. After: doctor and model CLI proactively synthesize candidate knowledge definitions directly from tool inspection and audit logs.
+
 ## 0.53.0 (2026-09-30)
 
 

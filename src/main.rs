@@ -1518,6 +1518,14 @@ fn main() {
                 println!("  {n:>5}  {head} {flag}");
             }
         }
+        if args.iter().any(|a| a == "--synthesize") {
+            println!("\n--- synthesized candidate knowledge entries (advisory) ---");
+            let top_names: Vec<String> = um.iter().take(15).map(|(name, _)| (*name).clone()).collect();
+            let cands = vouch::synthesizer::synthesize_candidates(&top_names);
+            for c in cands {
+                println!("# Source: {}\n{}", c.source, c.toml);
+            }
+        }
         // my-knowledge.toml, not knowledge.toml. The latter is the file that
         // ships, and `scripts/install-knowledge.sh --force` overwrites it —
         // so a description added there is lost on the next install. Nothing
