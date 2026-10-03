@@ -34,6 +34,10 @@
       "description": "`[run]`: run-place zones, executable-place program trust, and\nplace-scoped guard overrides.",
       "$ref": "#/$defs/RunSection"
     },
+    "runtime": {
+      "description": "`[runtime]`: platform runtime verification configuration (eBPF).",
+      "$ref": "#/$defs/RuntimeConfig"
+    },
     "shadow": {
       "description": "`[shadow]`: mode-keyed shadow (design 2026-08-16).",
       "anyOf": [
@@ -249,6 +253,27 @@
       },
       "additionalProperties": false
     },
+    "LinuxRuntimeConfig": {
+      "description": "The `[runtime.linux]` table: Linux runtime verifications (eBPF).",
+      "type": "object",
+      "properties": {
+        "ebpf_mode": {
+          "type": "string",
+          "default": "audit"
+        },
+        "ebpf_tracing": {
+          "type": "boolean",
+          "default": false
+        },
+        "trace_ring_buffer_pages": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 64,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
     "ProgramLocationTrust": {
       "description": "One `[[run.trust_program]]` entry: recognise a path-spelled shell program\nonly when its existing canonical file is under one of `under`'s trees AND\nits logical filename follows one of `name_patterns`' exact/prefix\nconventions. This recognises the whole matching program, not one verb, and\nnever searches PATH. Recognition only; guards and write rules still apply.",
       "type": "object",
@@ -355,6 +380,16 @@
           "items": {
             "$ref": "#/$defs/ProgramLocationTrust"
           }
+        }
+      },
+      "additionalProperties": false
+    },
+    "RuntimeConfig": {
+      "description": "The `[runtime]` table: platform-specific runtime verification settings.",
+      "type": "object",
+      "properties": {
+        "linux": {
+          "$ref": "#/$defs/LinuxRuntimeConfig"
         }
       },
       "additionalProperties": false

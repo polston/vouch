@@ -260,17 +260,37 @@ pub fn is_demote_eligible(kb: &Knowledge, command: &str, cwd: &str) -> bool {
     if scan.commands.is_empty() {
         return false;
     }
-    let all_cmds = crate::guards::expand_wrappers(kb, &scan.commands, "bash");
-    if all_cmds.is_empty() {
+    let expanded = crate::guards::expand_wrappers_with_sources(
+        kb,
+        &scan.commands,
+        &scan.heredocs,
+        &scan.input_source,
+        &scan.args_complete,
+        "bash",
+        &|_| 4,
+    );
+    if expanded.occurrences.is_empty() {
         return false;
     }
     let root = crate::route::project_root(cwd).unwrap_or_else(|| cwd.replace('\\', "/"));
 
-    for cmd in &all_cmds {
+    // Check transitively aggregated cross-language capabilities across all command occurrences
+    let caps = crate::capability::capabilities_for_occurrences(
+        kb,
+        &expanded.occurrences,
+        &crate::capability::DefaultCapabilityEmitter,
+    );
+    if caps.has_any() {
+        return false;
+    }
+
+    for occ in &expanded.occurrences {
+        let cmd = &occ.cmd;
+        let lang = &occ.lang;
         // Allow-list invariant (§1): Every command node in the AST must be
         // recognized and modeled. Unmodeled or partially modeled commands have
         // unknown capability requirements and must never be demoted.
-        if !crate::guards::recognises(kb, cmd, "bash", true) {
+        if !crate::guards::recognises(kb, cmd, lang, true) {
             return false;
         }
 
@@ -290,18 +310,8 @@ pub fn is_demote_eligible(kb: &Knowledge, command: &str, cwd: &str) -> bool {
             return false;
         }
         let (evaluates_input, _, _) =
-            crate::guards::evaluates_input_in(kb, cmd, "bash", false, false, false);
+            crate::guards::evaluates_input_in(kb, cmd, lang, false, false, false);
         if evaluates_input {
-            return false;
-        }
-
-        // Host and network capabilities declared in knowledge must not require
-        // network, host escape, daemon, or external filesystem access.
-        let caps = crate::guards::capabilities_for_cmd(kb, cmd, "bash");
-        if caps
-            .iter()
-            .any(|c| c == "network" || c == "external_paths" || c == "daemon")
-        {
             return false;
         }
 
@@ -309,7 +319,7 @@ pub fn is_demote_eligible(kb: &Knowledge, command: &str, cwd: &str) -> bool {
         // as Antigravity's macOS Seatbelt sandbox), subprocess file writes are denied
         // by default. Commands performing file modifications must preserve BypassSandbox: true
         // when requested rather than demoting to a sandbox that will reject the write.
-        let targets = crate::guards::written_paths_in(kb, cmd, "bash");
+        let targets = crate::guards::written_paths_in(kb, cmd, lang);
         if !targets.unknowable.is_empty() || !targets.paths.is_empty() {
             return false;
         }

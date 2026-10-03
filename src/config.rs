@@ -475,6 +475,34 @@ impl Default for DaemonConfig {
     }
 }
 
+/// The `[runtime.linux]` table: Linux runtime verifications (eBPF).
+#[derive(Debug, Deserialize, Clone, JsonSchema, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct LinuxRuntimeConfig {
+    #[serde(default)]
+    pub ebpf_tracing: bool,
+    #[serde(default = "default_ebpf_mode")]
+    pub ebpf_mode: String,
+    #[serde(default = "default_ring_buffer_pages")]
+    pub trace_ring_buffer_pages: u32,
+}
+
+fn default_ebpf_mode() -> String {
+    "audit".to_string()
+}
+
+fn default_ring_buffer_pages() -> u32 {
+    64
+}
+
+/// The `[runtime]` table: platform-specific runtime verification settings.
+#[derive(Debug, Deserialize, Clone, JsonSchema, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeConfig {
+    #[serde(default)]
+    pub linux: LinuxRuntimeConfig,
+}
+
 /// `config.toml` (`~/.config/vouch/config.toml`): what the operator has told
 /// vouch to do. Anything not named here resolves to `ask` — absence of a
 /// setting must never become permission.
@@ -549,6 +577,9 @@ struct Raw {
     /// `[daemon]`: persistent gating daemon configuration.
     #[serde(default)]
     daemon: DaemonConfig,
+    /// `[runtime]`: platform runtime verification configuration (eBPF).
+    #[serde(default)]
+    runtime: RuntimeConfig,
 }
 
 #[derive(Debug, Default)]
@@ -563,6 +594,7 @@ pub struct Config {
     pub unparseable_snippet: Option<Action>,
     pub read: ReadConfig,
     pub daemon: DaemonConfig,
+    pub runtime: RuntimeConfig,
     /// True only for `Config::nothing_configured()` — there is no config file
     /// on disk at all. Distinguishes that from a real, loaded config that
     /// simply names no tools yet (`tools` empty either way, so `tools` alone
@@ -757,6 +789,7 @@ pub fn load(text: &str) -> Result<Config, String> {
         unparseable_snippet: raw.unparseable_snippet,
         read: raw.read,
         daemon: raw.daemon,
+        runtime: raw.runtime,
         no_config_file: false,
     };
     validate(&cfg)?;

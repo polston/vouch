@@ -82,6 +82,27 @@ while ($true) {
             }
         }
 
+        # Find all member invocations across the AST for pipeline mutation tracking
+        $memberInvocations = $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true)
+        if ($memberInvocations) {
+            foreach ($inv in $memberInvocations) {
+                $memberName = $inv.Member.Extent.Text
+                if ($memberName -eq "Kill") {
+                    $statements += @{
+                        head = "Stop-Process"
+                        args = @("-Id", "$_.Id")
+                    }
+                } elseif ($memberName -eq "Delete") {
+                    $statements += @{
+                        head = "Remove-Item"
+                        args = @("-Recurse", "-Path", "$_.FullName")
+                    }
+                } else {
+                    $constructs += "method_call"
+                }
+            }
+        }
+
         # Find all redirections across the AST
         $redirNodes = $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.RedirectionAst] }, $true)
         if ($redirNodes) {

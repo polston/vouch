@@ -167,12 +167,17 @@ fn try_parse_on_child(child: &mut Child, code: &str) -> Result<Scan, String> {
         scan.note(construct);
     }
 
-    for (idx, cmd) in resp.commands.into_iter().enumerate() {
-        let c = Cmd {
+    let mut initial_cmds = Vec::new();
+    for cmd in resp.commands {
+        initial_cmds.push(Cmd {
             head: cmd.head,
             args: cmd.args,
             ..Default::default()
-        };
+        });
+    }
+
+    let analyzed_cmds = crate::powershell_pipeline::analyze_pipeline_stages(&initial_cmds);
+    for (idx, c) in analyzed_cmds.into_iter().enumerate() {
         scan.commands.push(c);
         scan.order.push(Order::Seq(idx as u32));
         scan.args_complete.push(true);

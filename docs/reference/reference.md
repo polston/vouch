@@ -20,6 +20,7 @@ setting must never become permission.
 | `protected` | ProtectedSection | (none) | `[protected]`: paths no `allow_paths` entry can ever open. |
 | `read` | ReadConfig | (none) | `[read]`: what vouch does about reading files, and which confidential paths are protected from silent exposure into transcripts. |
 | `run` | RunSection | (none) | `[run]`: run-place zones, executable-place program trust, and place-scoped guard overrides. |
+| `runtime` | RuntimeConfig | (none) | `[runtime]`: platform runtime verification configuration (eBPF). |
 | `shadow` | ShadowSection (optional) | (none) | `[shadow]`: mode-keyed shadow (design 2026-08-16). |
 | `tools` | map of string to Action | (none) | Per-tool actions, written as `[tools]`. vouch used to say NOTHING about any tool it had no scanner for — 46.5% of recorded tool calls — which is the same "unknown means allowed" inversion as unmodelled programs, one level up. Naming a FIRST tool here makes this section govern every tool, not only the one named; see `Config::tool_decision`. |
 | `unparseable_snippet` | Action (optional) | (none) | Decision when hook input from an agent harness or tool snippet cannot be parsed into structured payload. Allowed: "ask" (default) or "deny". "allow" is refused. |
@@ -87,6 +88,16 @@ Settings for one language: `[lang.bash]`, `[lang.powershell]`,
 | `worker_timeout_ms` | integer (optional) | (unset) | Timeout in milliseconds for reference worker calls before falling back. |
 | `wrap_depth` | integer (optional) | (unset) | How many layers of wrapper nesting are scanned before a deeper nest trips `wrap_depth_exceeded` and asks. `None` means the operator has not set it, so the built-in cap (4) applies. Read by the engine's wrapper walk, not by this file. |
 
+### `LinuxRuntimeConfig`
+
+The `[runtime.linux]` table: Linux runtime verifications (eBPF).
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `ebpf_mode` | string | "audit" |  |
+| `ebpf_tracing` | boolean | false |  |
+| `trace_ring_buffer_pages` | integer | 64 |  |
+
 ### `ProgramLocationTrust`
 
 One `[[run.trust_program]]` entry: recognise a path-spelled shell program
@@ -132,6 +143,14 @@ program trust, and place-scoped guard overrides.
 | `trust_all_under` | array of string (optional) | (unset) | Trust zone: any command run from under one of these trees is recognised, whatever it is — recognition only, guards and write rules still apply. `None` means absent (fine); a written empty list is refused at load, since it can never apply. It grants, so it needs every directory the command could be running in proven inside one of these trees: one member vouch cannot place, or one that is outside, recognises nothing. |
 | `trust_nothing_under` | array of string (optional) | (unset) | Distrust zone: no command run from under one of these trees is recognised, whatever it is — even a program a knowledge entry describes. Refused when written empty, same as the grants above: a written empty list can only be a mistake. It restricts, so it applies wherever any directory the command could be running in is under it, and wherever vouch cannot place the command at all; it stands down only when every possible directory is known and none is under it. |
 | `trust_program` | array of ProgramLocationTrust | (none) | Program-location trust rules, written as `[[run.trust_program]]`. Both an existing canonical executable location and a logical filename convention must match; bare names and uncertainty grant nothing. |
+
+### `RuntimeConfig`
+
+The `[runtime]` table: platform-specific runtime verification settings.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `linux` | LinuxRuntimeConfig | (none) |  |
 
 ### `ShadowSection`
 

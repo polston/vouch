@@ -1,5 +1,60 @@
 # Changelog
 
+## 0.55.0 (2026-10-03)
+
+
+### Features
+
+* **Deep PowerShell pipeline AST analysis for nested script blocks and pipeline chains**
+  - **Problem & Explanation:** Multi-stage PowerShell command pipelines, complex scriptblocks passed to cmdlets like `Where-Object` or `ForEach-Object`, and chained commands could obscure destructive or privileged operations within downstream pipeline elements. `src/powershell_pipeline.rs` introduces deep PowerShell AST pipeline analysis that breaks apart pipeline chains, analyzes scriptblock bodies, and evaluates each pipeline element independently against safety policies and guard rules, ensuring pipeline chaining cannot conceal dangerous operations.
+  - **Example Scenario:**
+    ```powershell
+    Get-Service | Where-Object { $_.Status -eq 'Running' } | Stop-Process -Force
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Automated pipeline analysis evaluates pipeline elements against standard safety rules and guards.
+    - *Behavior Contrast:* Before: complex chained pipeline commands could bypass individual element inspections when nested inside scriptblocks. After: each pipeline stage and script block is individually inspected and gated.
+
+* **eBPF-assisted runtime filesystem write verifier for Linux environments**
+  - **Problem & Explanation:** File access security historically relied on static inspection of command strings and paths declared in CLI arguments. On Linux environments, processes can perform runtime file mutations via hidden paths, symbolic link redirections, or in-process file writes not evident from the command invocation alone. `src/runtime/` introduces an eBPF-assisted runtime filesystem write verifier that traces filesystem-modifying system calls (`openat`, `write`, `rename`, `unlink`) via a ring buffer kernel probe, correlating actual runtime writes against declared and permitted paths with graceful no-op fallback on non-Linux platforms.
+  - **Example Scenario:**
+    ```bash
+    vouch run_command 'python3 -c "with open(\"/tmp/output.txt\", \"w\") as f: f.write(\"data\")"'
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Added `[runtime]` configuration table supporting `ebpf_tracing = true`, `ebpf_mode = "audit"` or `"enforce"`, and `trace_ring_buffer_pages = 64`.
+    - *Behavior Contrast:* Before: write path enforcement was strictly evaluated before process execution based on command arguments. After: runtime system calls are observed and verified against policy, catching undeclared or redirected writes.
+
+* **Interactive policy review terminal UI via vouch tui and vouch review --interactive**
+  - **Problem & Explanation:** Policy tuning and reviewing previous prompt decisions required reading terminal logs or manually inspecting JSON state files to identify candidate paths or flags for inclusion in `config.toml` or `my-knowledge.toml`. `src/tui/` introduces a full-screen interactive Terminal UI accessible via `vouch tui` and `vouch review --interactive` (with headless backend support for automated test suites), enabling operators to browse recent decisions, review proposable candidate rules, inspect guard non-proposability explanations, and apply approved rule additions directly.
+  - **Example Scenario:**
+    ```bash
+    vouch tui
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Added `vouch tui` and `vouch review -i` / `vouch review --interactive` subcommands.
+    - *Behavior Contrast:* Before: reviewing past friction decisions required manual state file inspection and manual configuration editing. After: interactive TUI provides structured navigation of recent decisions and direct application of candidate configuration additions.
+
+* **Multi-client streaming IPC daemon protocol for concurrent subagent evaluations**
+  - **Problem & Explanation:** Subagent execution workflows spawn concurrent coding agents that query vouch simultaneously. The previous daemon implementation operated on synchronous single-shot requests that serialized access, leading to lock contention and potential socket deadlocks under high-throughput concurrent agent operations. `src/daemon/` introduces a framed streaming IPC protocol with multi-tenant session isolation, non-blocking connection dispatch, fine-grained read-lock scoping, and support for concurrent client evaluations over Unix domain sockets.
+  - **Example Scenario:**
+    ```bash
+    vouch daemon --start
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Added streaming frame protocol support with concurrent request dispatch in `[daemon]`.
+    - *Behavior Contrast:* Before: daemon handled one client connection sequentially, blocking concurrent subagent requests. After: streaming daemon services concurrent subagents in parallel with dedicated worker tasks and connection framing.
+
+* **Strongly typed transitive capability propagation across command wrappers**
+  - **Problem & Explanation:** Command wrappers (such as `sudo`, `env`, `chroot`, container engines, or script runners) can modify or escalate the execution capabilities of wrapped inner commands. Previously, capability checking was loosely typed and did not systematically propagate transitive capabilities across deeply nested wrapper stacks. `src/capability.rs` introduces strongly typed `CapabilitySet` bitflags and a `CapabilityEmitter` trait that propagates execution capabilities transitively across wrapper hierarchies and container engines, preventing capability bypass or unmodeled privilege escalation.
+  - **Example Scenario:**
+    ```bash
+    sudo chroot /jail docker run -v /tmp:/data alpine touch /data/file
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Container engines and wrappers declare `capabilities` in `knowledge.toml`.
+    - *Behavior Contrast:* Before: wrapper capabilities were evaluated ad-hoc per wrapper without transitive bitflag propagation. After: composite wrappers propagate capabilities across all nesting levels, ensuring full end-to-end security boundary enforcement.
+
 ## 0.54.0 (2026-10-02)
 
 

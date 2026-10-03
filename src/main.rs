@@ -1538,6 +1538,18 @@ fn main() {
         std::process::exit(0);
     }
 
+    // `vouch tui` / `vouch review -i` / `vouch review --interactive`
+    if args.first().map(String::as_str) == Some("tui")
+        || (args.first().map(String::as_str) == Some("review")
+            && args.iter().any(|a| a == "--interactive" || a == "-i"))
+    {
+        let home = home();
+        if let Err(e) = vouch::tui::launch_interactive(&home) {
+            eprintln!("vouch tui error: {e}");
+        }
+        std::process::exit(0);
+    }
+
     // `vouch review` — evidence-backed rule candidates. Writes NOTHING without
     // an explicit `--accept <name>`, and never proposes a guard at all.
     if args.first().map(String::as_str) == Some("review") {
@@ -1890,7 +1902,8 @@ fn main() {
         println!("  vouch why '<cmd>'         the same, for a command already run");
         println!("  vouch why                 explain the last recorded decision");
         println!("  vouch doctor              list what vouch could not read or describe");
-        println!("  vouch review [--accept X] evidence-backed rule candidates");
+        println!("  vouch review [--accept X | -i | --interactive] evidence-backed rule candidates");
+        println!("  vouch tui                 interactive terminal review & policy correction");
         println!("  vouch import [file]       translate a cc-allow config to stdout");
         println!("  vouch install [--host claude|codex|agy] [--shell bash|powershell] [--state-dir <absolute>] [--shadow] [--print] [--write]");
         println!("                            merge host hook wiring (--write updates target file)");

@@ -2452,6 +2452,36 @@ dest_dir_flags = ["-path", "-literalpath"]
 no_value_options = ["-passthru"]
 case_sensitive_flags = false
 
+# PowerShell pipeline utility cmdlets (Where-Object, ForEach-Object, Select-Object).
+[[program]]
+match = ["Where-Object", "where", "?"]
+languages = ["powershell"]
+produces = ["data"]
+
+[[program]]
+match = ["ForEach-Object", "foreach", "%"]
+languages = ["powershell"]
+produces = ["data"]
+
+[[program]]
+match = ["Select-Object", "select"]
+languages = ["powershell"]
+produces = ["data"]
+
+# PowerShell process management cmdlets.
+[[program]]
+match = ["Get-Process", "gps"]
+languages = ["powershell"]
+produces = ["data"]
+
+[[program]]
+match = ["Stop-Process", "spps"]
+
+[[program.rule]]
+guard = "process_control"
+source = "declared: operator granted a guard for signalling or stopping a process, 2026-10-02"
+always = true
+
 [[program]]
 match = ["pushd"]
 languages = ["bash"]
@@ -2716,6 +2746,7 @@ no_value_options = [
 # Container engine CLIs.
 [[program]]
 match = ["docker", "podman", "nerdctl", "finch"]
+capabilities = ["external_paths", "daemon"]
 case_sensitive_flags = true
 standalone_flags = ["--help", "-h", "--version"]
 container_volume = { volume_flags = ["-v", "--volume"], mount_flags = ["--mount"] }

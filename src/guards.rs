@@ -3427,6 +3427,12 @@ pub fn capabilities_for_cmd(kb: &Knowledge, cmd: &Cmd, lang: &str) -> Vec<String
     caps
 }
 
+/// Collects all declared capabilities for this command occurrence as a strongly typed `CapabilitySet`.
+pub fn capability_set_for_cmd(kb: &Knowledge, cmd: &Cmd, lang: &str) -> crate::capability::CapabilitySet {
+    crate::capability::CapabilitySet::from_slice(&capabilities_for_cmd(kb, cmd, lang))
+}
+
+
 /// What `listable_standalone` found: the flags a fresh (or widened)
 /// `standalone_flags` entry could truthfully list for this run.
 /// `needs_case_key` is true when some same-name entry has not stated

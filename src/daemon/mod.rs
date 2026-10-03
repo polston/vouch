@@ -1,19 +1,32 @@
-//! Persistent Gating Daemon & In-Memory IPC Runtime (M4.5).
+//! Persistent Gating Daemon & In-Memory IPC Runtime (M4.5, Goal 5).
 //!
 //! Provides a resident background daemon maintaining in-memory parsed configuration,
 //! compiled knowledge models, and syntax scanners to answer hook queries in <2ms.
 //! Communication occurs over a local Unix domain socket (or loopback/named pipe),
 //! with non-blocking fail-closed fallback to standalone evaluation if the daemon is unavailable.
+//!
+//! Submodules:
+//! - `protocol`: Streaming length-prefixed and newline JSON frames (`ClientFrame`, `DaemonFrame`).
+//! - `session`: Context isolation boundaries (`SessionContext`, `DaemonSessionHandler`).
+//! - `transport`: Streaming client & connection multiplexing.
+
+pub mod protocol;
+pub mod session;
+pub mod transport;
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{load, Config};
 use crate::protocol::{render_for, Decision, Host};
+
+pub use protocol::{ClientFrame, DaemonFrame, DecisionOutput, EvaluateRequest};
+pub use session::{DaemonSessionHandler, SessionContext};
+pub use transport::StreamingClient;
 
 /// IPC request payload sent from hook client to daemon.
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -89,10 +102,15 @@ impl DaemonState {
 
     /// Process one hook evaluation request in-memory.
     pub fn process_request(&self, req: &DaemonRequest) -> DaemonResponse {
+        self.process_request_with_cwd(req, None)
+    }
+
+    /// Process one hook evaluation request with an optional scoped working directory.
+    pub fn process_request_with_cwd(&self, req: &DaemonRequest, scoped_cwd: Option<&Path>) -> DaemonResponse {
         let host = Host::parse(&req.host).unwrap_or(Host::Claude);
         let shadow = req.shadow;
 
-        let input = match crate::protocol::parse_input(&req.raw) {
+        let mut input = match crate::protocol::parse_input(&req.raw) {
             Ok(input) => input,
             Err(err) => {
                 let action = self.cfg.unparseable_snippet.unwrap_or(crate::config::Action::Ask);
@@ -114,6 +132,13 @@ impl DaemonState {
                 };
             }
         };
+
+        // If scoped_cwd is provided, override input.cwd if input.cwd was empty
+        if let Some(cwd) = scoped_cwd {
+            if input.cwd.is_empty() {
+                input.cwd = cwd.to_string_lossy().to_string();
+            }
+        }
 
         // Terminal events
         if let Some(o) = crate::outcome::Outcome::from_event(&input.hook_event_name) {
@@ -210,6 +235,42 @@ impl DaemonState {
     }
 }
 
+impl DaemonSessionHandler for DaemonState {
+    fn handle_evaluate(&self, session: &SessionContext, req: EvaluateRequest) -> DecisionOutput {
+        let start = Instant::now();
+        let daemon_req = DaemonRequest {
+            raw: req.raw_hook_json,
+            notice: None,
+            host: "claude".into(),
+            shadow: false,
+            state_dir: session.state_dir.to_string_lossy().to_string(),
+            home_dir: self.home.clone(),
+        };
+
+        let resp = self.process_request_with_cwd(&daemon_req, Some(&session.cwd));
+        let latency_us = start.elapsed().as_micros() as u64;
+
+        let verdict = if let Some(ref out) = resp.output {
+            if out.contains("\"allow\"") || out.contains("\"permissionDecision\":\"allow\"") {
+                "allow"
+            } else if out.contains("\"deny\"") || out.contains("\"permissionDecision\":\"deny\"") {
+                "deny"
+            } else {
+                "ask"
+            }
+        } else {
+            "abstain"
+        };
+
+        DecisionOutput {
+            request_id: req.request_id,
+            output: resp.output,
+            verdict: verdict.to_string(),
+            latency_us,
+        }
+    }
+}
+
 /// Resolve the default socket path for the daemon on this machine.
 pub fn default_socket_path(home: &str) -> PathBuf {
     if let Ok(sock) = std::env::var("VOUCH_DAEMON_SOCKET") {
@@ -282,7 +343,16 @@ pub fn run_daemon_server(
             .map_err(|e| format!("could not bind socket {}: {e}", socket_path.display()))?;
         let _ = std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600));
 
-        let mut state = DaemonState::new(home);
+        let state = Arc::new(std::sync::RwLock::new(DaemonState::new(home)));
+
+        struct StateHandler(Arc<std::sync::RwLock<DaemonState>>);
+        impl DaemonSessionHandler for StateHandler {
+            fn handle_evaluate(&self, session: &SessionContext, req: EvaluateRequest) -> DecisionOutput {
+                let s = self.0.read().unwrap();
+                s.handle_evaluate(session, req)
+            }
+        }
+        let handler: Arc<dyn DaemonSessionHandler> = Arc::new(StateHandler(Arc::clone(&state)));
 
         while shutdown_flag
             .as_ref()
@@ -298,8 +368,14 @@ pub fn run_daemon_server(
                     {
                         break;
                     }
-                    state.check_reload();
-                    let _ = handle_daemon_client(stream, &state);
+                    if let Ok(mut s) = state.write() {
+                        s.check_reload();
+                    }
+                    let state_clone = Arc::clone(&state);
+                    let handler_clone = Arc::clone(&handler);
+                    std::thread::spawn(move || {
+                        let _ = transport::handle_client_connection(stream, handler_clone, state_clone);
+                    });
                 }
                 Err(e) => {
                     eprintln!("daemon accept error: {e}");
@@ -315,26 +391,4 @@ pub fn run_daemon_server(
         let _ = (socket_path, home, shutdown_flag);
         Err("daemon server not supported on this platform".to_string())
     }
-}
-
-#[cfg(unix)]
-fn handle_daemon_client(
-    stream: std::os::unix::net::UnixStream,
-    state: &DaemonState,
-) -> Result<(), String> {
-    let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
-    let mut writer = stream;
-
-    let mut line = String::new();
-    reader.read_line(&mut line).map_err(|e| e.to_string())?;
-    if line.trim().is_empty() {
-        return Ok(());
-    }
-
-    let req: DaemonRequest = serde_json::from_str(&line).map_err(|e| e.to_string())?;
-    let resp = state.process_request(&req);
-    let resp_str = serde_json::to_string(&resp).map_err(|e| e.to_string())?;
-    writeln!(writer, "{resp_str}").map_err(|e| e.to_string())?;
-    writer.flush().map_err(|e| e.to_string())?;
-    Ok(())
 }

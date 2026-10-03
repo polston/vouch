@@ -548,11 +548,40 @@ pub fn parse(src: &str) -> Result<Parsed, String> {
             | poshtree::v2::NodeKind::Cast { .. } => {
                 out.note("type_literal");
             }
-            poshtree::v2::NodeKind::InvokeMember { is_static, .. } => {
+            poshtree::v2::NodeKind::InvokeMember { is_static, member, .. } => {
                 if *is_static {
                     out.note("type_literal");
                 } else {
                     out.note("method_call");
+                    if member.eq_ignore_ascii_case("kill") {
+                        out.push_cmd_with_expandable(
+                            "Stop-Process".to_string(),
+                            vec!["-Id".to_string(), "$_.Id".to_string()],
+                            crate::syntax::Order::Unordered,
+                            crate::syntax::InputSource::Unknown,
+                            true,
+                            None,
+                            vec![],
+                            Some(0),
+                            std::collections::HashMap::new(),
+                            false,
+                            std::collections::HashSet::new(),
+                        );
+                    } else if member.eq_ignore_ascii_case("delete") {
+                        out.push_cmd_with_expandable(
+                            "Remove-Item".to_string(),
+                            vec!["-Recurse".to_string(), "-Path".to_string(), "$_.FullName".to_string()],
+                            crate::syntax::Order::Unordered,
+                            crate::syntax::InputSource::Unknown,
+                            true,
+                            None,
+                            vec![],
+                            Some(0),
+                            std::collections::HashMap::new(),
+                            false,
+                            std::collections::HashSet::new(),
+                        );
+                    }
                 }
             }
             poshtree::v2::NodeKind::MemberAccess { is_static: true, .. } => {

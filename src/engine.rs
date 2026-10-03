@@ -3692,6 +3692,18 @@ struct Expanded {
     assignments: Vec<Vec<String>>,
 }
 
+impl Expanded {
+    #[allow(dead_code)]
+    pub fn required_capabilities(&self, kb: &crate::guards::Knowledge) -> crate::capability::CapabilitySet {
+        let mut caps = crate::capability::CapabilitySet::default();
+        for (cmd, lang) in self.cmds.iter().zip(self.langs.iter()) {
+            let cmd_caps = crate::capability::capabilities_for_cmd(kb, cmd, lang);
+            caps.union(cmd_caps);
+        }
+        caps
+    }
+}
+
 /// One wrapped snippet, and every position it can be judged at.
 ///
 /// A struct rather than the five-then-six-element tuple this was: two of its
