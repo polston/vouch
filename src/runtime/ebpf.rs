@@ -62,7 +62,7 @@ impl RuntimeVerifier for EbpfVerifier {
         }
     }
 
-    fn monitor_execution(&self, _pid: u32, cfg: &Config) -> Result<ExecutionTrace, RuntimeError> {
+    fn monitor_execution(&self, pid: u32, cfg: &Config) -> Result<ExecutionTrace, RuntimeError> {
         // If mock events are injected (for unit/integration testing)
         if let Some(ref events) = self.mock_events {
             let trace = evaluate_trace(events, cfg);
@@ -79,6 +79,7 @@ impl RuntimeVerifier for EbpfVerifier {
 
         #[cfg(not(target_os = "linux"))]
         {
+            let _ = pid;
             Err(RuntimeError::UnsupportedPlatform(
                 "eBPF tracepoints can only be dynamically attached on Linux".into(),
             ))
