@@ -928,14 +928,73 @@ fn main() {
         }
     }
 
-    // `vouch daemon [--socket <path>]` — run persistent background gating daemon (M4.5).
+    // `vouch daemon [--socket <path>] [--pid-file <path>] [--token-file <path>] [--daemonize]` — run persistent background gating daemon (M4.5, M6.3).
     if args.first().map(String::as_str) == Some("daemon") {
-        let socket_path = args
-            .get(1)
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| vouch::daemon::default_socket_path(&home()));
-        println!("vouch daemon running on socket: {}", socket_path.display());
-        if let Err(e) = vouch::daemon::run_daemon_server(&socket_path, &home(), None) {
+        if matches!(args.get(1).map(String::as_str), Some("--help" | "-h" | "help")) {
+            println!("vouch daemon");
+            println!("usage: vouch daemon [--socket <path>] [--pid-file <path>] [--token-file <path>] [--daemonize]");
+            println!("       run persistent background gating daemon with lifecycle management");
+            std::process::exit(0);
+        }
+
+        let mut socket_path = vouch::daemon::default_socket_path(&home());
+        let mut pid_path = vouch::daemon::default_pid_path(&home());
+        let mut token_path = None;
+        let mut daemonize = false;
+
+        let mut idx = 1;
+        while idx < args.len() {
+            match args[idx].as_str() {
+                "--socket" => {
+                    idx += 1;
+                    if idx >= args.len() {
+                        eprintln!("vouch daemon: --socket requires a path argument");
+                        std::process::exit(2);
+                    }
+                    socket_path = std::path::PathBuf::from(&args[idx]);
+                }
+                "--pid-file" => {
+                    idx += 1;
+                    if idx >= args.len() {
+                        eprintln!("vouch daemon: --pid-file requires a path argument");
+                        std::process::exit(2);
+                    }
+                    pid_path = std::path::PathBuf::from(&args[idx]);
+                }
+                "--token-file" => {
+                    idx += 1;
+                    if idx >= args.len() {
+                        eprintln!("vouch daemon: --token-file requires a path argument");
+                        std::process::exit(2);
+                    }
+                    token_path = Some(std::path::PathBuf::from(&args[idx]));
+                }
+                "--daemonize" => {
+                    daemonize = true;
+                }
+                arg if arg.starts_with('-') => {
+                    eprintln!("vouch daemon: unrecognized option: {arg}");
+                    eprintln!("usage: vouch daemon [--socket <path>] [--pid-file <path>] [--token-file <path>] [--daemonize]");
+                    std::process::exit(2);
+                }
+                arg => {
+                    socket_path = std::path::PathBuf::from(arg);
+                }
+            }
+            idx += 1;
+        }
+
+        if !daemonize {
+            println!("vouch daemon running on socket: {}", socket_path.display());
+        }
+        if let Err(e) = vouch::daemon::run_managed_daemon(
+            &socket_path,
+            &pid_path,
+            token_path.as_deref(),
+            &home(),
+            daemonize,
+            None,
+        ) {
             eprintln!("vouch daemon error: {e}");
             std::process::exit(1);
         }
@@ -1904,6 +1963,8 @@ fn main() {
         println!("  vouch doctor              list what vouch could not read or describe");
         println!("  vouch review [--accept X | -i | --interactive] evidence-backed rule candidates");
         println!("  vouch tui                 interactive terminal review & policy correction");
+        println!("  vouch daemon [--socket <path>]");
+        println!("                            run persistent background gating daemon");
         println!("  vouch import [file]       translate a cc-allow config to stdout");
         println!("  vouch install [--host claude|codex|agy] [--shell bash|powershell] [--state-dir <absolute>] [--shadow] [--print] [--write]");
         println!("                            merge host hook wiring (--write updates target file)");

@@ -2034,6 +2034,65 @@ fn dedent(src: &str) -> String {
         .join("\n")
 }
 
+/// Extract dynamically inferred capabilities from a Python script AST.
+pub fn extract_capabilities(src: &str) -> crate::capability::CapabilitySet {
+    use crate::capability::CapabilitySet;
+
+    let parsed = match ruff_python_parser::parse_module(src) {
+        Ok(parsed) if parsed.has_no_syntax_errors() => parsed.into_syntax(),
+        _ => return CapabilitySet::EMPTY,
+    };
+
+    let mut caps = CapabilitySet::EMPTY;
+
+    fn check_mod_name(name: &str, caps: &mut CapabilitySet) {
+        let top = name.split('.').next().unwrap_or(name);
+        match top {
+            "socket" | "http" | "urllib" | "requests" | "httpx" | "aiohttp" | "ftplib" | "asyncio" => {
+                caps.network = true;
+            }
+            "multiprocessing" | "pty" | "daemon" => {
+                caps.daemon = true;
+            }
+            "shutil" | "tempfile" => {
+                caps.external_paths = true;
+            }
+            _ => {}
+        }
+    }
+
+    for stmt in parsed.body {
+        match stmt {
+            ast::Stmt::Import(import_stmt) => {
+                for alias in &import_stmt.names {
+                    check_mod_name(alias.name.as_str(), &mut caps);
+                }
+            }
+            ast::Stmt::ImportFrom(from_stmt) => {
+                if let Some(ref mod_name) = from_stmt.module {
+                    check_mod_name(mod_name.as_str(), &mut caps);
+                    if mod_name.as_str() == "os" {
+                        for alias in &from_stmt.names {
+                            if matches!(alias.name.as_str(), "system" | "popen" | "spawnl" | "spawnlp" | "spawnv" | "spawnvp") {
+                                caps.daemon = true;
+                            }
+                        }
+                    } else if mod_name.as_str() == "subprocess" {
+                        for alias in &from_stmt.names {
+                            if matches!(alias.name.as_str(), "Popen") {
+                                caps.daemon = true;
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    caps
+}
+
 /// The Python scanner.
 pub struct Python;
 

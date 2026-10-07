@@ -257,3 +257,67 @@ fn tui_app_apply_current_candidate_removes_from_list() {
     assert!(app.status_message.starts_with("✓"));
     assert_eq!(app.engine.candidates.len(), initial_count - 1);
 }
+
+#[test]
+fn tui_backend_decode_key_bytes_sequences() {
+    use vouch::tui::backend::decode_key_bytes;
+
+    // Single ASCII char
+    let (ev, len) = decode_key_bytes(b"q").expect("decodes q");
+    assert_eq!(ev, TerminalEvent::Key(KeyCode::Char('q')));
+    assert_eq!(len, 1);
+
+    // Enter
+    let (ev, len) = decode_key_bytes(b"\r").expect("decodes CR");
+    assert_eq!(ev, TerminalEvent::Key(KeyCode::Enter));
+    assert_eq!(len, 1);
+
+    let (ev, len) = decode_key_bytes(b"\n").expect("decodes LF");
+    assert_eq!(ev, TerminalEvent::Key(KeyCode::Enter));
+    assert_eq!(len, 1);
+
+    // Tab and Backspace
+    let (ev, len) = decode_key_bytes(b"\t").expect("decodes tab");
+    assert_eq!(ev, TerminalEvent::Key(KeyCode::Tab));
+    assert_eq!(len, 1);
+
+    let (ev, len) = decode_key_bytes(&[0x7f]).expect("decodes backspace");
+    assert_eq!(ev, TerminalEvent::Key(KeyCode::Backspace));
+    assert_eq!(len, 1);
+
+    // Arrows
+    let (ev, len) = decode_key_bytes(b"\x1b[A").expect("decodes Up");
+    assert_eq!(ev, TerminalEvent::Key(KeyCode::Up));
+    assert_eq!(len, 3);
+
+    let (ev, len) = decode_key_bytes(b"\x1b[B").expect("decodes Down");
+    assert_eq!(ev, TerminalEvent::Key(KeyCode::Down));
+    assert_eq!(len, 3);
+
+    let (ev, len) = decode_key_bytes(b"\x1b[C").expect("decodes Right");
+    assert_eq!(ev, TerminalEvent::Key(KeyCode::Right));
+    assert_eq!(len, 3);
+
+    let (ev, len) = decode_key_bytes(b"\x1b[D").expect("decodes Left");
+    assert_eq!(ev, TerminalEvent::Key(KeyCode::Left));
+    assert_eq!(len, 3);
+
+    // Standalone Escape
+    let (ev, len) = decode_key_bytes(b"\x1b").expect("decodes Escape");
+    assert_eq!(ev, TerminalEvent::Key(KeyCode::Escape));
+    assert_eq!(len, 1);
+
+    // Empty input returns None
+    assert!(decode_key_bytes(b"").is_none());
+}
+
+#[test]
+fn tui_backend_raw_mode_guard_lifecycle() {
+    use vouch::tui::backend::RawModeGuard;
+
+    // Acquire guard (safe even in test runner without TTY)
+    let mut guard = RawModeGuard::acquire().expect("acquire raw mode guard succeeds");
+    guard.restore();
+    // Double restore should be safe and idempotent
+    guard.restore();
+}

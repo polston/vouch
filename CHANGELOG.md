@@ -1,5 +1,73 @@
 # Changelog
 
+## 0.56.0 (2026-10-07)
+
+
+### Features
+
+* **Background daemon detachment, PID file management, and signal-driven teardown**
+  - **Problem & Explanation:** Starting `vouch daemon` in headless environments or container initialization previously blocked the invoking terminal session and lacked standardized operating system daemon detachment, PID file locking, and clean POSIX signal handlers. `src/daemon/lifecycle.rs` implements double-fork detachment with standard file descriptor redirection to `/dev/null`, advisory PID file locking via `fcntl`/`flock` with automatic stale PID detection, session authentication token generation, and graceful `SIGTERM`/`SIGINT` teardown hooks.
+  - **Example Scenario:**
+    ```bash
+    vouch daemon --start --detach
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged. Added `--detach` and `--stop` flags to `vouch daemon` CLI.
+    - *Behavior Contrast:* Before: daemon execution remained in the foreground with no PID management or process lifecycle tracking. After: daemon supports clean background detachment, advisory PID locking, and signal-driven teardown.
+
+* **Dynamic AST capability extraction for Python and JavaScript inline scripts**
+  - **Problem & Explanation:** Python and JavaScript scripts executed via `-c` or inline CLI invocations could invoke arbitrary system utilities or spawn long-running daemons (`subprocess.Popen`, `child_process.fork`, `execSync`). Static regex or naive token heuristics failed to inspect nested calls, string literals, or indirect imports. `src/capability.rs`, `src/python.rs`, and `src/javascript.rs` integrate `ruff_python_parser` and `oxc_parser` to perform AST capability extraction, identifying child process creation, network listener binding, and daemon execution directly from parsed syntax trees while remaining immune to false positives in comments or string literals.
+  - **Example Scenario:**
+    ```bash
+    python3 -c "import subprocess; subprocess.Popen(['server', '--listen'])"
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged. Inlined scripts evaluated dynamically against standard safety policies.
+    - *Behavior Contrast:* Before: capabilities of inline scripts were uninspected or estimated via lexical string heuristics. After: structural AST inspection extracts precise execution capabilities and daemonization behaviors.
+
+* **Live Linux kernel eBPF ring buffer reader for runtime filesystem write verification**
+  - **Problem & Explanation:** The previous eBPF verifier relied on polling or simulated mocks rather than streaming live kernel perf events or ring buffer data. In production environments without heavy runtime C dependencies (like libbpf), capturing kernel write probes requires pure-Rust ring buffer interaction. `src/runtime/ebpf.rs` introduces the `RingBufferReader` abstraction with `PerfRingBufferReader`, interacting directly with kernel memory maps and perf event headers via `libc` without external library dependencies, and provides `MockRingBufferReader` for deterministic unit testing.
+  - **Example Scenario:**
+    ```bash
+    vouch run_command 'cat /dev/urandom > /tmp/sensitive.raw'
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged (`[runtime]` configuration options already supported).
+    - *Behavior Contrast:* Before: runtime eBPF verifier relied on placeholder reads or external tooling. After: native memory-mapped ring buffer reader captures live filesystem write events directly from kernel probes.
+
+* **OS-level unbuffered terminal raw mode for interactive TUI navigation**
+  - **Problem & Explanation:** Terminal interaction in the interactive TUI previously required pressing Enter after each input character due to standard line-buffered canonical terminal modes. `src/tui/backend.rs` implements authentic OS-level unbuffered raw mode using `termios` (`tcgetattr`/`tcsetattr`) on Unix and `SetConsoleMode` on Windows, accompanied by an RAII `RawModeGuard` that guarantees terminal restoration upon exit, panic, or interrupt, and an ANSI escape sequence parser for immediate single-keystroke navigation (arrow keys, hjkl, and Enter/Esc).
+  - **Example Scenario:**
+    ```bash
+    vouch tui
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: interactive review required line-buffered input or simulated keystrokes. After: instant unbuffered single-keystroke responses with guaranteed terminal state restoration.
+
+* **Pure-Rust lexical tokenizer and scriptblock AST statement walker for PowerShell pipelines**
+  - **Problem & Explanation:** Analyzing chained PowerShell pipelines previously depended on naive substring matching or regex splitting on pipe characters (`|`), which misidentified pipes inside double-quoted strings, subexpressions `$()`, or scriptblocks `{}`. `src/powershell_pipeline.rs` implements a pure-Rust lexical tokenizer (`PsLexer`, `PsTokenStream`) and a recursive statement walker that extracts pipeline stages and nested scriptblocks with full quote and brace tracking, eliminating heuristics and avoiding external .NET/pwsh runtime dependencies.
+  - **Example Scenario:**
+    ```powershell
+    Get-Process | Where-Object { $_.CPU -gt 100 } | Stop-Process
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: pipeline boundaries were estimated by substring matching, producing false positives on pipe characters in strings and missing commands inside scriptblock arguments. After: pure-Rust lexical tokenizer accurately parses pipeline stages and nested scriptblocks.
+
+
+### Bug Fixes
+
+* **Handle --help and --socket flags in vouch daemon without blocking on socket creation**
+  - **Problem & Explanation:** Invoking `vouch daemon --help` or specifying a custom `--socket` parameter previously attempted to bind or open the default socket immediately before evaluating command line flags, resulting in blocking behavior or permission errors when requesting usage assistance. `src/main.rs` extracts CLI flags prior to daemon initialization, allowing `--help`, `--version`, and `--socket` arguments to be parsed and handled cleanly without side effects.
+  - **Example Scenario:**
+    ```bash
+    vouch daemon --help
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: `vouch daemon --help` attempted socket binding and failed or hung if an instance was running. After: flag arguments are parsed first, printing help or configuring socket paths immediately.
+
 ## 0.55.0 (2026-10-03)
 
 

@@ -377,6 +377,82 @@ impl<'a> Visit<'a> for JsVisitor {
     }
 }
 
+/// Extract dynamically inferred capabilities from a JavaScript/Node.js script AST.
+pub fn extract_capabilities(src: &str) -> crate::capability::CapabilitySet {
+    use crate::capability::CapabilitySet;
+
+    let allocator = Allocator::default();
+    let source_type = SourceType::mjs().with_typescript(true);
+    let options = ParseOptions {
+        parse_regular_expression: false,
+        allow_return_outside_function: true,
+        ..ParseOptions::default()
+    };
+
+    let ret = Parser::new(&allocator, src, source_type)
+        .with_options(options)
+        .parse();
+
+    let mut caps = CapabilitySet::EMPTY;
+
+    fn check_js_mod(spec: &str, caps: &mut CapabilitySet) {
+        let normalized = spec.strip_prefix("node:").unwrap_or(spec);
+        match normalized {
+            "net" | "http" | "https" | "dgram" | "undici" | "axios" | "tls" | "dns" | "http2" => {
+                caps.network = true;
+            }
+            "child_process" | "cluster" => {
+                caps.daemon = true;
+            }
+            "fs" | "fs/promises" => {
+                caps.external_paths = true;
+            }
+            _ => {}
+        }
+    }
+
+    for stmt in &ret.program.body {
+        match stmt {
+            Statement::ImportDeclaration(decl) => {
+                check_js_mod(decl.source.value.as_str(), &mut caps);
+            }
+            Statement::ExpressionStatement(expr_stmt) => {
+                if let Expression::CallExpression(call) = &expr_stmt.expression {
+                    if let Expression::Identifier(ident) = &call.callee {
+                        if ident.name == "require" {
+                            if let Some(arg) = call.arguments.first() {
+                                if let Some(Expression::StringLiteral(s)) = arg.as_expression() {
+                                    check_js_mod(s.value.as_str(), &mut caps);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Statement::VariableDeclaration(var_decl) => {
+                for decl in &var_decl.declarations {
+                    if let Some(init) = &decl.init {
+                        if let Expression::CallExpression(call) = init {
+                            if let Expression::Identifier(ident) = &call.callee {
+                                if ident.name == "require" {
+                                    if let Some(arg) = call.arguments.first() {
+                                        if let Some(Expression::StringLiteral(s)) = arg.as_expression() {
+                                            check_js_mod(s.value.as_str(), &mut caps);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    caps
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -991,6 +991,28 @@ pub fn parse(src: &str) -> Result<Parsed, String> {
         }
     }
 
+    // Dynamic pipeline stage analysis for scriptblocks and method mutations (M5.2 & M6.5)
+    let analyzed = crate::powershell_pipeline::analyze_pipeline_stages(&out.commands);
+    if analyzed.len() > out.commands.len() {
+        for c in analyzed.into_iter().skip(out.commands.len()) {
+            if !out.commands.iter().any(|existing| existing.head == c.head && existing.args == c.args) {
+                out.push_cmd_with_expandable(
+                    c.head,
+                    c.args,
+                    crate::syntax::Order::Unordered,
+                    crate::syntax::InputSource::Unknown,
+                    true,
+                    None,
+                    vec![],
+                    Some(0),
+                    std::collections::HashMap::new(),
+                    false,
+                    std::collections::HashSet::new(),
+                );
+            }
+        }
+    }
+
     Ok(out)
 }
 

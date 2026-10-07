@@ -10,6 +10,7 @@
 //! - `session`: Context isolation boundaries (`SessionContext`, `DaemonSessionHandler`).
 //! - `transport`: Streaming client & connection multiplexing.
 
+pub mod lifecycle;
 pub mod protocol;
 pub mod session;
 pub mod transport;
@@ -24,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::{load, Config};
 use crate::protocol::{render_for, Decision, Host};
 
+pub use lifecycle::{daemonize_process, generate_session_token, install_signal_handlers, is_pid_alive, PidLockGuard};
 pub use protocol::{ClientFrame, DaemonFrame, DecisionOutput, EvaluateRequest};
 pub use session::{DaemonSessionHandler, SessionContext};
 pub use transport::StreamingClient;
@@ -279,6 +281,22 @@ pub fn default_socket_path(home: &str) -> PathBuf {
     crate::knowledge::config_dir(home).join("vouch.sock")
 }
 
+/// Resolve the default PID lock file path for the daemon on this machine.
+pub fn default_pid_path(home: &str) -> PathBuf {
+    if let Ok(p) = std::env::var("VOUCH_DAEMON_PID") {
+        return PathBuf::from(p);
+    }
+    crate::knowledge::config_dir(home).join("daemon.pid")
+}
+
+/// Resolve the default session token file path for the daemon on this machine.
+pub fn default_token_path(home: &str) -> PathBuf {
+    if let Ok(t) = std::env::var("VOUCH_DAEMON_TOKEN") {
+        return PathBuf::from(t);
+    }
+    crate::knowledge::config_dir(home).join("daemon.token")
+}
+
 /// Client helper: attempt to query daemon via local IPC socket.
 /// Returns Err if daemon socket is unavailable, refused, or times out.
 pub fn try_query_daemon(
@@ -342,6 +360,7 @@ pub fn run_daemon_server(
         let listener = UnixListener::bind(socket_path)
             .map_err(|e| format!("could not bind socket {}: {e}", socket_path.display()))?;
         let _ = std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600));
+        let _ = listener.set_nonblocking(true);
 
         let state = Arc::new(std::sync::RwLock::new(DaemonState::new(home)));
 
@@ -361,6 +380,7 @@ pub fn run_daemon_server(
         {
             match listener.accept() {
                 Ok((stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
                     if shutdown_flag
                         .as_ref()
                         .map(|f| f.load(Ordering::Relaxed))
@@ -377,6 +397,9 @@ pub fn run_daemon_server(
                         let _ = transport::handle_client_connection(stream, handler_clone, state_clone);
                     });
                 }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_micros(200));
+                }
                 Err(e) => {
                     eprintln!("daemon accept error: {e}");
                 }
@@ -391,4 +414,52 @@ pub fn run_daemon_server(
         let _ = (socket_path, home, shutdown_flag);
         Err("daemon server not supported on this platform".to_string())
     }
+}
+
+/// Run a daemon with full lifecycle management: PID locking, background detachment,
+/// signal trapping, and session token generation.
+pub fn run_managed_daemon(
+    socket_path: &Path,
+    pid_path: &Path,
+    token_path: Option<&Path>,
+    home: &str,
+    daemonize: bool,
+    log_path: Option<&Path>,
+) -> Result<(), String> {
+    // 1. Verify PID lock availability before detaching
+    if pid_path.exists() {
+        let _ = lifecycle::PidLockGuard::acquire(pid_path)?;
+    }
+
+    // 2. Detach into background if requested (Unix double-fork)
+    if daemonize {
+        lifecycle::daemonize_process(log_path)?;
+    }
+
+    // 3. Acquire PID file lock in the final process
+    let mut pid_lock = lifecycle::PidLockGuard::acquire(pid_path)?;
+
+    // 4. Generate and write session token
+    if let Some(tok_path) = token_path {
+        let token = lifecycle::generate_session_token();
+        if let Some(parent) = tok_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(tok_path, format!("{token}\n"));
+    }
+
+    // 5. Install signal handlers
+    let shutdown = Arc::new(AtomicBool::new(false));
+    lifecycle::install_signal_handlers(Arc::clone(&shutdown));
+
+    // 6. Run server loop
+    let result = run_daemon_server(socket_path, home, Some(shutdown));
+
+    // 7. Cleanup on exit
+    pid_lock.release();
+    if let Some(tok_path) = token_path {
+        let _ = std::fs::remove_file(tok_path);
+    }
+
+    result
 }

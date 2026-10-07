@@ -85,6 +85,29 @@ impl CapabilitySet {
     }
 }
 
+/// Trait for inspecting script AST bodies to dynamically infer capabilities.
+pub trait AstCapabilityExtractor: Send + Sync {
+    fn extract_capabilities(&self, script: &str, lang: &str) -> CapabilitySet;
+}
+
+/// Default AST capability extractor delegating to language parser visitors.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DefaultAstCapabilityExtractor;
+
+impl AstCapabilityExtractor for DefaultAstCapabilityExtractor {
+    fn extract_capabilities(&self, script: &str, lang: &str) -> CapabilitySet {
+        let trimmed = script.trim();
+        if trimmed.is_empty() {
+            return CapabilitySet::EMPTY;
+        }
+        match lang {
+            "python" | "py" => crate::python::extract_capabilities(trimmed),
+            "javascript" | "js" | "node" => crate::javascript::extract_capabilities(trimmed),
+            _ => CapabilitySet::EMPTY,
+        }
+    }
+}
+
 /// Extensible capability evaluator for individual commands.
 pub trait CapabilityEmitter: Send + Sync {
     fn required_capabilities(
@@ -95,7 +118,7 @@ pub trait CapabilityEmitter: Send + Sync {
     ) -> CapabilitySet;
 }
 
-/// Default capability emitter delegating to knowledge.toml capability rules.
+/// Default capability emitter delegating to knowledge.toml capability rules and script AST inspection.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DefaultCapabilityEmitter;
 
@@ -106,8 +129,35 @@ impl CapabilityEmitter for DefaultCapabilityEmitter {
         knowledge: &crate::guards::Knowledge,
         lang: &str,
     ) -> CapabilitySet {
-        let caps = crate::guards::capabilities_for_cmd(knowledge, cmd, lang);
-        CapabilitySet::from_slice(&caps)
+        let mut caps = CapabilitySet::from_slice(&crate::guards::capabilities_for_cmd(knowledge, cmd, lang));
+
+        let base_head = crate::guards::base_name(&cmd.head).to_lowercase();
+        let is_python = matches!(base_head.as_str(), "python" | "python3" | "py");
+        let is_node = matches!(base_head.as_str(), "node" | "nodejs" | "js");
+
+        if is_python || is_node {
+            for (idx, arg) in cmd.args.iter().enumerate() {
+                let unquoted_arg = crate::paths::unquote(arg);
+                if (is_python && (arg == "-c" || unquoted_arg == "-c")) || (is_node && (arg == "-e" || unquoted_arg == "-e")) {
+                    if let Some(script) = cmd.args.get(idx + 1) {
+                        let unquoted_script = crate::paths::unquote_snippet(script);
+                        let script_lang = if is_python { "python" } else { "javascript" };
+                        let ast_caps = DefaultAstCapabilityExtractor.extract_capabilities(&unquoted_script, script_lang);
+                        caps.union(ast_caps);
+                    }
+                } else if is_python && unquoted_arg.starts_with("-c") && unquoted_arg.len() > 2 {
+                    let script = crate::paths::unquote_snippet(&unquoted_arg[2..]);
+                    let ast_caps = DefaultAstCapabilityExtractor.extract_capabilities(&script, "python");
+                    caps.union(ast_caps);
+                } else if is_node && unquoted_arg.starts_with("-e") && unquoted_arg.len() > 2 {
+                    let script = crate::paths::unquote_snippet(&unquoted_arg[2..]);
+                    let ast_caps = DefaultAstCapabilityExtractor.extract_capabilities(&script, "javascript");
+                    caps.union(ast_caps);
+                }
+            }
+        }
+
+        caps
     }
 }
 
@@ -162,17 +212,32 @@ pub fn propagate_capabilities_with_emitter<E: CapabilityEmitter>(
         "sh" | "zsh" => "bash",
         other => other,
     };
+
+    let mut total_caps = CapabilitySet::default();
+
+    // If root language is python or javascript, extract direct AST capabilities
+    if normalized_lang == "python" || normalized_lang == "javascript" {
+        let root_ast = DefaultAstCapabilityExtractor.extract_capabilities(trimmed, normalized_lang);
+        total_caps.union(root_ast);
+    }
+
     let scan = if let Some(scanner) = crate::syntax::scanner_for(normalized_lang) {
         match scanner.scan(trimmed) {
             Ok(s) => s,
-            Err(_) => return CapabilitySet::default(),
+            Err(_) => return total_caps,
         }
     } else {
         match crate::shell::parse(trimmed) {
             Ok(s) => s,
-            Err(_) => return CapabilitySet::default(),
+            Err(_) => return total_caps,
         }
     };
+
+    for cmd in &scan.commands {
+        let caps = emitter.required_capabilities(cmd, kb, normalized_lang);
+        total_caps.union(caps);
+    }
+
     let expanded = crate::guards::expand_wrappers_with_sources(
         kb,
         &scan.commands,
@@ -182,5 +247,7 @@ pub fn propagate_capabilities_with_emitter<E: CapabilityEmitter>(
         normalized_lang,
         &|_| 4,
     );
-    capabilities_for_occurrences(kb, &expanded.occurrences, emitter)
+    let occurrences_caps = capabilities_for_occurrences(kb, &expanded.occurrences, emitter);
+    total_caps.union(occurrences_caps);
+    total_caps
 }

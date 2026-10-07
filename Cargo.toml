@@ -1,6 +1,6 @@
 [package]
 name = "vouch"
-version = "0.55.0"
+version = "0.56.0"
 edition = "2021"
 rust-version = "1.96"
 license = "WTFPL"
@@ -36,3 +36,4 @@ oxc_ast = "=0.150.0"
 oxc_span = "=0.150.0"
 oxc_ast_visit = "=0.150.0"
 poshtree = "0.4.2"
+libc = "0.2"

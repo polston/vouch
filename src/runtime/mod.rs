@@ -8,7 +8,10 @@ pub mod ebpf;
 pub mod noop;
 pub mod policy;
 
-pub use ebpf::EbpfVerifier;
+pub use ebpf::{
+    EbpfVerifier, MockRingBufferReader, PerfRingBufferReader, RawTraceEvent, RingBufferReader,
+    TracepointEventDecoder,
+};
 pub use noop::NoopVerifier;
 pub use policy::evaluate_trace;
 

@@ -2572,3 +2572,28 @@ fn missing_config_with_legacy_vouch_toml_prioritizes_move_and_forbids_copy_examp
     let _ = std::fs::remove_dir_all(&home);
 }
 
+#[test]
+fn daemon_help_flags_exit_immediately_without_hanging() {
+    for flag in ["--help", "-h", "help"] {
+        let out = Command::new(bin())
+            .arg("daemon")
+            .arg(flag)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "vouch daemon {flag} must exit 0");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.contains("usage: vouch daemon"), "must print usage: {stdout}");
+    }
+}
+
+#[test]
+fn daemon_unrecognized_flags_fail_fast_without_hanging() {
+    let out = Command::new(bin())
+        .arg("daemon")
+        .arg("--unrecognized-option")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "unrecognized flag must exit 2");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("unrecognized option"), "must report error: {stderr}");
+}

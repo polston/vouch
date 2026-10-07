@@ -21,18 +21,19 @@ mod daemon_tests {
         server_handle: Option<thread::JoinHandle<Result<(), String>>>,
     }
 
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
     impl TestEnv {
         fn new(_name: &str) -> Self {
             let pid = std::process::id();
-            let nonce = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let root = std::env::temp_dir().join(format!("vouch-dt-{pid}-{nonce}"));
+            let c = COUNTER.fetch_add(1, Ordering::SeqCst);
+            let root = std::env::temp_dir().join(format!("vouch-dt-{pid}-{c}"));
             let home = root.join("home");
-            let socket_path = PathBuf::from(format!("/tmp/vd-{pid}-{}.sock", nonce % 1000000));
+            let socket_path = PathBuf::from(format!("/tmp/vd-{pid}-{c}.sock"));
             let state_dir = root.join("state");
 
+            let _ = std::fs::remove_file(&socket_path);
+            let _ = std::fs::remove_dir_all(&root);
             fs::create_dir_all(&home.join(".config/vouch")).unwrap();
             fs::create_dir_all(&state_dir).unwrap();
 
