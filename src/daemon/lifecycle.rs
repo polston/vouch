@@ -23,10 +23,39 @@ pub fn is_pid_alive(pid: u32) -> bool {
             err.raw_os_error() == Some(libc::EPERM)
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        if pid == 0 {
+            return false;
+        }
+        if pid == std::process::id() {
+            return true;
+        }
+        extern "system" {
+            fn OpenProcess(desired_access: u32, inherit_handle: i32, process_id: u32) -> *mut std::ffi::c_void;
+            fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+            fn GetExitCodeProcess(handle: *mut std::ffi::c_void, exit_code: *mut u32) -> i32;
+            fn GetLastError() -> u32;
+        }
+        const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+        const STILL_ACTIVE: u32 = 259;
+        const ERROR_ACCESS_DENIED: u32 = 5;
+
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle.is_null() {
+                return GetLastError() == ERROR_ACCESS_DENIED;
+            }
+            let mut exit_code: u32 = 0;
+            let res = GetExitCodeProcess(handle, &mut exit_code);
+            CloseHandle(handle);
+            res != 0 && exit_code == STILL_ACTIVE
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = pid;
-        false
+        pid == std::process::id()
     }
 }
 

@@ -61,6 +61,7 @@ fn daemon_pid_lock_lifecycle_and_duplicate_rejection() {
 }
 
 #[test]
+#[cfg(unix)]
 fn daemon_server_runs_and_shuts_down_cleanly() {
     let tmp = make_temp_dir("daemon_srv_test");
     let pid = std::process::id();
