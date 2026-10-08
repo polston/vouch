@@ -252,3 +252,129 @@ fn ebpf_verifier_with_mock_ring_buffer_reader() {
     assert_eq!(trace.unpermitted_writes.len(), 1);
     assert_eq!(trace.unpermitted_writes[0], PathBuf::from("/var/log/system.log"));
 }
+
+#[test]
+fn zero_copy_ebpf_config_parsing() {
+    let cfg = load(
+        r#"
+version = 1
+[runtime.linux]
+ebpf_tracing = true
+zero_copy = true
+[runtime.ebpf]
+zero_copy = true
+buffer_page_count = 128
+"#,
+    )
+    .expect("config parses");
+
+    assert!(cfg.runtime.linux.zero_copy);
+    assert!(cfg.runtime.ebpf.zero_copy);
+    assert_eq!(cfg.runtime.ebpf.buffer_page_count, 128);
+}
+
+#[test]
+fn zero_copy_trace_decoder_handles_slices() {
+    use vouch::runtime::ZeroCopyTraceDecoder;
+
+    let mut buf = Vec::new();
+    ZeroCopyTraceDecoder::encode_record(1001, 257, 0o1, false, "/tmp/zero_copy.txt", &mut buf);
+    ZeroCopyTraceDecoder::encode_record(1002, 263, 0, false, "/etc/unpermitted.conf", &mut buf);
+
+    let (ev1, consumed1) = ZeroCopyTraceDecoder::decode_slice(&buf).expect("ev1 decodes");
+    assert_eq!(ev1.pid, 1001);
+    assert_eq!(ev1.syscall_nr, 257);
+    assert_eq!(ev1.filename, "/tmp/zero_copy.txt");
+    assert!(ev1.is_write);
+    assert_eq!(consumed1, 17 + "/tmp/zero_copy.txt".len() + 1);
+
+    let (ev2, consumed2) = ZeroCopyTraceDecoder::decode_slice(&buf[consumed1..]).expect("ev2 decodes");
+    assert_eq!(ev2.pid, 1002);
+    assert_eq!(ev2.syscall_nr, 263);
+    assert_eq!(ev2.filename, "/etc/unpermitted.conf");
+    assert!(ev2.is_write);
+    assert_eq!(consumed2, 17 + "/etc/unpermitted.conf".len() + 1);
+}
+
+#[test]
+fn zero_copy_trace_decoder_fails_closed_on_corrupt_slices() {
+    use vouch::runtime::ZeroCopyTraceDecoder;
+
+    let short_slice = [0u8; 10]; // Less than MIN_RECORD_LEN (17)
+    let res = ZeroCopyTraceDecoder::decode_slice(&short_slice);
+    assert!(res.is_err());
+
+    let invalid_utf8_slice = [
+        1, 0, 0, 0, // pid: 1
+        1, 1, 0, 0, 0, 0, 0, 0, // syscall: 257
+        1, 0, 0, 0, // flags: 1
+        1,    // explicit_write: 1
+        0xff, 0xff, 0, // invalid utf8 followed by NUL
+    ];
+    let res = ZeroCopyTraceDecoder::decode_slice(&invalid_utf8_slice);
+    assert!(res.is_err());
+}
+
+#[test]
+fn ebpf_verifier_with_mock_zero_copy_reader() {
+    use vouch::runtime::{MockZeroCopyReader, ZeroCopyRingBufferReader};
+
+    let cfg = test_config();
+    let mut reader = MockZeroCopyReader::new();
+    reader.add_record(7777, 257, 0o1, true, "/tmp/allowed_zero_copy.txt");
+    reader.add_record(7777, 263, 0, true, "/etc/shadow");
+    reader.simulate_dropped(5);
+    assert_eq!(reader.dropped_events(), 5);
+
+    let verifier = EbpfVerifier::with_zero_copy_reader("audit".into(), Box::new(reader));
+    assert!(verifier.is_supported());
+
+    let res = verifier.monitor_execution(7777, &cfg);
+    assert!(res.is_ok());
+    let trace = res.unwrap();
+    assert!(!trace.passed);
+    assert_eq!(trace.unpermitted_writes.len(), 1);
+    assert_eq!(trace.unpermitted_writes[0], PathBuf::from("/etc/shadow"));
+}
+
+#[test]
+fn zero_copy_batch_simulation_and_policy_evaluation() {
+    use vouch::runtime::{evaluate_trace_zero_copy, MockZeroCopyReader, ZeroCopyRingBufferReader};
+
+    let cfg = test_config();
+    let mut reader = MockZeroCopyReader::new();
+
+    for i in 0..100 {
+        reader.add_record(9000, 257, 0o1, true, &format!("/tmp/file_{i}.tmp"));
+    }
+    // Add one unpermitted write
+    reader.add_record(9000, 257, 0o1, true, "/var/run/unpermitted.pid");
+
+    let mut unpermitted_count = 0;
+    let mut unpermitted_paths = Vec::new();
+    let count = reader
+        .consume_events(&mut |ev| {
+            if !vouch::runtime::evaluate_event_borrowed(&ev, &cfg) {
+                unpermitted_count += 1;
+                unpermitted_paths.push(PathBuf::from(ev.filename));
+            }
+            Ok(())
+        })
+        .expect("events consumed");
+
+    assert_eq!(count, 101);
+    assert_eq!(unpermitted_count, 1);
+    assert_eq!(unpermitted_paths, vec![PathBuf::from("/var/run/unpermitted.pid")]);
+
+    // Also test evaluate_trace_zero_copy over slice-decoded events
+    let mut raw_buf = Vec::new();
+    vouch::runtime::ZeroCopyTraceDecoder::encode_record(9001, 257, 0o1, true, "/tmp/allowed.log", &mut raw_buf);
+    vouch::runtime::ZeroCopyTraceDecoder::encode_record(9001, 257, 0o1, true, "/etc/shadow", &mut raw_buf);
+
+    let (ev1, c1) = vouch::runtime::ZeroCopyTraceDecoder::decode_slice(&raw_buf).unwrap();
+    let (ev2, _) = vouch::runtime::ZeroCopyTraceDecoder::decode_slice(&raw_buf[c1..]).unwrap();
+    let trace = evaluate_trace_zero_copy(vec![ev1, ev2], &cfg);
+    assert!(!trace.passed);
+    assert_eq!(trace.unpermitted_writes.len(), 1);
+    assert_eq!(trace.unpermitted_writes[0], PathBuf::from("/etc/shadow"));
+}

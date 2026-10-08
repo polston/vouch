@@ -43,8 +43,19 @@ The `[daemon]` table: persistent gating daemon runtime options.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `fail_closed` | boolean | true | Whether the daemon fails closed on internal errors. |
+| `shared_memory` | boolean | false | Enable shared-memory IPC fallback transport. |
+| `shm_size_kb` | integer | 1024 | Size of the shared memory ring buffer in kilobytes (default 1024). |
 | `socket_path` | string | "~/.config/vouch/vouch.sock" | Local socket path (Unix domain socket or Windows named pipe/socket). |
 | `timeout_ms` | integer | 50 | Client connect and read timeout in milliseconds before local fallback. |
+
+### `EbpfRuntimeConfig`
+
+The `[runtime.ebpf]` table: direct eBPF options.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `buffer_page_count` | integer | 64 |  |
+| `zero_copy` | boolean | false |  |
 
 ### `FileConfig`
 
@@ -97,6 +108,7 @@ The `[runtime.linux]` table: Linux runtime verifications (eBPF).
 | `ebpf_mode` | string | "audit" |  |
 | `ebpf_tracing` | boolean | false |  |
 | `trace_ring_buffer_pages` | integer | 64 |  |
+| `zero_copy` | boolean | false |  |
 
 ### `ProgramLocationTrust`
 
@@ -150,6 +162,7 @@ The `[runtime]` table: platform-specific runtime verification settings.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
+| `ebpf` | EbpfRuntimeConfig | (none) |  |
 | `linux` | LinuxRuntimeConfig | (none) |  |
 
 ### `ShadowSection`

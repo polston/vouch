@@ -406,8 +406,76 @@ impl PsTokenStream {
     }
 }
 
+/// Origin and taint classification for a variable within a PowerShell scriptblock scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VariableOrigin {
+    Literal(String),
+    DynamicInput { source: String }, // e.g. "Read-Host", "$input", "Get-Content"
+    PipelineItem,                    // "$_" or "$PSItem"
+    CmdletResult { cmdlet: String }, // e.g. "Get-Process", "Get-ChildItem"
+    Environment(String),             // e.g. "$env:TEMP", "$env:PATH"
+    TaintedExpression,               // Derived or combined with dynamic untrusted input
+}
+
+/// Scoped symbol table tracking variable assignments and dataflow taint within a scriptblock.
+#[derive(Debug, Clone)]
+pub struct VariableTaintTable {
+    variables: std::collections::HashMap<String, VariableOrigin>,
+}
+
+impl Default for VariableTaintTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl VariableTaintTable {
+    pub fn new() -> Self {
+        let mut table = Self {
+            variables: std::collections::HashMap::new(),
+        };
+        table.set("$_", VariableOrigin::PipelineItem);
+        table.set("$PSItem", VariableOrigin::PipelineItem);
+        table
+    }
+
+    fn normalize_key(name: &str) -> String {
+        let trimmed = name.trim();
+        let key = if !trimmed.starts_with('$') {
+            format!("${}", trimmed)
+        } else {
+            trimmed.to_string()
+        };
+        key.to_lowercase()
+    }
+
+    pub fn set(&mut self, name: &str, origin: VariableOrigin) {
+        self.variables.insert(Self::normalize_key(name), origin);
+    }
+
+    pub fn get(&self, name: &str) -> Option<&VariableOrigin> {
+        self.variables.get(&Self::normalize_key(name))
+    }
+
+    pub fn is_tainted_or_dynamic(&self, name: &str) -> bool {
+        match self.get(name) {
+            Some(VariableOrigin::DynamicInput { .. }) | Some(VariableOrigin::TaintedExpression) => true,
+            _ => false,
+        }
+    }
+}
+
 /// Parse scriptblock text to extract synthesized guard commands for destructive operations.
 pub fn extract_scriptblock_synthesized_commands(script: &str) -> Vec<Cmd> {
+    let mut taint_table = VariableTaintTable::new();
+    extract_scriptblock_synthesized_commands_with_table(script, &mut taint_table)
+}
+
+/// Parse scriptblock text with a scoped variable taint table.
+pub fn extract_scriptblock_synthesized_commands_with_table(
+    script: &str,
+    taint_table: &mut VariableTaintTable,
+) -> Vec<Cmd> {
     let mut out = Vec::new();
     let tokens = PsLexer::tokenize(script);
 
@@ -427,7 +495,7 @@ pub fn extract_scriptblock_synthesized_commands(script: &str) -> Vec<Cmd> {
                     current_stmt.push(tok);
                 } else if brace_depth == 1 {
                     if !current_stmt.is_empty() {
-                        analyze_statement(&current_stmt, &mut out);
+                        analyze_statement(&current_stmt, taint_table, &mut out);
                         current_stmt.clear();
                     }
                 }
@@ -437,7 +505,7 @@ pub fn extract_scriptblock_synthesized_commands(script: &str) -> Vec<Cmd> {
             }
             PsToken::Semicolon | PsToken::Newline if brace_depth <= 1 => {
                 if !current_stmt.is_empty() {
-                    analyze_statement(&current_stmt, &mut out);
+                    analyze_statement(&current_stmt, taint_table, &mut out);
                     current_stmt.clear();
                 }
             }
@@ -448,14 +516,51 @@ pub fn extract_scriptblock_synthesized_commands(script: &str) -> Vec<Cmd> {
     }
 
     if !current_stmt.is_empty() {
-        analyze_statement(&current_stmt, &mut out);
+        analyze_statement(&current_stmt, taint_table, &mut out);
     }
 
     out
 }
 
-fn analyze_statement(stmt: &[PsToken], out: &mut Vec<Cmd>) {
-    // 1. Method invocations: look for MemberAccess followed by OpenParen
+fn analyze_statement(stmt: &[PsToken], taint_table: &mut VariableTaintTable, out: &mut Vec<Cmd>) {
+    // 1. Variable assignments: look for $var = <expr>
+    for (idx, tok) in stmt.iter().enumerate() {
+        if let PsToken::Other(op) = tok {
+            if (op == "=" || op == "+=") && idx > 0 {
+                if let PsToken::Variable(var) = &stmt[idx - 1] {
+                    let rhs = &stmt[idx + 1..];
+                    let origin = classify_rhs_origin(rhs, taint_table);
+                    taint_table.set(var, origin);
+                }
+            }
+        }
+    }
+
+    // 2. Foreach loops: foreach ($var in $collection_or_cmd)
+    if let Some(PsToken::Identifier(head)) = stmt.first() {
+        if head.eq_ignore_ascii_case("foreach") {
+            let filtered: Vec<&PsToken> = stmt
+                .iter()
+                .filter(|t| !matches!(t, PsToken::OpenParen | PsToken::CloseParen | PsToken::Newline))
+                .collect();
+            if filtered.len() >= 4 {
+                if let (PsToken::Variable(var), PsToken::Identifier(in_kw), PsToken::Identifier(cmd)) =
+                    (filtered[1], filtered[2], filtered[3])
+                {
+                    if in_kw.eq_ignore_ascii_case("in") {
+                        let cmd_lower = cmd.to_lowercase();
+                        if cmd_lower.starts_with("get-process") || cmd_lower == "gps" {
+                            taint_table.set(var, VariableOrigin::CmdletResult { cmdlet: "Get-Process".into() });
+                        } else if cmd_lower.starts_with("get-childitem") || cmd_lower == "gci" || cmd_lower == "dir" || cmd_lower == "ls" {
+                            taint_table.set(var, VariableOrigin::CmdletResult { cmdlet: "Get-ChildItem".into() });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Method invocations: look for MemberAccess followed by OpenParen
     for i in 0..stmt.len() {
         if let PsToken::MemberAccess(member) = &stmt[i] {
             if let Some(PsToken::OpenParen) = stmt.get(i + 1) {
@@ -477,20 +582,30 @@ fn analyze_statement(stmt: &[PsToken], out: &mut Vec<Cmd>) {
                     }
                 }
 
+                let origin = taint_table.get(&var_name);
+
                 if m == "kill" || m == "terminate" {
+                    let mut args = vec!["-Id".to_string(), format!("{}.Id", var_name)];
+                    if let Some(VariableOrigin::CmdletResult { cmdlet }) = origin {
+                        args.push(format!("origin:{cmdlet}"));
+                    }
                     out.push(Cmd {
                         head: "Stop-Process".to_string(),
-                        args: vec!["-Id".to_string(), format!("{}.Id", var_name)],
+                        args,
                         ..Default::default()
                     });
                 } else if m == "delete" || m == "remove" {
+                    let mut args = vec![
+                        "-Recurse".to_string(),
+                        "-Path".to_string(),
+                        format!("{}.FullName", var_name),
+                    ];
+                    if taint_table.is_tainted_or_dynamic(&var_name) {
+                        args.push("untrusted_input".to_string());
+                    }
                     out.push(Cmd {
                         head: "Remove-Item".to_string(),
-                        args: vec![
-                            "-Recurse".to_string(),
-                            "-Path".to_string(),
-                            format!("{}.FullName", var_name),
-                        ],
+                        args,
                         ..Default::default()
                     });
                 }
@@ -498,7 +613,7 @@ fn analyze_statement(stmt: &[PsToken], out: &mut Vec<Cmd>) {
         }
     }
 
-    // 2. Destructive command invocations
+    // 4. Destructive command invocations
     if let Some(first) = stmt.first() {
         if let PsToken::Identifier(head) = first {
             let name_lower = head.to_lowercase();
@@ -508,17 +623,32 @@ fn analyze_statement(stmt: &[PsToken], out: &mut Vec<Cmd>) {
                 || matches!(name_lower.as_str(), "rm" | "del" | "erase" | "spps" | "kill")
             {
                 let mut args = Vec::new();
+                let mut has_untrusted_var = false;
+
                 for tok in &stmt[1..] {
                     match tok {
+                        PsToken::Variable(v) => {
+                            args.push(v.clone());
+                            if taint_table.is_tainted_or_dynamic(v) {
+                                has_untrusted_var = true;
+                            }
+                        }
                         PsToken::Identifier(s)
                         | PsToken::Other(s)
-                        | PsToken::Variable(s)
                         | PsToken::StringLiteral(s) => {
                             args.push(s.clone());
                         }
                         _ => {}
                     }
                 }
+
+                // If variable passed is untrusted/dynamic, ensure -Recurse is included so path guards evaluate
+                if has_untrusted_var && (name_lower.starts_with("remove-") || matches!(name_lower.as_str(), "rm" | "del")) {
+                    if !args.iter().any(|a| a.eq_ignore_ascii_case("-recurse")) {
+                        args.push("-Recurse".to_string());
+                    }
+                }
+
                 out.push(Cmd {
                     head: head.clone(),
                     args,
@@ -529,29 +659,104 @@ fn analyze_statement(stmt: &[PsToken], out: &mut Vec<Cmd>) {
     }
 }
 
+fn classify_rhs_origin(rhs: &[PsToken], taint_table: &VariableTaintTable) -> VariableOrigin {
+    let meaningful: Vec<&PsToken> = rhs
+        .iter()
+        .filter(|t| !matches!(t, PsToken::OpenParen | PsToken::CloseParen | PsToken::Newline))
+        .collect();
+
+    if meaningful.is_empty() {
+        return VariableOrigin::Literal(String::new());
+    }
+
+    // Check if right-hand side is a command invocation
+    if let Some(PsToken::Identifier(cmd)) = meaningful.first() {
+        let cmd_lower = cmd.to_lowercase();
+        if cmd_lower == "read-host" || cmd_lower == "get-content" || cmd_lower == "gc" {
+            return VariableOrigin::DynamicInput { source: (*cmd).clone() };
+        } else if cmd_lower.starts_with("get-process") || cmd_lower == "gps" {
+            return VariableOrigin::CmdletResult { cmdlet: "Get-Process".into() };
+        } else if cmd_lower.starts_with("get-childitem") || cmd_lower == "gci" || cmd_lower == "dir" || cmd_lower == "ls" {
+            return VariableOrigin::CmdletResult { cmdlet: "Get-ChildItem".into() };
+        } else if cmd_lower.starts_with("get-") {
+            return VariableOrigin::CmdletResult { cmdlet: (*cmd).clone() };
+        } else {
+            return VariableOrigin::DynamicInput { source: (*cmd).clone() };
+        }
+    }
+
+    // Check if right-hand side references other variables
+    for tok in &meaningful {
+        if let PsToken::Variable(v) = tok {
+            let v_lower = v.to_lowercase();
+            if v_lower.starts_with("$env:") {
+                return VariableOrigin::Environment((*v).clone());
+            } else if taint_table.is_tainted_or_dynamic(v) {
+                return VariableOrigin::TaintedExpression;
+            } else if let Some(orig) = taint_table.get(v) {
+                return orig.clone();
+            }
+        }
+    }
+
+    // Pure string literal
+    if meaningful.iter().all(|t| matches!(t, PsToken::StringLiteral(_))) {
+        let s: String = meaningful
+            .iter()
+            .filter_map(|t| match t {
+                PsToken::StringLiteral(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        return VariableOrigin::Literal(s);
+    }
+
+    VariableOrigin::Literal("value".to_string())
+}
+
 /// Inspect a list of parsed PowerShell commands to extract member mutations
 /// and classify pipeline stages.
 pub fn analyze_pipeline_stages(cmds: &[Cmd]) -> Vec<Cmd> {
     let mut out = Vec::new();
+    let mut taint_table = VariableTaintTable::new();
 
     for cmd in cmds {
         out.push(cmd.clone());
 
-        // Check if command is an iterator or filter cmdlet
         let head_lower = cmd.head.to_lowercase();
+
+        // Dataflow origin propagation across pipeline stages
+        if head_lower == "read-host" || head_lower == "get-content" || head_lower == "gc" {
+            taint_table.set("$_", VariableOrigin::DynamicInput { source: cmd.head.clone() });
+        } else if head_lower == "get-process" || head_lower == "gps" {
+            taint_table.set("$_", VariableOrigin::CmdletResult { cmdlet: "Get-Process".into() });
+        } else if head_lower == "get-childitem" || head_lower == "gci" || head_lower == "dir" || head_lower == "ls" {
+            taint_table.set("$_", VariableOrigin::CmdletResult { cmdlet: "Get-ChildItem".into() });
+        }
+
+        // Check if command is an iterator or filter cmdlet
         let is_filter = matches!(head_lower.as_str(), "where-object" | "where" | "?");
         let is_iterator = matches!(head_lower.as_str(), "foreach-object" | "foreach" | "%");
 
         if is_filter || is_iterator {
             for arg in &cmd.args {
-                let synthesized = extract_scriptblock_synthesized_commands(arg);
+                let synthesized = extract_scriptblock_synthesized_commands_with_table(arg, &mut taint_table);
                 out.extend(synthesized);
+            }
+        } else {
+            // Also inspect scriptblock arguments in commands like `& { ... }` or multi-statement blocks
+            for arg in &cmd.args {
+                if arg.trim_start().starts_with('{') && arg.trim_end().ends_with('}') {
+                    let synthesized = extract_scriptblock_synthesized_commands_with_table(arg, &mut taint_table);
+                    out.extend(synthesized);
+                }
             }
         }
     }
 
     out
 }
+
 
 /// Returns true if a scriptblock text represents a pure read-only filter predicate.
 pub fn is_pure_predicate_block(script: &str) -> bool {

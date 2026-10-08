@@ -112,6 +112,18 @@
           "type": "boolean",
           "default": true
         },
+        "shared_memory": {
+          "description": "Enable shared-memory IPC fallback transport.",
+          "type": "boolean",
+          "default": false
+        },
+        "shm_size_kb": {
+          "description": "Size of the shared memory ring buffer in kilobytes (default 1024).",
+          "type": "integer",
+          "format": "uint32",
+          "default": 1024,
+          "minimum": 0
+        },
         "socket_path": {
           "description": "Local socket path (Unix domain socket or Windows named pipe/socket).",
           "type": "string",
@@ -123,6 +135,23 @@
           "format": "uint64",
           "default": 50,
           "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "EbpfRuntimeConfig": {
+      "description": "The `[runtime.ebpf]` table: direct eBPF options.",
+      "type": "object",
+      "properties": {
+        "buffer_page_count": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 64,
+          "minimum": 0
+        },
+        "zero_copy": {
+          "type": "boolean",
+          "default": false
         }
       },
       "additionalProperties": false
@@ -270,6 +299,10 @@
           "format": "uint32",
           "default": 64,
           "minimum": 0
+        },
+        "zero_copy": {
+          "type": "boolean",
+          "default": false
         }
       },
       "additionalProperties": false
@@ -388,6 +421,9 @@
       "description": "The `[runtime]` table: platform-specific runtime verification settings.",
       "type": "object",
       "properties": {
+        "ebpf": {
+          "$ref": "#/$defs/EbpfRuntimeConfig"
+        },
         "linux": {
           "$ref": "#/$defs/LinuxRuntimeConfig"
         }

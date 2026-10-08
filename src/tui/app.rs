@@ -21,6 +21,9 @@ pub struct TuiApp {
     pub selected_idx: usize,
     pub status_message: String,
     pub show_preview: bool,
+    pub search_mode: bool,
+    pub search_query: String,
+    pub search_filter_active: bool,
 }
 
 impl TuiApp {
@@ -29,15 +32,111 @@ impl TuiApp {
             engine,
             active_tab: ViewTab::Candidates,
             selected_idx: 0,
-            status_message: "Press [Tab] to switch views, [a] to accept rule, [p] to preview TOML, [q] to quit".to_string(),
+            status_message: "Press [Tab] to switch views, [/] to search, [a] to accept rule, [p] to preview TOML, [q] to quit".to_string(),
             show_preview: false,
+            search_mode: false,
+            search_query: String::new(),
+            search_filter_active: false,
         }
     }
 
+    pub fn matching_decision_indices(&self) -> Vec<usize> {
+        if !self.search_filter_active && !self.search_mode {
+            return (0..self.engine.decisions.len()).collect();
+        }
+        if self.search_query.trim().is_empty() {
+            return (0..self.engine.decisions.len()).collect();
+        }
+
+        let regex_opt = regex::Regex::new(&format!("(?i){}", self.search_query)).ok();
+        let query_lower = self.search_query.to_lowercase();
+
+        self.engine
+            .decisions
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, d)| {
+                let matches = if let Some(ref re) = regex_opt {
+                    re.is_match(&d.cmd) || re.is_match(&d.verdict) || re.is_match(&d.reason)
+                } else {
+                    d.cmd.to_lowercase().contains(&query_lower)
+                        || d.verdict.to_lowercase().contains(&query_lower)
+                        || d.reason.to_lowercase().contains(&query_lower)
+                };
+                if matches {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
     pub fn handle_event(&mut self, event: TerminalEvent) -> AppStatus {
+        if self.search_mode {
+            match event {
+                TerminalEvent::Key(KeyCode::Escape) => {
+                    self.search_mode = false;
+                    self.search_filter_active = false;
+                    self.search_query.clear();
+                    self.selected_idx = 0;
+                    self.status_message = "Search cancelled.".to_string();
+                }
+                TerminalEvent::Key(KeyCode::Enter) => {
+                    self.search_mode = false;
+                    self.search_filter_active = !self.search_query.is_empty();
+                    let count = self.matching_decision_indices().len();
+                    self.selected_idx = 0;
+                    self.status_message = format!("Filter active: \"{}\" ({} match(es))", self.search_query, count);
+                }
+                TerminalEvent::Key(KeyCode::Backspace) => {
+                    self.search_query.pop();
+                    self.selected_idx = 0;
+                }
+                TerminalEvent::Key(KeyCode::Char(c)) => {
+                    self.search_query.push(c);
+                    self.selected_idx = 0;
+                }
+                _ => {}
+            }
+            return AppStatus::Running;
+        }
+
         match event {
-            TerminalEvent::Key(KeyCode::Char('q')) | TerminalEvent::Key(KeyCode::Escape) => {
+            TerminalEvent::Key(KeyCode::Char('q')) => {
                 return AppStatus::Exit;
+            }
+            TerminalEvent::Key(KeyCode::Escape) => {
+                if self.search_filter_active {
+                    self.search_filter_active = false;
+                    self.search_query.clear();
+                    self.selected_idx = 0;
+                    self.status_message = "Search filter cleared.".to_string();
+                } else {
+                    return AppStatus::Exit;
+                }
+            }
+            TerminalEvent::Key(KeyCode::Char('/')) => {
+                self.active_tab = ViewTab::Decisions;
+                self.search_mode = true;
+                self.selected_idx = 0;
+                self.status_message = "Search mode: enter regex filter, [Enter] apply, [Esc] cancel".to_string();
+            }
+            TerminalEvent::Key(KeyCode::Char('n')) if self.search_filter_active => {
+                let matches = self.matching_decision_indices();
+                if !matches.is_empty() {
+                    self.selected_idx = (self.selected_idx + 1) % matches.len();
+                }
+            }
+            TerminalEvent::Key(KeyCode::Char('N')) if self.search_filter_active => {
+                let matches = self.matching_decision_indices();
+                if !matches.is_empty() {
+                    if self.selected_idx == 0 {
+                        self.selected_idx = matches.len() - 1;
+                    } else {
+                        self.selected_idx -= 1;
+                    }
+                }
             }
             TerminalEvent::Key(KeyCode::Tab) => {
                 self.active_tab = match self.active_tab {
@@ -76,7 +175,13 @@ impl TuiApp {
     fn current_list_len(&self) -> usize {
         match self.active_tab {
             ViewTab::Candidates => self.engine.candidates.len(),
-            ViewTab::Decisions => self.engine.decisions.len(),
+            ViewTab::Decisions => {
+                if self.search_filter_active || self.search_mode {
+                    self.matching_decision_indices().len()
+                } else {
+                    self.engine.decisions.len()
+                }
+            }
         }
     }
 
@@ -141,31 +246,55 @@ impl TuiApp {
                 }
             }
             ViewTab::Decisions => {
-                if self.engine.decisions.is_empty() {
-                    out.push_str("No recent decisions found in journal.\n");
+                let match_indices = self.matching_decision_indices();
+                if match_indices.is_empty() {
+                    if self.search_filter_active || self.search_mode {
+                        out.push_str(&format!("No decisions matching filter \"{}\".\n", self.search_query));
+                    } else {
+                        out.push_str("No recent decisions found in journal.\n");
+                    }
                 } else {
+                    if self.search_filter_active || self.search_mode {
+                        out.push_str(&format!(
+                            "  [Filter: \"{}\" (match {}/{})]\n",
+                            self.search_query,
+                            if match_indices.is_empty() { 0 } else { self.selected_idx + 1 },
+                            match_indices.len()
+                        ));
+                    }
                     out.push_str("  #   Verdict  Outcome     Command\n");
-                    for (i, d) in self.engine.decisions.iter().take(15).enumerate() {
-                        let cursor = if i == self.selected_idx { ">" } else { " " };
+                    for (display_idx, &real_idx) in match_indices.iter().take(15).enumerate() {
+                        let d = &self.engine.decisions[real_idx];
+                        let cursor = if display_idx == self.selected_idx { ">" } else { " " };
                         let short_cmd: String = d.cmd.chars().take(45).collect();
                         out.push_str(&format!(
                             "{} {:2}. {:7}  {:10}  {}\n",
-                            cursor, i + 1, d.verdict.to_uppercase(), d.outcome, short_cmd
+                            cursor, display_idx + 1, d.verdict.to_uppercase(), d.outcome, short_cmd
                         ));
                     }
-                    if let Some(selected) = self.engine.decisions.get(self.selected_idx) {
-                        out.push_str("\n--- Decision Detail ---\n");
-                        out.push_str(&format!("Full Command: {}\n", selected.cmd));
-                        out.push_str(&format!("Verdict: {} ({})\n", selected.verdict, selected.outcome));
-                        out.push_str(&format!("Reason:\n  {}\n", selected.reason.replace('\n', "\n  ")));
+                    if let Some(&selected_real_idx) = match_indices.get(self.selected_idx) {
+                        if let Some(selected) = self.engine.decisions.get(selected_real_idx) {
+                            out.push_str("\n--- Decision Detail ---\n");
+                            out.push_str(&format!("Full Command: {}\n", selected.cmd));
+                            out.push_str(&format!("Verdict: {} ({})\n", selected.verdict, selected.outcome));
+                            out.push_str(&format!("Reason:\n  {}\n", selected.reason.replace('\n', "\n  ")));
+                        }
                     }
                 }
             }
         }
 
         out.push_str("--------------------------------------------------------------------------------\n");
-        out.push_str(&format!("Status: {}\n", self.status_message));
-        out.push_str("[j/k]: Nav | [Tab]: View | [a]: Accept Rule | [p]: Preview TOML | [q]: Quit\n");
+        if self.search_mode {
+            out.push_str(&format!("Search: {}_\n", self.search_query));
+            out.push_str("[Enter]: Apply Filter | [Esc]: Cancel Search\n");
+        } else if self.search_filter_active {
+            out.push_str(&format!("Status: Filtered on \"{}\" ({}/{} matches)\n", self.search_query, self.selected_idx + 1, self.matching_decision_indices().len()));
+            out.push_str("[j/k]: Nav | [n/N]: Next/Prev Match | [Esc]: Clear Filter | [Tab]: View | [q]: Quit\n");
+        } else {
+            out.push_str(&format!("Status: {}\n", self.status_message));
+            out.push_str("[j/k]: Nav | [/]: Search | [Tab]: View | [a]: Accept Rule | [p]: Preview TOML | [q]: Quit\n");
+        }
         out
     }
 
@@ -173,6 +302,11 @@ impl TuiApp {
         backend.enter_raw_mode().map_err(|e| e.to_string())?;
 
         loop {
+            let new_events = self.engine.poll_live_events();
+            if new_events > 0 && !self.search_mode && !self.search_filter_active {
+                self.status_message = format!("Live stream: ingested {new_events} new decision(s)");
+            }
+
             let frame = self.render();
             let _ = backend.write_str("\x1b[2J\x1b[H"); // clear screen & home
             let _ = backend.write_str(&frame);

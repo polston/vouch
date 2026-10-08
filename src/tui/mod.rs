@@ -9,7 +9,7 @@ pub mod engine;
 
 pub use app::{AppStatus, TuiApp, ViewTab};
 pub use backend::{ConsoleBackend, MockTerminalBackend, TerminalBackend, TerminalEvent, KeyCode};
-pub use engine::{DecisionItem, ReviewCandidate, TuiEngine};
+pub use engine::{DecisionItem, JournalTailReader, ReviewCandidate, TuiEngine};
 
 /// Launch interactive review session on the active terminal.
 pub fn launch_interactive(home_dir: &str) -> Result<(), String> {

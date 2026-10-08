@@ -9,11 +9,13 @@ pub mod noop;
 pub mod policy;
 
 pub use ebpf::{
-    EbpfVerifier, MockRingBufferReader, PerfRingBufferReader, RawTraceEvent, RingBufferReader,
-    TracepointEventDecoder,
+    BorrowedTraceEvent, EbpfVerifier, MockRingBufferReader, MockZeroCopyReader,
+    PerfRingBufferReader, RawTraceEvent, RingBufferReader, TracepointEventDecoder,
+    ZeroCopyRingBufferReader, ZeroCopyTraceDecoder,
 };
 pub use noop::NoopVerifier;
-pub use policy::evaluate_trace;
+pub use policy::{evaluate_event_borrowed, evaluate_trace, evaluate_trace_zero_copy};
+
 
 use std::path::PathBuf;
 use crate::config::Config;

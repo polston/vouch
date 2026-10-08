@@ -411,44 +411,47 @@ pub fn extract_capabilities(src: &str) -> crate::capability::CapabilitySet {
         }
     }
 
-    for stmt in &ret.program.body {
-        match stmt {
-            Statement::ImportDeclaration(decl) => {
-                check_js_mod(decl.source.value.as_str(), &mut caps);
-            }
-            Statement::ExpressionStatement(expr_stmt) => {
-                if let Expression::CallExpression(call) = &expr_stmt.expression {
-                    if let Expression::Identifier(ident) = &call.callee {
-                        if ident.name == "require" {
-                            if let Some(arg) = call.arguments.first() {
-                                if let Some(Expression::StringLiteral(s)) = arg.as_expression() {
-                                    check_js_mod(s.value.as_str(), &mut caps);
-                                }
-                            }
+    struct JsCapVisitor<'a> {
+        caps: &'a mut CapabilitySet,
+        _phantom: std::marker::PhantomData<&'a ()>,
+    }
+
+    impl<'a> Visit<'a> for JsCapVisitor<'a> {
+        fn visit_import_declaration(&mut self, decl: &ImportDeclaration<'a>) {
+            check_js_mod(decl.source.value.as_str(), self.caps);
+            walk::walk_import_declaration(self, decl);
+        }
+
+        fn visit_call_expression(&mut self, expr: &CallExpression<'a>) {
+            if let Expression::Identifier(ident) = &expr.callee {
+                if ident.name == "require" {
+                    if let Some(arg) = expr.arguments.first() {
+                        if let Some(Expression::StringLiteral(s)) = arg.as_expression() {
+                            check_js_mod(s.value.as_str(), self.caps);
                         }
                     }
+                } else if ident.name == "eval" {
+                    self.caps.dynamic_eval = true;
                 }
             }
-            Statement::VariableDeclaration(var_decl) => {
-                for decl in &var_decl.declarations {
-                    if let Some(init) = &decl.init {
-                        if let Expression::CallExpression(call) = init {
-                            if let Expression::Identifier(ident) = &call.callee {
-                                if ident.name == "require" {
-                                    if let Some(arg) = call.arguments.first() {
-                                        if let Some(Expression::StringLiteral(s)) = arg.as_expression() {
-                                            check_js_mod(s.value.as_str(), &mut caps);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+            walk::walk_call_expression(self, expr);
+        }
+
+        fn visit_new_expression(&mut self, expr: &NewExpression<'a>) {
+            if let Expression::Identifier(ident) = &expr.callee {
+                if ident.name == "Function" {
+                    self.caps.dynamic_eval = true;
                 }
             }
-            _ => {}
+            walk::walk_new_expression(self, expr);
         }
     }
+
+    let mut visitor = JsCapVisitor {
+        caps: &mut caps,
+        _phantom: std::marker::PhantomData,
+    };
+    visitor.visit_program(&ret.program);
 
     caps
 }

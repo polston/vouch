@@ -3,6 +3,13 @@
 use crate::journal::Record;
 use crate::outcome::Outcome;
 use crate::review::{self, Candidate};
+use std::fs::File;
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{channel, Receiver};
+use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TargetFile {
@@ -40,6 +47,8 @@ pub struct TuiEngine {
     pub home: String,
     pub decisions: Vec<DecisionItem>,
     pub candidates: Vec<ReviewCandidate>,
+    pub tail_reader: Option<JournalTailReader>,
+    pub tail_receiver: Option<std::sync::mpsc::Receiver<Record>>,
 }
 
 impl TuiEngine {
@@ -133,7 +142,50 @@ impl TuiEngine {
             home: home.to_string(),
             decisions,
             candidates,
+            tail_reader: None,
+            tail_receiver: None,
         }
+    }
+
+    pub fn with_tail_reader(mut self, reader: JournalTailReader) -> Self {
+        self.tail_reader = Some(reader);
+        self
+    }
+
+    pub fn with_tail_receiver(mut self, rx: Receiver<Record>) -> Self {
+        self.tail_receiver = Some(rx);
+        self
+    }
+
+    pub fn push_record(&mut self, r: &Record) {
+        let item = DecisionItem {
+            timestamp: r.ts.clone(),
+            cmd: r.cmd.clone(),
+            verdict: r.verdict.clone(),
+            reason: r.reason.clone(),
+            outcome: format!("{:?}", r.outcome),
+            session: r.session.clone(),
+            cwd: r.cwd.clone(),
+        };
+        self.decisions.insert(0, item);
+    }
+
+    pub fn poll_live_events(&mut self) -> usize {
+        let mut new_recs = Vec::new();
+        if let Some(ref rx) = self.tail_receiver {
+            while let Ok(rec) = rx.try_recv() {
+                new_recs.push(rec);
+            }
+        }
+        if let Some(ref mut reader) = self.tail_reader {
+            let records = reader.poll_new_records();
+            new_recs.extend(records);
+        }
+        let count = new_recs.len();
+        for r in &new_recs {
+            self.push_record(r);
+        }
+        count
     }
 
     /// Applies an approved candidate rule to configuration files.
@@ -189,4 +241,97 @@ fn extract_unpermitted_path(reason: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Streaming file follower for journal.jsonl.
+pub struct JournalTailReader {
+    pub path: PathBuf,
+    last_offset: u64,
+}
+
+impl JournalTailReader {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        let last_offset = if let Ok(meta) = std::fs::metadata(&path) {
+            meta.len()
+        } else {
+            0
+        };
+        Self { path, last_offset }
+    }
+
+    pub fn from_start(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            last_offset: 0,
+        }
+    }
+
+    pub fn last_offset(&self) -> u64 {
+        self.last_offset
+    }
+
+    pub fn poll_new_records(&mut self) -> Vec<Record> {
+        let Ok(mut file) = File::open(&self.path) else {
+            return Vec::new();
+        };
+        let Ok(meta) = file.metadata() else {
+            return Vec::new();
+        };
+        let current_len = meta.len();
+        if current_len <= self.last_offset {
+            if current_len < self.last_offset {
+                self.last_offset = 0;
+            } else {
+                return Vec::new();
+            }
+        }
+
+        if file.seek(SeekFrom::Start(self.last_offset)).is_err() {
+            return Vec::new();
+        }
+
+        let mut reader = BufReader::new(file);
+        let mut new_records = Vec::new();
+        let mut line = String::new();
+
+        while let Ok(bytes_read) = reader.read_line(&mut line) {
+            if bytes_read == 0 {
+                break;
+            }
+            self.last_offset += bytes_read as u64;
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                if let Ok(rec) = serde_json::from_str::<Record>(trimmed) {
+                    new_records.push(rec);
+                }
+            }
+            line.clear();
+        }
+
+        new_records
+    }
+
+    pub fn spawn_channel(
+        mut self,
+        poll_interval: Duration,
+    ) -> (Receiver<Record>, Arc<AtomicBool>) {
+        let (tx, rx) = channel();
+        let running = Arc::new(AtomicBool::new(true));
+        let running_clone = running.clone();
+
+        std::thread::spawn(move || {
+            while running_clone.load(Ordering::Relaxed) {
+                let records = self.poll_new_records();
+                for r in records {
+                    if tx.send(r).is_err() {
+                        return;
+                    }
+                }
+                std::thread::sleep(poll_interval);
+            }
+        });
+
+        (rx, running)
+    }
 }

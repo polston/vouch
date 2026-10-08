@@ -280,3 +280,71 @@ fn powershell_tokenizer_token_stream_structural_verification() {
     assert_eq!(stream.remaining().len(), 9);
     assert!(!stream.is_empty());
 }
+
+#[test]
+fn powershell_dynamic_input_path_taint_synthesizes_recurse_delete() {
+    let script = "{ $file = Read-Host; Remove-Item $file }";
+    let cmds = vouch::powershell_pipeline::extract_scriptblock_synthesized_commands(script);
+    assert!(!cmds.is_empty());
+    assert_eq!(cmds[0].head, "Remove-Item");
+    assert!(cmds[0].args.iter().any(|a| a == "-Recurse"));
+}
+
+#[test]
+fn powershell_process_origin_kill_synthesizes_guarded_stop_process() {
+    let script = "{ $p = Get-Process evil; $p.Kill() }";
+    let cmds = vouch::powershell_pipeline::extract_scriptblock_synthesized_commands(script);
+    assert!(!cmds.is_empty());
+    assert_eq!(cmds[0].head, "Stop-Process");
+    assert_eq!(cmds[0].args[0], "-Id");
+    assert_eq!(cmds[0].args[1], "$p.Id");
+    assert_eq!(cmds[0].args[2], "origin:Get-Process");
+}
+
+#[test]
+fn powershell_string_literal_immunity_no_synthesized_commands() {
+    let script = "{ Write-Host 'calling .kill() or $x = Read-Host' }";
+    let cmds = vouch::powershell_pipeline::extract_scriptblock_synthesized_commands(script);
+    assert!(cmds.is_empty());
+
+    let double_quoted = "{ Write-Output \"$bad = Read-Host; Remove-Item $bad\" }";
+    let cmds2 = vouch::powershell_pipeline::extract_scriptblock_synthesized_commands(double_quoted);
+    assert!(cmds2.is_empty());
+}
+
+#[test]
+fn powershell_foreach_loop_induction_variable_delete() {
+    let script = "foreach ($f in Get-ChildItem) { $f.Delete() }";
+    let cmds = vouch::powershell_pipeline::extract_scriptblock_synthesized_commands(script);
+    assert!(!cmds.is_empty());
+    assert_eq!(cmds[0].head, "Remove-Item");
+    assert_eq!(cmds[0].args[0], "-Recurse");
+    assert_eq!(cmds[0].args[1], "-Path");
+    assert_eq!(cmds[0].args[2], "$f.FullName");
+}
+
+#[test]
+fn powershell_transitive_taint_propagation_synthesizes_recurse() {
+    let script = "{ $bad = Read-Host; $target = $bad; Remove-Item $target }";
+    let cmds = vouch::powershell_pipeline::extract_scriptblock_synthesized_commands(script);
+    assert!(!cmds.is_empty());
+    assert_eq!(cmds[0].head, "Remove-Item");
+    assert!(cmds[0].args.iter().any(|a| a == "-Recurse"));
+}
+
+#[test]
+fn powershell_taint_table_isolation_and_normalization() {
+    use vouch::powershell_pipeline::{VariableOrigin, VariableTaintTable};
+
+    let mut table = VariableTaintTable::new();
+    assert_eq!(table.get("$_"), Some(&VariableOrigin::PipelineItem));
+    assert_eq!(table.get("$psitem"), Some(&VariableOrigin::PipelineItem));
+
+    table.set("myVar", VariableOrigin::DynamicInput { source: "Read-Host".into() });
+    assert!(table.is_tainted_or_dynamic("$myvar"));
+    assert!(table.is_tainted_or_dynamic("MYVAR"));
+
+    table.set("$proc", VariableOrigin::CmdletResult { cmdlet: "Get-Process".into() });
+    assert!(!table.is_tainted_or_dynamic("$proc"));
+    assert_eq!(table.get("PROC"), Some(&VariableOrigin::CmdletResult { cmdlet: "Get-Process".into() }));
+}

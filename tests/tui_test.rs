@@ -321,3 +321,187 @@ fn tui_backend_raw_mode_guard_lifecycle() {
     // Double restore should be safe and idempotent
     guard.restore();
 }
+
+#[test]
+fn tui_journal_tail_reader_streaming() {
+    use std::io::Write;
+    use vouch::tui::JournalTailReader;
+
+    let tmp_dir = std::env::temp_dir().join(format!("vouch_tui_test_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+    let log_file = tmp_dir.join("journal.jsonl");
+
+    let r1 = Record {
+        id: "101".into(),
+        ts: "2026-10-08T12:00:00Z".into(),
+        cmd: "ls -la".into(),
+        verdict: "allow".into(),
+        reason: "safe".into(),
+        mode: "live".into(),
+        outcome: Outcome::Executed,
+        session: "s1".into(),
+        lang: "bash".into(),
+        cwd: "/home/dev".into(),
+        tool: "bash".into(),
+        permission_mode: "".into(),
+        measurement: false,
+        host: "claude".into(),
+        count: 1,
+    };
+
+    let mut f = std::fs::File::create(&log_file).unwrap();
+    writeln!(f, "{}", serde_json::to_string(&r1).unwrap()).unwrap();
+    drop(f);
+
+    let mut reader = JournalTailReader::from_start(&log_file);
+    let recs = reader.poll_new_records();
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0].cmd, "ls -la");
+
+    // Second poll with no new data
+    let recs2 = reader.poll_new_records();
+    assert_eq!(recs2.len(), 0);
+
+    // Append second record
+    let r2 = Record {
+        id: "102".into(),
+        ts: "2026-10-08T12:01:00Z".into(),
+        cmd: "cargo build".into(),
+        verdict: "allow".into(),
+        reason: "safe build".into(),
+        mode: "live".into(),
+        outcome: Outcome::Executed,
+        session: "s1".into(),
+        lang: "bash".into(),
+        cwd: "/home/dev".into(),
+        tool: "bash".into(),
+        permission_mode: "".into(),
+        measurement: false,
+        host: "claude".into(),
+        count: 1,
+    };
+    let mut f2 = std::fs::OpenOptions::new().append(true).open(&log_file).unwrap();
+    writeln!(f2, "{}", serde_json::to_string(&r2).unwrap()).unwrap();
+    drop(f2);
+
+    let recs3 = reader.poll_new_records();
+    assert_eq!(recs3.len(), 1);
+    assert_eq!(recs3[0].cmd, "cargo build");
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn tui_engine_live_stream_poll_events() {
+    use std::io::Write;
+    use vouch::tui::JournalTailReader;
+
+    let tmp_dir = std::env::temp_dir().join(format!("vouch_tui_engine_test_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+    let log_file = tmp_dir.join("journal.jsonl");
+
+    let _ = std::fs::File::create(&log_file).unwrap();
+
+    let mut engine = TuiEngine::from_records("/tmp", &[]);
+    assert_eq!(engine.decisions.len(), 0);
+
+    let reader = JournalTailReader::from_start(&log_file);
+    engine = engine.with_tail_reader(reader);
+
+    let rec = Record {
+        id: "201".into(),
+        ts: "2026-10-08T12:00:00Z".into(),
+        cmd: "git status".into(),
+        verdict: "allow".into(),
+        reason: "clean".into(),
+        mode: "live".into(),
+        outcome: Outcome::Executed,
+        session: "s2".into(),
+        lang: "bash".into(),
+        cwd: "/home/dev".into(),
+        tool: "bash".into(),
+        permission_mode: "".into(),
+        measurement: false,
+        host: "claude".into(),
+        count: 1,
+    };
+
+    let mut f = std::fs::OpenOptions::new().append(true).open(&log_file).unwrap();
+    writeln!(f, "{}", serde_json::to_string(&rec).unwrap()).unwrap();
+    drop(f);
+
+    let ingested = engine.poll_live_events();
+    assert_eq!(ingested, 1);
+    assert_eq!(engine.decisions.len(), 1);
+    assert_eq!(engine.decisions[0].cmd, "git status");
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn tui_search_mode_interactive_filtering() {
+    let records = sample_records();
+    let engine = TuiEngine::from_records("/tmp", &records);
+    let mut app = TuiApp::new(engine);
+
+    // Switch to Decisions tab and enter search mode via '/'
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('/')));
+    assert!(app.search_mode);
+    assert_eq!(app.active_tab, vouch::tui::ViewTab::Decisions);
+
+    // Type 'e', 'v', 'a', 'l'
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('e')));
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('v')));
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('a')));
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('l')));
+    assert_eq!(app.search_query, "eval");
+
+    let frame = app.render();
+    assert!(frame.contains("Search: eval_"));
+    assert!(frame.contains("[Filter: \"eval\" (match 1/1)]"));
+
+    // Press Enter to commit search filter
+    app.handle_event(TerminalEvent::Key(KeyCode::Enter));
+    assert!(!app.search_mode);
+    assert!(app.search_filter_active);
+
+    let committed_frame = app.render();
+    assert!(committed_frame.contains("eval 'echo hello'"));
+    assert!(!committed_frame.contains("touch /tmp/test.txt")); // filtered out
+
+    // Escape clears filter
+    app.handle_event(TerminalEvent::Key(KeyCode::Escape));
+    assert!(!app.search_filter_active);
+    assert!(app.render().contains("touch /tmp/test.txt")); // restored
+}
+
+#[test]
+fn tui_search_regex_and_match_cycling() {
+    let records = sample_records();
+    let engine = TuiEngine::from_records("/tmp", &records);
+    let mut app = TuiApp::new(engine);
+
+    // Search for 'touch' (matches 2 records: touch /tmp/test.txt and touch /var/log/custom.log)
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('/')));
+    for c in "touch".chars() {
+        app.handle_event(TerminalEvent::Key(KeyCode::Char(c)));
+    }
+    app.handle_event(TerminalEvent::Key(KeyCode::Enter));
+
+    assert!(app.search_filter_active);
+    let matches = app.matching_decision_indices();
+    assert_eq!(matches.len(), 2);
+    assert_eq!(app.selected_idx, 0);
+
+    // 'n' cycles to next match
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('n')));
+    assert_eq!(app.selected_idx, 1);
+
+    // 'n' wraps around to first match
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('n')));
+    assert_eq!(app.selected_idx, 0);
+
+    // 'N' cycles backward to last match
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('N')));
+    assert_eq!(app.selected_idx, 1);
+}

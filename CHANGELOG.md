@@ -1,5 +1,73 @@
 # Changelog
 
+## 0.57.0 (2026-10-08)
+
+
+### Features
+
+* **Deep AST scriptblock dataflow and variable taint tracking for PowerShell**
+  - **Problem & Explanation:** PowerShell scripts often assign sensitive or destructive targets (such as system files or processes) to variables or iterate over pipeline collections via `ForEach-Object` / `foreach` loops. Previous pipeline inspection only checked literal cmdlet arguments, allowing variable indirections (`$victim = "/etc/shadow"; Remove-Item $victim`) to evade policy checks. `src/powershell_pipeline.rs` introduces `VariableOrigin` and `VariableTaintTable`, tracing assignment values and loop induction variables through scriptblock ASTs and propagating taint to downstream destructive cmdlets (`Remove-Item`, `Stop-Process`).
+  - **Example Scenario:**
+    ```powershell
+    $target = "/etc/passwd"; Remove-Item -Path $target -Force
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged. Evaluated through existing PowerShell pipeline and guard policies.
+    - *Behavior Contrast:* Before: variable assignments obscured target paths and names from cmdlet argument inspections. After: variable definitions and taint flows are tracked across scriptblock scopes to evaluate effective arguments against safety policies.
+
+* **Interactive TUI live session log streaming and regex filtered search**
+  - **Problem & Explanation:** The terminal user interface (TUI) previously loaded session log events statically upon startup, requiring a full exit and restart to observe newly recorded audit events, and lacked interactive search capabilities across large event journals. `src/tui/engine.rs` and `src/tui/app.rs` introduce `JournalTailReader` for live event log tailing over bounded mpsc channels with non-blocking updates, paired with an interactive regex search mode (`/`, `<Enter>`, `n`, `N`, `<Esc>`) and live match counters for efficient audit log navigation.
+  - **Example Scenario:**
+    ```bash
+    vouch tui
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: TUI events were frozen at launch time with no interactive search or filtering. After: TUI dynamically streams live journal appends and provides real-time regex filtering and match navigation.
+
+* **Synchronous IPC fallback transport with anonymous shared memory**
+  - **Problem & Explanation:** High-throughput telemetry and daemon evaluation queries across concurrent agent worker processes could encounter OS domain socket or named pipe queue backpressure, serialization latency, or connection exhaustion. `src/daemon/shm.rs` implements `ShmTransport` and `ShmRingBuffer`, utilizing anonymous memory-mapped circular ring buffers (`shm_open`/`mmap` and `CreateFileMapping`/`MapViewOfFile`) with atomic sequence locks (`AtomicU64`) and cache-line aligned frame headers, achieving sub-microsecond roundtrip IPC fallback under heavy agent concurrency without socket allocation overhead.
+  - **Example Scenario:**
+    ```bash
+    vouch daemon --start
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Added optional `[daemon] shared_memory = true` and `shm_size_kb = 4096` configuration options.
+    - *Behavior Contrast:* Before: daemon communications relied exclusively on Unix domain sockets or Windows named pipes. After: concurrent processes seamlessly leverage anonymous shared memory ring buffers for high-speed zero-copy IPC transport.
+
+* **Transitive AST import graph resolver for local Python and Node packages**
+  - **Problem & Explanation:** Static capability inspection previously examined only the entry script file; imported local workspace helper modules (`from .utils import net_helper`, `const auth = require('./lib/auth')`) remained uninspected, allowing privileged capabilities (networking, daemonization, dynamic eval) to hide in transitive dependencies. `src/capability.rs` implements `TransitiveImportResolver` and `CapabilityReport`, parsing local Python (`ruff_python_parser`) and JavaScript/TypeScript (`oxc_parser`) import trees with cycle detection, configurable depth and file traversal limits, and strict workspace root containment guarantees.
+  - **Example Scenario:**
+    ```bash
+    python3 -c "from services.worker import launch; launch()"
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged. Integrated with runtime capability emitters.
+    - *Behavior Contrast:* Before: capability checks only observed imports declared directly in the entry script file. After: transitive local dependencies are resolved and aggregated into a comprehensive capability report.
+
+* **Zero-copy eBPF event deserialization via typed ring buffer slices**
+  - **Problem & Explanation:** Kernel eBPF tracepoint streams emit high-frequency file write records; allocating heap strings and intermediate event structs on every raw kernel event caused memory allocation spikes and latency overhead in performance-critical gating loops. `src/runtime/ebpf.rs` and `src/runtime/policy.rs` implement `ZeroCopyTraceDecoder` and `BorrowedTraceEvent<'a>`, deserializing packed memory records directly into typed slice references with zero intermediate allocations, coupled with `evaluate_event_borrowed` and `evaluate_trace_zero_copy` for high-throughput zero-copy trace validation.
+  - **Example Scenario:**
+    ```bash
+    vouch run_command 'make -j8 build'
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Added `[runtime] zero_copy = true` and `buffer_page_count = 64` configuration options.
+    - *Behavior Contrast:* Before: eBPF event parsing allocated heap strings and owned event structures for every raw kernel record. After: trace verification operates directly over borrowed buffer slices without dynamic allocations.
+
+
+### Bug Fixes
+
+* **Windows process liveness checking and daemon lifecycle test gating**
+  - **Problem & Explanation:** On Windows systems, sending signal 0 via `kill` to check process liveness is unsupported, leading to panic or false stale detections when managing daemon PID files. Additionally, the Unix domain socket server test attempted to run on Windows where Unix sockets require platform-specific handling. `src/daemon/lifecycle.rs` implements native Windows process liveness checks using `OpenProcess` and `GetExitCodeProcess`, and gates Unix socket unit tests to Unix target platforms.
+  - **Example Scenario:**
+    ```bash
+    cargo test --test daemon_lifecycle_test
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: process liveness detection failed or panicked on Windows platforms. After: native Win32 process queries accurately confirm process existence, and platform-specific tests are appropriately gated.
+
 ## 0.56.0 (2026-10-07)
 
 

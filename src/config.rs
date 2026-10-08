@@ -451,6 +451,12 @@ pub struct DaemonConfig {
     /// Whether the daemon fails closed on internal errors.
     #[serde(default = "default_true")]
     pub fail_closed: bool,
+    /// Enable shared-memory IPC fallback transport.
+    #[serde(default)]
+    pub shared_memory: bool,
+    /// Size of the shared memory ring buffer in kilobytes (default 1024).
+    #[serde(default = "default_shm_size_kb")]
+    pub shm_size_kb: u32,
 }
 
 fn default_daemon_socket_path() -> String {
@@ -465,15 +471,22 @@ fn default_true() -> bool {
     true
 }
 
+fn default_shm_size_kb() -> u32 {
+    1024
+}
+
 impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
             socket_path: default_daemon_socket_path(),
             timeout_ms: default_daemon_timeout_ms(),
             fail_closed: true,
+            shared_memory: false,
+            shm_size_kb: 1024,
         }
     }
 }
+
 
 /// The `[runtime.linux]` table: Linux runtime verifications (eBPF).
 #[derive(Debug, Deserialize, Clone, JsonSchema, PartialEq, Eq, Default)]
@@ -485,6 +498,8 @@ pub struct LinuxRuntimeConfig {
     pub ebpf_mode: String,
     #[serde(default = "default_ring_buffer_pages")]
     pub trace_ring_buffer_pages: u32,
+    #[serde(default)]
+    pub zero_copy: bool,
 }
 
 fn default_ebpf_mode() -> String {
@@ -495,13 +510,26 @@ fn default_ring_buffer_pages() -> u32 {
     64
 }
 
+/// The `[runtime.ebpf]` table: direct eBPF options.
+#[derive(Debug, Deserialize, Clone, JsonSchema, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct EbpfRuntimeConfig {
+    #[serde(default)]
+    pub zero_copy: bool,
+    #[serde(default = "default_ring_buffer_pages")]
+    pub buffer_page_count: u32,
+}
+
 /// The `[runtime]` table: platform-specific runtime verification settings.
 #[derive(Debug, Deserialize, Clone, JsonSchema, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeConfig {
     #[serde(default)]
     pub linux: LinuxRuntimeConfig,
+    #[serde(default)]
+    pub ebpf: EbpfRuntimeConfig,
 }
+
 
 /// `config.toml` (`~/.config/vouch/config.toml`): what the operator has told
 /// vouch to do. Anything not named here resolves to `ask` — absence of a

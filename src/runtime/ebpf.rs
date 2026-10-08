@@ -22,6 +22,28 @@ pub struct RawTraceEvent {
     pub is_write: bool,
 }
 
+/// Borrowed tracepoint sample with direct string slice over mapped ring buffer page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BorrowedTraceEvent<'a> {
+    pub pid: u32,
+    pub syscall_nr: i64,
+    pub filename: &'a str,
+    pub flags: i32,
+    pub is_write: bool,
+}
+
+impl<'a> BorrowedTraceEvent<'a> {
+    pub fn to_owned(&self) -> RawTraceEvent {
+        RawTraceEvent {
+            pid: self.pid,
+            syscall_nr: self.syscall_nr,
+            filename: self.filename.to_string(),
+            flags: self.flags,
+            is_write: self.is_write,
+        }
+    }
+}
+
 /// Abstract ring buffer reader interface for Linux perf / eBPF events.
 pub trait RingBufferReader: Send {
     /// Poll for available trace events within the specified timeout.
@@ -30,6 +52,20 @@ pub trait RingBufferReader: Send {
     /// Return the count of dropped events due to buffer saturation.
     fn dropped_events(&self) -> u64;
 }
+
+/// High-throughput zero-copy ring buffer reader processing raw memory page slices.
+pub trait ZeroCopyRingBufferReader: Send {
+    /// Consume available kernel events directly from ring buffer slices without heap allocation.
+    fn consume_events(
+        &mut self,
+        handler: &mut dyn FnMut(BorrowedTraceEvent<'_>) -> Result<(), RuntimeError>,
+    ) -> Result<usize, RuntimeError>;
+
+    /// Return count of dropped events due to buffer saturation.
+    fn dropped_events(&self) -> u64;
+}
+
+
 
 /// Decodes raw kernel trace records into normalized filesystem policy events.
 pub struct TracepointEventDecoder;
@@ -117,6 +153,138 @@ impl RingBufferReader for MockRingBufferReader {
     }
 }
 
+/// Zero-copy decoder for memory-mapped ring buffer record slices.
+pub struct ZeroCopyTraceDecoder;
+
+impl ZeroCopyTraceDecoder {
+    /// Minimum header size: pid (4) + syscall_nr (8) + flags (4) + explicit_write (1) = 17 bytes.
+    pub const MIN_RECORD_LEN: usize = 17;
+
+    /// Encode a synthetic trace record into a byte buffer for zero-copy testing.
+    pub fn encode_record(
+        pid: u32,
+        syscall_nr: i64,
+        flags: i32,
+        explicit_write: bool,
+        filename: &str,
+        buf: &mut Vec<u8>,
+    ) {
+        buf.extend_from_slice(&pid.to_le_bytes());
+        buf.extend_from_slice(&syscall_nr.to_le_bytes());
+        buf.extend_from_slice(&flags.to_le_bytes());
+        buf.push(if explicit_write { 1 } else { 0 });
+        buf.extend_from_slice(filename.as_bytes());
+        buf.push(0); // NUL terminator
+    }
+
+    /// Decode one event from a raw record slice without heap allocations.
+    /// Returns the decoded event and the number of bytes consumed.
+    pub fn decode_slice<'a>(slice: &'a [u8]) -> Result<(BorrowedTraceEvent<'a>, usize), RuntimeError> {
+        if slice.len() < Self::MIN_RECORD_LEN {
+            return Err(RuntimeError::ProbeFailed(
+                "slice too short for zero-copy trace record header".into(),
+            ));
+        }
+
+        let pid = u32::from_le_bytes(slice[0..4].try_into().unwrap());
+        let syscall_nr = i64::from_le_bytes(slice[4..12].try_into().unwrap());
+        let flags = i32::from_le_bytes(slice[12..16].try_into().unwrap());
+        let explicit_write = slice[16] != 0;
+
+        let filename_bytes = &slice[17..];
+        let (raw_path, consumed) = match filename_bytes.iter().position(|&b| b == 0) {
+            Some(nul_pos) => (&filename_bytes[..nul_pos], 17 + nul_pos + 1),
+            None => (filename_bytes, 17 + filename_bytes.len()),
+        };
+
+        let filename = std::str::from_utf8(raw_path).map_err(|e| {
+            RuntimeError::ProbeFailed(format!("invalid UTF-8 in kernel tracepoint path: {e}"))
+        })?;
+
+        let (_name, is_write) = TracepointEventDecoder::classify_syscall(syscall_nr, flags, explicit_write);
+
+        Ok((
+            BorrowedTraceEvent {
+                pid,
+                syscall_nr,
+                filename,
+                flags,
+                is_write,
+            },
+            consumed,
+        ))
+    }
+}
+
+/// Cross-platform mock reader providing zero-copy slice iteration over an in-memory buffer.
+pub struct MockZeroCopyReader {
+    buffer: Vec<u8>,
+    cursor: usize,
+    dropped_count: u64,
+}
+
+impl MockZeroCopyReader {
+    pub fn new() -> Self {
+        Self {
+            buffer: Vec::new(),
+            cursor: 0,
+            dropped_count: 0,
+        }
+    }
+
+    pub fn with_buffer(buffer: Vec<u8>) -> Self {
+        Self {
+            buffer,
+            cursor: 0,
+            dropped_count: 0,
+        }
+    }
+
+    pub fn add_record(
+        &mut self,
+        pid: u32,
+        syscall_nr: i64,
+        flags: i32,
+        explicit_write: bool,
+        filename: &str,
+    ) {
+        ZeroCopyTraceDecoder::encode_record(pid, syscall_nr, flags, explicit_write, filename, &mut self.buffer);
+    }
+
+    pub fn simulate_dropped(&mut self, count: u64) {
+        self.dropped_count += count;
+    }
+}
+
+impl Default for MockZeroCopyReader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ZeroCopyRingBufferReader for MockZeroCopyReader {
+    fn consume_events(
+        &mut self,
+        handler: &mut dyn FnMut(BorrowedTraceEvent<'_>) -> Result<(), RuntimeError>,
+    ) -> Result<usize, RuntimeError> {
+        let mut count = 0;
+        while self.cursor < self.buffer.len() {
+            let slice = &self.buffer[self.cursor..];
+            let (event, consumed) = ZeroCopyTraceDecoder::decode_slice(slice)?;
+            self.cursor += consumed;
+            handler(event)?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    fn dropped_events(&self) -> u64 {
+        self.dropped_count
+    }
+}
+
+
+
 /// Live Linux kernel perf event ring buffer reader.
 pub struct PerfRingBufferReader {
     #[allow(dead_code)]
@@ -169,6 +337,7 @@ pub struct EbpfVerifier {
     pub mode: String,
     mock_events: Option<Vec<FilesystemEvent>>,
     reader: Option<std::sync::Mutex<Box<dyn RingBufferReader>>>,
+    zero_copy_reader: Option<std::sync::Mutex<Box<dyn ZeroCopyRingBufferReader>>>,
 }
 
 impl EbpfVerifier {
@@ -177,6 +346,7 @@ impl EbpfVerifier {
             mode,
             mock_events: None,
             reader: None,
+            zero_copy_reader: None,
         }
     }
 
@@ -186,6 +356,7 @@ impl EbpfVerifier {
             mode,
             mock_events: Some(events),
             reader: None,
+            zero_copy_reader: None,
         }
     }
 
@@ -195,6 +366,17 @@ impl EbpfVerifier {
             mode,
             mock_events: None,
             reader: Some(std::sync::Mutex::new(reader)),
+            zero_copy_reader: None,
+        }
+    }
+
+    /// Provide a custom zero-copy ring buffer reader.
+    pub fn with_zero_copy_reader(mode: String, reader: Box<dyn ZeroCopyRingBufferReader>) -> Self {
+        Self {
+            mode,
+            mock_events: None,
+            reader: None,
+            zero_copy_reader: Some(std::sync::Mutex::new(reader)),
         }
     }
 
@@ -226,11 +408,44 @@ impl RuntimeVerifier for EbpfVerifier {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            self.mock_events.is_some() || self.reader.is_some()
+            self.mock_events.is_some() || self.reader.is_some() || self.zero_copy_reader.is_some()
         }
     }
 
     fn monitor_execution(&self, pid: u32, cfg: &Config) -> Result<ExecutionTrace, RuntimeError> {
+        // If an explicit zero-copy ring buffer reader is configured
+        if let Some(ref mutex) = self.zero_copy_reader {
+            if let Ok(mut reader) = mutex.lock() {
+                let mut unpermitted_writes = Vec::new();
+                let mut fs_events = Vec::new();
+
+                reader.consume_events(&mut |ev| {
+                    if !super::policy::evaluate_event_borrowed(&ev, cfg) {
+                        unpermitted_writes.push(PathBuf::from(ev.filename));
+                    }
+                    fs_events.push(FilesystemEvent {
+                        pid: ev.pid,
+                        syscall: match ev.syscall_nr {
+                            257 | 56 => "openat".to_string(),
+                            263 | 35 => "unlinkat".to_string(),
+                            264 | 38 | 316 | 276 => "renameat".to_string(),
+                            _ => "unknown".to_string(),
+                        },
+                        path: PathBuf::from(ev.filename),
+                        is_write: ev.is_write,
+                    });
+                    Ok(())
+                })?;
+
+                let passed = unpermitted_writes.is_empty();
+                return Ok(ExecutionTrace {
+                    events: fs_events,
+                    unpermitted_writes,
+                    passed,
+                });
+            }
+        }
+
         // If an explicit ring buffer reader is configured
         if let Some(ref mutex) = self.reader {
             if let Ok(mut reader) = mutex.lock() {

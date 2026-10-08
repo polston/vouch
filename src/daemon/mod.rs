@@ -13,6 +13,7 @@
 pub mod lifecycle;
 pub mod protocol;
 pub mod session;
+pub mod shm;
 pub mod transport;
 
 use std::io::{BufRead, BufReader, Write};
@@ -28,7 +29,9 @@ use crate::protocol::{render_for, Decision, Host};
 pub use lifecycle::{daemonize_process, generate_session_token, install_signal_handlers, is_pid_alive, PidLockGuard};
 pub use protocol::{ClientFrame, DaemonFrame, DecisionOutput, EvaluateRequest};
 pub use session::{DaemonSessionHandler, SessionContext};
+pub use shm::{run_shm_worker, ShmError, ShmHeader, ShmRequest, ShmResponse, ShmRingBuffer, ShmTransport};
 pub use transport::StreamingClient;
+
 
 /// IPC request payload sent from hook client to daemon.
 #[derive(Debug, Serialize, Deserialize, Clone)]
