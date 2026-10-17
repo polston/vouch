@@ -137,12 +137,686 @@ impl CapabilityReport {
     }
 }
 
+/// A single TypeScript/JavaScript path alias mapping from `tsconfig.json` / `jsconfig.json`
+/// `compilerOptions.paths` (e.g. `"@/*": ["./src/*"]`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TsPathMapping {
+    pub pattern: String,
+    pub targets: Vec<PathBuf>,
+}
+
+/// Package-scoped Node.js subpath import mappings (`package.json` `"imports": { "#*": ... }`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeSubpathImportScope {
+    pub pkg_dir: PathBuf,
+    pub mappings: Vec<TsPathMapping>,
+}
+
+/// Index of local Python and Node/JavaScript/TypeScript packages discovered from workspace manifests
+/// (`pyproject.toml`, `requirements.txt`, `package.json`, `pnpm-lock.yaml`, `tsconfig.json`, `jsconfig.json`).
+#[derive(Debug, Clone, Default)]
+pub struct WorkspaceManifestIndex {
+    /// Maps Python top-level module/package name (normalized and raw) to its package directory.
+    pub python_packages: std::collections::HashMap<String, PathBuf>,
+    /// Maps Node package name (e.g., `@scope/pkg` or `my-pkg`) to its package root directory.
+    pub node_packages: std::collections::HashMap<String, PathBuf>,
+    /// Maps Node package name -> subpath key (e.g., `.`, `./net`) -> target path inside package.
+    pub node_exports: std::collections::HashMap<String, std::collections::HashMap<String, PathBuf>>,
+    /// Package-scoped `#` subpath import mappings from `package.json` `"imports"` fields.
+    pub node_subpath_imports: Vec<NodeSubpathImportScope>,
+    /// Resolved `compilerOptions.baseUrl` directories from `tsconfig.json` / `jsconfig.json`.
+    pub ts_base_urls: Vec<PathBuf>,
+    /// Resolved `compilerOptions.paths` alias mappings from `tsconfig.json` / `jsconfig.json`.
+    pub ts_path_mappings: Vec<TsPathMapping>,
+    /// Resolved TypeScript composite project reference directories (`tsconfig.json` `"references"`).
+    pub ts_project_references: Vec<PathBuf>,
+}
+
+impl WorkspaceManifestIndex {
+    /// Discover workspace manifests under `workspace_root` with bounded recursion.
+    pub fn discover(workspace_root: &Path) -> Self {
+        let mut index = Self::default();
+        if !workspace_root.is_dir() {
+            return index;
+        }
+        let mut visited_dirs = HashSet::new();
+        index.scan_dir_bounded(workspace_root, workspace_root, 0, 4, &mut visited_dirs);
+        index
+    }
+
+    /// Returns true if `specifier` matches any configured `tsconfig.json` / `jsconfig.json` path alias pattern.
+    pub fn matches_ts_alias(&self, specifier: &str) -> bool {
+        let trimmed = specifier.trim();
+        for mapping in &self.ts_path_mappings {
+            if let Some((prefix, suffix)) = mapping.pattern.split_once('*') {
+                if trimmed.starts_with(prefix)
+                    && trimmed.ends_with(suffix)
+                    && trimmed.len() >= prefix.len() + suffix.len()
+                {
+                    return true;
+                }
+            } else if trimmed == mapping.pattern
+                || trimmed.starts_with(&format!("{}/", mapping.pattern))
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn scan_dir_bounded(
+        &mut self,
+        workspace_root: &Path,
+        dir: &Path,
+        depth: usize,
+        max_depth: usize,
+        visited_dirs: &mut HashSet<PathBuf>,
+    ) {
+        if depth > max_depth || visited_dirs.len() >= 128 {
+            return;
+        }
+        let canonical_dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+        if !visited_dirs.insert(canonical_dir) {
+            return;
+        }
+
+        let pyproject = dir.join("pyproject.toml");
+        if pyproject.is_file() {
+            self.parse_pyproject_toml(workspace_root, dir, &pyproject);
+        }
+
+        let requirements = dir.join("requirements.txt");
+        if requirements.is_file() {
+            self.parse_requirements_txt(workspace_root, dir, &requirements);
+        }
+
+        let package_json = dir.join("package.json");
+        if package_json.is_file() {
+            self.parse_package_json(workspace_root, dir, &package_json);
+        }
+
+        let pnpm_lock = dir.join("pnpm-lock.yaml");
+        if pnpm_lock.is_file() {
+            self.parse_pnpm_lock(workspace_root, dir, &pnpm_lock);
+        }
+
+        for tsconfig_name in &["tsconfig.json", "jsconfig.json"] {
+            let tsconfig_path = dir.join(tsconfig_name);
+            if tsconfig_path.is_file() {
+                self.parse_tsconfig_json(workspace_root, dir, &tsconfig_path, 0);
+            }
+        }
+
+        // Also check standard src/ layout in workspace root or package dir
+        let src_dir = dir.join("src");
+        if depth <= 2 && src_dir.is_dir() {
+            self.register_python_src_children(&src_dir);
+        }
+
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if matches!(
+                name_str.as_ref(),
+                ".git"
+                    | "node_modules"
+                    | "target"
+                    | ".venv"
+                    | "venv"
+                    | "dist"
+                    | "build"
+                    | "__pycache__"
+                    | ".tox"
+                    | ".mypy_cache"
+                    | ".pytest_cache"
+            ) {
+                continue;
+            }
+            self.scan_dir_bounded(workspace_root, &path, depth + 1, max_depth, visited_dirs);
+        }
+    }
+
+    fn normalize_py_name(name: &str) -> String {
+        name.trim()
+            .to_lowercase()
+            .replace('-', "_")
+            .replace('.', "_")
+    }
+
+    fn register_python_package_dir(&mut self, pkg_name: &str, pkg_root: &Path) {
+        let norm = Self::normalize_py_name(pkg_name);
+        if norm.is_empty() {
+            return;
+        }
+
+        // Candidate 1: src/<norm>
+        let src_pkg = pkg_root.join("src").join(&norm);
+        if src_pkg.is_dir() || src_pkg.with_extension("py").is_file() {
+            self.python_packages.insert(norm.clone(), src_pkg.clone());
+            self.python_packages.insert(pkg_name.to_string(), src_pkg);
+            return;
+        }
+
+        // Candidate 2: <pkg_root>/<norm>
+        let flat_pkg = pkg_root.join(&norm);
+        if flat_pkg.is_dir() || flat_pkg.with_extension("py").is_file() {
+            self.python_packages.insert(norm.clone(), flat_pkg.clone());
+            self.python_packages.insert(pkg_name.to_string(), flat_pkg);
+            return;
+        }
+
+        // Candidate 3: if pkg_root/src exists, inspect children
+        let src_dir = pkg_root.join("src");
+        if src_dir.is_dir() {
+            self.register_python_src_children(&src_dir);
+        }
+
+        // Candidate 4: pkg_root itself if it is a directory (supports __init__.py and PEP 420 namespace packages)
+        if pkg_root.is_dir() {
+            self.python_packages
+                .entry(norm)
+                .or_insert_with(|| pkg_root.to_path_buf());
+            self.python_packages
+                .entry(pkg_name.to_string())
+                .or_insert_with(|| pkg_root.to_path_buf());
+        }
+    }
+
+    fn register_python_src_children(&mut self, src_dir: &Path) {
+        let Ok(entries) = std::fs::read_dir(src_dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            if path.is_dir() && path.join("__init__.py").is_file() {
+                let norm = Self::normalize_py_name(&file_name);
+                self.python_packages.entry(norm).or_insert_with(|| path.clone());
+                self.python_packages.entry(file_name).or_insert(path);
+            } else if path.is_file() && file_name.ends_with(".py") && file_name != "__init__.py" {
+                let stem = file_name.trim_end_matches(".py");
+                self.python_packages
+                    .entry(stem.to_string())
+                    .or_insert_with(|| src_dir.join(stem));
+            }
+        }
+    }
+
+    fn parse_pyproject_toml(&mut self, _workspace_root: &Path, pkg_dir: &Path, pyproject_path: &Path) {
+        let Ok(content) = std::fs::read_to_string(pyproject_path) else {
+            return;
+        };
+        let Ok(val) = toml::from_str::<toml::Value>(&content) else {
+            return;
+        };
+
+        if let Some(name) = val
+            .get("project")
+            .and_then(|p| p.get("name"))
+            .and_then(|n| n.as_str())
+        {
+            self.register_python_package_dir(name, pkg_dir);
+        }
+
+        if let Some(poetry) = val.get("tool").and_then(|t| t.get("poetry")) {
+            if let Some(name) = poetry.get("name").and_then(|n| n.as_str()) {
+                self.register_python_package_dir(name, pkg_dir);
+            }
+            if let Some(packages) = poetry.get("packages").and_then(|p| p.as_array()) {
+                for pkg_entry in packages {
+                    if let Some(include) = pkg_entry.get("include").and_then(|i| i.as_str()) {
+                        let from_dir = pkg_entry
+                            .get("from")
+                            .and_then(|f| f.as_str())
+                            .map(|f| pkg_dir.join(f))
+                            .unwrap_or_else(|| pkg_dir.to_path_buf());
+                        let target = from_dir.join(include);
+                        let norm = Self::normalize_py_name(include);
+                        self.python_packages.insert(norm, target.clone());
+                        self.python_packages.insert(include.to_string(), target);
+                    }
+                }
+            }
+        }
+    }
+
+    fn parse_requirements_txt(&mut self, workspace_root: &Path, req_dir: &Path, req_path: &Path) {
+        let Ok(content) = std::fs::read_to_string(req_path) else {
+            return;
+        };
+        for raw_line in content.lines() {
+            let line = raw_line.split('#').next().unwrap_or("").trim();
+            if line.is_empty() {
+                continue;
+            }
+            let editable_target = if let Some(rest) = line.strip_prefix("-e ") {
+                Some(rest.trim())
+            } else if let Some(rest) = line.strip_prefix("--editable ") {
+                Some(rest.trim())
+            } else if let Some(rest) = line.strip_prefix("--editable=") {
+                Some(rest.trim())
+            } else if line.starts_with("./") || line.starts_with("../") {
+                Some(line)
+            } else {
+                None
+            };
+
+            if let Some(rel_target) = editable_target {
+                let target_dir = req_dir.join(rel_target);
+                let pyproj = target_dir.join("pyproject.toml");
+                if pyproj.is_file() {
+                    self.parse_pyproject_toml(workspace_root, &target_dir, &pyproj);
+                }
+                let src_dir = target_dir.join("src");
+                if src_dir.is_dir() {
+                    self.register_python_src_children(&src_dir);
+                }
+                if let Some(dir_name) = target_dir.file_name().and_then(|n| n.to_str()) {
+                    self.register_python_package_dir(dir_name, &target_dir);
+                }
+            }
+        }
+    }
+
+    fn parse_package_json(&mut self, _workspace_root: &Path, pkg_dir: &Path, pkg_json_path: &Path) {
+        let Ok(content) = std::fs::read_to_string(pkg_json_path) else {
+            return;
+        };
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) else {
+            return;
+        };
+
+        if let Some(name) = val.get("name").and_then(|n| n.as_str()) {
+            self.node_packages
+                .insert(name.to_string(), pkg_dir.to_path_buf());
+
+            if let Some(exports) = val.get("exports") {
+                let mut export_map = std::collections::HashMap::new();
+                if let Some(s) = exports.as_str() {
+                    export_map.insert(".".to_string(), pkg_dir.join(s));
+                } else if let Some(obj) = exports.as_object() {
+                    for (k, v) in obj {
+                        if k.starts_with('.') {
+                            if let Some(target_rel) = Self::extract_export_target(v) {
+                                export_map.insert(k.clone(), pkg_dir.join(target_rel));
+                            }
+                        } else if let Some(target_rel) = Self::extract_export_target(exports) {
+                            export_map.insert(".".to_string(), pkg_dir.join(target_rel));
+                            break;
+                        }
+                    }
+                }
+                if !export_map.is_empty() {
+                    self.node_exports.insert(name.to_string(), export_map);
+                }
+            }
+        }
+
+        // Parse Node.js subpath imports (`"imports": { "#internal/*": "./src/internal/*", ... }`)
+        if let Some(imports_obj) = val.get("imports").and_then(|i| i.as_object()) {
+            let mut mappings = Vec::new();
+            for (k, v) in imports_obj {
+                if k.starts_with('#') {
+                    let mut rel_targets = Vec::new();
+                    Self::collect_export_targets(v, &mut rel_targets);
+                    let targets: Vec<PathBuf> =
+                        rel_targets.into_iter().map(|t| pkg_dir.join(t)).collect();
+                    if !targets.is_empty() {
+                        mappings.push(TsPathMapping {
+                            pattern: k.clone(),
+                            targets,
+                        });
+                    }
+                }
+            }
+            if !mappings.is_empty() {
+                if let Some(existing) = self
+                    .node_subpath_imports
+                    .iter_mut()
+                    .find(|s| s.pkg_dir == pkg_dir)
+                {
+                    for m in mappings {
+                        if !existing.mappings.contains(&m) {
+                            existing.mappings.push(m);
+                        }
+                    }
+                } else {
+                    self.node_subpath_imports.push(NodeSubpathImportScope {
+                        pkg_dir: pkg_dir.to_path_buf(),
+                        mappings,
+                    });
+                }
+            }
+        }
+
+        // Check dependencies / devDependencies for file: or link: references
+        for dep_section in &["dependencies", "devDependencies", "peerDependencies"] {
+            if let Some(deps) = val.get(*dep_section).and_then(|d| d.as_object()) {
+                for (dep_name, dep_spec) in deps {
+                    if let Some(spec_str) = dep_spec.as_str() {
+                        let local_rel = spec_str
+                            .strip_prefix("file:")
+                            .or_else(|| spec_str.strip_prefix("link:"))
+                            .or_else(|| spec_str.strip_prefix("workspace:"));
+                        if let Some(rel) = local_rel {
+                            let trimmed_rel = rel.trim();
+                            if !trimmed_rel.is_empty() && trimmed_rel != "*" && trimmed_rel != "^" && trimmed_rel != "~" {
+                                let target_dir = pkg_dir.join(trimmed_rel);
+                                self.node_packages.insert(dep_name.clone(), target_dir);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn collect_export_targets<'a>(val: &'a serde_json::Value, out: &mut Vec<&'a str>) {
+        if let Some(s) = val.as_str() {
+            if !out.contains(&s) {
+                out.push(s);
+            }
+        } else if let Some(arr) = val.as_array() {
+            for item in arr {
+                Self::collect_export_targets(item, out);
+            }
+        } else if let Some(obj) = val.as_object() {
+            for key in &[
+                "source",
+                "import",
+                "module",
+                "require",
+                "node",
+                "default",
+                "development",
+                "production",
+            ] {
+                if let Some(inner) = obj.get(*key) {
+                    Self::collect_export_targets(inner, out);
+                }
+            }
+            for (_k, v) in obj {
+                Self::collect_export_targets(v, out);
+            }
+        }
+    }
+
+    fn extract_export_target(val: &serde_json::Value) -> Option<&str> {
+        let mut targets = Vec::new();
+        Self::collect_export_targets(val, &mut targets);
+        targets.into_iter().next()
+    }
+
+    fn parse_pnpm_lock(&mut self, _workspace_root: &Path, lock_dir: &Path, lock_path: &Path) {
+        let Ok(content) = std::fs::read_to_string(lock_path) else {
+            return;
+        };
+        let mut current_dep: Option<String> = None;
+        for raw_line in content.lines() {
+            let trimmed = raw_line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            // Match direct line like `'@acme/pkg': link:packages/pkg` or `my-pkg: link:./packages/my-pkg`
+            if let Some((left, right)) = trimmed.split_once(':') {
+                let key = left.trim().trim_matches('\'').trim_matches('"');
+                let val = right.trim().trim_matches('\'').trim_matches('"');
+                if let Some(rel_path) = val.strip_prefix("link:").or_else(|| val.strip_prefix("file:")) {
+                    let pkg_name = if key == "version" || key == "specifier" {
+                        current_dep.clone()
+                    } else {
+                        Some(key.to_string())
+                    };
+                    if let Some(name) = pkg_name {
+                        let target_dir = lock_dir.join(rel_path.trim());
+                        self.node_packages.entry(name).or_insert(target_dir);
+                    }
+                } else if val.is_empty() && !key.is_empty() && !matches!(key, "importers" | "dependencies" | "devDependencies" | "packages" | "snapshots") {
+                    current_dep = Some(key.to_string());
+                }
+            }
+        }
+    }
+
+    fn parse_tsconfig_json(
+        &mut self,
+        workspace_root: &Path,
+        config_dir: &Path,
+        config_path: &Path,
+        extends_depth: usize,
+    ) {
+        if extends_depth > 4 {
+            return;
+        }
+        let Ok(raw_content) = std::fs::read_to_string(config_path) else {
+            return;
+        };
+        let clean_json = strip_jsonc_comments_and_trailing_commas(&raw_content);
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(&clean_json) else {
+            return;
+        };
+
+        // 1. Handle `"extends"` (string or array of strings) with bounded recursion
+        if let Some(extends_val) = val.get("extends") {
+            let mut parent_specs = Vec::new();
+            if let Some(s) = extends_val.as_str() {
+                parent_specs.push(s);
+            } else if let Some(arr) = extends_val.as_array() {
+                for item in arr {
+                    if let Some(s) = item.as_str() {
+                        parent_specs.push(s);
+                    }
+                }
+            }
+            for spec in parent_specs {
+                let mut cand = config_dir.join(spec);
+                if !cand.is_file() {
+                    if cand.is_dir() {
+                        cand = cand.join("tsconfig.json");
+                    } else if cand.extension().is_none() {
+                        cand = cand.with_extension("json");
+                    }
+                }
+                if let Ok(canon_parent) = cand.canonicalize() {
+                    if canon_parent.starts_with(workspace_root) {
+                        if let Some(parent_dir) = canon_parent.parent() {
+                            self.parse_tsconfig_json(
+                                workspace_root,
+                                parent_dir,
+                                &canon_parent,
+                                extends_depth + 1,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Extract `compilerOptions.baseUrl` and `compilerOptions.paths`
+        if let Some(compiler_opts) = val.get("compilerOptions").and_then(|c| c.as_object()) {
+            let base_dir = if let Some(base_url) = compiler_opts.get("baseUrl").and_then(|b| b.as_str()) {
+                let resolved_base = config_dir.join(base_url);
+                if !self.ts_base_urls.contains(&resolved_base) {
+                    self.ts_base_urls.push(resolved_base.clone());
+                }
+                resolved_base
+            } else {
+                config_dir.to_path_buf()
+            };
+
+            if let Some(paths_obj) = compiler_opts.get("paths").and_then(|p| p.as_object()) {
+                for (pattern, targets_val) in paths_obj {
+                    let Some(targets_arr) = targets_val.as_array() else {
+                        continue;
+                    };
+                    let mut targets = Vec::new();
+                    for item in targets_arr {
+                        if let Some(rel_target) = item.as_str() {
+                            targets.push(base_dir.join(rel_target));
+                        }
+                    }
+                    if !targets.is_empty() {
+                        let mapping = TsPathMapping {
+                            pattern: pattern.clone(),
+                            targets,
+                        };
+                        if !self.ts_path_mappings.contains(&mapping) {
+                            self.ts_path_mappings.push(mapping);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Handle TypeScript composite project `"references"` (`[{ "path": "../pkg-b" }, ...]`)
+        if let Some(refs_arr) = val.get("references").and_then(|r| r.as_array()) {
+            for ref_item in refs_arr {
+                let Some(ref_path_str) = ref_item.get("path").and_then(|p| p.as_str()) else {
+                    continue;
+                };
+                let mut cand = config_dir.join(ref_path_str);
+                if cand.is_dir() {
+                    cand = cand.join("tsconfig.json");
+                } else if !cand.is_file() && cand.extension().is_none() {
+                    cand = cand.with_extension("json");
+                }
+                let Ok(canon_ref) = cand.canonicalize() else {
+                    continue;
+                };
+                // Enforce workspace root boundary on project references
+                if !canon_ref.starts_with(workspace_root) {
+                    continue;
+                }
+                let Some(ref_dir) = canon_ref.parent() else {
+                    continue;
+                };
+                if !self.ts_project_references.contains(&ref_dir.to_path_buf()) {
+                    self.ts_project_references.push(ref_dir.to_path_buf());
+                }
+                if let Some(dir_name) = ref_dir.file_name().and_then(|n| n.to_str()) {
+                    self.node_packages
+                        .entry(dir_name.to_string())
+                        .or_insert_with(|| ref_dir.to_path_buf());
+                }
+                let ref_pkg_json = ref_dir.join("package.json");
+                if ref_pkg_json.is_file() {
+                    self.parse_package_json(workspace_root, ref_dir, &ref_pkg_json);
+                }
+                self.parse_tsconfig_json(workspace_root, ref_dir, &canon_ref, extends_depth + 1);
+            }
+        }
+    }
+}
+
+/// Strip `//` line comments, `/* ... */` block comments, and trailing commas outside string literals
+/// so `tsconfig.json` and `jsconfig.json` (JSONC) files parse cleanly with `serde_json`.
+pub fn strip_jsonc_comments_and_trailing_commas(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let mut no_comments = String::with_capacity(input.len());
+    let mut i = 0;
+    let mut in_string = false;
+
+    while i < chars.len() {
+        let c = chars[i];
+        if in_string {
+            no_comments.push(c);
+            if c == '\\' && i + 1 < chars.len() {
+                no_comments.push(chars[i + 1]);
+                i += 2;
+                continue;
+            }
+            if c == '"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if c == '"' {
+            in_string = true;
+            no_comments.push(c);
+            i += 1;
+            continue;
+        }
+
+        if c == '/' && i + 1 < chars.len() && chars[i + 1] == '/' {
+            i += 2;
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+
+        if c == '/' && i + 1 < chars.len() && chars[i + 1] == '*' {
+            i += 2;
+            while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
+                i += 1;
+            }
+            i = (i + 2).min(chars.len());
+            continue;
+        }
+
+        no_comments.push(c);
+        i += 1;
+    }
+
+    let nc_chars: Vec<char> = no_comments.chars().collect();
+    let mut out = String::with_capacity(no_comments.len());
+    let mut j = 0;
+    let mut in_str = false;
+    while j < nc_chars.len() {
+        let c = nc_chars[j];
+        if in_str {
+            out.push(c);
+            if c == '\\' && j + 1 < nc_chars.len() {
+                out.push(nc_chars[j + 1]);
+                j += 2;
+                continue;
+            }
+            if c == '"' {
+                in_str = false;
+            }
+            j += 1;
+            continue;
+        }
+        if c == '"' {
+            in_str = true;
+            out.push(c);
+            j += 1;
+            continue;
+        }
+        if c == ',' {
+            let mut look = j + 1;
+            while look < nc_chars.len() && nc_chars[look].is_whitespace() {
+                look += 1;
+            }
+            if look < nc_chars.len() && matches!(nc_chars[look], '}' | ']') {
+                j += 1;
+                continue;
+            }
+        }
+        out.push(c);
+        j += 1;
+    }
+    out
+}
+
 /// Transitive AST Import Graph Resolver for local Python and Node/JavaScript packages.
 #[derive(Debug, Clone)]
 pub struct TransitiveImportResolver {
     workspace_root: PathBuf,
     max_depth: usize,
     max_files: usize,
+    manifest_index: WorkspaceManifestIndex,
 }
 
 impl TransitiveImportResolver {
@@ -152,10 +826,12 @@ impl TransitiveImportResolver {
     pub fn new(workspace_root: impl Into<PathBuf>) -> Self {
         let root = workspace_root.into();
         let canonical = root.canonicalize().unwrap_or(root);
+        let manifest_index = WorkspaceManifestIndex::discover(&canonical);
         Self {
             workspace_root: canonical,
             max_depth: Self::DEFAULT_MAX_DEPTH,
             max_files: Self::DEFAULT_MAX_FILES,
+            manifest_index,
         }
     }
 
@@ -167,6 +843,10 @@ impl TransitiveImportResolver {
 
     pub fn workspace_root(&self) -> &Path {
         &self.workspace_root
+    }
+
+    pub fn manifest_index(&self) -> &WorkspaceManifestIndex {
+        &self.manifest_index
     }
 
     /// Resolve transitive capabilities for a Python snippet or entry file.
@@ -189,7 +869,7 @@ impl TransitiveImportResolver {
     pub fn resolve_script(&self, script: &str, lang: &str, current_file: Option<&Path>) -> CapabilityReport {
         match lang {
             "python" | "py" => self.resolve_python(script, current_file),
-            "javascript" | "js" | "node" | "typescript" | "ts" | "mjs" | "cjs" => {
+            "javascript" | "js" | "node" | "typescript" | "ts" | "tsx" | "jsx" | "mjs" | "cjs" => {
                 self.resolve_javascript(script, current_file)
             }
             _ => {
@@ -228,7 +908,12 @@ impl TransitiveImportResolver {
         report.capabilities.union(ast_caps);
 
         for spec in imports {
-            let candidates = resolve_python_import_candidates(&spec, current_file, &self.workspace_root);
+            let candidates = resolve_python_import_candidates(
+                &spec,
+                current_file,
+                &self.workspace_root,
+                &self.manifest_index,
+            );
             let mut resolved_path = None;
             for cand in candidates {
                 if cand.is_file() {
@@ -299,12 +984,26 @@ impl TransitiveImportResolver {
         };
 
         for spec in imports {
-            let is_relative_or_local = spec.starts_with("./") || spec.starts_with("../") || spec.starts_with('/');
-            let candidates = resolve_javascript_import_candidates(&spec, current_file, &self.workspace_root);
+            let is_relative_or_local = spec.starts_with("./")
+                || spec.starts_with("../")
+                || spec.starts_with('/')
+                || spec.starts_with('#')
+                || self.manifest_index.matches_ts_alias(&spec);
+            let candidates = resolve_javascript_import_candidates(
+                &spec,
+                current_file,
+                &self.workspace_root,
+                &self.manifest_index,
+            );
             let mut resolved_path = None;
-            for cand in candidates {
+            let mut escaped_candidate = None;
+            for cand in &candidates {
+                let norm = normalize_lexical_path(cand);
+                if !norm.starts_with(&self.workspace_root) && escaped_candidate.is_none() {
+                    escaped_candidate = Some(norm);
+                }
                 if cand.is_file() {
-                    resolved_path = Some(cand);
+                    resolved_path = Some(cand.clone());
                     break;
                 }
             }
@@ -338,11 +1037,28 @@ impl TransitiveImportResolver {
                 } else {
                     report.unresolved_imports.push(format!("unreadable: {}", canonical.display()));
                 }
+            } else if let Some(escaped) = escaped_candidate {
+                report.unresolved_imports.push(format!("escaped: {}", escaped.display()));
             } else if is_relative_or_local {
                 report.unresolved_imports.push(format!("local_import: {spec}"));
             }
         }
     }
+}
+
+fn normalize_lexical_path(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone)]
@@ -420,6 +1136,7 @@ fn resolve_python_import_candidates(
     spec: &PythonImportSpecifier,
     current_file: Option<&Path>,
     workspace_root: &Path,
+    manifest_index: &WorkspaceManifestIndex,
 ) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     let current_dir = current_file.and_then(|p| p.parent()).unwrap_or(workspace_root);
@@ -461,6 +1178,37 @@ fn resolve_python_import_candidates(
                 candidates.push(base.join(&rel_path).join(name).join("__init__.py"));
             }
         }
+
+        // Consult WorkspaceManifestIndex for src-layout / editable / workspace packages
+        let (first_seg, rest_opt) = match mod_name.split_once('.') {
+            Some((first, rest)) => (first, Some(rest.replace('.', "/"))),
+            None => (mod_name.as_str(), None),
+        };
+        let norm_first = WorkspaceManifestIndex::normalize_py_name(first_seg);
+        if let Some(pkg_dir) = manifest_index
+            .python_packages
+            .get(first_seg)
+            .or_else(|| manifest_index.python_packages.get(&norm_first))
+        {
+            match rest_opt {
+                None => {
+                    candidates.push(pkg_dir.with_extension("py"));
+                    candidates.push(pkg_dir.join("__init__.py"));
+                    for name in &spec.imported_names {
+                        candidates.push(pkg_dir.join(format!("{}.py", name)));
+                        candidates.push(pkg_dir.join(name).join("__init__.py"));
+                    }
+                }
+                Some(rest_rel) => {
+                    candidates.push(pkg_dir.join(format!("{}.py", rest_rel)));
+                    candidates.push(pkg_dir.join(&rest_rel).join("__init__.py"));
+                    for name in &spec.imported_names {
+                        candidates.push(pkg_dir.join(&rest_rel).join(format!("{}.py", name)));
+                        candidates.push(pkg_dir.join(&rest_rel).join(name).join("__init__.py"));
+                    }
+                }
+            }
+        }
     }
 
     candidates
@@ -473,7 +1221,7 @@ fn collect_javascript_imports(src: &str) -> Result<Vec<String>, String> {
     use oxc_span::SourceType;
 
     let allocator = Allocator::default();
-    let source_type = SourceType::mjs().with_typescript(true);
+    let source_type = SourceType::mjs().with_typescript(true).with_jsx(true);
     let options = ParseOptions {
         parse_regular_expression: false,
         allow_return_outside_function: true,
@@ -526,47 +1274,75 @@ fn collect_javascript_imports(src: &str) -> Result<Vec<String>, String> {
     Ok(visitor.imports)
 }
 
-fn resolve_javascript_import_candidates(
-    specifier: &str,
-    current_file: Option<&Path>,
-    workspace_root: &Path,
-) -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    let trimmed = specifier.trim();
-
-    let target = if trimmed.starts_with("./") || trimmed.starts_with("../") {
-        let base_dir = current_file.and_then(|p| p.parent()).unwrap_or(workspace_root);
-        base_dir.join(trimmed)
-    } else if trimmed.starts_with('/') {
-        workspace_root.join(trimmed.trim_start_matches('/'))
-    } else {
-        workspace_root.join(trimmed)
-    };
-
+fn push_js_target_candidates(candidates: &mut Vec<PathBuf>, target: &Path) {
     // 1. Direct path
-    candidates.push(target.clone());
+    candidates.push(target.to_path_buf());
+
+    // TypeScript ESM / composite fallback: if target ends in .js/.mjs/.cjs, also probe .ts/.tsx
+    if let Some(ext) = target.extension().and_then(|e| e.to_str()) {
+        if matches!(ext, "js" | "mjs" | "cjs") {
+            candidates.push(target.with_extension("ts"));
+            candidates.push(target.with_extension("tsx"));
+        }
+    }
+    // If target path contains a /dist/ or /build/ segment, also probe the /src/ equivalent
+    let target_lossy = target.to_string_lossy();
+    for out_seg in &["/dist/", "/build/"] {
+        if target_lossy.contains(out_seg) {
+            let src_equiv = PathBuf::from(target_lossy.replacen(out_seg, "/src/", 1));
+            candidates.push(src_equiv.clone());
+            candidates.push(src_equiv.with_extension("ts"));
+            candidates.push(src_equiv.with_extension("tsx"));
+            candidates.push(src_equiv.with_extension("js"));
+        }
+    }
 
     // 2. Common extensions
-    for ext in &[".js", ".ts", ".mjs", ".cjs", ".json"] {
-        let mut with_ext = target.clone().into_os_string();
+    for ext in &[".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs", ".json"] {
+        let mut with_ext = target.as_os_str().to_os_string();
         with_ext.push(ext);
         candidates.push(PathBuf::from(with_ext));
     }
 
     // 3. Directory index files
-    for idx in &["index.js", "index.ts", "index.mjs", "index.cjs"] {
+    for idx in &[
+        "index.js",
+        "index.ts",
+        "index.tsx",
+        "index.jsx",
+        "index.mjs",
+        "index.cjs",
+        "src/index.js",
+        "src/index.ts",
+        "src/index.tsx",
+        "src/index.jsx",
+        "src/index.mjs",
+    ] {
         candidates.push(target.join(idx));
     }
 
-    // 4. package.json main / module field
+    // 4. package.json main / module / exports field
     let pkg_json = target.join("package.json");
     if pkg_json.is_file() {
         if let Ok(content) = std::fs::read_to_string(&pkg_json) {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(exports) = val.get("exports") {
+                    if let Some(s) = exports.as_str() {
+                        candidates.push(target.join(s));
+                    } else if let Some(obj) = exports.as_object() {
+                        if let Some(dot_val) = obj.get(".") {
+                            if let Some(s) = WorkspaceManifestIndex::extract_export_target(dot_val) {
+                                candidates.push(target.join(s));
+                            }
+                        } else if let Some(s) = WorkspaceManifestIndex::extract_export_target(exports) {
+                            candidates.push(target.join(s));
+                        }
+                    }
+                }
                 if let Some(main) = val.get("main").and_then(|m| m.as_str()) {
                     let main_path = target.join(main);
                     candidates.push(main_path.clone());
-                    for ext in &[".js", ".ts", ".mjs", ".cjs"] {
+                    for ext in &[".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs"] {
                         let mut with_ext = main_path.clone().into_os_string();
                         with_ext.push(ext);
                         candidates.push(PathBuf::from(with_ext));
@@ -578,6 +1354,145 @@ fn resolve_javascript_import_candidates(
             }
         }
     }
+}
+
+fn split_node_package_specifier(spec: &str) -> (&str, Option<&str>) {
+    if spec.starts_with('@') {
+        let mut slash_indices = spec.match_indices('/').map(|(i, _)| i);
+        let _first_slash = slash_indices.next();
+        if let Some(second_slash) = slash_indices.next() {
+            (&spec[..second_slash], Some(&spec[second_slash + 1..]))
+        } else {
+            (spec, None)
+        }
+    } else if let Some((pkg, sub)) = spec.split_once('/') {
+        (pkg, Some(sub))
+    } else {
+        (spec, None)
+    }
+}
+
+fn apply_path_mappings_to_candidates(
+    trimmed: &str,
+    mappings: &[TsPathMapping],
+    candidates: &mut Vec<PathBuf>,
+) {
+    for mapping in mappings {
+        if let Some((prefix, suffix)) = mapping.pattern.split_once('*') {
+            if trimmed.starts_with(prefix)
+                && trimmed.ends_with(suffix)
+                && trimmed.len() >= prefix.len() + suffix.len()
+            {
+                let matched = &trimmed[prefix.len()..trimmed.len() - suffix.len()];
+                for target_tpl in &mapping.targets {
+                    let tpl_str = target_tpl.to_string_lossy();
+                    let resolved = if tpl_str.contains('*') {
+                        PathBuf::from(tpl_str.replace('*', matched))
+                    } else {
+                        target_tpl.join(matched)
+                    };
+                    push_js_target_candidates(candidates, &resolved);
+                }
+            }
+        } else if trimmed == mapping.pattern {
+            for target_path in &mapping.targets {
+                push_js_target_candidates(candidates, target_path);
+            }
+        } else if let Some(sub) = trimmed.strip_prefix(&format!("{}/", mapping.pattern)) {
+            for target_path in &mapping.targets {
+                push_js_target_candidates(candidates, &target_path.join(sub));
+            }
+        }
+    }
+}
+
+fn resolve_javascript_import_candidates(
+    specifier: &str,
+    current_file: Option<&Path>,
+    workspace_root: &Path,
+    manifest_index: &WorkspaceManifestIndex,
+) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    let trimmed = specifier.trim();
+
+    if trimmed.starts_with('#') {
+        // Node.js package.json `"imports"` subpath imports (`#internal/*`)
+        // Prioritize enclosing package scopes (deepest pkg_dir first), then fallback to workspace scopes.
+        let mut enclosing_scopes: Vec<&NodeSubpathImportScope> = Vec::new();
+        let mut other_scopes: Vec<&NodeSubpathImportScope> = Vec::new();
+        for scope in &manifest_index.node_subpath_imports {
+            if let Some(cf) = current_file {
+                if cf.starts_with(&scope.pkg_dir) {
+                    enclosing_scopes.push(scope);
+                    continue;
+                }
+            }
+            other_scopes.push(scope);
+        }
+        enclosing_scopes.sort_by(|a, b| b.pkg_dir.as_os_str().len().cmp(&a.pkg_dir.as_os_str().len()));
+        for scope in enclosing_scopes.into_iter().chain(other_scopes.into_iter()) {
+            apply_path_mappings_to_candidates(trimmed, &scope.mappings, &mut candidates);
+        }
+        return candidates;
+    }
+
+    let is_relative = trimmed.starts_with("./") || trimmed.starts_with("../") || trimmed.starts_with('/');
+
+    if !is_relative {
+        // 1. Consult tsconfig.json / jsconfig.json compilerOptions.paths aliases
+        apply_path_mappings_to_candidates(trimmed, &manifest_index.ts_path_mappings, &mut candidates);
+
+        // 2. Consult tsconfig.json / jsconfig.json compilerOptions.baseUrl
+        for base_url in &manifest_index.ts_base_urls {
+            push_js_target_candidates(&mut candidates, &base_url.join(trimmed));
+        }
+
+        // 3. Consult Node workspace packages and package.json exports
+        let (pkg_name, subpath_opt) = split_node_package_specifier(trimmed);
+        let export_key = match subpath_opt {
+            Some(sub) => format!("./{sub}"),
+            None => ".".to_string(),
+        };
+
+        if let Some(exports_map) = manifest_index.node_exports.get(pkg_name) {
+            if let Some(export_target) = exports_map.get(&export_key) {
+                push_js_target_candidates(&mut candidates, export_target);
+            }
+            if let Some(sub) = subpath_opt {
+                for (pat_key, pat_target) in exports_map {
+                    if let Some(prefix) = pat_key.strip_prefix("./").and_then(|k| k.strip_suffix('*')) {
+                        if let Some(matched_wildcard) = sub.strip_prefix(prefix) {
+                            let target_str = pat_target.to_string_lossy().replace('*', matched_wildcard);
+                            push_js_target_candidates(&mut candidates, Path::new(&target_str));
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(pkg_dir) = manifest_index.node_packages.get(pkg_name) {
+            match subpath_opt {
+                None => {
+                    push_js_target_candidates(&mut candidates, pkg_dir);
+                }
+                Some(sub) => {
+                    push_js_target_candidates(&mut candidates, &pkg_dir.join(sub));
+                    push_js_target_candidates(&mut candidates, &pkg_dir.join("src").join(sub));
+                }
+            }
+        }
+    }
+
+    let target = if trimmed.starts_with("./") || trimmed.starts_with("../") {
+        let base_dir = current_file.and_then(|p| p.parent()).unwrap_or(workspace_root);
+        base_dir.join(trimmed)
+    } else if trimmed.starts_with('/') {
+        workspace_root.join(trimmed.trim_start_matches('/'))
+    } else {
+        workspace_root.join(trimmed)
+    };
+
+    push_js_target_candidates(&mut candidates, &target);
 
     candidates
 }

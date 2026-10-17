@@ -530,6 +530,76 @@ pub struct RuntimeConfig {
     pub ebpf: EbpfRuntimeConfig,
 }
 
+/// Journal storage format under `[logging]`.
+#[derive(Debug, Deserialize, Clone, Copy, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum JournalFormat {
+    /// Traditional append-only JSON Lines (`journal.jsonl`).
+    Jsonl,
+    /// Memory-mapped binary audit log with offset index header (`journal.vlog`).
+    Binary,
+}
+
+impl Default for JournalFormat {
+    fn default() -> Self {
+        Self::Jsonl
+    }
+}
+
+/// The `[logging]` table: audit journal storage and indexing options.
+#[derive(Debug, Deserialize, Clone, JsonSchema, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct LoggingConfig {
+    /// Format used for persisting audit journal events ("jsonl" or "binary").
+    #[serde(default)]
+    pub journal_format: JournalFormat,
+}
+
+/// The `[sandbox.cgroups]` table: Linux cgroups v2 memory limits for worker processes.
+#[derive(Debug, Deserialize, Clone, JsonSchema, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct CgroupsConfig {
+    /// Hard memory limit in megabytes (`memory.max` in cgroups v2).
+    #[serde(default)]
+    pub max_memory_mb: Option<u64>,
+    /// Throttle memory high-water mark in megabytes (`memory.high` in cgroups v2).
+    #[serde(default)]
+    pub high_memory_mb: Option<u64>,
+}
+
+/// Seccomp-BPF syscall filter profile under `[sandbox]`.
+#[derive(Debug, Deserialize, Clone, Copy, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SeccompProfile {
+    /// Blocks kernel module loading, kexec, mount/pivot_root, ptrace, and raw/packet/netlink sockets.
+    Strict,
+    /// Blocks kernel module loading, kexec, mount/pivot_root, and ptrace while allowing standard sockets.
+    Baseline,
+    /// Disables seccomp-BPF syscall filtering.
+    None,
+}
+
+/// The `[sandbox]` table: worker process sandboxing, namespaces, seccomp-BPF, and cgroups v2 limits.
+#[derive(Debug, Deserialize, Clone, JsonSchema, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxConfig {
+    /// Linux cgroups v2 memory limits (`[sandbox.cgroups]`).
+    #[serde(default)]
+    pub cgroups: CgroupsConfig,
+    /// Whether to isolate user, PID, and mount namespaces (`CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNS`).
+    #[serde(default)]
+    pub unshare_namespaces: bool,
+    /// Whether to isolate the Linux network namespace (`CLONE_NEWNET`) with loopback-only (`lo`) routing.
+    #[serde(default)]
+    pub isolate_network: bool,
+    /// Optional seccomp-BPF syscall filter profile (`"strict"`, `"baseline"`, or `"none"`).
+    #[serde(default)]
+    pub seccomp_profile: Option<SeccompProfile>,
+    /// Whether to enforce Linux Landlock LSM unprivileged filesystem access rules (`[write].allow_paths`).
+    #[serde(default)]
+    pub landlock_enforce: bool,
+}
+
 
 /// `config.toml` (`~/.config/vouch/config.toml`): what the operator has told
 /// vouch to do. Anything not named here resolves to `ask` — absence of a
@@ -608,6 +678,12 @@ struct Raw {
     /// `[runtime]`: platform runtime verification configuration (eBPF).
     #[serde(default)]
     runtime: RuntimeConfig,
+    /// `[logging]`: audit log storage and binary indexing configuration.
+    #[serde(default)]
+    logging: LoggingConfig,
+    /// `[sandbox]`: kernel namespace and cgroups v2 memory isolation settings.
+    #[serde(default)]
+    sandbox: SandboxConfig,
 }
 
 #[derive(Debug, Default)]
@@ -623,6 +699,8 @@ pub struct Config {
     pub read: ReadConfig,
     pub daemon: DaemonConfig,
     pub runtime: RuntimeConfig,
+    pub logging: LoggingConfig,
+    pub sandbox: SandboxConfig,
     /// True only for `Config::nothing_configured()` — there is no config file
     /// on disk at all. Distinguishes that from a real, loaded config that
     /// simply names no tools yet (`tools` empty either way, so `tools` alone
@@ -818,6 +896,8 @@ pub fn load(text: &str) -> Result<Config, String> {
         read: raw.read,
         daemon: raw.daemon,
         runtime: raw.runtime,
+        logging: raw.logging,
+        sandbox: raw.sandbox,
         no_config_file: false,
     };
     validate(&cfg)?;

@@ -17,10 +17,12 @@ setting must never become permission.
 | `daemon` | DaemonConfig | (none) | `[daemon]`: persistent gating daemon configuration. |
 | `guards` | map of string to Action | (none) | What commands DO, written as `[guards]`. Shared across every language: a guard fires the same way whichever scanner recognised the command that tripped it. Every key must be one of vouch's known guard names (`bypass_enforcement`, `confidential_output`, `delete_recursive`, `grant_execute`, `history_rewrite`, `publish_outward`, `process_control`, `privilege_escalation`, `disk_or_system`, `in_place_edit`, `local_state_write`, `remote_execution`); an unset guard always resolves to `ask`. |
 | `lang` | map of string to LangConfig | (none) | Every language section, written as `[lang.<name>]` — `bash`, `powershell`, `python`, and `javascript` ship with vouch. One map, so a new scanner needs no new key here. |
+| `logging` | LoggingConfig | (none) | `[logging]`: audit log storage and binary indexing configuration. |
 | `protected` | ProtectedSection | (none) | `[protected]`: paths no `allow_paths` entry can ever open. |
 | `read` | ReadConfig | (none) | `[read]`: what vouch does about reading files, and which confidential paths are protected from silent exposure into transcripts. |
 | `run` | RunSection | (none) | `[run]`: run-place zones, executable-place program trust, and place-scoped guard overrides. |
 | `runtime` | RuntimeConfig | (none) | `[runtime]`: platform runtime verification configuration (eBPF). |
+| `sandbox` | SandboxConfig | (none) | `[sandbox]`: kernel namespace and cgroups v2 memory isolation settings. |
 | `shadow` | ShadowSection (optional) | (none) | `[shadow]`: mode-keyed shadow (design 2026-08-16). |
 | `tools` | map of string to Action | (none) | Per-tool actions, written as `[tools]`. vouch used to say NOTHING about any tool it had no scanner for — 46.5% of recorded tool calls — which is the same "unknown means allowed" inversion as unmodelled programs, one level up. Naming a FIRST tool here makes this section govern every tool, not only the one named; see `Config::tool_decision`. |
 | `unparseable_snippet` | Action (optional) | (none) | Decision when hook input from an agent harness or tool snippet cannot be parsed into structured payload. Allowed: "ask" (default) or "deny". "allow" is refused. |
@@ -35,6 +37,15 @@ through, stop and ask the operator, or refuse it outright.
 - `allow` — Let it through with no prompt.
 - `ask` — Stop and show the operator what was recognised, before it runs.
 - `deny` — Refuse it outright, with no prompt.
+
+### `CgroupsConfig`
+
+The `[sandbox.cgroups]` table: Linux cgroups v2 memory limits for worker processes.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `high_memory_mb` | integer (optional) | (unset) | Throttle memory high-water mark in megabytes (`memory.high` in cgroups v2). |
+| `max_memory_mb` | integer (optional) | (unset) | Hard memory limit in megabytes (`memory.max` in cgroups v2). |
 
 ### `DaemonConfig`
 
@@ -84,6 +95,13 @@ down only when every possible directory is known and none is under it.
 |---|---|---|---|
 | `under` | array of string | (required) | The trees this override applies under. Each entry is a path or a `path/**` glob. |
 
+### `JournalFormat`
+
+Journal storage format under `[logging]`.
+
+- `jsonl` — Traditional append-only JSON Lines (`journal.jsonl`).
+- `binary` — Memory-mapped binary audit log with offset index header (`journal.vlog`).
+
 ### `LangConfig`
 
 Settings for one language: `[lang.bash]`, `[lang.powershell]`,
@@ -109,6 +127,14 @@ The `[runtime.linux]` table: Linux runtime verifications (eBPF).
 | `ebpf_tracing` | boolean | false |  |
 | `trace_ring_buffer_pages` | integer | 64 |  |
 | `zero_copy` | boolean | false |  |
+
+### `LoggingConfig`
+
+The `[logging]` table: audit journal storage and indexing options.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `journal_format` | JournalFormat | (none) | Format used for persisting audit journal events ("jsonl" or "binary"). |
 
 ### `ProgramLocationTrust`
 
@@ -164,6 +190,26 @@ The `[runtime]` table: platform-specific runtime verification settings.
 |---|---|---|---|
 | `ebpf` | EbpfRuntimeConfig | (none) |  |
 | `linux` | LinuxRuntimeConfig | (none) |  |
+
+### `SandboxConfig`
+
+The `[sandbox]` table: worker process sandboxing, namespaces, seccomp-BPF, and cgroups v2 limits.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `cgroups` | CgroupsConfig | (none) | Linux cgroups v2 memory limits (`[sandbox.cgroups]`). |
+| `isolate_network` | boolean | false | Whether to isolate the Linux network namespace (`CLONE_NEWNET`) with loopback-only (`lo`) routing. |
+| `landlock_enforce` | boolean | false | Whether to enforce Linux Landlock LSM unprivileged filesystem access rules (`[write].allow_paths`). |
+| `seccomp_profile` | SeccompProfile (optional) | (none) | Optional seccomp-BPF syscall filter profile (`"strict"`, `"baseline"`, or `"none"`). |
+| `unshare_namespaces` | boolean | false | Whether to isolate user, PID, and mount namespaces (`CLONE_NEWUSER \| CLONE_NEWPID \| CLONE_NEWNS`). |
+
+### `SeccompProfile`
+
+Seccomp-BPF syscall filter profile under `[sandbox]`.
+
+- `strict` — Blocks kernel module loading, kexec, mount/pivot_root, ptrace, and raw/packet/netlink sockets.
+- `baseline` — Blocks kernel module loading, kexec, mount/pivot_root, and ptrace while allowing standard sockets.
+- `none` — Disables seccomp-BPF syscall filtering.
 
 ### `ShadowSection`
 

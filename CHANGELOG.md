@@ -1,5 +1,205 @@
 # Changelog
 
+## 0.60.0 (2026-10-17)
+
+
+### Features
+
+* **Add interactive in-memory policy amendment simulation and side-by-side verdict impact diffing in vouch tui**
+  - **Problem & Explanation:** Inspecting a policy evaluation Directed Acyclic Graph (DAG) in the TUI Policy Visualizer tab (`ViewTab::Visualizer`) previously showed static TOML previews (`p`) without indicating whether applying the candidate rule would fully unblock the command or leave another construct or guard active. `TuiEngine::simulate_candidate` in `src/tui/engine.rs` and `PolicyGraph::render_ascii` in `src/tui/graph.rs` now allow pressing `d` on a `[PATH]` or `[RULE]` node to evaluate the command against an in-memory amended `Config` (`decide_command_at`), displaying an inline `[SIMULATED: ASK -> ALLOW]` badge and a side-by-side before/after verdict impact diff without modifying `config.toml` on disk.
+  - **Example Scenario:**
+    ```bash
+    vouch tui
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: operators could preview raw TOML (`p`) or immediately write to disk (`a`). After: pressing `d` simulates the candidate amendment in memory against the full decision pipeline and renders the before/after verdict transition while refusing simulation on `[GUARD]` nodes.
+
+* **Add Linux Landlock LSM unprivileged filesystem access enforcement via sandbox.landlock_enforce**
+  - **Problem & Explanation:** Sandboxed subagent worker processes on Linux previously isolated user, PID, mount, and network namespaces alongside cgroups v2 memory limits and seccomp-BPF syscall class filters, but did not enforce path-granular VFS write boundaries inside the kernel. `LandlockRulesetPlan::from_write_policy` in `src/runtime/sandbox.rs` and `[sandbox] landlock_enforce = true` in `src/config.rs` compile Vouch's `[write].allow_paths` into an unprivileged Linux Landlock LSM ruleset (`landlock_create_ruleset`, `landlock_add_rule`, `landlock_restrict_self`, ABI v1–v3) that grants read/execute access across `/` while restricting file creation, truncation, unlinking, and writing strictly to resolved allowed hierarchies.
+  - **Example Scenario:**
+    ```toml
+    [sandbox]
+    unshare_namespaces = true
+    landlock_enforce = true
+
+    [write]
+    allow_paths = ["~/workspace/**", "/tmp/**"]
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Added optional `[sandbox] landlock_enforce = true` (default `false`).
+    - *Behavior Contrast:* Before: kernel sandbox isolation operated at the namespace, cgroup, and syscall-number level. After: Linux kernels supporting Landlock LSM additionally enforce `[write].allow_paths` at the VFS `path_beneath` layer without requiring root privileges.
+
+* **Add rolling cryptographic hash-chained binary audit frames and vouch doctor tamper-evidence verification for journal.vlog**
+  - **Problem & Explanation:** Binary audit journal frames (`journal.vlog` / `journal.vidx`) previously verified individual record payloads using per-frame IEEE 802.3 CRC32 checksums, which detected accidental bit rot or torn writes but could not detect out-of-band frame deletion, splicing, or reordering. `src/journal_vlog.rs` extends each frame header to 16 bytes (`[payload_len: u32][crc32: u32][chain_tag: u64]`) with a rolling 64-bit keyed FNV-1a cryptographic chain tag (`compute_frame_chain_tag(prev_tag, crc32, index)`) and wires `verify_vlog_integrity` into `vouch doctor` to detect payload corruption, broken hash chains, truncated frames, and `.vidx` sidecar mismatches.
+  - **Example Scenario:**
+    ```bash
+    vouch doctor
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged (uses `[logging] journal_format = "binary"`).
+    - *Behavior Contrast:* Before: `.vlog` frames were validated independently by CRC32. After: each frame cryptographically commits to its predecessor and position, and `vouch doctor` verifies end-to-end chain and sidecar integrity.
+
+* **Model PowerShell trap exception handlers, labeled loop jumps, and cross-scope script and global variable taint propagation**
+  - **Problem & Explanation:** PowerShell scripts frequently propagate state across helper functions using `$script:` or `$global:` scope-qualified variables, handle errors via statement-scoped `trap [Exception] { ... }` blocks (`continue` vs `break`), and exit nested loops via `:label` targets (`break :outer`, `continue :outer`). `PsControlFlowGraph` and `VariableTaintTable` in `src/powershell_pipeline.rs` now preserve `$script:` and `$global:` taint across function boundaries, connect `trap` handler blocks with `continue`/`break` reachability semantics, and prune dead basic blocks following labeled loop jumps.
+  - **Example Scenario:**
+    ```powershell
+    function Set-Target { $script:targetProc = (Get-Process -Name worker) }
+    Set-Target
+    Stop-Process -Id $script:targetProc.Id
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: taint tracking was function-local and CFG analysis modeled `try`/`catch`/`finally` without `trap` or labeled loop jumps. After: CFG and taint analysis track `$script:`/`$global:` mutations across functions, model `trap` handlers, and prune dead code after `break :label` / `continue :label`.
+
+* **Resolve Node.js package.json # subpath imports and TypeScript composite project references during static capability inference**
+  - **Problem & Explanation:** Modern Node.js packages map internal modules via the `package.json` `"imports"` field (`"#internal/*": "./src/internal/*.ts"`), and TypeScript monorepos link composite packages via `"references": [{ "path": "./packages/core" }]` in `tsconfig.json`. `WorkspaceManifestIndex` in `src/capability.rs` now indexes `package.json` `"imports"` (including conditional `"import"`/`"require"`/`"default"` targets scoped to the nearest enclosing package) and recursively traverses `tsconfig.json` `"references"` (with `dist/` to `src/` composite source fallback) while enforcing canonical workspace root containment.
+  - **Example Scenario:**
+    ```bash
+    node -e "import { runDaemon } from '#internal/spawner'; runDaemon();"
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged. Automatically discovered from `package.json` `"imports"` and `tsconfig.json` `"references"` within the workspace root.
+    - *Behavior Contrast:* Before: `#` subpath imports were treated as external specifiers and `tsconfig.json` `"references"` were not traversed. After: both resolve transitively within workspace bounds for static AST capability propagation.
+
+## 0.59.0 (2026-10-14)
+
+
+### Features
+
+* **Add Linux network namespace isolation (isolate_network) and seccomp-BPF syscall filter profiles (seccomp_profile) for sandboxed subagents**
+  - **Problem & Explanation:** Sandboxed subagents previously isolated user, PID, and mount namespaces alongside cgroups v2 memory limits, leaving host network interfaces and dangerous kernel syscalls reachable unless externally restricted. `src/runtime/sandbox.rs` and `src/config.rs` add `isolate_network = true` (`CLONE_NEWNET` with isolated loopback `lo`) and `seccomp_profile` (`"disabled"`, `"standard"`, `"strict"`), assembling deterministic seccomp-BPF instruction programs (`SeccompBpfProgram`) across `x86_64` and `aarch64` to return `EPERM` on `kexec_load`, kernel module loading (`init_module`, `finit_module`, `delete_module`), `ptrace`, filesystem mount/pivot (`mount`, `umount2`, `pivot_root`, `swapon`, `swapoff`), and raw `AF_PACKET` sockets.
+  - **Example Scenario:**
+    ```toml
+    [sandbox]
+    unshare_namespaces = true
+    isolate_network = true
+    seccomp_profile = "strict"
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Added optional `[sandbox] isolate_network = true` and `seccomp_profile = "standard" | "strict" | "disabled"`.
+    - *Behavior Contrast:* Before: sandboxed subagent workers shared host network namespace interfaces and had no seccomp syscall filter program. After: workers can unshare `CLONE_NEWNET` and enforce deterministic seccomp-BPF syscall filters on Linux.
+
+* **Model PowerShell switch case reachability, try/catch/finally exception edges, and ForEach-Object Begin/Process/End stages in CFG analysis**
+  - **Problem & Explanation:** PowerShell scripts frequently dispatch commands via `switch ($mode) { ... }`, wrap operations in `try { ... } catch { ... } finally { ... }`, and pass multi-block `-Begin`, `-Process`, and `-End` scriptblocks to `ForEach-Object`. `PsControlFlowGraph` in `src/powershell_pipeline.rs` now evaluates static `switch` conditions (`-Exact`, `-Wildcard`, `-Regex`, and `default` fallback) to prune unreachable case arms, routes exception edges to `catch` only when the `try` block can throw while guaranteeing `finally` execution before downstream statements, and orders `-Begin`/`-Process`/`-End` stages with upstream pipeline cmdlet taint inference.
+  - **Example Scenario:**
+    ```powershell
+    $mode = "safe"
+    switch ($mode) {
+        "safe" { Get-Date }
+        "nuke" { Remove-Item -Recurse -Force /etc/passwd }
+    }
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: CFG analysis modeled only `if`/`elseif`/`else` branches and linear pipeline scriptblocks. After: CFG prunes statically unreachable `switch` arms and pure-try `catch` blocks while preserving `finally` and multi-stage `ForEach-Object` dataflow.
+
+* **Resolve TypeScript and JavaScript tsconfig.json and jsconfig.json path aliases (paths and baseUrl) within workspace bounds**
+  - **Problem & Explanation:** Modern TypeScript and JavaScript repositories configure `compilerOptions.baseUrl` and `compilerOptions.paths` (such as `"@/*": ["./src/*"]`) in `tsconfig.json` or `jsconfig.json`, often using JSON with Comments (JSONC) and `"extends"` inheritance. `WorkspaceManifestIndex` in `src/capability.rs` now strips JSONC comments and trailing commas via a string-aware state machine, follows bounded `"extends"` chains, and resolves path alias imports across `.ts`, `.tsx`, `.js`, and `.jsx` files while enforcing canonical workspace root containment.
+  - **Example Scenario:**
+    ```bash
+    node -e "import { run } from '@/services/network'; run();"
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged. Automatically discovered from `tsconfig.json` and `jsconfig.json` within the workspace root.
+    - *Behavior Contrast:* Before: `@/` and `~/` path aliases were treated as unresolved external package specifiers. After: path aliases resolve transitively to local workspace modules under strict root containment.
+
+* **Support direct TOML preview (p) and config.toml rule amendment (a) from PATH and RULE nodes in the TUI Policy Visualizer tab**
+  - **Problem & Explanation:** Inspecting an evaluation Directed Acyclic Graph (DAG) in the TUI Policy Visualizer tab (`ViewTab::Visualizer`) previously required switching back to Tab 1 (`Rule Candidates`) and locating the corresponding entry to preview or apply a rule amendment. `GraphNode::to_review_candidate` in `src/tui/graph.rs` and `apply_selected_visualizer_node` in `src/tui/app.rs` now allow pressing `p` to preview the exact TOML delta and `a` to write `write.allow_paths` or construct rules directly from `[PATH]` and `[RULE]` nodes in the visualizer, while explicitly refusing standing approval on `[GUARD]` nodes.
+  - **Example Scenario:**
+    ```bash
+    vouch tui
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: the Policy Visualizer tab was read-only for configuration changes. After: operators can preview (`p`) and apply (`a`) `config.toml` amendments directly on selected `[PATH]` and `[RULE]` DAG nodes.
+
+* **Support incremental binary journal (.vlog / .vidx) compaction and live index-offset tail streaming in vouch tui**
+  - **Problem & Explanation:** When `[logging] journal_format = "binary"` was enabled, `JournalTailReader` in `src/tui/engine.rs` could not stream newly appended `.vlog` records incrementally, and `compact_journal_if_needed` in `src/journal.rs` only compacted text `journal.jsonl` files. `src/journal_vlog.rs` introduces `read_vlog_from_index_offset`, `inspect_vlog_watermark`, and `compact_vlog`, enabling real-time $O(1)$ index-offset tail streaming in `vouch tui` with compaction watermark reset detection and atomic binary journal compaction.
+  - **Example Scenario:**
+    ```toml
+    [logging]
+    journal_format = "binary"
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged (uses `[logging] journal_format = "binary"`).
+    - *Behavior Contrast:* Before: live TUI tailing and background compaction operated only on `journal.jsonl`. After: both live TUI tailing and background journal compaction natively support binary `journal.vlog` and `journal.vidx` files.
+
+## 0.58.0 (2026-10-14)
+
+
+### Features
+
+* **Dynamic inter-procedural control flow graph (CFG) analysis for PowerShell**
+  - **Problem & Explanation:** PowerShell scriptblocks frequently define local helper functions (`function Invoke-Cleanup($target) { Remove-Item $target -Recurse }`) and guard execution paths behind conditional branches (`if ($false) { ... }`) or early returns (`return; Remove-Item /etc/hosts`). Linear statement walking treated unreachable branches as active and could not propagate argument taint across local function boundaries. `src/powershell_pipeline.rs` introduces `PsControlFlowGraph`, `BasicBlock`, and `FunctionSummaryTable`, evaluating static boolean conditions (`$false`, `$true`, `0`, `1`, literal string comparisons), pruning dead basic blocks after early `return`/`exit`/`break`/`throw` terminators, and binding caller arguments into local function parameter taint tables up to bounded recursion depth.
+  - **Example Scenario:**
+    ```powershell
+    function Remove-Target($p) { Remove-Item -Path $p -Recurse -Force }
+    if ($false) { Stop-Process -Name lsass } else { Remove-Target "/etc/passwd" }
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: all branches were analyzed linearly without pruning dead conditionals or resolving local function parameter taint. After: unreachable branches are pruned and inter-procedural function calls propagate caller argument taint to inner destructive cmdlets.
+
+* **Kernel namespaces and cgroups v2 memory gating for sandboxed subagents**
+  - **Problem & Explanation:** Subagent worker processes executing untrusted build scripts or heavy compilation tasks shared host OS memory limits and process/mount visibility, creating the risk of host out-of-memory exhaustion or cross-worker inspection. `src/runtime/sandbox.rs` implements `CgroupV2Manager`, `CgroupScope`, and `NamespaceSpec`, enforcing Linux cgroups v2 memory limits (`memory.max`, `memory.high`), parsing `memory.events` OOM kill counters, and isolating user, PID, and mount namespaces (`CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNS`) with clean RAII scope teardown and graceful cross-platform fallback.
+  - **Example Scenario:**
+    ```toml
+    [sandbox]
+    unshare_namespaces = true
+
+    [sandbox.cgroups]
+    max_memory_mb = 2048
+    high_memory_mb = 1536
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Added optional `[sandbox] unshare_namespaces = true` and `[sandbox.cgroups] max_memory_mb` / `high_memory_mb` settings.
+    - *Behavior Contrast:* Before: worker processes executed without kernel cgroup memory quotas or namespace isolation. After: sandboxed workers enforce cgroup v2 memory caps and unshare user/PID/mount namespaces on supported Linux kernels.
+
+* **Memory-mapped binary audit log persistence and indexing (.vlog)**
+  - **Problem & Explanation:** As audit trails grow to hundreds of thousands of events, scanning append-only text `journal.jsonl` files linearly incurs high I/O and deserialization latency during timeline queries, TUI reviews, and compaction. `src/journal_vlog.rs` implements a memory-mapped binary audit log (`journal.vlog`) with a 64-byte magic/version header (`VLOG\x00\x01\x00\x00`), IEEE 802.3 CRC32-verified length-prefixed frames, torn-write tail recovery, and a fixed-stride 32-byte `journal.vidx` offset index supporting $O(\log N)$ binary search over microsecond timestamps and zero-parse verdict/outcome bitflag filtering.
+  - **Example Scenario:**
+    ```toml
+    [logging]
+    journal_format = "binary"
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Added optional `[logging] journal_format = "binary"` (`"jsonl"` default).
+    - *Behavior Contrast:* Before: journal persistence relied exclusively on sequential text JSONL scans. After: binary `.vlog` storage provides memory-mapped zero-copy framing and $O(\log N)$ indexed timestamp range queries.
+
+* **TUI interactive policy visualizer and graph exploration**
+  - **Problem & Explanation:** Operators reviewing complex command evaluations in `vouch tui` previously saw flat text tables of candidates and decisions without a structural view of how wrapper expansions, inferred script capabilities, path checks, and guards combined to produce a verdict. `src/tui/graph.rs` and `src/tui/app.rs` introduce `PolicyGraph` and `ViewTab::Visualizer` (toggled via `v`), rendering an interactive ASCII/Unicode Directed Acyclic Graph (DAG) with node cursor navigation (`j`/`k`), decision switching (`h`/`l`), and subtree folding (`Space`/`Enter`).
+  - **Example Scenario:**
+    ```bash
+    vouch tui
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: TUI displayed only flat tabular lists of rule candidates and recent decisions. After: TUI includes an interactive Policy Visualizer tab rendering collapsible evaluation DAGs and node-level configuration hints.
+
+* **Workspace manifest and lockfile package resolution for Python and Node**
+  - **Problem & Explanation:** Transitive AST capability resolution previously resolved only explicit relative imports (`from .utils import x`, `require('./lib')`) or direct root files, missing internal monorepo packages, `src/`-layout Python packages, editable installs (`requirements.txt` `-e ./pkg`), and Node workspace/subpath exports (`@org/pkg/client`). `src/capability.rs` introduces `WorkspaceManifestIndex`, parsing `pyproject.toml`, `requirements.txt`, `package.json` (`workspaces`, `exports`, `file:`/`link:` dependencies), and `pnpm-lock.yaml` within the workspace root while strictly blocking symlink or relative-path escapes outside the workspace boundary.
+  - **Example Scenario:**
+    ```bash
+    node -e "import { connect } from '@acme/net-utils/client'; connect();"
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged. Automatically discovered by `TransitiveImportResolver` within workspace roots.
+    - *Behavior Contrast:* Before: non-relative workspace package imports were treated as external unanalyzed modules. After: workspace manifests and lockfiles resolve local monorepo and `src/`-layout packages transitively under strict workspace containment.
+
+
+### Bug Fixes
+
+* **Allow force updating release-please tracking ref in land-private-release**
+  - **Problem & Explanation:** When `release-please` force-updates its pull request branch across successive releases, fetching the PR head without a force prefix (`+`) into the local remote-tracking ref failed with a non-fast-forward ref update error in `scripts/land-private-release.sh`. Prefixing the refspec with `+` allows `git fetch` to update the local tracking reference cleanly while preserving all exact-commit and ancestry verification checks.
+  - **Example Scenario:**
+    ```bash
+    bash scripts/land-private-release.sh 109
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: fetching a force-updated `release-please` branch failed when a prior release's tracking ref existed locally. After: the tracking ref updates cleanly and proceeds through exact-object verification.
+
 ## 0.57.0 (2026-10-08)
 
 

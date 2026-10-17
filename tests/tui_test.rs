@@ -505,3 +505,223 @@ fn tui_search_regex_and_match_cycling() {
     app.handle_event(TerminalEvent::Key(KeyCode::Char('N')));
     assert_eq!(app.selected_idx, 1);
 }
+
+#[test]
+fn tui_policy_graph_construction_from_decisions() {
+    use vouch::tui::{DecisionItem, NodeKind, PolicyGraph};
+
+    let guard_decision = DecisionItem {
+        timestamp: "2026-10-13T12:00:00Z".into(),
+        cmd: "bash -c 'curl https://example.com && rm -rf /'".into(),
+        verdict: "ask".into(),
+        reason: "vouch stopped on: delete_recursive (guard)\n  what that means: recursively deletes directory trees".into(),
+        outcome: "Denied".into(),
+        session: "sess-g".into(),
+        cwd: "/home/dev".into(),
+    };
+
+    let graph = PolicyGraph::from_decision(&guard_decision);
+    assert!(graph.nodes.iter().any(|n| n.kind == NodeKind::CommandRoot));
+    assert!(graph.nodes.iter().any(|n| n.kind == NodeKind::WrapperExpansion));
+    assert!(graph.nodes.iter().any(|n| n.kind == NodeKind::CapabilityNode && n.label.contains("network")));
+    assert!(graph.nodes.iter().any(|n| n.kind == NodeKind::GuardHit && n.label.contains("delete_recursive")));
+    assert!(graph.nodes.iter().any(|n| n.kind == NodeKind::PolicyVerdict && n.label.contains("ASK")));
+
+    let rendered = graph.render_ascii();
+    assert!(rendered.contains("[ROOT]"));
+    assert!(rendered.contains("[WRAP]"));
+    assert!(rendered.contains("[CAP] capability: network"));
+    assert!(rendered.contains("[GUARD] guard: delete_recursive"));
+    assert!(rendered.contains("[VERDICT] verdict: ASK (Denied)"));
+}
+
+#[test]
+fn tui_visualizer_tab_navigation_and_node_collapse_expand() {
+    let records = sample_records();
+    let engine = TuiEngine::from_records("/tmp", &records);
+    let mut app = TuiApp::new(engine);
+
+    // Press 'v' to switch to Policy Visualizer tab
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('v')));
+    assert_eq!(app.active_tab, vouch::tui::ViewTab::Visualizer);
+    assert_eq!(app.visualizer_decision_idx, 0);
+
+    let initial_visible = app.policy_graph.visible_entries().len();
+    assert!(initial_visible >= 3, "Root decision graph should have at least 3 visible nodes");
+
+    let frame_expanded = app.render();
+    assert!(frame_expanded.contains("[ 3. Policy Visualizer (v) * ]"));
+    assert!(frame_expanded.contains("[-] [ROOT] touch /var/log/custom.log"));
+    assert!(frame_expanded.contains("[PATH] unpermitted write path: /var/log/custom.log"));
+
+    // Navigate down to child node with 'j' and back up to root with 'k'
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('j')));
+    assert_eq!(app.selected_idx, 1);
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('k')));
+    assert_eq!(app.selected_idx, 0);
+
+    // Collapse root node using Space
+    app.handle_event(TerminalEvent::Key(KeyCode::Char(' ')));
+    assert_eq!(app.policy_graph.visible_entries().len(), 1);
+    let frame_collapsed = app.render();
+    assert!(frame_collapsed.contains("[+] [ROOT] touch /var/log/custom.log"));
+    assert!(!frame_collapsed.contains("[VERDICT]"));
+
+    // Expand root node again using Enter
+    app.handle_event(TerminalEvent::Key(KeyCode::Enter));
+    assert_eq!(app.policy_graph.visible_entries().len(), initial_visible);
+
+    // Switch to next decision in visualizer using 'l' (Right)
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('l')));
+    assert_eq!(app.visualizer_decision_idx, 1);
+    let frame_second = app.render();
+    assert!(frame_second.contains("[ROOT] rm -rf /"));
+    assert!(frame_second.contains("[GUARD] guard: delete_recursive"));
+}
+
+#[test]
+fn tui_visualizer_direct_path_and_construct_amendment_and_guard_refusal() {
+    let tag = format!("tui_test_vis_amend_{}_{}", std::process::id(), line!());
+    let tmp_path = std::env::temp_dir().join(tag);
+    let _ = std::fs::remove_dir_all(&tmp_path);
+    let home = tmp_path.to_str().unwrap();
+    let config_dir = tmp_path.join(".config").join("vouch");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let config_file = config_dir.join("config.toml");
+    std::fs::write(&config_file, "version = 1\n[write]\nallow_paths = [\"/tmp/**\"]\n").unwrap();
+
+    let records = sample_records();
+    let engine = TuiEngine::from_records(home, &records);
+    let mut app = TuiApp::new(engine);
+
+    // Switch to Policy Visualizer tab
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('v')));
+    assert_eq!(app.active_tab, vouch::tui::ViewTab::Visualizer);
+    // Decision 0 is "touch /var/log/custom.log" with child node [PATH] unpermitted write path: /var/log/custom.log
+    assert_eq!(app.visualizer_decision_idx, 0);
+
+    // Navigate down to child [PATH] node
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('j')));
+    assert_eq!(app.selected_idx, 1);
+
+    // Press 'p' to preview TOML delta on the [PATH] node
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('p')));
+    let preview_frame = app.render();
+    assert!(preview_frame.contains("--- Proposed TOML Delta ---"));
+    assert!(preview_frame.contains("/var/log/custom.log"));
+
+    // Press 'a' to apply the [PATH] node directly to config.toml
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('a')));
+    assert!(
+        app.status_message.contains("Added \"/var/log/custom.log\" to write.allow_paths in config.toml"),
+        "Unexpected status: {}",
+        app.status_message
+    );
+    let updated_cfg = std::fs::read_to_string(&config_file).unwrap();
+    assert!(updated_cfg.contains("/var/log/custom.log"));
+    assert!(updated_cfg.contains("/tmp/**"));
+    // Matching candidate should also be removed from engine.candidates
+    assert!(!app.engine.candidates.iter().any(|c| c.name == "path: /var/log/custom.log"));
+
+    // Switch to Decision 1 ("rm -rf /" with [GUARD] guard: delete_recursive)
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('l')));
+    assert_eq!(app.visualizer_decision_idx, 1);
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('j'))); // Select [GUARD] node
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('a')));
+    assert!(
+        app.status_message.contains("Refused: this is a guard"),
+        "Guard node must refuse direct amendment, got: {}",
+        app.status_message
+    );
+
+    // Switch to Decision 2 ("eval 'echo hello'" with [RULE] construct: evaluated_input)
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('l')));
+    assert_eq!(app.visualizer_decision_idx, 2);
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('j'))); // Select [RULE] node
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('a')));
+    assert!(
+        app.status_message.contains("Added [lang.bash.constructs] evaluated_input = \"allow\" to config.toml"),
+        "Construct node should apply amendment, got: {}",
+        app.status_message
+    );
+    let final_cfg = std::fs::read_to_string(&config_file).unwrap();
+    assert!(final_cfg.contains("evaluated_input = \"allow\""));
+    assert!(!app.engine.candidates.iter().any(|c| c.name == "evaluated_input"));
+
+    let _ = std::fs::remove_dir_all(&tmp_path);
+}
+
+#[test]
+fn tui_visualizer_interactive_simulation_and_impact_diff_without_disk_mutation() {
+    let tag = format!("tui_test_vis_sim_{}_{}", std::process::id(), line!());
+    let tmp_path = std::env::temp_dir().join(tag);
+    let _ = std::fs::remove_dir_all(&tmp_path);
+    let home = tmp_path.to_str().unwrap();
+    let config_dir = tmp_path.join(".config").join("vouch");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let config_file = config_dir.join("config.toml");
+    let initial_toml = "version = 1\n[write]\nallow_paths = [\"/tmp/**\"]\n";
+    std::fs::write(&config_file, initial_toml).unwrap();
+
+    let records = sample_records();
+    let engine = TuiEngine::from_records(home, &records);
+    let mut app = TuiApp::new(engine);
+
+    // Switch to Policy Visualizer tab
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('v')));
+    assert_eq!(app.active_tab, vouch::tui::ViewTab::Visualizer);
+    assert_eq!(app.visualizer_decision_idx, 0);
+
+    // Select child [PATH] node ("unpermitted write path: /var/log/custom.log")
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('j')));
+    assert_eq!(app.selected_idx, 1);
+
+    // Press 'd' to simulate amendment in memory
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('d')));
+    assert!(
+        app.status_message.contains("ASK -> ALLOW"),
+        "Expected ASK -> ALLOW simulation status, got: {}",
+        app.status_message
+    );
+    let sim_frame = app.render();
+    assert!(sim_frame.contains("[SIMULATED: ASK -> ALLOW]"));
+    assert!(sim_frame.contains("--- Side-by-Side Amendment Impact Diff (Simulation) ---"));
+    assert!(sim_frame.contains("Amendment: [write] allow_paths += \"/var/log/custom.log\""));
+    assert!(sim_frame.contains("Before:    [ASK]"));
+    assert!(sim_frame.contains("After:     [ALLOW]"));
+
+    // Verify config.toml on disk was NOT mutated during simulation
+    let disk_after_sim = std::fs::read_to_string(&config_file).unwrap();
+    assert_eq!(disk_after_sim, initial_toml, "Simulation must never mutate config.toml on disk");
+
+    // Pressing 'd' again toggles simulation off
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('d')));
+    assert!(app.policy_graph.simulation.is_none());
+    assert!(!app.render().contains("[SIMULATED:"));
+
+    // Switch to Decision 1 ("rm -rf /" with [GUARD] delete_recursive)
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('l')));
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('j'))); // Select [GUARD] node
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('d')));
+    assert!(
+        app.status_message.contains("Guard rules describe operator effects and cannot be simulated as allow-list amendments."),
+        "Guard simulation must be refused with explanatory message, got: {}",
+        app.status_message
+    );
+    assert!(app.policy_graph.simulation.is_none());
+
+    // Switch to Decision 2 ("eval 'echo hello'" with [RULE] evaluated_input)
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('l')));
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('j'))); // Select [RULE] node
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('d')));
+    assert!(
+        app.status_message.contains("ASK -> ALLOW"),
+        "Construct simulation must transition ASK -> ALLOW, got: {}",
+        app.status_message
+    );
+    let rule_sim_frame = app.render();
+    assert!(rule_sim_frame.contains("Amendment: [lang.bash.constructs] evaluated_input = \"allow\""));
+    assert_eq!(std::fs::read_to_string(&config_file).unwrap(), initial_toml);
+
+    let _ = std::fs::remove_dir_all(&tmp_path);
+}

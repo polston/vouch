@@ -519,3 +519,26 @@ paths = [
 # socket_path = "~/.config/vouch/vouch.sock"
 # timeout_ms = 50
 # fail_closed = true
+
+# ---------------------------------------------------------------------------
+# Audit Log Persistence & Binary Indexing: optional memory-mapped binary
+# journal format (.vlog) with an offset index header for sub-millisecond
+# timeline seeking and verdict filtering on multi-gigabyte audit logs.
+#
+# [logging]
+# journal_format = "binary"
+
+# ---------------------------------------------------------------------------
+# Kernel Namespaces, Seccomp-BPF & cgroups v2 Memory Gating: optional Linux
+# cgroups v2 memory quotas, user/PID/mount/network namespace isolation, and
+# seccomp-BPF syscall filtering for sandboxed workers.
+#
+# [sandbox]
+# unshare_namespaces = true
+# isolate_network = true
+# seccomp_profile = "strict"
+# landlock_enforce = true
+#
+# [sandbox.cgroups]
+# max_memory_mb = 2048
+# high_memory_mb = 1536

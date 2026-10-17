@@ -237,7 +237,26 @@ fn append_line(dir: &Path, file: &str, line: &str) -> std::io::Result<()> {
 pub fn append(dir: &Path, rec: &Record) -> std::io::Result<()> {
     let json = serde_json::to_string(rec).unwrap_or_default();
     let _ = crate::journal_wal::write_wal_frame(dir, &json);
+    if dir.join("journal.vlog").exists() || std::env::var("VOUCH_JOURNAL_FORMAT").ok().as_deref() == Some("binary") {
+        let _ = crate::journal_vlog::append_vlog(dir, rec);
+    }
     append_line(dir, "journal.jsonl", &json)
+}
+
+pub fn append_with_format(dir: &Path, rec: &Record, format: crate::config::JournalFormat) -> std::io::Result<()> {
+    match format {
+        crate::config::JournalFormat::Binary => {
+            crate::journal_vlog::append_vlog(dir, rec)?;
+            // Also keep JSONL synchronized if it already exists on disk
+            if dir.join("journal.jsonl").exists() {
+                let json = serde_json::to_string(rec).unwrap_or_default();
+                let _ = crate::journal_wal::write_wal_frame(dir, &json);
+                let _ = append_line(dir, "journal.jsonl", &json);
+            }
+            Ok(())
+        }
+        crate::config::JournalFormat::Jsonl => append(dir, rec),
+    }
 }
 
 pub fn append_outcome(dir: &Path, rec: &OutcomeRecord) -> std::io::Result<()> {
@@ -275,6 +294,9 @@ fn read_lines<T: for<'de> Deserialize<'de>>(dir: &Path, file: &str) -> Vec<T> {
 pub fn all(dir: &Path) -> Vec<Record> {
     let mut recs: Vec<Record> = read_lines(dir, "journal.jsonl");
     let outs: Vec<OutcomeRecord> = read_lines(dir, "outcomes.jsonl");
+    if recs.is_empty() && dir.join("journal.vlog").exists() {
+        recs = crate::journal_vlog::all_vlog(dir, &outs);
+    }
     let mut by_id: HashMap<(String, String), Outcome> = HashMap::new();
     for o in &outs {
         by_id.insert((o.host.clone(), o.id.clone()), o.outcome);
@@ -412,10 +434,18 @@ pub fn compact_records(records: &[Record], policy: &JournalPolicy) -> (Vec<Recor
 
 /// Atomically compacts duplicate historical runs and prunes records exceeding the retention policy cap.
 ///
-/// Also prunes orphaned `outcomes.jsonl` entries whose corresponding journal records have been pruned.
+/// Supports both JSONL (`journal.jsonl`) and binary (`journal.vlog` / `journal.vidx`) journals,
+/// and prunes orphaned `outcomes.jsonl` entries whose corresponding journal records have been pruned.
 pub fn prune_and_compact(dir: &Path, policy: &JournalPolicy) -> std::io::Result<CompactionStats> {
     create_dir_all(dir)?;
-    let recs: Vec<Record> = read_lines(dir, "journal.jsonl");
+    let has_jsonl = dir.join("journal.jsonl").exists();
+    let has_vlog = dir.join("journal.vlog").exists();
+    let outcomes: Vec<OutcomeRecord> = read_lines(dir, "outcomes.jsonl");
+
+    let mut recs: Vec<Record> = read_lines(dir, "journal.jsonl");
+    if recs.is_empty() && has_vlog {
+        recs = crate::journal_vlog::all_vlog(dir, &outcomes);
+    }
     if recs.is_empty() {
         return Ok(CompactionStats::default());
     }
@@ -423,7 +453,6 @@ pub fn prune_and_compact(dir: &Path, policy: &JournalPolicy) -> std::io::Result<
     let (compacted_recs, mut stats) = compact_records(&recs, policy);
 
     // Filter outcomes to only retain those matching retained journal records
-    let outcomes: Vec<OutcomeRecord> = read_lines(dir, "outcomes.jsonl");
     let active_ids: std::collections::HashSet<(String, String)> = compacted_recs
         .iter()
         .filter(|r| !r.id.is_empty())
@@ -435,60 +464,74 @@ pub fn prune_and_compact(dir: &Path, policy: &JournalPolicy) -> std::io::Result<
         .collect();
     stats.outcomes_retained = filtered_outcomes.len();
 
-    // Atomic write for journal.jsonl
-    let tmp_journal = dir.join("journal.jsonl.tmp");
-    {
-        let mut f = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&tmp_journal)?;
-        for r in &compacted_recs {
-            let line = serde_json::to_string(r).unwrap_or_default();
-            f.write_all(line.as_bytes())?;
-            f.write_all(b"\n")?;
+    // Atomic write for journal.jsonl when JSONL journal is present
+    if has_jsonl {
+        let tmp_journal = dir.join("journal.jsonl.tmp");
+        {
+            let mut f = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&tmp_journal)?;
+            for r in &compacted_recs {
+                let line = serde_json::to_string(r).unwrap_or_default();
+                f.write_all(line.as_bytes())?;
+                f.write_all(b"\n")?;
+            }
+            f.sync_all()?;
         }
-        f.sync_all()?;
+        std::fs::rename(&tmp_journal, dir.join("journal.jsonl"))?;
     }
-    std::fs::rename(&tmp_journal, dir.join("journal.jsonl"))?;
 
-    // Atomic write for outcomes.jsonl
-    let tmp_outcomes = dir.join("outcomes.jsonl.tmp");
-    {
-        let mut f = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&tmp_outcomes)?;
-        for o in &filtered_outcomes {
-            let line = serde_json::to_string(o).unwrap_or_default();
-            f.write_all(line.as_bytes())?;
-            f.write_all(b"\n")?;
+    // Atomic write for outcomes.jsonl when outcomes.jsonl exists or had entries
+    if dir.join("outcomes.jsonl").exists() || !filtered_outcomes.is_empty() {
+        let tmp_outcomes = dir.join("outcomes.jsonl.tmp");
+        {
+            let mut f = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&tmp_outcomes)?;
+            for o in &filtered_outcomes {
+                let line = serde_json::to_string(o).unwrap_or_default();
+                f.write_all(line.as_bytes())?;
+                f.write_all(b"\n")?;
+            }
+            f.sync_all()?;
         }
-        f.sync_all()?;
+        std::fs::rename(&tmp_outcomes, dir.join("outcomes.jsonl"))?;
     }
-    std::fs::rename(&tmp_outcomes, dir.join("outcomes.jsonl"))?;
+
+    if has_vlog {
+        crate::journal_vlog::write_all_vlog(dir, &compacted_recs)?;
+    }
 
     Ok(stats)
 }
 
-/// Reads the single most recent record directly from the end of `journal.jsonl`
+/// Reads the single most recent record directly from the end of `journal.jsonl` (or `journal.vlog`)
 /// without loading or parsing the entire historical file.
 pub fn tail_record(dir: &Path) -> Option<Record> {
     use std::io::{Read, Seek, SeekFrom};
     let path = dir.join("journal.jsonl");
-    let mut file = std::fs::File::open(&path).ok()?;
-    let len = file.metadata().ok()?.len();
-    if len == 0 {
+    let mut rec = if let Ok(mut file) = std::fs::File::open(&path) {
+        let len = file.metadata().ok()?.len();
+        if len == 0 {
+            return None;
+        }
+        let read_size = std::cmp::min(len, 8192) as usize;
+        file.seek(SeekFrom::End(-(read_size as i64))).ok()?;
+        let mut buf = vec![0u8; read_size];
+        file.read_exact(&mut buf).ok()?;
+        let text = String::from_utf8_lossy(&buf);
+        let last_line = text.lines().rev().find(|l| !l.trim().is_empty())?;
+        serde_json::from_str::<Record>(last_line).ok()?
+    } else if dir.join("journal.vlog").exists() {
+        let reader = crate::journal_vlog::VlogReader::open(&dir.join("journal.vlog")).ok()?;
+        reader.tail_record()?
+    } else {
         return None;
-    }
-    let read_size = std::cmp::min(len, 8192) as usize;
-    file.seek(SeekFrom::End(-(read_size as i64))).ok()?;
-    let mut buf = vec![0u8; read_size];
-    file.read_exact(&mut buf).ok()?;
-    let text = String::from_utf8_lossy(&buf);
-    let last_line = text.lines().rev().find(|l| !l.trim().is_empty())?;
-    let mut rec: Record = serde_json::from_str(last_line).ok()?;
+    };
 
     if !rec.id.is_empty() {
         if let Ok(out_file) = std::fs::File::open(dir.join("outcomes.jsonl")) {

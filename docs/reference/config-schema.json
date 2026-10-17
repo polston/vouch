@@ -22,6 +22,10 @@
         "$ref": "#/$defs/LangConfig"
       }
     },
+    "logging": {
+      "description": "`[logging]`: audit log storage and binary indexing configuration.",
+      "$ref": "#/$defs/LoggingConfig"
+    },
     "protected": {
       "description": "`[protected]`: paths no `allow_paths` entry can ever open.",
       "$ref": "#/$defs/ProtectedSection"
@@ -37,6 +41,10 @@
     "runtime": {
       "description": "`[runtime]`: platform runtime verification configuration (eBPF).",
       "$ref": "#/$defs/RuntimeConfig"
+    },
+    "sandbox": {
+      "description": "`[sandbox]`: kernel namespace and cgroups v2 memory isolation settings.",
+      "$ref": "#/$defs/SandboxConfig"
     },
     "shadow": {
       "description": "`[shadow]`: mode-keyed shadow (design 2026-08-16).",
@@ -102,6 +110,33 @@
           "const": "deny"
         }
       ]
+    },
+    "CgroupsConfig": {
+      "description": "The `[sandbox.cgroups]` table: Linux cgroups v2 memory limits for worker processes.",
+      "type": "object",
+      "properties": {
+        "high_memory_mb": {
+          "description": "Throttle memory high-water mark in megabytes (`memory.high` in cgroups v2).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
+        "max_memory_mb": {
+          "description": "Hard memory limit in megabytes (`memory.max` in cgroups v2).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
     },
     "DaemonConfig": {
       "description": "The `[daemon]` table: persistent gating daemon runtime options.",
@@ -217,6 +252,21 @@
         "under"
       ]
     },
+    "JournalFormat": {
+      "description": "Journal storage format under `[logging]`.",
+      "oneOf": [
+        {
+          "description": "Traditional append-only JSON Lines (`journal.jsonl`).",
+          "type": "string",
+          "const": "jsonl"
+        },
+        {
+          "description": "Memory-mapped binary audit log with offset index header (`journal.vlog`).",
+          "type": "string",
+          "const": "binary"
+        }
+      ]
+    },
     "LangConfig": {
       "description": "Settings for one language: `[lang.bash]`, `[lang.powershell]`,\n`[lang.python]` — one shape for every scanner, looked up by name.",
       "type": "object",
@@ -303,6 +353,17 @@
         "zero_copy": {
           "type": "boolean",
           "default": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "LoggingConfig": {
+      "description": "The `[logging]` table: audit journal storage and indexing options.",
+      "type": "object",
+      "properties": {
+        "journal_format": {
+          "description": "Format used for persisting audit journal events (\"jsonl\" or \"binary\").",
+          "$ref": "#/$defs/JournalFormat"
         }
       },
       "additionalProperties": false
@@ -429,6 +490,63 @@
         }
       },
       "additionalProperties": false
+    },
+    "SandboxConfig": {
+      "description": "The `[sandbox]` table: worker process sandboxing, namespaces, seccomp-BPF, and cgroups v2 limits.",
+      "type": "object",
+      "properties": {
+        "cgroups": {
+          "description": "Linux cgroups v2 memory limits (`[sandbox.cgroups]`).",
+          "$ref": "#/$defs/CgroupsConfig"
+        },
+        "isolate_network": {
+          "description": "Whether to isolate the Linux network namespace (`CLONE_NEWNET`) with loopback-only (`lo`) routing.",
+          "type": "boolean",
+          "default": false
+        },
+        "landlock_enforce": {
+          "description": "Whether to enforce Linux Landlock LSM unprivileged filesystem access rules (`[write].allow_paths`).",
+          "type": "boolean",
+          "default": false
+        },
+        "seccomp_profile": {
+          "description": "Optional seccomp-BPF syscall filter profile (`\"strict\"`, `\"baseline\"`, or `\"none\"`).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SeccompProfile"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unshare_namespaces": {
+          "description": "Whether to isolate user, PID, and mount namespaces (`CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNS`).",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "SeccompProfile": {
+      "description": "Seccomp-BPF syscall filter profile under `[sandbox]`.",
+      "oneOf": [
+        {
+          "description": "Blocks kernel module loading, kexec, mount/pivot_root, ptrace, and raw/packet/netlink sockets.",
+          "type": "string",
+          "const": "strict"
+        },
+        {
+          "description": "Blocks kernel module loading, kexec, mount/pivot_root, and ptrace while allowing standard sockets.",
+          "type": "string",
+          "const": "baseline"
+        },
+        {
+          "description": "Disables seccomp-BPF syscall filtering.",
+          "type": "string",
+          "const": "none"
+        }
+      ]
     },
     "ShadowSection": {
       "description": "`[shadow]`: stand down from gating while the harness reports a named\npermission mode. vouch still evaluates and journals every call; what\nwould prompt is not emitted. An ALLOW is never suppressed.",

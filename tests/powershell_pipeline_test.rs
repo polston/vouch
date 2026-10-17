@@ -348,3 +348,402 @@ fn powershell_taint_table_isolation_and_normalization() {
     assert!(!table.is_tainted_or_dynamic("$proc"));
     assert_eq!(table.get("PROC"), Some(&VariableOrigin::CmdletResult { cmdlet: "Get-Process".into() }));
 }
+
+#[test]
+fn powershell_cfg_prunes_dead_false_branch_and_evaluates_reachable_branch() {
+    use vouch::powershell_pipeline::PsControlFlowGraph;
+
+    // 1. Static `$false` condition prunes dead destructive branch
+    let script = "{ if ($false) { Remove-Item -Recurse C:/Users/dev/secret } else { Get-Process } }";
+    let cfg = PsControlFlowGraph::build(script);
+    assert!(
+        cfg.synthesized_commands.is_empty(),
+        "dead branch must not synthesize Remove-Item, got {:?}",
+        cfg.synthesized_commands
+    );
+    assert!(cfg.unreachable_block_count() >= 1);
+
+    // 2. Variable literal condition `$env_mode = 'prod'; if ($env_mode -eq 'dev') { $_.Kill() }` prunes dead branch
+    let script2 = "{ $env_mode = 'prod'; if ($env_mode -eq 'dev') { $_.Kill() } }";
+    let cfg2 = PsControlFlowGraph::build(script2);
+    assert!(
+        cfg2.synthesized_commands.is_empty(),
+        "statically false -eq comparison must prune branch, got {:?}",
+        cfg2.synthesized_commands
+    );
+
+    // 3. Static true condition `$isAdmin = $true; if ($isAdmin) { $_.Kill() }` executes reachable branch
+    let script3 = "{ $isAdmin = $true; if ($isAdmin) { $_.Kill() } }";
+    let cfg3 = PsControlFlowGraph::build(script3);
+    assert_eq!(cfg3.synthesized_commands.len(), 1);
+    assert_eq!(cfg3.synthesized_commands[0].head, "Stop-Process");
+}
+
+#[test]
+fn powershell_cfg_conservatively_traverses_both_branches_on_dynamic_condition() {
+    use vouch::powershell_pipeline::PsControlFlowGraph;
+
+    // Dynamic condition from Read-Host is Unknown -> fail-closed: both branches are reachable!
+    let script = "{ $confirm = Read-Host; if ($confirm -eq 'yes') { $_.Kill() } else { Get-Process } }";
+    let cfg = PsControlFlowGraph::build(script);
+    assert_eq!(
+        cfg.synthesized_commands.len(),
+        1,
+        "dynamic condition must fail-closed and traverse then branch"
+    );
+    assert_eq!(cfg.synthesized_commands[0].head, "Stop-Process");
+    assert_eq!(cfg.unreachable_block_count(), 0);
+}
+
+#[test]
+fn powershell_cfg_early_return_or_exit_prunes_subsequent_dead_statements() {
+    use vouch::powershell_pipeline::PsControlFlowGraph;
+
+    let script = "{ Write-Output 'done'; return; $_.Kill(); Remove-Item -Recurse C:/Users/dev/x }";
+    let cfg = PsControlFlowGraph::build(script);
+    assert!(
+        cfg.synthesized_commands.is_empty(),
+        "statements after unconditional return must be pruned as unreachable, got {:?}",
+        cfg.synthesized_commands
+    );
+    assert!(cfg.unreachable_block_count() >= 1);
+}
+
+#[test]
+fn powershell_cfg_interprocedural_function_call_propagates_arguments_and_respects_reachability() {
+    use vouch::powershell_pipeline::PsControlFlowGraph;
+
+    // Function declared locally and called from a reachable branch with tainted input
+    let script_reachable = "{
+        function Invoke-Cleanup($targetPath) {
+            Remove-Item $targetPath
+        }
+        $userInput = Read-Host
+        if ($true) {
+            Invoke-Cleanup $userInput
+        }
+    }";
+    let cfg_reach = PsControlFlowGraph::build(script_reachable);
+    assert_eq!(cfg_reach.functions.len(), 1);
+    assert_eq!(cfg_reach.synthesized_commands.len(), 1);
+    assert_eq!(cfg_reach.synthesized_commands[0].head, "Remove-Item");
+    assert!(
+        cfg_reach.synthesized_commands[0]
+            .args
+            .iter()
+            .any(|a| a == "-Recurse"),
+        "tainted argument passed into local function must synthesize -Recurse"
+    );
+
+    // Same function called only inside a statically dead `if ($false)` branch
+    let script_dead = "{
+        function Invoke-Cleanup($targetPath) {
+            Remove-Item -Recurse $targetPath
+        }
+        if ($false) {
+            Invoke-Cleanup C:/Users/dev/important
+        }
+    }";
+    let cfg_dead = PsControlFlowGraph::build(script_dead);
+    assert_eq!(cfg_dead.functions.len(), 1);
+    assert!(
+        cfg_dead.synthesized_commands.is_empty(),
+        "function called only from unreachable branch must not synthesize commands"
+    );
+}
+
+#[test]
+fn powershell_cfg_bounded_recursion_terminates_cleanly() {
+    use vouch::powershell_pipeline::PsControlFlowGraph;
+
+    let recursive_script = "{
+        function Invoke-Loop($x) {
+            Invoke-Loop $x
+        }
+        Invoke-Loop 'test'
+    }";
+    let cfg = PsControlFlowGraph::build(recursive_script);
+    assert_eq!(cfg.functions.len(), 1);
+    assert!(cfg.synthesized_commands.is_empty());
+}
+
+#[test]
+fn powershell_cfg_switch_prunes_unmatched_arms_and_executes_matched_arm() {
+    use vouch::powershell_pipeline::PsControlFlowGraph;
+
+    // 1. Static switch selector ('prod') prunes 'dev' arm and dead 'default' arm
+    let script_matched = "{
+        $env = 'prod'
+        switch ($env) {
+            'dev' { $_.Kill() }
+            'prod' { Write-Output 'safe' }
+            default { Remove-Item -Recurse C:/Users/dev/secret }
+        }
+    }";
+    let cfg_matched = PsControlFlowGraph::build(script_matched);
+    assert!(
+        cfg_matched.synthesized_commands.is_empty(),
+        "unmatched 'dev' and dead 'default' switch arms must be pruned, got {:?}",
+        cfg_matched.synthesized_commands
+    );
+    assert!(cfg_matched.unreachable_block_count() >= 2);
+
+    // 2. Static switch selector ('staging') falls through to 'default' arm
+    let script_default = "{
+        switch ('staging') {
+            'dev' { Write-Output 'dev' }
+            'prod' { Write-Output 'prod' }
+            default { $_.Kill() }
+        }
+    }";
+    let cfg_default = PsControlFlowGraph::build(script_default);
+    assert_eq!(cfg_default.synthesized_commands.len(), 1);
+    assert_eq!(cfg_default.synthesized_commands[0].head, "Stop-Process");
+
+    // 3. Dynamic switch selector (from Read-Host) fails closed and traverses all arms
+    let script_dynamic = "{
+        $userChoice = Read-Host
+        switch ($userChoice) {
+            'clean' { $_.Delete() }
+            'keep'  { Write-Output 'ok' }
+        }
+    }";
+    let cfg_dynamic = PsControlFlowGraph::build(script_dynamic);
+    assert_eq!(cfg_dynamic.synthesized_commands.len(), 1);
+    assert_eq!(cfg_dynamic.synthesized_commands[0].head, "Remove-Item");
+}
+
+#[test]
+fn powershell_cfg_try_catch_finally_models_exception_and_finally_reachability() {
+    use vouch::powershell_pipeline::PsControlFlowGraph;
+
+    // 1. `throw` inside `try` prunes dead code after `throw`, reaches `catch` and `finally`
+    let script_throw = "{
+        try {
+            throw 'boom'
+            $_.Kill()
+        } catch [System.Exception] {
+            Remove-Item $_
+        } finally {
+            Write-Output 'cleanup'
+        }
+    }";
+    let cfg_throw = PsControlFlowGraph::build(script_throw);
+    assert_eq!(
+        cfg_throw.synthesized_commands.len(),
+        1,
+        "dead $_.Kill() after throw must be pruned while catch Remove-Item $_ is reached: {:?}",
+        cfg_throw.synthesized_commands
+    );
+    assert_eq!(cfg_throw.synthesized_commands[0].head, "Remove-Item");
+    assert!(
+        cfg_throw.synthesized_commands[0]
+            .args
+            .iter()
+            .any(|a| a == "-Recurse"),
+        "$_ inside catch block is a dynamic ErrorRecord and must trigger tainted -Recurse"
+    );
+
+    // 2. Pure literal `try` that cannot throw prunes `catch`, while `finally` still runs even after `return`
+    let script_pure_try = "{
+        try {
+            $mode = 'safe'
+            return
+        } catch {
+            $_.Kill()
+        } finally {
+            $_.Delete()
+        }
+        Remove-Item -Recurse C:/Users/dev/after_return
+    }";
+    let cfg_pure = PsControlFlowGraph::build(script_pure_try);
+    assert_eq!(
+        cfg_pure.synthesized_commands.len(),
+        1,
+        "catch and post-return statements must be pruned while finally executes: {:?}",
+        cfg_pure.synthesized_commands
+    );
+    assert_eq!(cfg_pure.synthesized_commands[0].head, "Remove-Item");
+    assert!(cfg_pure.synthesized_commands[0].args.contains(&"$_.FullName".to_string()));
+}
+
+#[test]
+fn powershell_foreach_multi_block_begin_process_end_and_multi_stage_pipeline_taint() {
+    use vouch::powershell_pipeline::{analyze_pipeline_stages, PsControlFlowGraph};
+
+    // 1. Named -Begin / -Process / -End parameters (even when passed out of order on command line)
+    // evaluate in lifecycle order: Begin -> Process -> End
+    let cmds = vec![Cmd {
+        head: "ForEach-Object".to_string(),
+        args: vec![
+            "-End".to_string(),
+            "{ $targetProc.Kill() }".to_string(),
+            "-Begin".to_string(),
+            "{ $targetProc = Get-Process evil }".to_string(),
+            "-Process".to_string(),
+            "{ Write-Output $targetProc.Name }".to_string(),
+        ],
+        ..Default::default()
+    }];
+    let analyzed = analyze_pipeline_stages(&cmds);
+    assert_eq!(analyzed.len(), 2);
+    assert_eq!(analyzed[1].head, "Stop-Process");
+    assert_eq!(
+        analyzed[1].args,
+        vec!["-Id", "$targetProc.Id", "origin:Get-Process"]
+    );
+
+    // 2. Inline `begin { ... } process { ... } end { ... }` inside a single scriptblock
+    let inline_stages = "{
+        begin { $taintedPath = Read-Host }
+        process { Write-Output $taintedPath }
+        end { Remove-Item $taintedPath }
+    }";
+    let cfg_inline = PsControlFlowGraph::build(inline_stages);
+    assert_eq!(cfg_inline.synthesized_commands.len(), 1);
+    assert_eq!(cfg_inline.synthesized_commands[0].head, "Remove-Item");
+    assert!(cfg_inline.synthesized_commands[0]
+        .args
+        .contains(&"-Recurse".to_string()));
+
+    // 3. Multi-stage pipeline taint propagation across consecutive ForEach-Object stages
+    let multi_stage = vec![
+        Cmd {
+            head: "ForEach-Object".to_string(),
+            args: vec!["{ Get-Process evil }".to_string()],
+            ..Default::default()
+        },
+        Cmd {
+            head: "ForEach-Object".to_string(),
+            args: vec!["{ $PSItem.Kill() }".to_string()],
+            ..Default::default()
+        },
+    ];
+    let stage_res = analyze_pipeline_stages(&multi_stage);
+    assert_eq!(stage_res.len(), 3);
+    assert_eq!(stage_res[2].head, "Stop-Process");
+    assert_eq!(
+        stage_res[2].args,
+        vec!["-Id", "$PSItem.Id", "origin:Get-Process"]
+    );
+}
+
+#[test]
+fn powershell_cfg_cross_scope_script_and_global_taint_propagation() {
+    use vouch::powershell_pipeline::PsControlFlowGraph;
+
+    // 1. `$script:` and `$global:` assignments inside a local function propagate to caller scope
+    let script = "{
+        function Resolve-Target {
+            $script:targetProc = Get-Process evil
+            $global:userPath = Read-Host
+            $local:isolated = Get-Process local_only
+        }
+        Resolve-Target
+        $script:targetProc.Kill()
+        Remove-Item $global:userPath
+    }";
+    let cfg = PsControlFlowGraph::build(script);
+    assert_eq!(cfg.synthesized_commands.len(), 2);
+    assert_eq!(cfg.synthesized_commands[0].head, "Stop-Process");
+    assert_eq!(
+        cfg.synthesized_commands[0].args,
+        vec!["-Id", "$script:targetProc.Id", "origin:Get-Process"]
+    );
+    assert_eq!(cfg.synthesized_commands[1].head, "Remove-Item");
+    assert!(
+        cfg.synthesized_commands[1]
+            .args
+            .contains(&"-Recurse".to_string()),
+        "$global:userPath tainted inside callee must trigger -Recurse in caller"
+    );
+
+    // 2. Unprefixed `$targetProc.Kill()` in caller also resolves against `$script:targetProc`
+    let script_fallback = "{
+        function Init-Target {
+            $script:targetProc = Get-Process evil
+        }
+        Init-Target
+        $targetProc.Kill()
+    }";
+    let cfg_fb = PsControlFlowGraph::build(script_fallback);
+    assert_eq!(cfg_fb.synthesized_commands.len(), 1);
+    assert_eq!(
+        cfg_fb.synthesized_commands[0].args,
+        vec!["-Id", "$targetProc.Id", "origin:Get-Process"]
+    );
+}
+
+#[test]
+fn powershell_cfg_trap_statement_handler_reachability_and_break_continue_semantics() {
+    use vouch::powershell_pipeline::PsControlFlowGraph;
+
+    // 1. `trap { Remove-Item $_; break }` executes trap handler when scope can throw and prunes post-throw code
+    let script_trap_break = "{
+        trap [System.Exception] {
+            Remove-Item $_
+            break
+        }
+        throw 'fatal'
+        $_.Kill()
+    }";
+    let cfg_break = PsControlFlowGraph::build(script_trap_break);
+    assert_eq!(
+        cfg_break.synthesized_commands.len(),
+        1,
+        "trap handler Remove-Item $_ must be synthesized while post-throw $_.Kill() is pruned: {:?}",
+        cfg_break.synthesized_commands
+    );
+    assert_eq!(cfg_break.synthesized_commands[0].head, "Remove-Item");
+    assert!(cfg_break.synthesized_commands[0]
+        .args
+        .contains(&"-Recurse".to_string()));
+
+    // 2. `trap { Write-Output $_; continue }` resumes execution at statement following `throw`
+    let script_trap_continue = "{
+        trap {
+            Write-Output $_
+            continue
+        }
+        throw 'recoverable'
+        $_.Kill()
+    }";
+    let cfg_cont = PsControlFlowGraph::build(script_trap_continue);
+    assert_eq!(
+        cfg_cont.synthesized_commands.len(),
+        1,
+        "trap with continue must allow post-throw $_.Kill() to remain reachable"
+    );
+    assert_eq!(cfg_cont.synthesized_commands[0].head, "Stop-Process");
+}
+
+#[test]
+fn powershell_cfg_labeled_loops_break_and_continue_prune_outer_loop_statements() {
+    use vouch::powershell_pipeline::PsControlFlowGraph;
+
+    // `break :outer` inside `:inner` prunes both the remainder of `:inner` (`$b.Kill()`)
+    // AND the remainder of `:outer` (`$a.Delete()`), while statements after `:outer` remain reachable.
+    let script = "{
+        :outer foreach ($a in Get-ChildItem C:/Users/dev/work) {
+            :inner foreach ($b in Get-Process) {
+                break :outer
+                $b.Kill()
+            }
+            $a.Delete()
+        }
+        $afterLoop = Get-Process tail
+        $afterLoop.Kill()
+    }";
+    let cfg = PsControlFlowGraph::build(script);
+    assert_eq!(
+        cfg.synthesized_commands.len(),
+        1,
+        "only $afterLoop.Kill() after :outer should be reachable; $b.Kill() and $a.Delete() must be pruned: {:?}",
+        cfg.synthesized_commands
+    );
+    assert_eq!(cfg.synthesized_commands[0].head, "Stop-Process");
+    assert_eq!(
+        cfg.synthesized_commands[0].args,
+        vec!["-Id", "$afterLoop.Id", "origin:Get-Process"]
+    );
+}

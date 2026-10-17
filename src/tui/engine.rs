@@ -55,7 +55,13 @@ impl TuiEngine {
     pub fn load(home: &str) -> Self {
         let state_dir = crate::journal::state_dir();
         let records = crate::journal::all(&state_dir);
-        Self::from_records(home, &records)
+        let vlog_file = state_dir.join("journal.vlog");
+        let tail_path = if vlog_file.exists() {
+            vlog_file
+        } else {
+            state_dir.join("journal.jsonl")
+        };
+        Self::from_records(home, &records).with_tail_reader(JournalTailReader::new(tail_path))
     }
 
     pub fn from_records(home: &str, records: &[Record]) -> Self {
@@ -188,46 +194,120 @@ impl TuiEngine {
         count
     }
 
-    /// Applies an approved candidate rule to configuration files.
-    pub fn apply_candidate(&self, cand: &ReviewCandidate) -> Result<String, String> {
+    fn build_amended_config_toml(
+        &self,
+        cand: &ReviewCandidate,
+    ) -> Result<(String, String, bool), String> {
         if !cand.proposable {
-            return Err(cand.blocked_reason.clone().unwrap_or_else(|| "Candidate is not proposable".to_string()));
+            return Err(cand
+                .blocked_reason
+                .clone()
+                .unwrap_or_else(|| "Candidate is not proposable".to_string()));
         }
 
         let config_path = crate::knowledge::config_dir(&self.home).join("config.toml");
         let content = std::fs::read_to_string(&config_path).unwrap_or_default();
+        let orig_doc: toml_edit::DocumentMut = content
+            .parse()
+            .map_err(|e| format!("Invalid TOML: {e}"))?;
+        let has_explicit_bash_default = orig_doc
+            .get("lang")
+            .and_then(|l| l.get("bash"))
+            .and_then(|b| b.get("default"))
+            .is_some();
 
         if cand.section == "write.allow_paths" {
-            // Append path to allow_paths list in config.toml
             let path_to_add = cand.name.strip_prefix("path: ").unwrap_or(&cand.name);
-            let mut doc: toml_edit::DocumentMut = content.parse().map_err(|e| format!("Invalid TOML: {e}"))?;
+            let mut doc = orig_doc;
 
-            let write_table = doc.entry("write").or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
-            let write_table = write_table.as_table_like_mut().ok_or_else(|| "write is not a table")?;
+            let write_table = doc
+                .entry("write")
+                .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+            let write_table = write_table
+                .as_table_like_mut()
+                .ok_or_else(|| "write is not a table")?;
 
-            let allow_paths = write_table.entry("allow_paths").or_insert(toml_edit::Item::Value(toml_edit::Value::Array(toml_edit::Array::new())));
+            let allow_paths = write_table.entry("allow_paths").or_insert(
+                toml_edit::Item::Value(toml_edit::Value::Array(toml_edit::Array::new())),
+            );
             if let Some(arr) = allow_paths.as_array_mut() {
                 if !arr.iter().any(|v| v.as_str() == Some(path_to_add)) {
                     arr.push(path_to_add);
                 }
             }
-            std::fs::write(&config_path, doc.to_string()).map_err(|e| format!("Failed to write config: {e}"))?;
-            Ok(format!("Added {:?} to write.allow_paths in config.toml", path_to_add))
+            let summary = format!("[write] allow_paths += {:?}", path_to_add);
+            Ok((doc.to_string(), summary, has_explicit_bash_default))
         } else {
-            // Construct rule candidate
             let c = Candidate {
                 name: cand.name.clone(),
                 section: cand.section.clone(),
-                approved: cand.approved,
+                approved: cand.approved.max(1),
                 denied: cand.denied,
                 unknown: cand.unknown,
-                sessions: cand.sessions,
+                sessions: cand.sessions.max(1),
                 proposable: true,
                 blocked: None,
                 example: cand.example_cmd.clone(),
             };
             let updated = review::apply(&content, &c)?;
-            std::fs::write(&config_path, updated).map_err(|e| format!("Failed to write config: {e}"))?;
+            let summary = format!("[{}] {} = \"allow\"", cand.section, cand.name);
+            Ok((updated, summary, has_explicit_bash_default))
+        }
+    }
+
+    /// Simulates a candidate policy amendment in-memory against a `DecisionItem` without writing to disk.
+    pub fn simulate_candidate(
+        &self,
+        decision: &DecisionItem,
+        cand: &ReviewCandidate,
+        target_node_id: usize,
+    ) -> Result<super::graph::PolicySimulationResult, String> {
+        let (amended_toml, amendment_summary, has_explicit_bash_default) =
+            self.build_amended_config_toml(cand)?;
+        let mut cfg = crate::config::load(&amended_toml)?;
+        if !has_explicit_bash_default && !decision.reason.contains("default") {
+            cfg.langs
+                .entry("bash".to_string())
+                .or_default()
+                .default = crate::config::Action::Allow;
+        }
+
+        let simulated_decision = crate::engine::decide_command_at(
+            &cfg,
+            "bash",
+            &decision.cmd,
+            Some(&self.home),
+            Some(&decision.cwd),
+            Some(&decision.cwd),
+        );
+        let (after_verdict, after_reason) = match simulated_decision {
+            crate::protocol::Decision::Allow(r) => ("ALLOW".to_string(), r),
+            crate::protocol::Decision::Ask(r) => ("ASK".to_string(), r),
+            crate::protocol::Decision::Deny(r) => ("DENY".to_string(), r),
+            crate::protocol::Decision::Abstain => ("ABSTAIN".to_string(), "abstained".to_string()),
+        };
+
+        Ok(super::graph::PolicySimulationResult {
+            target_node_id,
+            amendment_summary,
+            before_verdict: decision.verdict.to_uppercase(),
+            after_verdict,
+            before_reason: decision.reason.clone(),
+            after_reason,
+        })
+    }
+
+    /// Applies an approved candidate rule to configuration files.
+    pub fn apply_candidate(&self, cand: &ReviewCandidate) -> Result<String, String> {
+        let (updated_toml, _summary, _) = self.build_amended_config_toml(cand)?;
+        let config_path = crate::knowledge::config_dir(&self.home).join("config.toml");
+        std::fs::write(&config_path, updated_toml)
+            .map_err(|e| format!("Failed to write config: {e}"))?;
+
+        if cand.section == "write.allow_paths" {
+            let path_to_add = cand.name.strip_prefix("path: ").unwrap_or(&cand.name);
+            Ok(format!("Added {:?} to write.allow_paths in config.toml", path_to_add))
+        } else {
             Ok(format!("Added [{}] {} = \"allow\" to config.toml", cand.section, cand.name))
         }
     }
@@ -243,27 +323,60 @@ fn extract_unpermitted_path(reason: &str) -> Option<String> {
     None
 }
 
-/// Streaming file follower for journal.jsonl.
+fn is_binary_journal_path(path: & std::path::Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("vlog") | Some("vidx")
+    )
+}
+
+/// Streaming file follower for `journal.jsonl`, `journal.vlog`, and `journal.vidx`.
 pub struct JournalTailReader {
     pub path: PathBuf,
     last_offset: u64,
+    last_record_count: u64,
+    last_record_key: Option<(String, String, String)>,
 }
 
 impl JournalTailReader {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
-        let last_offset = if let Ok(meta) = std::fs::metadata(&path) {
-            meta.len()
+        if is_binary_journal_path(&path) {
+            let (last_record_count, last_offset, last_record_key) =
+                crate::journal_vlog::inspect_vlog_watermark(&path);
+            Self {
+                path,
+                last_offset,
+                last_record_count,
+                last_record_key,
+            }
         } else {
-            0
-        };
-        Self { path, last_offset }
+            let last_offset = if let Ok(meta) = std::fs::metadata(&path) {
+                meta.len()
+            } else {
+                0
+            };
+            Self {
+                path,
+                last_offset,
+                last_record_count: 0,
+                last_record_key: None,
+            }
+        }
     }
 
     pub fn from_start(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        let initial_offset = if is_binary_journal_path(&path) {
+            crate::journal_vlog::VLOG_HEADER_LEN as u64
+        } else {
+            0
+        };
         Self {
-            path: path.into(),
-            last_offset: 0,
+            path,
+            last_offset: initial_offset,
+            last_record_count: 0,
+            last_record_key: None,
         }
     }
 
@@ -271,7 +384,20 @@ impl JournalTailReader {
         self.last_offset
     }
 
+    pub fn last_record_count(&self) -> u64 {
+        self.last_record_count
+    }
+
     pub fn poll_new_records(&mut self) -> Vec<Record> {
+        if is_binary_journal_path(&self.path) {
+            return crate::journal_vlog::poll_vlog_delta(
+                &self.path,
+                &mut self.last_record_count,
+                &mut self.last_offset,
+                &mut self.last_record_key,
+            );
+        }
+
         let Ok(mut file) = File::open(&self.path) else {
             return Vec::new();
         };
@@ -303,6 +429,7 @@ impl JournalTailReader {
             let trimmed = line.trim();
             if !trimmed.is_empty() {
                 if let Ok(rec) = serde_json::from_str::<Record>(trimmed) {
+                    self.last_record_count += 1;
                     new_records.push(rec);
                 }
             }

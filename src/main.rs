@@ -1449,7 +1449,29 @@ fn main() {
         }
 
         let dir = journal::state_dir();
-        let _ = journal::prune_and_compact(&dir, &journal::JournalPolicy::default());
+        let vlog_file = vouch::journal_vlog::vlog_path(&dir);
+        let mut vlog_intact = true;
+        if vlog_file.exists() {
+            match vouch::journal_vlog::verify_vlog_integrity(&vlog_file) {
+                Ok(report) if !report.valid => {
+                    vlog_intact = false;
+                    println!(
+                        "journal.vlog integrity check FAILED (verified {} records, finding: {:?})",
+                        report.verified_records, report.tamper_finding
+                    );
+                    println!();
+                }
+                Err(err) => {
+                    vlog_intact = false;
+                    println!("journal.vlog integrity check ERROR: {err}");
+                    println!();
+                }
+                _ => {}
+            }
+        }
+        if vlog_intact {
+            let _ = journal::prune_and_compact(&dir, &journal::JournalPolicy::default());
+        }
         let recs = journal::all(&dir);
         if recs.is_empty() {
             println!("no decisions recorded yet ({})", vouch::knowledge::display_path(&dir));

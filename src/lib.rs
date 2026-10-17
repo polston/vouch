@@ -13,6 +13,7 @@ pub mod import_cc;
 pub mod install;
 pub mod javascript;
 pub mod journal;
+pub mod journal_vlog;
 pub mod journal_wal;
 pub mod knowledge;
 pub mod outcome;
