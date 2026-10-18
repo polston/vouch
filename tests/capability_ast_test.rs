@@ -621,7 +621,7 @@ fn node_package_json_subpath_imports_resolve_wildcard_and_conditional_targets() 
 }"##,
     );
     ws.write_file(
-        "packages/app/src/internal/spawner.ts",
+        "packages/app/src/internal/workers/spawner.ts",
         "import cp from 'child_process';\nexport function runDaemon() { return cp.fork('worker.js'); }\n",
     );
     ws.write_file(
@@ -630,7 +630,7 @@ fn node_package_json_subpath_imports_resolve_wildcard_and_conditional_targets() 
     );
     let entry = ws.write_file(
         "packages/app/src/index.ts",
-        "import { runDaemon } from '#internal/spawner';\nimport { getUrl } from '#net';\nrunDaemon();\ngetUrl('https://example.com');\n",
+        "import { runDaemon } from '#internal/workers/spawner';\nimport { getUrl } from '#net';\nrunDaemon();\ngetUrl('https://example.com');\n",
     );
 
     let resolver = TransitiveImportResolver::new(ws.path());

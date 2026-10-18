@@ -1048,8 +1048,20 @@ impl TransitiveImportResolver {
 
 fn normalize_lexical_path(p: &Path) -> PathBuf {
     use std::path::Component;
+    let normalized_buf: PathBuf;
+    let target: &Path = if std::path::MAIN_SEPARATOR == '\\' {
+        let lossy = p.to_string_lossy();
+        if lossy.contains('/') {
+            normalized_buf = PathBuf::from(lossy.replace('/', "\\"));
+            &normalized_buf
+        } else {
+            p
+        }
+    } else {
+        p
+    };
     let mut out = PathBuf::new();
-    for comp in p.components() {
+    for comp in target.components() {
         match comp {
             Component::CurDir => {}
             Component::ParentDir => {
@@ -1059,6 +1071,16 @@ fn normalize_lexical_path(p: &Path) -> PathBuf {
         }
     }
     out
+}
+
+fn replace_wildcard_in_template(target_tpl: &Path, matched: &str) -> PathBuf {
+    let tpl_str = target_tpl.to_string_lossy();
+    let raw = if tpl_str.contains('*') {
+        PathBuf::from(tpl_str.replace('*', matched))
+    } else {
+        target_tpl.join(matched)
+    };
+    normalize_lexical_path(&raw)
 }
 
 #[derive(Debug, Clone)]
@@ -1274,7 +1296,10 @@ fn collect_javascript_imports(src: &str) -> Result<Vec<String>, String> {
     Ok(visitor.imports)
 }
 
-fn push_js_target_candidates(candidates: &mut Vec<PathBuf>, target: &Path) {
+fn push_js_target_candidates(candidates: &mut Vec<PathBuf>, raw_target: &Path) {
+    let norm_target = normalize_lexical_path(raw_target);
+    let target = norm_target.as_path();
+
     // 1. Direct path
     candidates.push(target.to_path_buf());
 
@@ -1287,9 +1312,14 @@ fn push_js_target_candidates(candidates: &mut Vec<PathBuf>, target: &Path) {
     }
     // If target path contains a /dist/ or /build/ segment, also probe the /src/ equivalent
     let target_lossy = target.to_string_lossy();
-    for out_seg in &["/dist/", "/build/"] {
+    for (out_seg, src_seg) in &[
+        ("/dist/", "/src/"),
+        ("\\dist\\", "\\src\\"),
+        ("/build/", "/src/"),
+        ("\\build\\", "\\src\\"),
+    ] {
         if target_lossy.contains(out_seg) {
-            let src_equiv = PathBuf::from(target_lossy.replacen(out_seg, "/src/", 1));
+            let src_equiv = normalize_lexical_path(Path::new(&target_lossy.replacen(out_seg, src_seg, 1)));
             candidates.push(src_equiv.clone());
             candidates.push(src_equiv.with_extension("ts"));
             candidates.push(src_equiv.with_extension("tsx"));
@@ -1385,12 +1415,7 @@ fn apply_path_mappings_to_candidates(
             {
                 let matched = &trimmed[prefix.len()..trimmed.len() - suffix.len()];
                 for target_tpl in &mapping.targets {
-                    let tpl_str = target_tpl.to_string_lossy();
-                    let resolved = if tpl_str.contains('*') {
-                        PathBuf::from(tpl_str.replace('*', matched))
-                    } else {
-                        target_tpl.join(matched)
-                    };
+                    let resolved = replace_wildcard_in_template(target_tpl, matched);
                     push_js_target_candidates(candidates, &resolved);
                 }
             }
@@ -1462,8 +1487,8 @@ fn resolve_javascript_import_candidates(
                 for (pat_key, pat_target) in exports_map {
                     if let Some(prefix) = pat_key.strip_prefix("./").and_then(|k| k.strip_suffix('*')) {
                         if let Some(matched_wildcard) = sub.strip_prefix(prefix) {
-                            let target_str = pat_target.to_string_lossy().replace('*', matched_wildcard);
-                            push_js_target_candidates(&mut candidates, Path::new(&target_str));
+                            let resolved = replace_wildcard_in_template(pat_target, matched_wildcard);
+                            push_js_target_candidates(&mut candidates, &resolved);
                         }
                     }
                 }
