@@ -40,12 +40,13 @@ through, stop and ask the operator, or refuse it outright.
 
 ### `CgroupsConfig`
 
-The `[sandbox.cgroups]` table: Linux cgroups v2 memory limits for worker processes.
+The `[sandbox.cgroups]` table: Linux cgroups v2 memory and process count limits for worker processes.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `high_memory_mb` | integer (optional) | (unset) | Throttle memory high-water mark in megabytes (`memory.high` in cgroups v2). |
 | `max_memory_mb` | integer (optional) | (unset) | Hard memory limit in megabytes (`memory.max` in cgroups v2). |
+| `pids_max` | integer (optional) | (unset) | Hard process and thread count limit (`pids.max` in cgroups v2). |
 
 ### `DaemonConfig`
 
@@ -193,13 +194,16 @@ The `[runtime]` table: platform-specific runtime verification settings.
 
 ### `SandboxConfig`
 
-The `[sandbox]` table: worker process sandboxing, namespaces, seccomp-BPF, and cgroups v2 limits.
+The `[sandbox]` table: worker process sandboxing, namespaces, seccomp-BPF, setrlimit, and cgroups v2 limits.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `cgroups` | CgroupsConfig | (none) | Linux cgroups v2 memory limits (`[sandbox.cgroups]`). |
+| `cgroups` | CgroupsConfig | (none) | Linux cgroups v2 memory and PID limits (`[sandbox.cgroups]`). |
 | `isolate_network` | boolean | false | Whether to isolate the Linux network namespace (`CLONE_NEWNET`) with loopback-only (`lo`) routing. |
 | `landlock_enforce` | boolean | false | Whether to enforce Linux Landlock LSM unprivileged filesystem access rules (`[write].allow_paths`). |
+| `max_cpu_seconds` | integer (optional) | (unset) | Maximum CPU time in seconds (`RLIMIT_CPU`). |
+| `max_open_files` | integer (optional) | (unset) | Maximum open file descriptor count (`RLIMIT_NOFILE`). |
+| `max_pids` | integer (optional) | (unset) | Maximum process and thread count (`RLIMIT_NPROC` and cgroups v2 `pids.max` fallback). |
 | `seccomp_profile` | SeccompProfile (optional) | (none) | Optional seccomp-BPF syscall filter profile (`"strict"`, `"baseline"`, or `"none"`). |
 | `unshare_namespaces` | boolean | false | Whether to isolate user, PID, and mount namespaces (`CLONE_NEWUSER \| CLONE_NEWPID \| CLONE_NEWNS`). |
 

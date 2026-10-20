@@ -762,3 +762,190 @@ fn node_subpath_imports_escape_outside_workspace_is_blocked() {
         report.unresolved_imports
     );
 }
+
+#[test]
+fn deno_jsonc_and_import_map_resolve_local_prefixes_scopes_and_external_specifiers() {
+    let ws = TestWorkspace::new("deno_import_map");
+
+    // 1. External `import_map.json` referenced from `deno.jsonc` with comments & trailing commas
+    ws.write_file(
+        "deno.jsonc",
+        r#"{
+  // Deno config with external import map and local overrides
+  "importMap": "./import_map.json",
+  "imports": {
+    "@local/": "./src/local/",
+  },
+  "scopes": {
+    "./packages/special/": {
+      "@scoped/helper": "./packages/special/scoped_exec.ts",
+    },
+  },
+}"#,
+    );
+
+    ws.write_file(
+        "import_map.json",
+        r#"{
+  "imports": {
+    "http-client": "npm:axios@^1.6.0",
+    "std-http/": "jsr:@std/http/",
+    "remote-mod": "https://deno.land/std@0.220.0/http/server.ts"
+  }
+}"#,
+    );
+
+    ws.write_file(
+        "src/local/runner.ts",
+        "import fs from 'node:fs';\nexport function runCmd() { return fs.readFileSync('id'); }\n",
+    );
+    ws.write_file(
+        "packages/special/scoped_exec.ts",
+        "export function evaluateDynamic(code: string) { return eval(code); }\n",
+    );
+
+    let entry = ws.write_file(
+        "packages/special/main.ts",
+        r#"
+import { runCmd } from "@local/runner.ts";
+import { evaluateDynamic } from "@scoped/helper";
+import axios from "http-client";
+runCmd();
+evaluateDynamic("1+1");
+console.log(axios);
+"#,
+    );
+
+    let resolver = TransitiveImportResolver::new(ws.path());
+    let script = fs::read_to_string(&entry).unwrap();
+    let report = resolver.resolve_javascript(&script, Some(&entry));
+
+    assert!(
+        report.capabilities.network,
+        "import map alias 'http-client' -> 'npm:axios@^1.6.0' must propagate network capability"
+    );
+    assert!(
+        report.capabilities.external_paths,
+        "import map prefix '@local/' -> './src/local/runner.ts' importing 'node:child_process' must propagate external_paths"
+    );
+    assert!(
+        report.capabilities.dynamic_eval,
+        "scoped import map '@scoped/helper' -> './packages/special/scoped_exec.ts' must propagate dynamic_eval"
+    );
+    assert!(
+        report.unresolved_imports.is_empty(),
+        "expected no unresolved local imports, got {:?}",
+        report.unresolved_imports
+    );
+}
+
+#[test]
+fn python_pep723_inline_script_metadata_resolves_dependencies_and_uv_local_sources() {
+    let ws = TestWorkspace::new("python_pep723_metadata");
+
+    // Local package referenced via [tool.uv.sources]
+    ws.write_file(
+        "pkgs/internal_runner/src/internal_runner/__init__.py",
+        "import shutil\ndef run_task():\n    shutil.rmtree('/tmp/work')\n",
+    );
+
+    let script_path = ws.write_file(
+        "scripts/fetch_and_run.py",
+        r#"# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#   "httpx[http2]>=0.27.0",
+#   "celery~=5.3",
+#   "internal-runner",
+# ]
+#
+# [tool.uv.sources]
+# internal-runner = { path = "../pkgs/internal_runner" }
+# ///
+
+import internal_runner
+
+def main():
+    internal_runner.run_task()
+"#,
+    );
+
+    let resolver = TransitiveImportResolver::new(ws.path());
+    let script = fs::read_to_string(&script_path).unwrap();
+    let report = resolver.resolve_python(&script, Some(&script_path));
+
+    assert!(
+        report.capabilities.network,
+        "PEP 723 dependency 'httpx[http2]>=0.27.0' must propagate network capability"
+    );
+    assert!(
+        report.capabilities.daemon,
+        "PEP 723 dependency 'celery~=5.3' must propagate daemon capability"
+    );
+    assert!(
+        report.capabilities.external_paths,
+        "PEP 723 [tool.uv.sources] local path '../pkgs/internal_runner' importing subprocess must propagate external_paths"
+    );
+    assert_eq!(
+        report.resolved_files.len(),
+        1,
+        "expected internal_runner/__init__.py to be resolved on disk"
+    );
+}
+
+#[test]
+fn deno_import_map_and_pep723_escape_outside_workspace_are_blocked() {
+    let ws = TestWorkspace::new("import_map_pep723_escape");
+
+    ws.write_file(
+        "deno.json",
+        r#"{
+  "imports": {
+    "@escaped/": "../../outside_workspace/"
+  }
+}"#,
+    );
+    let js_entry = ws.write_file(
+        "main.ts",
+        "import { x } from '@escaped/secret.ts';\nconsole.log(x);\n",
+    );
+
+    let py_entry = ws.write_file(
+        "run.py",
+        r#"# /// script
+# dependencies = ["escaped-pkg"]
+# [tool.uv.sources]
+# escaped-pkg = { path = "../../outside_py_pkg" }
+# ///
+import escaped_pkg
+"#,
+    );
+
+    let resolver = TransitiveImportResolver::new(ws.path());
+
+    let js_report = resolver.resolve_javascript(
+        &fs::read_to_string(&js_entry).unwrap(),
+        Some(&js_entry),
+    );
+    assert!(
+        js_report
+            .unresolved_imports
+            .iter()
+            .any(|u| u.starts_with("escaped:")),
+        "deno.json import map target escaping workspace must record escaped entry: {:?}",
+        js_report.unresolved_imports
+    );
+
+    let py_report = resolver.resolve_python(
+        &fs::read_to_string(&py_entry).unwrap(),
+        Some(&py_entry),
+    );
+    assert!(
+        py_report
+            .unresolved_imports
+            .iter()
+            .any(|u| u.starts_with("escaped:")),
+        "PEP 723 [tool.uv.sources] path escaping workspace must record escaped entry: {:?}",
+        py_report.unresolved_imports
+    );
+}

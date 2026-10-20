@@ -503,7 +503,7 @@ pub fn prune_and_compact(dir: &Path, policy: &JournalPolicy) -> std::io::Result<
     }
 
     if has_vlog {
-        crate::journal_vlog::write_all_vlog(dir, &compacted_recs)?;
+        crate::journal_vlog::write_compacted_vlog_with_checkpoint(dir, &compacted_recs)?;
     }
 
     Ok(stats)

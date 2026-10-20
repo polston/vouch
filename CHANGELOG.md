@@ -1,5 +1,69 @@
 # Changelog
 
+## 0.61.0 (2026-10-20)
+
+
+### Features
+
+* **Enforce Linux cgroups v2 pids.max process limits and POSIX RLIMIT_NOFILE, RLIMIT_NPROC, and RLIMIT_CPU resource ceilings in sandboxed execution plans**
+  - **Problem & Explanation:** Sandboxed subagent execution previously enforced Linux cgroups v2 memory limits (`memory.max`, `memory.high`), namespaces, seccomp-BPF syscall filters, and Landlock LSM path rules, but did not cap process concurrency or POSIX file-descriptor and CPU time limits. `CgroupV2Manager` and `PosixRlimitSpec` in `src/runtime/sandbox.rs` alongside `[sandbox.cgroups] pids_max` and `[sandbox] max_open_files` / `max_cpu_seconds` in `src/config.rs` now write `pids.max` (and parse `pids.events` fork-throttle counters) on Linux cgroups v2 and enforce POSIX `setrlimit` caps (`RLIMIT_NOFILE`, `RLIMIT_NPROC`, `RLIMIT_CPU`) before subagent exec.
+  - **Example Scenario:**
+    ```toml
+    [sandbox]
+    max_open_files = 1024
+    max_cpu_seconds = 300
+
+    [sandbox.cgroups]
+    pids_max = 64
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Added optional `[sandbox.cgroups] pids_max`, `[sandbox] max_open_files`, and `[sandbox] max_cpu_seconds`.
+    - *Behavior Contrast:* Before: sandbox resource gating covered cgroups v2 `memory.max` and `memory.high`. After: adds cgroups v2 `pids.max` process caps (`pids.events` inspection) and POSIX `setrlimit` enforcement (`RLIMIT_NOFILE`, `RLIMIT_NPROC`, `RLIMIT_CPU`).
+
+* **Maintain detached journal.vchk cryptographic continuity checkpoints across binary audit log compactions and verify multi-generation lineage in vouch doctor**
+  - **Problem & Explanation:** While `journal.vlog` frames carried rolling intra-file SipHash-2-4 hash chains (`VLOG_FLAG_HASH_CHAINED`), running `compact_vlog` rewrote the `.vlog` file from a fresh genesis root without recording a detached cryptographic proof linking the compacted file back to the pre-compaction audit history. `src/journal_vlog.rs` now appends a 64-byte keyed SipHash-2-4 checkpoint record to `journal.vchk` during `compact_vlog` (committing to the pre-compaction head digest, post-compaction root digest, frame counts, and compaction generation) and verifies unbroken multi-generation lineage in `verify_vlog_chain` and `vouch doctor`.
+  - **Example Scenario:**
+    ```bash
+    vouch doctor
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged (uses `[logging] journal_format = "binary"`).
+    - *Behavior Contrast:* Before: `verify_vlog_chain` verified intra-file hash chaining from the current `.vlog` file's genesis. After: `compact_vlog` persists detached `journal.vchk` continuity proofs and `vouch doctor` verifies cross-compaction lineage against wholesale file replacement or rollback.
+
+* **Propagate taint through PowerShell @params hashtable and array splatting, evaluate switch -Regex and -Wildcard branch reachability, and track -PipelineVariable bindings across pipeline stages**
+  - **Problem & Explanation:** PowerShell scripts commonly assemble cmdlet arguments into a hashtable or array variable (`$p = @{ Path = $ext }`) and pass it via splatting (`Remove-Item @p`), branch on `-Regex` or `-Wildcard` `switch` patterns, or bind upstream pipeline outputs via `-PipelineVariable` (`-pv`) for reference in downstream scriptblocks. `PsControlFlowGraph` and `VariableTaintTable` in `src/powershell_pipeline.rs` now propagate value taint into hashtable/array definitions, expand `@splat` arguments at cmdlet call sites, statically evaluate `-Regex` and `-Wildcard` `switch` arms to prune dead branches, and propagate `-PipelineVariable` / `-pv` bindings across subsequent pipeline stages.
+  - **Example Scenario:**
+    ```powershell
+    $params = @{ Path = (Get-Content -Path ./target.txt) }
+    Remove-Item @params
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: taint tracking followed direct `$var` arguments and exact-literal `switch` cases. After: taint propagates through `@splat` parameter tables, `-Regex`/`-Wildcard` switch patterns, and `-PipelineVariable` (`-pv`) pipeline stage bindings.
+
+* **Resolve Deno and Bun import maps (deno.json, deno.jsonc, import_map.json) and Python PEP 723 inline script metadata dependencies and uv local path sources in transitive AST capability analysis**
+  - **Problem & Explanation:** Deno and Bun workspaces map bare module specifiers and prefix scopes via W3C import maps (`deno.json`, `deno.jsonc`, `import_map.json` `"imports"` and `"scopes"`), and standalone Python scripts declare inline dependencies and `[tool.uv.sources]` path packages using PEP 723 (`# /// script` ... `# ///`) metadata blocks. `WorkspaceManifestIndex` and `TransitiveImportResolver` in `src/capability.rs` now index Deno/W3C import maps with longest-prefix scope and specifier matching and parse PEP 723 inline script metadata blocks to infer capabilities from declared packages (such as `requests` and `paramiko`) and recursively traverse local `[tool.uv.sources]` path dependencies within the workspace root.
+  - **Example Scenario:**
+    ```python
+    # /// script
+    # dependencies = ["requests>=2.31"]
+    # ///
+    import requests
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged. Automatically discovered from `deno.json`, `deno.jsonc`, `import_map.json`, and PEP 723 `# /// script` headers within the workspace root.
+    - *Behavior Contrast:* Before: static capability resolution indexed `pyproject.toml`, `requirements.txt`, `package.json`, `pnpm-lock.yaml`, and `tsconfig.json`. After: also resolves Deno/Bun import maps and PEP 723 inline script dependencies and local path sources.
+
+* **Support multi-node staging, cumulative policy simulation with session-wide impact preview, and atomic batch configuration amendments in the Policy Visualizer TUI**
+  - **Problem & Explanation:** Complex commands in `vouch tui` (`ViewTab::Visualizer`) can trigger multiple independent `[PATH]` or `[RULE]` nodes simultaneously, so simulating a single node (`d`) still leaves the overall command verdict at `ASK` until all blocking nodes are addressed together. `PolicyGraph` (`src/tui/graph.rs`), `TuiEngine` (`src/tui/engine.rs`), and `TuiApp` (`src/tui/app.rs`) now support staging multiple `[PATH]` / `[RULE]` nodes with Space (`[STAGED]` badge), running cumulative multi-node simulation (`D`) with a session-wide batch impact counter (`Session batch impact: X / Y historical ASK prompt(s) -> ALLOW`), and applying all staged amendments atomically (`A`).
+  - **Example Scenario:**
+    ```bash
+    vouch tui
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: `d` simulated a single selected node against the current record. After: Space stages multiple nodes, `D` simulates their combined effect across the current DAG and all historical `ASK` records in the loaded journal, and `A` writes the deduplicated batch amendment atomically.
+
 ## 0.60.0 (2026-10-17)
 
 

@@ -555,7 +555,7 @@ pub struct LoggingConfig {
     pub journal_format: JournalFormat,
 }
 
-/// The `[sandbox.cgroups]` table: Linux cgroups v2 memory limits for worker processes.
+/// The `[sandbox.cgroups]` table: Linux cgroups v2 memory and process count limits for worker processes.
 #[derive(Debug, Deserialize, Clone, JsonSchema, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct CgroupsConfig {
@@ -565,6 +565,9 @@ pub struct CgroupsConfig {
     /// Throttle memory high-water mark in megabytes (`memory.high` in cgroups v2).
     #[serde(default)]
     pub high_memory_mb: Option<u64>,
+    /// Hard process and thread count limit (`pids.max` in cgroups v2).
+    #[serde(default)]
+    pub pids_max: Option<u64>,
 }
 
 /// Seccomp-BPF syscall filter profile under `[sandbox]`.
@@ -579,11 +582,11 @@ pub enum SeccompProfile {
     None,
 }
 
-/// The `[sandbox]` table: worker process sandboxing, namespaces, seccomp-BPF, and cgroups v2 limits.
+/// The `[sandbox]` table: worker process sandboxing, namespaces, seccomp-BPF, setrlimit, and cgroups v2 limits.
 #[derive(Debug, Deserialize, Clone, JsonSchema, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxConfig {
-    /// Linux cgroups v2 memory limits (`[sandbox.cgroups]`).
+    /// Linux cgroups v2 memory and PID limits (`[sandbox.cgroups]`).
     #[serde(default)]
     pub cgroups: CgroupsConfig,
     /// Whether to isolate user, PID, and mount namespaces (`CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNS`).
@@ -598,6 +601,15 @@ pub struct SandboxConfig {
     /// Whether to enforce Linux Landlock LSM unprivileged filesystem access rules (`[write].allow_paths`).
     #[serde(default)]
     pub landlock_enforce: bool,
+    /// Maximum process and thread count (`RLIMIT_NPROC` and cgroups v2 `pids.max` fallback).
+    #[serde(default)]
+    pub max_pids: Option<u64>,
+    /// Maximum open file descriptor count (`RLIMIT_NOFILE`).
+    #[serde(default)]
+    pub max_open_files: Option<u64>,
+    /// Maximum CPU time in seconds (`RLIMIT_CPU`).
+    #[serde(default)]
+    pub max_cpu_seconds: Option<u64>,
 }
 
 

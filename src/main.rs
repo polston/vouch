@@ -1456,8 +1456,8 @@ fn main() {
                 Ok(report) if !report.valid => {
                     vlog_intact = false;
                     println!(
-                        "journal.vlog integrity check FAILED (verified {} records, finding: {:?})",
-                        report.verified_records, report.tamper_finding
+                        "journal.vlog integrity check FAILED (verified {} records, {} checkpoints, finding: {:?})",
+                        report.verified_records, report.verified_checkpoints, report.tamper_finding
                     );
                     println!();
                 }

@@ -368,6 +368,123 @@ impl CgroupMemoryEvents {
     }
 }
 
+/// Parsed statistics from a cgroup v2 `pids.events` control file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CgroupPidsEvents {
+    pub max: u64,
+}
+
+impl CgroupPidsEvents {
+    pub fn parse(text: &str) -> Self {
+        let mut events = Self::default();
+        for line in text.lines() {
+            let mut parts = line.split_whitespace();
+            let Some(key) = parts.next() else { continue };
+            let Some(val_str) = parts.next() else { continue };
+            let Ok(val) = val_str.parse::<u64>() else { continue };
+            if key == "max" {
+                events.max = val;
+            }
+        }
+        events
+    }
+
+    /// Returns true if the kernel rejected at least one `fork()`/`clone()` due to hitting `pids.max`.
+    pub fn has_fork_rejected(&self) -> bool {
+        self.max > 0
+    }
+}
+
+/// POSIX `setrlimit(2)` resource type enforced for sandboxed worker processes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RlimitResource {
+    /// Maximum open file descriptor count (`RLIMIT_NOFILE`).
+    NoFile,
+    /// Maximum number of processes/threads (`RLIMIT_NPROC`).
+    NProc,
+    /// Maximum CPU time in seconds (`RLIMIT_CPU`).
+    CpuSeconds,
+}
+
+/// A single POSIX `setrlimit(2)` soft/hard resource ceiling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RlimitRule {
+    pub resource: RlimitResource,
+    pub soft: u64,
+    pub hard: u64,
+}
+
+/// Collection of POSIX `setrlimit(2)` ceilings configured for a sandboxed worker process.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RlimitSet {
+    pub rules: Vec<RlimitRule>,
+}
+
+impl RlimitSet {
+    pub fn from_config(cfg: &SandboxConfig) -> Self {
+        let mut rules = Vec::new();
+        if let Some(nofile) = cfg.max_open_files.filter(|&v| v > 0) {
+            rules.push(RlimitRule {
+                resource: RlimitResource::NoFile,
+                soft: nofile,
+                hard: nofile,
+            });
+        }
+        if let Some(nproc) = cfg.max_pids.or(cfg.cgroups.pids_max).filter(|&v| v > 0) {
+            rules.push(RlimitRule {
+                resource: RlimitResource::NProc,
+                soft: nproc,
+                hard: nproc,
+            });
+        }
+        if let Some(cpu_secs) = cfg.max_cpu_seconds.filter(|&v| v > 0) {
+            rules.push(RlimitRule {
+                resource: RlimitResource::CpuSeconds,
+                soft: cpu_secs,
+                hard: cpu_secs,
+            });
+        }
+        Self { rules }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rules.is_empty()
+    }
+
+    pub fn limit_for(&self, resource: RlimitResource) -> Option<RlimitRule> {
+        self.rules.iter().copied().find(|r| r.resource == resource)
+    }
+
+    /// Deterministically check whether `requested` units of `resource` are permitted by this `RlimitSet`.
+    pub fn simulate_check(&self, resource: RlimitResource, requested: u64) -> bool {
+        match self.limit_for(resource) {
+            Some(rule) => requested <= rule.hard,
+            None => true,
+        }
+    }
+
+    /// Apply configured `RLIMIT_NOFILE`, `RLIMIT_NPROC`, and `RLIMIT_CPU` ceilings via `libc::setrlimit`.
+    #[cfg(target_os = "linux")]
+    pub fn apply_in_current_process(&self) -> std::io::Result<()> {
+        for rule in &self.rules {
+            let resource_id = match rule.resource {
+                RlimitResource::NoFile => libc::RLIMIT_NOFILE,
+                RlimitResource::NProc => libc::RLIMIT_NPROC,
+                RlimitResource::CpuSeconds => libc::RLIMIT_CPU,
+            };
+            let rlim = libc::rlimit {
+                rlim_cur: rule.soft as libc::rlim_t,
+                rlim_max: rule.hard as libc::rlim_t,
+            };
+            let rc = unsafe { libc::setrlimit(resource_id, &rlim as *const libc::rlimit) };
+            if rc != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Manages a cgroups v2 hierarchy under a configurable root (default `/sys/fs/cgroup`).
 #[derive(Debug, Clone)]
 pub struct CgroupV2Manager {
@@ -413,7 +530,7 @@ impl CgroupV2Manager {
         self.cgroup_root.is_dir() && self.cgroup_root.join("cgroup.controllers").exists()
     }
 
-    /// Provision a cgroup v2 directory for `scope_id` and apply configured memory limits.
+    /// Provision a cgroup v2 directory for `scope_id` and apply configured memory and PID limits.
     pub fn provision_scope(
         &self,
         scope_id: &str,
@@ -436,10 +553,18 @@ impl CgroupV2Manager {
             write_control_file(&dir.join("memory.high"), "max")?;
         }
 
+        let effective_pids_max = cfg.pids_max.filter(|&v| v > 0);
+        if let Some(pids_max) = effective_pids_max {
+            write_control_file(&dir.join("pids.max"), &pids_max.to_string())?;
+        } else {
+            write_control_file(&dir.join("pids.max"), "max")?;
+        }
+
         Ok(CgroupScope {
             dir,
             max_memory_bytes: cfg.max_memory_mb.map(|mb| mb.saturating_mul(1024 * 1024)),
             high_memory_bytes: cfg.high_memory_mb.map(|mb| mb.saturating_mul(1024 * 1024)),
+            pids_max: effective_pids_max,
         })
     }
 }
@@ -461,6 +586,7 @@ pub struct CgroupScope {
     pub dir: PathBuf,
     pub max_memory_bytes: Option<u64>,
     pub high_memory_bytes: Option<u64>,
+    pub pids_max: Option<u64>,
 }
 
 impl CgroupScope {
@@ -501,10 +627,33 @@ impl CgroupScope {
         CgroupMemoryEvents::parse(&text)
     }
 
+    /// Read current process/thread count from `pids.current`.
+    pub fn read_current_pids(&self) -> Option<u64> {
+        let text = std::fs::read_to_string(self.dir.join("pids.current")).ok()?;
+        text.trim().parse::<u64>().ok()
+    }
+
+    /// Read and parse `pids.events` (including `max` fork-rejection counter).
+    pub fn read_pids_events(&self) -> CgroupPidsEvents {
+        let Ok(text) = std::fs::read_to_string(self.dir.join("pids.events")) else {
+            return CgroupPidsEvents::default();
+        };
+        CgroupPidsEvents::parse(&text)
+    }
+
     /// Remove the worker cgroup directory when no processes remain.
     pub fn teardown(&self) -> std::io::Result<()> {
         if self.dir.exists() {
-            for file in ["cgroup.procs", "memory.max", "memory.high", "memory.current", "memory.events"] {
+            for file in [
+                "cgroup.procs",
+                "memory.max",
+                "memory.high",
+                "memory.current",
+                "memory.events",
+                "pids.max",
+                "pids.current",
+                "pids.events",
+            ] {
                 let p = self.dir.join(file);
                 if p.is_file() {
                     let _ = std::fs::remove_file(p);
@@ -674,6 +823,8 @@ pub struct SandboxExecutionPlan {
     pub cgroup_dir: Option<PathBuf>,
     pub max_memory_bytes: Option<u64>,
     pub high_memory_bytes: Option<u64>,
+    pub pids_max: Option<u64>,
+    pub rlimits: RlimitSet,
     pub namespaces: NamespaceSpec,
     pub clone_flags: i32,
     pub loopback: Option<LoopbackInterfaceSpec>,
@@ -706,14 +857,22 @@ impl SandboxExecutionPlan {
         let namespaces = NamespaceSpec::from_config(cfg);
         let clone_flags = namespaces.clone_flags();
 
-        let has_cgroup_limits =
-            cfg.cgroups.max_memory_mb.is_some() || cfg.cgroups.high_memory_mb.is_some();
+        let effective_cgroups = CgroupsConfig {
+            max_memory_mb: cfg.cgroups.max_memory_mb,
+            high_memory_mb: cfg.cgroups.high_memory_mb,
+            pids_max: cfg.cgroups.pids_max.or(cfg.max_pids),
+        };
+        let has_cgroup_limits = effective_cgroups.max_memory_mb.is_some()
+            || effective_cgroups.high_memory_mb.is_some()
+            || effective_cgroups.pids_max.is_some();
 
         let scope = if has_cgroup_limits {
-            Some(manager.provision_scope(scope_id, &cfg.cgroups)?)
+            Some(manager.provision_scope(scope_id, &effective_cgroups)?)
         } else {
             None
         };
+
+        let rlimits = RlimitSet::from_config(cfg);
 
         let loopback = if namespaces.net {
             Some(LoopbackInterfaceSpec::default())
@@ -736,6 +895,8 @@ impl SandboxExecutionPlan {
             cgroup_dir: scope.as_ref().map(|s| s.dir.clone()),
             max_memory_bytes: scope.as_ref().and_then(|s| s.max_memory_bytes),
             high_memory_bytes: scope.as_ref().and_then(|s| s.high_memory_bytes),
+            pids_max: scope.as_ref().and_then(|s| s.pids_max),
+            rlimits,
             namespaces,
             clone_flags,
             loopback,
@@ -746,8 +907,8 @@ impl SandboxExecutionPlan {
         Ok((plan, scope))
     }
 
-    /// Apply Linux kernel `unshare(2)`, rootless UID/GID mappings, Landlock LSM ruleset,
-    /// and Seccomp-BPF filter inside a child process pre-exec hook.
+    /// Apply Linux kernel `unshare(2)`, rootless UID/GID mappings, POSIX `setrlimit(2)` ceilings,
+    /// Landlock LSM ruleset, and Seccomp-BPF filter inside a child process pre-exec hook.
     #[cfg(target_os = "linux")]
     pub fn apply_in_child_process(&self) -> std::io::Result<()> {
         if self.clone_flags != 0 {
@@ -776,6 +937,7 @@ impl SandboxExecutionPlan {
                 let _ = writeln!(f, "{pid}");
             }
         }
+        self.rlimits.apply_in_current_process()?;
         if let Some(ref ruleset) = self.landlock_ruleset {
             #[repr(C)]
             struct LandlockRulesetAttr {

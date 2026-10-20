@@ -143,11 +143,14 @@ pub struct GraphEdge {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicySimulationResult {
     pub target_node_id: usize,
+    pub staged_node_ids: Vec<usize>,
     pub amendment_summary: String,
     pub before_verdict: String,
     pub after_verdict: String,
     pub before_reason: String,
     pub after_reason: String,
+    pub session_ask_total: usize,
+    pub session_flipped_to_allow: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -155,6 +158,7 @@ pub struct PolicyGraph {
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
     pub selected_visible_idx: usize,
+    pub staged_node_ids: Vec<usize>,
     pub simulation: Option<PolicySimulationResult>,
 }
 
@@ -164,6 +168,7 @@ impl PolicyGraph {
             nodes: Vec::new(),
             edges: Vec::new(),
             selected_visible_idx: 0,
+            staged_node_ids: Vec::new(),
             simulation: None,
         }
     }
@@ -288,6 +293,64 @@ impl PolicyGraph {
             evaluation_leaf_ids.push(rule_id);
         }
 
+        // 3b. If decision is ASK without a guard hit, also discover any additional construct gates
+        // or unpermitted write paths in the command so multi-gate commands can be staged & simulated together.
+        if decision.verdict.eq_ignore_ascii_case("ask")
+            && extract_guard_hit(&decision.reason).is_none()
+        {
+            if let Ok(scan) = crate::shell::parse(&decision.cmd) {
+                for construct in &scan.constructs {
+                    let expected_label = format!("policy gate: {construct}");
+                    if !graph.nodes.iter().any(|n| n.label == expected_label) {
+                        let rule_id = graph.add_node(
+                            NodeKind::ConstructHit,
+                            expected_label,
+                            format!("Shell construct gate '{construct}' present in command"),
+                            Some(format!("[lang.bash.constructs] {construct} = \"allow\"")),
+                        );
+                        graph.add_edge(active_parent_id, rule_id, "hits_rule");
+                        evaluation_leaf_ids.push(rule_id);
+                    }
+                }
+
+                let mut extra_write_paths: Vec<String> = Vec::new();
+                for target in &scan.redirect_targets {
+                    if target.starts_with('/') && !target.starts_with(&decision.cwd) {
+                        extra_write_paths.push(target.clone());
+                    }
+                }
+                for cmd in &scan.commands {
+                    let base = crate::guards::base_name(&cmd.head);
+                    if matches!(
+                        base.as_str(),
+                        "touch" | "tee" | "mkdir" | "cp" | "mv" | "install"
+                    ) {
+                        for arg in &cmd.args {
+                            if !arg.starts_with('-')
+                                && arg.starts_with('/')
+                                && !arg.starts_with(&decision.cwd)
+                            {
+                                extra_write_paths.push(arg.clone());
+                            }
+                        }
+                    }
+                }
+                for path_val in extra_write_paths {
+                    let expected_label = format!("unpermitted write path: {path_val}");
+                    if !graph.nodes.iter().any(|n| n.label == expected_label) {
+                        let path_id = graph.add_node(
+                            NodeKind::PathCheck,
+                            expected_label,
+                            "Write target falls outside workspace and write.allow_paths".to_string(),
+                            Some(format!("write.allow_paths = [\"{path_val}\"]")),
+                        );
+                        graph.add_edge(active_parent_id, path_id, "checks_path");
+                        evaluation_leaf_ids.push(path_id);
+                    }
+                }
+            }
+        }
+
         // 4. Final Verdict Node
         let verdict_id = graph.add_node(
             NodeKind::PolicyVerdict,
@@ -367,6 +430,20 @@ impl PolicyGraph {
             return;
         }
         for (child_id, edge_rel) in self.children_of(node_id) {
+            if self
+                .nodes
+                .get(child_id)
+                .is_some_and(|n| n.kind == NodeKind::PolicyVerdict)
+            {
+                let all_parents_visited = self
+                    .edges
+                    .iter()
+                    .filter(|e| e.to == child_id)
+                    .all(|e| visited.contains(&e.from));
+                if !all_parents_visited {
+                    continue;
+                }
+            }
             self.collect_visible_dfs(child_id, depth + 1, edge_rel.to_string(), visited, out);
         }
     }
@@ -405,6 +482,30 @@ impl PolicyGraph {
         }
     }
 
+    /// Toggle whether the currently selected `[RULE]` or `[PATH]` node is staged for cumulative simulation.
+    /// Returns `Ok(true)` if newly staged, `Ok(false)` if unstaged, or `Err(reason)` if the node cannot be staged.
+    pub fn toggle_stage_selected(&mut self) -> Result<bool, String> {
+        let Some(node) = self.selected_node().cloned() else {
+            return Err("No policy graph node selected.".to_string());
+        };
+        if node.kind == NodeKind::GuardHit {
+            return Err(
+                "Guard rules describe operator effects and cannot be simulated as allow-list amendments."
+                    .to_string(),
+            );
+        }
+        // Validate that the node can produce a proposable ReviewCandidate
+        let _ = node.to_review_candidate("")?;
+
+        if let Some(pos) = self.staged_node_ids.iter().position(|&id| id == node.id) {
+            self.staged_node_ids.remove(pos);
+            Ok(false)
+        } else {
+            self.staged_node_ids.push(node.id);
+            Ok(true)
+        }
+    }
+
     /// Render the interactive policy DAG into a deterministic multi-line ASCII/Unicode frame.
     pub fn render_ascii(&self) -> String {
         if self.nodes.is_empty() {
@@ -439,9 +540,17 @@ impl PolicyGraph {
                 format!("└─({rel})─► ")
             };
 
+            let staged_badge = if self.staged_node_ids.contains(node_id) {
+                " [STAGED]"
+            } else {
+                ""
+            };
+
             let sim_badge = match &self.simulation {
                 Some(sim)
-                    if sim.target_node_id == *node_id || node.kind == NodeKind::PolicyVerdict =>
+                    if sim.target_node_id == *node_id
+                        || sim.staged_node_ids.contains(node_id)
+                        || node.kind == NodeKind::PolicyVerdict =>
                 {
                     format!(" [SIMULATED: {} -> {}]", sim.before_verdict, sim.after_verdict)
                 }
@@ -449,13 +558,14 @@ impl PolicyGraph {
             };
 
             out.push_str(&format!(
-                "{} {}{}{} [{}] {}{}\n",
+                "{} {}{}{} [{}] {}{}{}\n",
                 cursor,
                 indent,
                 connector,
                 fold_marker,
                 node.kind.badge(),
                 node.label,
+                staged_badge,
                 sim_badge
             ));
         }
@@ -482,6 +592,10 @@ impl PolicyGraph {
                 "After:     [{}] {}\n",
                 sim.after_verdict,
                 sim.after_reason.lines().next().unwrap_or(&sim.after_reason)
+            ));
+            out.push_str(&format!(
+                "Session Impact: {}/{} ASK decision(s) would flip to ALLOW\n",
+                sim.session_flipped_to_allow, sim.session_ask_total
             ));
         }
 

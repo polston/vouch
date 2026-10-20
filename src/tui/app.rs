@@ -248,6 +248,11 @@ impl TuiApp {
                     self.simulate_selected_visualizer_node();
                 }
             }
+            TerminalEvent::Key(KeyCode::Char('D')) => {
+                if self.active_tab == ViewTab::Visualizer {
+                    self.stage_and_simulate_visualizer_node();
+                }
+            }
             _ => {}
         }
         AppStatus::Running
@@ -333,17 +338,96 @@ impl TuiApp {
         }
     }
 
+    fn stage_and_simulate_visualizer_node(&mut self) {
+        match self.policy_graph.toggle_stage_selected() {
+            Ok(_newly_staged) => {
+                if self.policy_graph.staged_node_ids.is_empty() {
+                    self.policy_graph.simulation = None;
+                    self.status_message = "Cleared staged policy amendments.".to_string();
+                    return;
+                }
+                let Some(decision) = self.engine.decisions.get(self.visualizer_decision_idx) else {
+                    self.status_message = "No decision selected for simulation.".to_string();
+                    return;
+                };
+                let staged_ids = self.policy_graph.staged_node_ids.clone();
+                let mut cands = Vec::with_capacity(staged_ids.len());
+                for &id in &staged_ids {
+                    if let Some(node) = self.policy_graph.nodes.get(id) {
+                        if let Ok(cand) = node.to_review_candidate(&decision.cmd) {
+                            cands.push(cand);
+                        }
+                    }
+                }
+                match self.engine.simulate_candidates(decision, &cands, staged_ids) {
+                    Ok(sim) => {
+                        self.status_message = format!(
+                            "Staged {} node(s) ({}): {} -> {} (session flip: {}/{})",
+                            cands.len(),
+                            sim.amendment_summary,
+                            sim.before_verdict,
+                            sim.after_verdict,
+                            sim.session_flipped_to_allow,
+                            sim.session_ask_total
+                        );
+                        self.policy_graph.simulation = Some(sim);
+                    }
+                    Err(err) => {
+                        self.policy_graph.simulation = None;
+                        self.status_message = format!("✗ Refused simulation: {err}");
+                    }
+                }
+            }
+            Err(err) => {
+                self.status_message = format!("✗ Refused simulation: {err}");
+            }
+        }
+    }
+
     fn apply_selected_visualizer_node(&mut self) {
-        let Some(node) = self.policy_graph.selected_node().cloned() else {
-            self.status_message = "No policy graph node selected.".to_string();
-            return;
-        };
         let example_cmd = self
             .engine
             .decisions
             .get(self.visualizer_decision_idx)
             .map(|d| d.cmd.clone())
             .unwrap_or_default();
+
+        if !self.policy_graph.staged_node_ids.is_empty() {
+            let staged_ids = self.policy_graph.staged_node_ids.clone();
+            let mut cands = Vec::with_capacity(staged_ids.len());
+            for &id in &staged_ids {
+                if let Some(node) = self.policy_graph.nodes.get(id) {
+                    match node.to_review_candidate(&example_cmd) {
+                        Ok(cand) => cands.push(cand),
+                        Err(err) => {
+                            self.status_message = format!("✗ Refused: {err}");
+                            return;
+                        }
+                    }
+                }
+            }
+            match self.engine.apply_candidates(&cands) {
+                Ok(msg) => {
+                    self.status_message = format!("✓ {msg}");
+                    for cand in &cands {
+                        self.engine
+                            .candidates
+                            .retain(|c| !(c.section == cand.section && c.name == cand.name));
+                    }
+                    self.policy_graph.staged_node_ids.clear();
+                    self.policy_graph.simulation = None;
+                }
+                Err(err) => {
+                    self.status_message = format!("✗ Refused: {err}");
+                }
+            }
+            return;
+        }
+
+        let Some(node) = self.policy_graph.selected_node().cloned() else {
+            self.status_message = "No policy graph node selected.".to_string();
+            return;
+        };
         match node.to_review_candidate(&example_cmd) {
             Ok(cand) => match self.engine.apply_candidate(&cand) {
                 Ok(msg) => {

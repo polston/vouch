@@ -152,8 +152,41 @@ pub struct NodeSubpathImportScope {
     pub mappings: Vec<TsPathMapping>,
 }
 
+/// Target of a W3C / Deno / Bun Import Map entry (`deno.json`, `deno.jsonc`, `import_map.json`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImportMapTarget {
+    /// Local filesystem path resolved relative to the import map's directory.
+    LocalPath(PathBuf),
+    /// External specifier such as `npm:axios@^1.6`, `jsr:@std/http`, `https://...`, or `node:net`.
+    ExternalSpecifier(String),
+}
+
+/// Single entry from a W3C / Deno / Bun Import Map (`imports` or `scopes`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportMapEntry {
+    /// Optional directory scope if declared under `"scopes": { "<scope_prefix>": { ... } }`.
+    pub scope_dir: Option<PathBuf>,
+    /// Specifier key or prefix (e.g. `"@core/"`, `"@db"`, `"http-client"`).
+    pub key: String,
+    /// Target path or external specifier.
+    pub target: ImportMapTarget,
+}
+
+/// Parsed Python PEP 723 inline script metadata (`# /// script` ... `# ///`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Pep723ScriptMetadata {
+    /// Normalized PEP 508 package names declared in `dependencies = [...]`.
+    pub dependencies: Vec<String>,
+    /// Local path sources from `[tool.uv.sources]` or PEP 508 `@ file://` references,
+    /// mapping normalized package name -> relative or local path string.
+    pub local_sources: std::collections::HashMap<String, String>,
+    /// Inferred capability set from declared third-party dependencies.
+    pub capabilities: CapabilitySet,
+}
+
 /// Index of local Python and Node/JavaScript/TypeScript packages discovered from workspace manifests
-/// (`pyproject.toml`, `requirements.txt`, `package.json`, `pnpm-lock.yaml`, `tsconfig.json`, `jsconfig.json`).
+/// (`pyproject.toml`, `requirements.txt`, `package.json`, `pnpm-lock.yaml`, `tsconfig.json`, `jsconfig.json`,
+/// `deno.json`, `deno.jsonc`, `import_map.json`).
 #[derive(Debug, Clone, Default)]
 pub struct WorkspaceManifestIndex {
     /// Maps Python top-level module/package name (normalized and raw) to its package directory.
@@ -170,6 +203,8 @@ pub struct WorkspaceManifestIndex {
     pub ts_path_mappings: Vec<TsPathMapping>,
     /// Resolved TypeScript composite project reference directories (`tsconfig.json` `"references"`).
     pub ts_project_references: Vec<PathBuf>,
+    /// Resolved W3C / Deno / Bun import map entries (`deno.json`, `deno.jsonc`, `import_map.json`).
+    pub import_map_entries: Vec<ImportMapEntry>,
 }
 
 impl WorkspaceManifestIndex {
@@ -187,21 +222,102 @@ impl WorkspaceManifestIndex {
     /// Returns true if `specifier` matches any configured `tsconfig.json` / `jsconfig.json` path alias pattern.
     pub fn matches_ts_alias(&self, specifier: &str) -> bool {
         let trimmed = specifier.trim();
-        for mapping in &self.ts_path_mappings {
-            if let Some((prefix, suffix)) = mapping.pattern.split_once('*') {
-                if trimmed.starts_with(prefix)
-                    && trimmed.ends_with(suffix)
-                    && trimmed.len() >= prefix.len() + suffix.len()
+        if ! {
+            for mapping in &self.ts_path_mappings {
+                if let Some((prefix, suffix)) = mapping.pattern.split_once('*') {
+                    if trimmed.starts_with(prefix)
+                        && trimmed.ends_with(suffix)
+                        && trimmed.len() >= prefix.len() + suffix.len()
+                    {
+                        return true;
+                    }
+                } else if trimmed == mapping.pattern
+                    || trimmed.starts_with(&format!("{}/", mapping.pattern))
                 {
                     return true;
                 }
-            } else if trimmed == mapping.pattern
-                || trimmed.starts_with(&format!("{}/", mapping.pattern))
-            {
-                return true;
+            }
+            false
+        } {
+            return false;
+        }
+        true
+    }
+
+    /// Returns true if `specifier` matches a local-path entry in a discovered `deno.json` / `import_map.json`.
+    pub fn matches_import_map_local(&self, specifier: &str, current_file: Option<&Path>) -> bool {
+        let trimmed = specifier.trim();
+        for entry in self.ordered_import_map_entries(current_file) {
+            if Self::import_map_key_matches(&entry.key, trimmed).is_some() {
+                return matches!(entry.target, ImportMapTarget::LocalPath(_));
             }
         }
         false
+    }
+
+    /// Resolves capabilities for an import specifier if it maps to an external specifier in `deno.json` / `import_map.json`.
+    pub fn resolve_import_map_external_capabilities(
+        &self,
+        specifier: &str,
+        current_file: Option<&Path>,
+    ) -> CapabilitySet {
+        let mut caps = CapabilitySet::EMPTY;
+        let trimmed = specifier.trim();
+        for entry in self.ordered_import_map_entries(current_file) {
+            if let Some(rest) = Self::import_map_key_matches(&entry.key, trimmed) {
+                if let ImportMapTarget::ExternalSpecifier(ext_target) = &entry.target {
+                    let full_spec = if rest.is_empty() || ext_target.ends_with('/') {
+                        format!("{ext_target}{rest}")
+                    } else {
+                        format!("{ext_target}/{rest}")
+                    };
+                    caps.union(classify_external_js_specifier_capabilities(&full_spec));
+                }
+            }
+        }
+        caps
+    }
+
+    fn ordered_import_map_entries(&self, current_file: Option<&Path>) -> Vec<&ImportMapEntry> {
+        let mut scoped = Vec::new();
+        let mut unscoped = Vec::new();
+        let canon_cf = current_file.map(|cf| {
+            cf.canonicalize()
+                .unwrap_or_else(|_| normalize_lexical_path(cf))
+        });
+        for entry in &self.import_map_entries {
+            if let Some(scope_dir) = &entry.scope_dir {
+                if let Some(ref cf) = canon_cf {
+                    if cf.starts_with(scope_dir)
+                        || current_file.is_some_and(|raw| raw.starts_with(scope_dir))
+                    {
+                        scoped.push(entry);
+                    }
+                }
+            } else {
+                unscoped.push(entry);
+            }
+        }
+        // Sort scoped entries by longest (most specific) scope_dir first, then by longest key first
+        scoped.sort_by(|a, b| {
+            let a_len = a.scope_dir.as_ref().map(|d| d.as_os_str().len()).unwrap_or(0);
+            let b_len = b.scope_dir.as_ref().map(|d| d.as_os_str().len()).unwrap_or(0);
+            b_len.cmp(&a_len).then_with(|| b.key.len().cmp(&a.key.len()))
+        });
+        unscoped.sort_by(|a, b| b.key.len().cmp(&a.key.len()));
+        scoped.into_iter().chain(unscoped).collect()
+    }
+
+    fn import_map_key_matches<'a>(key: &str, specifier: &'a str) -> Option<&'a str> {
+        if key == specifier {
+            Some("")
+        } else if key.ends_with('/') && specifier.starts_with(key) {
+            Some(&specifier[key.len()..])
+        } else if let Some(rest) = specifier.strip_prefix(&format!("{key}/")) {
+            Some(rest)
+        } else {
+            None
+        }
     }
 
     fn scan_dir_bounded(
@@ -244,6 +360,13 @@ impl WorkspaceManifestIndex {
             let tsconfig_path = dir.join(tsconfig_name);
             if tsconfig_path.is_file() {
                 self.parse_tsconfig_json(workspace_root, dir, &tsconfig_path, 0);
+            }
+        }
+
+        for import_map_name in &["deno.json", "deno.jsonc", "import_map.json"] {
+            let map_path = dir.join(import_map_name);
+            if map_path.is_file() {
+                self.parse_import_map_json(workspace_root, dir, &map_path, 0);
             }
         }
 
@@ -715,6 +838,105 @@ impl WorkspaceManifestIndex {
             }
         }
     }
+
+    fn parse_import_map_json(
+        &mut self,
+        workspace_root: &Path,
+        config_dir: &Path,
+        config_path: &Path,
+        depth: usize,
+    ) {
+        if depth > 2 {
+            return;
+        }
+        let Ok(raw_content) = std::fs::read_to_string(config_path) else {
+            return;
+        };
+        let clean_json = strip_jsonc_comments_and_trailing_commas(&raw_content);
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(&clean_json) else {
+            return;
+        };
+
+        // 1. Follow `"importMap": "./import_map.json"` reference if present in deno.json / deno.jsonc
+        if let Some(import_map_ref) = val.get("importMap").and_then(|v| v.as_str()) {
+            let ref_path = config_dir.join(import_map_ref);
+            if let Ok(canon_ref) = ref_path.canonicalize() {
+                if canon_ref.starts_with(workspace_root) {
+                    if let Some(ref_dir) = canon_ref.parent() {
+                        self.parse_import_map_json(workspace_root, ref_dir, &canon_ref, depth + 1);
+                    }
+                }
+            }
+        }
+
+        // 2. Parse top-level `"imports": { "<key>": "<target>" }`
+        if let Some(imports_obj) = val.get("imports").and_then(|v| v.as_object()) {
+            self.collect_import_map_object(workspace_root, config_dir, None, imports_obj);
+        }
+
+        // 3. Parse `"scopes": { "<scope_prefix>": { "<key>": "<target>" } }`
+        if let Some(scopes_obj) = val.get("scopes").and_then(|v| v.as_object()) {
+            for (scope_key, scope_val) in scopes_obj {
+                let Some(inner_obj) = scope_val.as_object() else {
+                    continue;
+                };
+                let scope_rel = scope_key.trim();
+                let raw_scope_dir = if scope_rel.starts_with('/') {
+                    workspace_root.join(scope_rel.trim_start_matches('/'))
+                } else {
+                    config_dir.join(scope_rel)
+                };
+                let norm_scope_dir = raw_scope_dir
+                    .canonicalize()
+                    .unwrap_or_else(|_| normalize_lexical_path(&raw_scope_dir));
+                self.collect_import_map_object(
+                    workspace_root,
+                    config_dir,
+                    Some(norm_scope_dir),
+                    inner_obj,
+                );
+            }
+        }
+    }
+
+    fn collect_import_map_object(
+        &mut self,
+        workspace_root: &Path,
+        base_dir: &Path,
+        scope_dir: Option<PathBuf>,
+        obj: &serde_json::Map<String, serde_json::Value>,
+    ) {
+        for (key, target_val) in obj {
+            let Some(target_str) = target_val.as_str() else {
+                continue;
+            };
+            let trimmed_target = target_str.trim();
+            if trimmed_target.is_empty() {
+                continue;
+            }
+            let target = if trimmed_target.starts_with("./")
+                || trimmed_target.starts_with("../")
+                || trimmed_target.starts_with('/')
+            {
+                let resolved = if trimmed_target.starts_with('/') {
+                    workspace_root.join(trimmed_target.trim_start_matches('/'))
+                } else {
+                    base_dir.join(trimmed_target)
+                };
+                ImportMapTarget::LocalPath(resolved)
+            } else {
+                ImportMapTarget::ExternalSpecifier(trimmed_target.to_string())
+            };
+            let entry = ImportMapEntry {
+                scope_dir: scope_dir.clone(),
+                key: key.clone(),
+                target,
+            };
+            if !self.import_map_entries.contains(&entry) {
+                self.import_map_entries.push(entry);
+            }
+        }
+    }
 }
 
 /// Strip `//` line comments, `/* ... */` block comments, and trailing commas outside string literals
@@ -898,6 +1120,10 @@ impl TransitiveImportResolver {
         let direct_caps = crate::python::extract_capabilities(script);
         report.capabilities.union(direct_caps);
 
+        // Extract Python PEP 723 inline script metadata (`# /// script` ... `# ///`)
+        let pep723 = parse_pep723_script_metadata(script);
+        report.capabilities.union(pep723.capabilities);
+
         let (imports, ast_caps) = match collect_python_imports(script) {
             Ok(res) => res,
             Err(err) => {
@@ -908,16 +1134,29 @@ impl TransitiveImportResolver {
         report.capabilities.union(ast_caps);
 
         for spec in imports {
-            let candidates = resolve_python_import_candidates(
+            if let Some(ref mod_name) = spec.module {
+                let first_seg = mod_name.split('.').next().unwrap_or(mod_name.as_str());
+                let norm_first = WorkspaceManifestIndex::normalize_py_name(first_seg);
+                report
+                    .capabilities
+                    .union(classify_python_dependency_capabilities(&norm_first));
+            }
+            let candidates = resolve_python_import_candidates_with_pep723(
                 &spec,
                 current_file,
                 &self.workspace_root,
                 &self.manifest_index,
+                &pep723,
             );
             let mut resolved_path = None;
-            for cand in candidates {
+            let mut escaped_candidate = None;
+            for cand in &candidates {
+                let norm = normalize_lexical_path(cand);
+                if !norm.starts_with(&self.workspace_root) && escaped_candidate.is_none() {
+                    escaped_candidate = Some(norm);
+                }
                 if cand.is_file() {
-                    resolved_path = Some(cand);
+                    resolved_path = Some(cand.clone());
                     break;
                 }
             }
@@ -951,6 +1190,8 @@ impl TransitiveImportResolver {
                 } else {
                     report.unresolved_imports.push(format!("unreadable: {}", canonical.display()));
                 }
+            } else if let Some(escaped) = escaped_candidate {
+                report.unresolved_imports.push(format!("escaped: {}", escaped.display()));
             } else if spec.level > 0 {
                 // Relative import failed to resolve on disk
                 let mod_desc = spec.module.as_deref().unwrap_or("<current>");
@@ -984,11 +1225,24 @@ impl TransitiveImportResolver {
         };
 
         for spec in imports {
+            // Propagate capabilities from direct external specifiers (`npm:`, `jsr:`, `https://`, `node:`, `bun:`)
+            // and from `deno.json` / `import_map.json` external specifier mappings.
+            report
+                .capabilities
+                .union(classify_external_js_specifier_capabilities(&spec));
+            report.capabilities.union(
+                self.manifest_index
+                    .resolve_import_map_external_capabilities(&spec, current_file),
+            );
+
             let is_relative_or_local = spec.starts_with("./")
                 || spec.starts_with("../")
                 || spec.starts_with('/')
                 || spec.starts_with('#')
-                || self.manifest_index.matches_ts_alias(&spec);
+                || self.manifest_index.matches_ts_alias(&spec)
+                || self
+                    .manifest_index
+                    .matches_import_map_local(&spec, current_file);
             let candidates = resolve_javascript_import_candidates(
                 &spec,
                 current_file,
@@ -1152,6 +1406,329 @@ fn collect_python_imports(src: &str) -> Result<(Vec<PythonImportSpecifier>, Capa
         visitor.visit_stmt(stmt);
     }
     Ok((visitor.imports, visitor.caps))
+}
+
+/// Extract Python PEP 723 inline script metadata (`# /// script` ... `# ///`).
+pub fn parse_pep723_script_metadata(script: &str) -> Pep723ScriptMetadata {
+    let mut meta = Pep723ScriptMetadata::default();
+    let mut in_block = false;
+    let mut toml_lines: Vec<String> = Vec::new();
+
+    for line in script.lines() {
+        let trimmed = line.trim();
+        if !in_block {
+            if trimmed == "# /// script" {
+                in_block = true;
+                toml_lines.clear();
+            }
+        } else if trimmed == "# ///" {
+            let toml_text = toml_lines.join("\n");
+            if let Ok(val) = toml::from_str::<toml::Value>(&toml_text) {
+                if let Some(deps) = val.get("dependencies").and_then(|d| d.as_array()) {
+                    for dep_val in deps {
+                        if let Some(dep_str) = dep_val.as_str() {
+                            if let Some((pkg_name, file_ref)) = parse_pep508_dependency(dep_str) {
+                                let norm = WorkspaceManifestIndex::normalize_py_name(&pkg_name);
+                                if !norm.is_empty() {
+                                    meta.capabilities
+                                        .union(classify_python_dependency_capabilities(&norm));
+                                    if !meta.dependencies.contains(&norm) {
+                                        meta.dependencies.push(norm.clone());
+                                    }
+                                    if let Some(local_path) = file_ref {
+                                        if local_path.starts_with("__network_url__:") {
+                                            meta.capabilities.network = true;
+                                        } else {
+                                            meta.local_sources.insert(norm, local_path);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(uv_sources) = val
+                    .get("tool")
+                    .and_then(|t| t.get("uv"))
+                    .and_then(|u| u.get("sources"))
+                    .and_then(|s| s.as_table())
+                {
+                    for (pkg_key, src_val) in uv_sources {
+                        let norm = WorkspaceManifestIndex::normalize_py_name(pkg_key);
+                        if let Some(path_str) = src_val.get("path").and_then(|p| p.as_str()) {
+                            meta.local_sources
+                                .insert(norm.clone(), path_str.trim().to_string());
+                            meta.local_sources
+                                .insert(pkg_key.clone(), path_str.trim().to_string());
+                        } else if let Some(git_url) = src_val.get("git").and_then(|g| g.as_str()) {
+                            if !git_url.is_empty() {
+                                meta.capabilities.network = true;
+                            }
+                        }
+                    }
+                }
+            }
+            in_block = false;
+        } else if let Some(stripped) = trimmed.strip_prefix('#') {
+            let content = stripped.strip_prefix(' ').unwrap_or(stripped);
+            toml_lines.push(content.to_string());
+        } else {
+            // Invalid PEP 723 block (non-comment line before `# ///` closing marker)
+            in_block = false;
+            toml_lines.clear();
+        }
+    }
+
+    meta
+}
+
+fn parse_pep508_dependency(dep: &str) -> Option<(String, Option<String>)> {
+    let trimmed = dep.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut end_idx = trimmed.len();
+    for (i, ch) in trimmed.char_indices() {
+        if matches!(ch, '[' | ';' | '@' | '~' | '=' | '<' | '>' | '!' | ' ' | '\t') {
+            end_idx = i;
+            break;
+        }
+    }
+    let pkg = trimmed[..end_idx].trim();
+    if pkg.is_empty() {
+        return None;
+    }
+    let mut local_ref = None;
+    if let Some((_, after_at)) = trimmed.split_once('@') {
+        let target = after_at.split(';').next().unwrap_or("").trim();
+        if let Some(file_path) = target.strip_prefix("file://") {
+            local_ref = Some(file_path.trim().to_string());
+        } else if target.starts_with("http://")
+            || target.starts_with("https://")
+            || target.starts_with("git+")
+        {
+            // Direct URL dependency requires network
+            local_ref = Some(format!("__network_url__:{target}"));
+        } else if target.starts_with("./") || target.starts_with("../") || target.starts_with('/') {
+            local_ref = Some(target.to_string());
+        }
+    }
+    Some((pkg.to_string(), local_ref))
+}
+
+fn classify_python_dependency_capabilities(norm_pkg: &str) -> CapabilitySet {
+    let mut caps = CapabilitySet::EMPTY;
+    if matches!(
+        norm_pkg,
+        "requests"
+            | "httpx"
+            | "aiohttp"
+            | "urllib3"
+            | "websockets"
+            | "grpcio"
+            | "boto3"
+            | "botocore"
+            | "paramiko"
+            | "fabric"
+            | "fastapi"
+            | "uvicorn"
+            | "starlette"
+            | "flask"
+            | "django"
+            | "tornado"
+            | "pycurl"
+            | "twine"
+    ) {
+        caps.network = true;
+    }
+    if matches!(
+        norm_pkg,
+        "celery" | "dramatiq" | "rq" | "supervisor" | "python_daemon" | "daemonize"
+    ) {
+        caps.daemon = true;
+    }
+    if matches!(
+        norm_pkg,
+        "psutil" | "pexpect" | "sh" | "plumbum" | "invoke"
+    ) {
+        caps.external_paths = true;
+    }
+    caps
+}
+
+/// Classify capabilities required by external JavaScript/TypeScript/Deno/Bun module specifiers.
+pub fn classify_external_js_specifier_capabilities(specifier: &str) -> CapabilitySet {
+    let mut caps = CapabilitySet::EMPTY;
+    let trimmed = specifier.trim();
+    if trimmed.is_empty() {
+        return caps;
+    }
+
+    // 1. Remote HTTP/HTTPS/WS URLs (Deno / ESM URL imports)
+    if trimmed.starts_with("https://")
+        || trimmed.starts_with("http://")
+        || trimmed.starts_with("wss://")
+        || trimmed.starts_with("ws://")
+    {
+        caps.network = true;
+        return caps;
+    }
+
+    // 2. Node / Bun / Deno built-in protocol specifiers
+    if let Some(node_mod) = trimmed.strip_prefix("node:") {
+        let base = node_mod.split('/').next().unwrap_or(node_mod);
+        if matches!(
+            base,
+            "http" | "https" | "net" | "tls" | "dgram" | "dns" | "http2"
+        ) {
+            caps.network = true;
+        }
+        if matches!(base, "child_process" | "cluster" | "worker_threads") {
+            caps.daemon = true;
+        }
+        if matches!(base, "fs") {
+            caps.external_paths = true;
+        }
+        if matches!(base, "vm") {
+            caps.dynamic_eval = true;
+        }
+        return caps;
+    }
+
+    if let Some(bun_mod) = trimmed.strip_prefix("bun:") {
+        if matches!(bun_mod, "ffi" | "sqlite") {
+            caps.external_paths = true;
+        }
+        return caps;
+    }
+
+    // 3. `npm:<pkg>` / `jsr:<pkg>` or bare package names mapped via import map
+    let without_proto = trimmed
+        .strip_prefix("npm:")
+        .or_else(|| trimmed.strip_prefix("jsr:"))
+        .unwrap_or(trimmed);
+    let without_leading_slash = without_proto.trim_start_matches('/');
+    let pkg_name = extract_npm_or_jsr_package_name(without_leading_slash);
+
+    if matches!(
+        pkg_name.as_str(),
+        "axios"
+            | "node-fetch"
+            | "undici"
+            | "got"
+            | "ws"
+            | "socket.io"
+            | "socket.io-client"
+            | "ky"
+            | "superagent"
+            | "requests"
+            | "fastify"
+            | "express"
+            | "koa"
+            | "hono"
+            | "grpc"
+            | "@grpc/grpc-js"
+            | "@std/http"
+            | "@std/net"
+            | "http"
+            | "https"
+            | "net"
+            | "tls"
+            | "dgram"
+            | "dns"
+            | "http2"
+    ) {
+        caps.network = true;
+    }
+    if matches!(
+        pkg_name.as_str(),
+        "fs" | "@std/fs" | "shelljs" | "zx" | "ffi-napi" | "koffi"
+    ) {
+        caps.external_paths = true;
+    }
+    if matches!(
+        pkg_name.as_str(),
+        "child_process" | "cluster" | "execa" | "cross-spawn" | "pm2" | "forever" | "nodemon"
+    ) {
+        caps.daemon = true;
+    }
+
+    caps
+}
+
+fn extract_npm_or_jsr_package_name(raw: &str) -> String {
+    if let Some(rest) = raw.strip_prefix('@') {
+        // Scoped package: `@scope/name[@version][/subpath]`
+        if let Some((scope, after_scope)) = rest.split_once('/') {
+            let pkg_part = after_scope.split('/').next().unwrap_or(after_scope);
+            let pkg_clean = pkg_part.split('@').next().unwrap_or(pkg_part);
+            return format!("@{scope}/{pkg_clean}");
+        }
+        return raw.to_string();
+    }
+    let first_seg = raw.split('/').next().unwrap_or(raw);
+    first_seg.split('@').next().unwrap_or(first_seg).to_string()
+}
+
+fn resolve_python_import_candidates_with_pep723(
+    spec: &PythonImportSpecifier,
+    current_file: Option<&Path>,
+    workspace_root: &Path,
+    manifest_index: &WorkspaceManifestIndex,
+    pep723: &Pep723ScriptMetadata,
+) -> Vec<PathBuf> {
+    let mut candidates =
+        resolve_python_import_candidates(spec, current_file, workspace_root, manifest_index);
+    let current_dir = current_file.and_then(|p| p.parent()).unwrap_or(workspace_root);
+
+    if spec.level == 0 {
+        if let Some(ref mod_name) = spec.module {
+            let (first_seg, rest_opt) = match mod_name.split_once('.') {
+                Some((first, rest)) => (first, Some(rest.replace('.', "/"))),
+                None => (mod_name.as_str(), None),
+            };
+            let norm_first = WorkspaceManifestIndex::normalize_py_name(first_seg);
+            if let Some(rel_src) = pep723
+                .local_sources
+                .get(first_seg)
+                .or_else(|| pep723.local_sources.get(&norm_first))
+            {
+                if !rel_src.starts_with("__network_url__:") {
+                    let pkg_root = current_dir.join(rel_src);
+                    let search_roots = [
+                        pkg_root.join("src").join(&norm_first),
+                        pkg_root.join("src").join(first_seg),
+                        pkg_root.join(&norm_first),
+                        pkg_root.join(first_seg),
+                        pkg_root.clone(),
+                    ];
+                    for root in &search_roots {
+                        match &rest_opt {
+                            None => {
+                                candidates.push(root.with_extension("py"));
+                                candidates.push(root.join("__init__.py"));
+                                for name in &spec.imported_names {
+                                    candidates.push(root.join(format!("{}.py", name)));
+                                    candidates.push(root.join(name).join("__init__.py"));
+                                }
+                            }
+                            Some(rest_rel) => {
+                                candidates.push(root.join(format!("{}.py", rest_rel)));
+                                candidates.push(root.join(rest_rel).join("__init__.py"));
+                                for name in &spec.imported_names {
+                                    candidates.push(root.join(rest_rel).join(format!("{}.py", name)));
+                                    candidates
+                                        .push(root.join(rest_rel).join(name).join("__init__.py"));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    candidates
 }
 
 fn resolve_python_import_candidates(
@@ -1464,6 +2041,21 @@ fn resolve_javascript_import_candidates(
     let is_relative = trimmed.starts_with("./") || trimmed.starts_with("../") || trimmed.starts_with('/');
 
     if !is_relative {
+        // 0. Consult W3C / Deno / Bun import map local entries (scoped first, then unscoped)
+        for entry in manifest_index.ordered_import_map_entries(current_file) {
+            if let Some(rest) = WorkspaceManifestIndex::import_map_key_matches(&entry.key, trimmed)
+            {
+                if let ImportMapTarget::LocalPath(base_target) = &entry.target {
+                    let resolved = if rest.is_empty() {
+                        base_target.clone()
+                    } else {
+                        base_target.join(rest)
+                    };
+                    push_js_target_candidates(&mut candidates, &resolved);
+                }
+            }
+        }
+
         // 1. Consult tsconfig.json / jsconfig.json compilerOptions.paths aliases
         apply_path_mappings_to_candidates(trimmed, &manifest_index.ts_path_mappings, &mut candidates);
 
@@ -1540,12 +2132,29 @@ impl AstCapabilityExtractor for DefaultAstCapabilityExtractor {
         match lang {
             "python" | "py" => {
                 let mut caps = crate::python::extract_capabilities(trimmed);
-                if let Ok((_, ast_caps)) = collect_python_imports(trimmed) {
+                let pep723 = parse_pep723_script_metadata(trimmed);
+                caps.union(pep723.capabilities);
+                if let Ok((imports, ast_caps)) = collect_python_imports(trimmed) {
                     caps.union(ast_caps);
+                    for spec in imports {
+                        if let Some(ref mod_name) = spec.module {
+                            let first_seg = mod_name.split('.').next().unwrap_or(mod_name.as_str());
+                            let norm = WorkspaceManifestIndex::normalize_py_name(first_seg);
+                            caps.union(classify_python_dependency_capabilities(&norm));
+                        }
+                    }
                 }
                 caps
             }
-            "javascript" | "js" | "node" => crate::javascript::extract_capabilities(trimmed),
+            "javascript" | "js" | "node" | "typescript" | "ts" | "tsx" | "jsx" | "mjs" | "cjs" => {
+                let mut caps = crate::javascript::extract_capabilities(trimmed);
+                if let Ok(imports) = collect_javascript_imports(trimmed) {
+                    for spec in imports {
+                        caps.union(classify_external_js_specifier_capabilities(&spec));
+                    }
+                }
+                caps
+            }
             _ => CapabilitySet::EMPTY,
         }
     }
@@ -1575,8 +2184,11 @@ impl CapabilityEmitter for DefaultCapabilityEmitter {
         let mut caps = CapabilitySet::from_slice(&crate::guards::capabilities_for_cmd(knowledge, cmd, lang));
 
         let base_head = crate::guards::base_name(&cmd.head).to_lowercase();
-        let is_python = matches!(base_head.as_str(), "python" | "python3" | "py");
-        let is_node = matches!(base_head.as_str(), "node" | "nodejs" | "js");
+        let is_python = matches!(base_head.as_str(), "python" | "python3" | "py" | "uv");
+        let is_node = matches!(
+            base_head.as_str(),
+            "node" | "nodejs" | "js" | "deno" | "bun"
+        );
 
         if is_python || is_node {
             for (idx, arg) in cmd.args.iter().enumerate() {

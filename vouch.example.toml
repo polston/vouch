@@ -538,7 +538,11 @@ paths = [
 # isolate_network = true
 # seccomp_profile = "strict"
 # landlock_enforce = true
+# max_pids = 128
+# max_open_files = 1024
+# max_cpu_seconds = 60
 #
 # [sandbox.cgroups]
 # max_memory_mb = 2048
 # high_memory_mb = 1536
+# pids_max = 128

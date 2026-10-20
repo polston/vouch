@@ -747,3 +747,152 @@ fn powershell_cfg_labeled_loops_break_and_continue_prune_outer_loop_statements()
         vec!["-Id", "$afterLoop.Id", "origin:Get-Process"]
     );
 }
+
+#[test]
+fn powershell_splatting_hashtable_and_array_taint_propagation() {
+    use vouch::powershell_pipeline::PsControlFlowGraph;
+
+    // 1. Hashtable splatting `@params` with tainted `Read-Host` value synthesizes `-Path`, `-Recurse`, and `untrusted_input`
+    let script_hash = "{
+        $params = @{ Path = (Read-Host); Recurse = $true }
+        Remove-Item @params
+    }";
+    let cfg_hash = PsControlFlowGraph::build(script_hash);
+    assert_eq!(cfg_hash.synthesized_commands.len(), 1);
+    let cmd = &cfg_hash.synthesized_commands[0];
+    assert_eq!(cmd.head, "Remove-Item");
+    assert!(
+        cmd.args.contains(&"-Path".to_string()),
+        "splatted hashtable must expand -Path key: {:?}",
+        cmd.args
+    );
+    assert!(
+        cmd.args.contains(&"-Recurse".to_string()),
+        "splatted hashtable with Recurse = $true must expand -Recurse: {:?}",
+        cmd.args
+    );
+    assert!(
+        cmd.args.contains(&"untrusted_input".to_string()),
+        "tainted hashtable splat must propagate untrusted_input: {:?}",
+        cmd.args
+    );
+
+    // 2. Array splatting `@arr` with tainted variable and switch flag
+    let script_arr = "{
+        $userTarget = Read-Host
+        $arr = @('-Path', $userTarget, '-Force')
+        Remove-Item @arr
+    }";
+    let cfg_arr = PsControlFlowGraph::build(script_arr);
+    assert_eq!(cfg_arr.synthesized_commands.len(), 1);
+    let cmd_arr = &cfg_arr.synthesized_commands[0];
+    assert_eq!(cmd_arr.head, "Remove-Item");
+    assert!(cmd_arr.args.contains(&"-Path".to_string()));
+    assert!(cmd_arr.args.contains(&"-Force".to_string()));
+    assert!(cmd_arr.args.contains(&"-Recurse".to_string()));
+    assert!(cmd_arr.args.contains(&"untrusted_input".to_string()));
+}
+
+#[test]
+fn powershell_switch_regex_and_wildcard_branch_pruning_and_fallthrough() {
+    use vouch::powershell_pipeline::PsControlFlowGraph;
+
+    // 1. `switch -Regex ($mode)` prunes non-matching regex arm and executes matching regex arm
+    let script_regex = "{
+        $mode = 'prod-us-east-1'
+        switch -Regex ($mode) {
+            '^dev-.*' { Remove-Item -Recurse C:/Users/dev/work; break }
+            '^prod-[a-z]+-[a-z]+-[0-9]+$' { $p = Get-Process app; $p.Kill(); break }
+            default { $f = Get-ChildItem C:/Users/dev/tmp; $f.Delete() }
+        }
+    }";
+    let cfg_regex = PsControlFlowGraph::build(script_regex);
+    assert_eq!(
+        cfg_regex.synthesized_commands.len(),
+        1,
+        "only matching regex arm should execute and break before default: {:?}",
+        cfg_regex.synthesized_commands
+    );
+    assert_eq!(cfg_regex.synthesized_commands[0].head, "Stop-Process");
+
+    // 2. `switch -Wildcard ($envName)` matches glob pattern, prunes non-matching arm, and falls through without break
+    let script_wildcard = "{
+        $envName = 'staging_node_04'
+        switch -Wildcard ($envName) {
+            'prod_*' { Remove-Item -Recurse C:/Users/dev/prod; break }
+            'staging_node_??' { $p = Get-Process worker; $p.Kill() }
+            '*_04' { $f = Get-ChildItem C:/Users/dev/cache; $f.Delete(); break }
+        }
+    }";
+    let cfg_wildcard = PsControlFlowGraph::build(script_wildcard);
+    assert_eq!(
+        cfg_wildcard.synthesized_commands.len(),
+        2,
+        "both matching wildcard arms must execute when the first lacks break, while prod_* is pruned: {:?}",
+        cfg_wildcard.synthesized_commands
+    );
+    assert_eq!(cfg_wildcard.synthesized_commands[0].head, "Stop-Process");
+    assert_eq!(cfg_wildcard.synthesized_commands[1].head, "Remove-Item");
+}
+
+#[test]
+fn powershell_pipeline_variable_pv_taint_propagation_across_multi_stage_pipeline() {
+    let cfg = test_config();
+
+    // 1. `Get-ChildItem -PipelineVariable dirItem | Get-Process | ForEach-Object { Remove-Item $dirItem.FullName }`
+    // Or calling `$dirItem.Delete()` / `Remove-Item` in a later pipeline stage after `$_` was overwritten by `Get-Process`
+    let cmds = vec![
+        Cmd {
+            head: "Get-Content".to_string(),
+            args: vec![
+                "C:/Users/dev/targets.txt".to_string(),
+                "-PipelineVariable".to_string(),
+                "rawTarget".to_string(),
+            ],
+            ..Default::default()
+        },
+        Cmd {
+            head: "Get-Process".to_string(),
+            args: vec!["-pv".to_string(), "procItem".to_string()],
+            ..Default::default()
+        },
+        Cmd {
+            head: "ForEach-Object".to_string(),
+            args: vec!["{ $procItem.Kill(); Remove-Item $rawTarget }".to_string()],
+            ..Default::default()
+        },
+    ];
+    let analyzed = vouch::powershell_pipeline::analyze_pipeline_stages(&cmds);
+    let stop_cmd = analyzed
+        .iter()
+        .find(|c| c.head == "Stop-Process")
+        .expect("expected synthesized Stop-Process from $procItem.Kill()");
+    assert!(
+        stop_cmd.args.contains(&"origin:Get-Process".to_string()),
+        "-pv procItem must retain Get-Process origin across stages: {:?}",
+        stop_cmd.args
+    );
+
+    let rm_cmd = analyzed
+        .iter()
+        .find(|c| c.head == "Remove-Item")
+        .expect("expected synthesized Remove-Item from $rawTarget");
+    assert!(
+        rm_cmd.args.contains(&"-Recurse".to_string())
+            && rm_cmd.args.contains(&"untrusted_input".to_string()),
+        "-PipelineVariable rawTarget from Get-Content must retain DynamicInput taint in stage 3: {:?}",
+        rm_cmd.args
+    );
+
+    // Verify end-to-end decision triggers guard Ask
+    let d = decide_powershell(
+        &cfg,
+        "Get-Process -PipelineVariable p | Get-ChildItem | ForEach-Object { $p.Kill() }",
+    );
+    match d {
+        Decision::Ask(reason) => {
+            assert!(reason.contains("process_control (guard)"), "got {}", reason);
+        }
+        other => panic!("expected Ask on process_control guard via -PipelineVariable, got {other:?}"),
+    }
+}

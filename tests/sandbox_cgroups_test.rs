@@ -2,12 +2,13 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use vouch::config::{self, SeccompProfile};
 use vouch::runtime::{
-    CgroupMemoryEvents, CgroupV2Manager, LandlockRulesetPlan, LandlockVerdict,
-    LoopbackInterfaceSpec, NamespaceSpec, SandboxExecutionPlan, SeccompFilterProgram,
-    AUDIT_ARCH_AARCH64, AUDIT_ARCH_X86_64, CLONE_NEWNET, CLONE_NEWNS, CLONE_NEWPID, CLONE_NEWUSER,
-    LANDLOCK_ACCESS_FS_EXECUTE, LANDLOCK_ACCESS_FS_MAKE_REG, LANDLOCK_ACCESS_FS_READ_FILE,
-    LANDLOCK_ACCESS_FS_REMOVE_FILE, LANDLOCK_ACCESS_FS_TRUNCATE, LANDLOCK_ACCESS_FS_WRITE_FILE,
-    SECCOMP_RET_ALLOW, SECCOMP_RET_ERRNO_EPERM, SECCOMP_RET_KILL_PROCESS,
+    CgroupMemoryEvents, CgroupPidsEvents, CgroupV2Manager, LandlockRulesetPlan, LandlockVerdict,
+    LoopbackInterfaceSpec, NamespaceSpec, RlimitResource, RlimitRule, RlimitSet,
+    SandboxExecutionPlan, SeccompFilterProgram, AUDIT_ARCH_AARCH64, AUDIT_ARCH_X86_64,
+    CLONE_NEWNET, CLONE_NEWNS, CLONE_NEWPID, CLONE_NEWUSER, LANDLOCK_ACCESS_FS_EXECUTE,
+    LANDLOCK_ACCESS_FS_MAKE_REG, LANDLOCK_ACCESS_FS_READ_FILE, LANDLOCK_ACCESS_FS_REMOVE_FILE,
+    LANDLOCK_ACCESS_FS_TRUNCATE, LANDLOCK_ACCESS_FS_WRITE_FILE, SECCOMP_RET_ALLOW,
+    SECCOMP_RET_ERRNO_EPERM, SECCOMP_RET_KILL_PROCESS,
 };
 
 fn unique_cgroup_root(tag: &str) -> PathBuf {
@@ -306,5 +307,114 @@ landlock_enforce = true
         LandlockVerdict::DenyEacces
     );
 
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn cgroup_v2_provisions_pids_max_and_monitors_fork_rejection_events() {
+    let root = unique_cgroup_root("pids_max");
+    std::fs::write(root.join("cgroup.controllers"), "cpu memory pids\n").unwrap();
+
+    let manager = CgroupV2Manager::new(&root);
+    let toml_text = r#"
+[sandbox]
+max_open_files = 1024
+max_cpu_seconds = 120
+
+[sandbox.cgroups]
+pids_max = 64
+"#;
+    let cfg = config::load(toml_text).expect("load pids_max config");
+    assert_eq!(cfg.sandbox.cgroups.pids_max, Some(64));
+    assert_eq!(cfg.sandbox.max_open_files, Some(1024));
+    assert_eq!(cfg.sandbox.max_cpu_seconds, Some(120));
+
+    let (plan, scope_opt) =
+        SandboxExecutionPlan::prepare(&manager, "worker-pids", &cfg.sandbox).expect("prepare");
+    let scope = scope_opt.expect("scope provisioned for pids_max");
+
+    assert_eq!(plan.pids_max, Some(64));
+    assert_eq!(scope.pids_max, Some(64));
+
+    let pids_max_file = std::fs::read_to_string(scope.dir.join("pids.max")).unwrap();
+    assert_eq!(pids_max_file.trim(), "64");
+
+    // Simulate kernel reporting pids.current and fork rejection in pids.events
+    std::fs::write(scope.dir.join("pids.current"), "64\n").unwrap();
+    std::fs::write(scope.dir.join("pids.events"), "max 5\n").unwrap();
+
+    assert_eq!(scope.read_current_pids(), Some(64));
+    let pids_events: CgroupPidsEvents = scope.read_pids_events();
+    assert_eq!(pids_events.max, 5);
+    assert!(pids_events.has_fork_rejected());
+
+    // Teardown cleans up pids.* files and removes the cgroup directory
+    scope.teardown().expect("teardown scope with pids files");
+    assert!(!scope.dir.exists());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn rlimit_set_compiles_posix_resource_ceilings_and_simulates_enforcement() {
+    let root = unique_cgroup_root("rlimits");
+    std::fs::write(root.join("cgroup.controllers"), "cpu memory pids\n").unwrap();
+    let manager = CgroupV2Manager::new(&root);
+
+    let toml_text = r#"
+[sandbox]
+max_pids = 128
+max_open_files = 512
+max_cpu_seconds = 30
+"#;
+    let cfg = config::load(toml_text).expect("load rlimit config");
+    let rlimits = RlimitSet::from_config(&cfg.sandbox);
+    assert!(!rlimits.is_empty());
+    assert_eq!(
+        rlimits.limit_for(RlimitResource::NoFile),
+        Some(RlimitRule {
+            resource: RlimitResource::NoFile,
+            soft: 512,
+            hard: 512,
+        })
+    );
+    assert_eq!(
+        rlimits.limit_for(RlimitResource::NProc),
+        Some(RlimitRule {
+            resource: RlimitResource::NProc,
+            soft: 128,
+            hard: 128,
+        })
+    );
+    assert_eq!(
+        rlimits.limit_for(RlimitResource::CpuSeconds),
+        Some(RlimitRule {
+            resource: RlimitResource::CpuSeconds,
+            soft: 30,
+            hard: 30,
+        })
+    );
+
+    assert!(rlimits.simulate_check(RlimitResource::NoFile, 512));
+    assert!(!rlimits.simulate_check(RlimitResource::NoFile, 513));
+    assert!(rlimits.simulate_check(RlimitResource::NProc, 128));
+    assert!(!rlimits.simulate_check(RlimitResource::NProc, 129));
+    assert!(rlimits.simulate_check(RlimitResource::CpuSeconds, 30));
+    assert!(!rlimits.simulate_check(RlimitResource::CpuSeconds, 31));
+
+    // Top-level `[sandbox].max_pids` also provisions cgroup `pids.max` as fallback
+    let (plan, scope_opt) =
+        SandboxExecutionPlan::prepare(&manager, "worker-rlimit", &cfg.sandbox).expect("prepare");
+    let scope = scope_opt.expect("scope provisioned from max_pids fallback");
+    assert_eq!(plan.pids_max, Some(128));
+    assert_eq!(plan.rlimits, rlimits);
+    assert_eq!(
+        std::fs::read_to_string(scope.dir.join("pids.max"))
+            .unwrap()
+            .trim(),
+        "128"
+    );
+
+    scope.teardown().expect("teardown");
     let _ = std::fs::remove_dir_all(&root);
 }

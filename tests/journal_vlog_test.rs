@@ -3,9 +3,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use vouch::config::{self, JournalFormat};
 use vouch::journal::{self, JournalPolicy, OutcomeRecord, Record};
 use vouch::journal_vlog::{
-    append_vlog, compact_vlog, encode_record_payload, read_vidx_entries, verify_vlog_integrity,
-    vidx_path, write_all_vlog, VlogHeader, VlogIndexEntry, VlogReader, VlogTamperKind,
-    VLOG_FRAME_HEADER_LEN, VLOG_HEADER_LEN, VLOG_INDEX_ENTRY_LEN, VLOG_MAGIC,
+    append_vlog, compact_vlog, encode_record_payload, read_vidx_entries, read_vlog_checkpoints,
+    vchk_path, verify_vlog_integrity, vidx_path, write_all_vlog, VlogHeader, VlogIndexEntry,
+    VlogReader, VlogTamperKind, VCHK_ENTRY_LEN, VLOG_FRAME_HEADER_LEN, VLOG_HEADER_LEN,
+    VLOG_INDEX_ENTRY_LEN, VLOG_MAGIC,
 };
 use vouch::journal_wal::crc32;
 use vouch::outcome::Outcome;
@@ -523,6 +524,167 @@ fn vlog_hash_chain_detects_sidecar_vidx_mismatch() {
     assert!(matches!(
         report.tamper_finding,
         Some(VlogTamperKind::SidecarIndexMismatch { .. })
+    ));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn vlog_checkpoint_ledger_verifies_multi_generation_compaction_and_post_compact_appends() {
+    let dir = unique_test_dir("vchk_multi_gen");
+    let vlog_file = dir.join("journal.vlog");
+    let vchk_file = vchk_path(&dir);
+
+    // Generation 0: append 6 records (4 duplicates of `git status` + 2 unique)
+    for i in 0..4 {
+        append_vlog(&dir, &sample_record(i, 10_000 + i as u64, "allow", "git status")).unwrap();
+    }
+    append_vlog(&dir, &sample_record(10, 10_010, "ask", "touch /tmp/a")).unwrap();
+    append_vlog(&dir, &sample_record(11, 10_011, "allow", "cargo test")).unwrap();
+
+    let pre_gen1 = verify_vlog_integrity(&vlog_file).unwrap();
+    assert!(pre_gen1.valid);
+    assert_eq!(pre_gen1.verified_records, 6);
+    assert_eq!(pre_gen1.verified_checkpoints, 0);
+    assert!(!vchk_file.exists());
+
+    // Compaction #1: 6 records -> 3 records (4 duplicates collapsed to 1 + 2 recent)
+    let policy = JournalPolicy {
+        max_records: 100,
+        compact_duplicates: true,
+        preserve_recent: 2,
+    };
+    let stats1 = compact_vlog(&dir, &policy).expect("compact #1");
+    assert_eq!(stats1.original_count, 6);
+    assert_eq!(stats1.compacted_count, 3);
+    assert!(vchk_file.exists(), "journal.vchk must be created by compact_vlog");
+
+    let post_gen1 = verify_vlog_integrity(&vlog_file).unwrap();
+    assert!(post_gen1.valid, "post_gen1 failed: {post_gen1:?}");
+    assert_eq!(post_gen1.verified_records, 3);
+    assert_eq!(post_gen1.verified_checkpoints, 1);
+
+    let ckpts1 = read_vlog_checkpoints(&vchk_file).expect("read ckpts #1");
+    assert_eq!(ckpts1.len(), 1);
+    assert_eq!(ckpts1[0].checkpoint_seq, 0);
+    assert_eq!(ckpts1[0].pre_compact_records, 6);
+    assert_eq!(ckpts1[0].pre_compact_terminal_tag, pre_gen1.terminal_chain_tag);
+    assert_eq!(ckpts1[0].post_compact_records, 3);
+    assert_eq!(ckpts1[0].pruned_records, 3);
+    assert_eq!(ckpts1[0].post_compact_terminal_tag, post_gen1.terminal_chain_tag);
+
+    // Append 3 new records after Compaction #1 (total 6 records) and verify continuity still holds!
+    for i in 0..3 {
+        append_vlog(
+            &dir,
+            &sample_record(20 + i, 10_020 + i as u64, "allow", "git diff"),
+        )
+        .unwrap();
+    }
+    let mid_report = verify_vlog_integrity(&vlog_file).unwrap();
+    assert!(mid_report.valid, "mid_report after post-compact append failed: {mid_report:?}");
+    assert_eq!(mid_report.verified_records, 6);
+    assert_eq!(mid_report.verified_checkpoints, 1);
+
+    // Compaction #2: 6 records -> 5 records (`git diff` collapsed in historical prefix with preserve_recent: 1)
+    let policy_gen2 = JournalPolicy {
+        max_records: 100,
+        compact_duplicates: true,
+        preserve_recent: 1,
+    };
+    let stats2 = compact_vlog(&dir, &policy_gen2).expect("compact #2");
+    assert_eq!(stats2.original_count, 6);
+    assert_eq!(stats2.compacted_count, 5);
+
+    let post_gen2 = verify_vlog_integrity(&vlog_file).unwrap();
+    assert!(post_gen2.valid, "post_gen2 failed: {post_gen2:?}");
+    assert_eq!(post_gen2.verified_records, 5);
+    assert_eq!(post_gen2.verified_checkpoints, 2);
+
+    // Compaction #3 with tighter max_records=3 (5 records -> 3 records)
+    let policy_tight = JournalPolicy {
+        max_records: 3,
+        compact_duplicates: true,
+        preserve_recent: 1,
+    };
+    let stats3 = compact_vlog(&dir, &policy_tight).expect("compact #3");
+    assert_eq!(stats3.original_count, 5);
+    assert_eq!(stats3.pruned_count, 2);
+
+    let post_gen3 = verify_vlog_integrity(&vlog_file).unwrap();
+    assert!(post_gen3.valid, "post_gen3 failed: {post_gen3:?}");
+    assert_eq!(post_gen3.verified_records, 3);
+    assert_eq!(post_gen3.verified_checkpoints, 3);
+
+    let ckpts3 = read_vlog_checkpoints(&vchk_file).expect("read ckpts #3");
+    assert_eq!(ckpts3.len(), 3);
+    assert_eq!(ckpts3[1].prev_checkpoint_digest, ckpts3[0].checkpoint_digest);
+    assert_eq!(ckpts3[2].prev_checkpoint_digest, ckpts3[1].checkpoint_digest);
+    assert_eq!(ckpts3[2].pre_compact_terminal_tag, ckpts3[1].post_compact_terminal_tag);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn vlog_checkpoint_detects_tampered_vchk_and_forged_vlog_replacement() {
+    let dir = unique_test_dir("vchk_tamper");
+    let vlog_file = dir.join("journal.vlog");
+    let vchk_file = vchk_path(&dir);
+
+    for i in 0..4 {
+        append_vlog(&dir, &sample_record(i, 11_000 + i as u64, "allow", "echo dup")).unwrap();
+    }
+    append_vlog(&dir, &sample_record(9, 11_010, "ask", "touch /tmp/z")).unwrap();
+
+    let policy = JournalPolicy {
+        max_records: 100,
+        compact_duplicates: true,
+        preserve_recent: 1,
+    };
+    compact_vlog(&dir, &policy).expect("compact");
+    assert!(verify_vlog_integrity(&vlog_file).unwrap().valid);
+
+    // Case 1: Replace journal.vlog with a freshly written 2-record .vlog whose internal CRC/chain
+    // is valid, but whose records do not match the checkpoint's post_compact_terminal_tag.
+    let saved_vlog = std::fs::read(&vlog_file).unwrap();
+    let saved_vidx = std::fs::read(vidx_path(&dir)).unwrap();
+
+    write_all_vlog(
+        &dir,
+        &[
+            sample_record(100, 11_000, "allow", "echo forged_one"),
+            sample_record(101, 11_010, "allow", "echo forged_two"),
+        ],
+    )
+    .unwrap();
+
+    let forged_report = verify_vlog_integrity(&vlog_file).unwrap();
+    assert!(!forged_report.valid, "forged vlog replacement must fail checkpoint continuity");
+    assert!(matches!(
+        forged_report.tamper_finding,
+        Some(VlogTamperKind::CheckpointContinuityBroken { checkpoint_seq: 0, .. })
+    ));
+
+    // Also verify compact_vlog refuses to compact when checkpoint continuity is broken
+    let compact_err = compact_vlog(&dir, &policy).unwrap_err();
+    assert_eq!(compact_err.kind(), std::io::ErrorKind::InvalidData);
+
+    // Restore valid vlog/vidx, then tamper with journal.vchk directly
+    std::fs::write(&vlog_file, &saved_vlog).unwrap();
+    std::fs::write(vidx_path(&dir), &saved_vidx).unwrap();
+    assert!(verify_vlog_integrity(&vlog_file).unwrap().valid);
+
+    let mut vchk_bytes = std::fs::read(&vchk_file).unwrap();
+    assert_eq!(vchk_bytes.len(), VCHK_ENTRY_LEN);
+    // Flip a bit in pre_compact_terminal_tag inside journal.vchk
+    vchk_bytes[34] ^= 0x01;
+    std::fs::write(&vchk_file, &vchk_bytes).unwrap();
+
+    let tampered_vchk_report = verify_vlog_integrity(&vlog_file).unwrap();
+    assert!(!tampered_vchk_report.valid, "corrupted journal.vchk must fail integrity check");
+    assert!(matches!(
+        tampered_vchk_report.tamper_finding,
+        Some(VlogTamperKind::CheckpointContinuityBroken { .. })
     ));
 
     let _ = std::fs::remove_dir_all(&dir);

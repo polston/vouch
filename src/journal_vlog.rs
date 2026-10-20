@@ -24,6 +24,12 @@ pub const VLOG_FRAME_HEADER_LEN: usize = 16; // 4 bytes payload_len + 4 bytes pa
 pub const VLOG_GENESIS_SEED: [u8; 32] = *b"VOUCH_VLOG_GENESIS_SHA256_V00001";
 pub const VLOG_GENESIS_TAG: u64 = 0x564f_5543_485f_474e; // "VOUCH_GN"
 
+pub const VCHK_MAGIC: [u8; 4] = *b"VCHK";
+pub const VCHK_VERSION: u32 = 1;
+pub const VCHK_ENTRY_LEN: usize = 96;
+pub const VCHK_GENESIS_SEED: [u8; 32] = *b"VOUCH_VCHK_GENESIS_SHA256_V00001";
+pub const VCHK_GENESIS_DIGEST: u64 = 0x564f_5543_485f_434b; // "VOUCH_CK"
+
 /// Compute a 64-bit rolling cryptographic hash chain tag over `(VLOG_GENESIS_SEED, prev_tag, seq_idx, payload)`.
 pub fn compute_frame_chain_tag(prev_tag: u64, seq_idx: u64, payload: &[u8]) -> u64 {
     let mut hasher = Sha256::new();
@@ -33,6 +39,196 @@ pub fn compute_frame_chain_tag(prev_tag: u64, seq_idx: u64, payload: &[u8]) -> u
     hasher.update(payload);
     let digest = hasher.finalize();
     u64::from_le_bytes(digest[0..8].try_into().unwrap())
+}
+
+/// Compute a 64-bit rolling cryptographic digest over a compaction checkpoint entry.
+#[allow(clippy::too_many_arguments)]
+pub fn compute_checkpoint_digest(
+    prev_checkpoint_digest: u64,
+    checkpoint_seq: u64,
+    timestamp_secs: u64,
+    pre_compact_records: u64,
+    pre_compact_terminal_tag: u64,
+    pruned_records: u64,
+    post_compact_records: u64,
+    post_compact_first_tag: u64,
+    post_compact_terminal_tag: u64,
+) -> u64 {
+    let mut hasher = Sha256::new();
+    hasher.update(VCHK_GENESIS_SEED);
+    hasher.update(prev_checkpoint_digest.to_le_bytes());
+    hasher.update(checkpoint_seq.to_le_bytes());
+    hasher.update(timestamp_secs.to_le_bytes());
+    hasher.update(pre_compact_records.to_le_bytes());
+    hasher.update(pre_compact_terminal_tag.to_le_bytes());
+    hasher.update(pruned_records.to_le_bytes());
+    hasher.update(post_compact_records.to_le_bytes());
+    hasher.update(post_compact_first_tag.to_le_bytes());
+    hasher.update(post_compact_terminal_tag.to_le_bytes());
+    let digest = hasher.finalize();
+    u64::from_le_bytes(digest[0..8].try_into().unwrap())
+}
+
+/// Fixed 96-byte detached compaction checkpoint record stored in `journal.vchk`.
+/// Links the pre-compaction `.vlog` hash chain terminal tag to the post-compaction
+/// `.vlog` first and terminal tags, forming a verifiable multi-generation lineage chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VlogCheckpointEntry {
+    pub version: u32,
+    pub checkpoint_seq: u64,
+    pub timestamp_secs: u64,
+    pub pre_compact_records: u64,
+    pub pre_compact_terminal_tag: u64,
+    pub pruned_records: u64,
+    pub post_compact_records: u64,
+    pub post_compact_first_tag: u64,
+    pub post_compact_terminal_tag: u64,
+    pub prev_checkpoint_digest: u64,
+    pub checkpoint_digest: u64,
+    pub entry_crc32: u32,
+}
+
+impl VlogCheckpointEntry {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        checkpoint_seq: u64,
+        timestamp_secs: u64,
+        pre_compact_records: u64,
+        pre_compact_terminal_tag: u64,
+        pruned_records: u64,
+        post_compact_records: u64,
+        post_compact_first_tag: u64,
+        post_compact_terminal_tag: u64,
+        prev_checkpoint_digest: u64,
+    ) -> Self {
+        let checkpoint_digest = compute_checkpoint_digest(
+            prev_checkpoint_digest,
+            checkpoint_seq,
+            timestamp_secs,
+            pre_compact_records,
+            pre_compact_terminal_tag,
+            pruned_records,
+            post_compact_records,
+            post_compact_first_tag,
+            post_compact_terminal_tag,
+        );
+        let mut entry = Self {
+            version: VCHK_VERSION,
+            checkpoint_seq,
+            timestamp_secs,
+            pre_compact_records,
+            pre_compact_terminal_tag,
+            pruned_records,
+            post_compact_records,
+            post_compact_first_tag,
+            post_compact_terminal_tag,
+            prev_checkpoint_digest,
+            checkpoint_digest,
+            entry_crc32: 0,
+        };
+        entry.entry_crc32 = entry.compute_crc();
+        entry
+    }
+
+    pub fn compute_crc(&self) -> u32 {
+        let mut buf = [0u8; 88];
+        buf[0..4].copy_from_slice(&VCHK_MAGIC);
+        buf[4..8].copy_from_slice(&self.version.to_le_bytes());
+        buf[8..16].copy_from_slice(&self.checkpoint_seq.to_le_bytes());
+        buf[16..24].copy_from_slice(&self.timestamp_secs.to_le_bytes());
+        buf[24..32].copy_from_slice(&self.pre_compact_records.to_le_bytes());
+        buf[32..40].copy_from_slice(&self.pre_compact_terminal_tag.to_le_bytes());
+        buf[40..48].copy_from_slice(&self.pruned_records.to_le_bytes());
+        buf[48..56].copy_from_slice(&self.post_compact_records.to_le_bytes());
+        buf[56..64].copy_from_slice(&self.post_compact_first_tag.to_le_bytes());
+        buf[64..72].copy_from_slice(&self.post_compact_terminal_tag.to_le_bytes());
+        buf[72..80].copy_from_slice(&self.prev_checkpoint_digest.to_le_bytes());
+        buf[80..88].copy_from_slice(&self.checkpoint_digest.to_le_bytes());
+        crc32(&buf)
+    }
+
+    pub fn to_bytes(&self) -> [u8; VCHK_ENTRY_LEN] {
+        let mut out = [0u8; VCHK_ENTRY_LEN];
+        out[0..4].copy_from_slice(&VCHK_MAGIC);
+        out[4..8].copy_from_slice(&self.version.to_le_bytes());
+        out[8..16].copy_from_slice(&self.checkpoint_seq.to_le_bytes());
+        out[16..24].copy_from_slice(&self.timestamp_secs.to_le_bytes());
+        out[24..32].copy_from_slice(&self.pre_compact_records.to_le_bytes());
+        out[32..40].copy_from_slice(&self.pre_compact_terminal_tag.to_le_bytes());
+        out[40..48].copy_from_slice(&self.pruned_records.to_le_bytes());
+        out[48..56].copy_from_slice(&self.post_compact_records.to_le_bytes());
+        out[56..64].copy_from_slice(&self.post_compact_first_tag.to_le_bytes());
+        out[64..72].copy_from_slice(&self.post_compact_terminal_tag.to_le_bytes());
+        out[72..80].copy_from_slice(&self.prev_checkpoint_digest.to_le_bytes());
+        out[80..88].copy_from_slice(&self.checkpoint_digest.to_le_bytes());
+        out[88..92].copy_from_slice(&self.entry_crc32.to_le_bytes());
+        out
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.len() < VCHK_ENTRY_LEN {
+            return Err(format!(
+                "vchk entry truncated: expected {VCHK_ENTRY_LEN} bytes, got {}",
+                bytes.len()
+            ));
+        }
+        if bytes[0..4] != VCHK_MAGIC {
+            return Err("invalid vchk magic".to_string());
+        }
+        let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        if version != VCHK_VERSION {
+            return Err(format!("unsupported vchk version: {version}"));
+        }
+        let checkpoint_seq = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+        let timestamp_secs = u64::from_le_bytes(bytes[16..24].try_into().unwrap());
+        let pre_compact_records = u64::from_le_bytes(bytes[24..32].try_into().unwrap());
+        let pre_compact_terminal_tag = u64::from_le_bytes(bytes[32..40].try_into().unwrap());
+        let pruned_records = u64::from_le_bytes(bytes[40..48].try_into().unwrap());
+        let post_compact_records = u64::from_le_bytes(bytes[48..56].try_into().unwrap());
+        let post_compact_first_tag = u64::from_le_bytes(bytes[56..64].try_into().unwrap());
+        let post_compact_terminal_tag = u64::from_le_bytes(bytes[64..72].try_into().unwrap());
+        let prev_checkpoint_digest = u64::from_le_bytes(bytes[72..80].try_into().unwrap());
+        let checkpoint_digest = u64::from_le_bytes(bytes[80..88].try_into().unwrap());
+        let entry_crc32 = u32::from_le_bytes(bytes[88..92].try_into().unwrap());
+
+        let entry = Self {
+            version,
+            checkpoint_seq,
+            timestamp_secs,
+            pre_compact_records,
+            pre_compact_terminal_tag,
+            pruned_records,
+            post_compact_records,
+            post_compact_first_tag,
+            post_compact_terminal_tag,
+            prev_checkpoint_digest,
+            checkpoint_digest,
+            entry_crc32,
+        };
+        let actual_crc = entry.compute_crc();
+        if actual_crc != entry_crc32 {
+            return Err(format!(
+                "vchk entry {checkpoint_seq} crc mismatch: expected {entry_crc32:08x}, got {actual_crc:08x}"
+            ));
+        }
+        let expected_digest = compute_checkpoint_digest(
+            prev_checkpoint_digest,
+            checkpoint_seq,
+            timestamp_secs,
+            pre_compact_records,
+            pre_compact_terminal_tag,
+            pruned_records,
+            post_compact_records,
+            post_compact_first_tag,
+            post_compact_terminal_tag,
+        );
+        if checkpoint_digest != expected_digest {
+            return Err(format!(
+                "vchk entry {checkpoint_seq} digest mismatch: expected {expected_digest:016x}, got {checkpoint_digest:016x}"
+            ));
+        }
+        Ok(entry)
+    }
 }
 
 pub const VERDICT_ALLOW: u8 = 0;
@@ -692,6 +888,152 @@ pub fn vidx_path(dir: &Path) -> PathBuf {
     dir.join("journal.vidx")
 }
 
+pub fn vchk_path(dir: &Path) -> PathBuf {
+    dir.join("journal.vchk")
+}
+
+/// Read and validate all `VlogCheckpointEntry` records from a detached `journal.vchk` ledger.
+/// Verifies entry CRC32, SHA-256 checkpoint digest, sequential `checkpoint_seq`, and cross-checkpoint continuity.
+pub fn read_vlog_checkpoints(path: &Path) -> Result<Vec<VlogCheckpointEntry>, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("failed to read vchk: {e}"))?;
+    if bytes.is_empty() {
+        return Err("vchk file is empty".to_string());
+    }
+    if bytes.len() % VCHK_ENTRY_LEN != 0 {
+        return Err(format!(
+            "vchk file length {} is not a multiple of {VCHK_ENTRY_LEN}",
+            bytes.len()
+        ));
+    }
+    let count = bytes.len() / VCHK_ENTRY_LEN;
+    let mut entries: Vec<VlogCheckpointEntry> = Vec::with_capacity(count);
+    let mut expected_prev_digest = VCHK_GENESIS_DIGEST;
+
+    for idx in 0..count {
+        let start = idx * VCHK_ENTRY_LEN;
+        let entry = VlogCheckpointEntry::from_bytes(&bytes[start..start + VCHK_ENTRY_LEN])?;
+        if entry.checkpoint_seq != idx as u64 {
+            return Err(format!(
+                "vchk checkpoint_seq mismatch at index {idx}: expected {idx}, got {}",
+                entry.checkpoint_seq
+            ));
+        }
+        if entry.prev_checkpoint_digest != expected_prev_digest {
+            return Err(format!(
+                "vchk chain link broken at checkpoint {idx}: expected prev_checkpoint_digest {expected_prev_digest:016x}, got {:016x}",
+                entry.prev_checkpoint_digest
+            ));
+        }
+        if entry.post_compact_records > entry.pre_compact_records {
+            return Err(format!(
+                "vchk checkpoint {idx} invalid record counts: post_compact_records ({}) > pre_compact_records ({})",
+                entry.post_compact_records, entry.pre_compact_records
+            ));
+        }
+        let expected_pruned = entry
+            .pre_compact_records
+            .saturating_sub(entry.post_compact_records);
+        if entry.pruned_records != expected_pruned {
+            return Err(format!(
+                "vchk checkpoint {idx} pruned_records ({}) != pre - post ({expected_pruned})",
+                entry.pruned_records
+            ));
+        }
+        if let Some(prev) = entries.last() {
+            if entry.pre_compact_records < prev.post_compact_records {
+                return Err(format!(
+                    "vchk checkpoint {idx} pre_compact_records ({}) < previous post_compact_records ({})",
+                    entry.pre_compact_records, prev.post_compact_records
+                ));
+            }
+            if entry.pre_compact_records == prev.post_compact_records
+                && entry.pre_compact_terminal_tag != prev.post_compact_terminal_tag
+            {
+                return Err(format!(
+                    "vchk checkpoint {idx} pre_compact_terminal_tag ({:016x}) != previous post_compact_terminal_tag ({:016x}) with identical record count",
+                    entry.pre_compact_terminal_tag, prev.post_compact_terminal_tag
+                ));
+            }
+        }
+        expected_prev_digest = entry.checkpoint_digest;
+        entries.push(entry);
+    }
+
+    Ok(entries)
+}
+
+/// Atomically append a new `VlogCheckpointEntry` to `journal.vchk`.
+fn append_vlog_checkpoint(
+    dir: &Path,
+    timestamp_secs: u64,
+    pre_compact_records: u64,
+    pre_compact_terminal_tag: u64,
+    post_compact_records: u64,
+    post_compact_first_tag: u64,
+    post_compact_terminal_tag: u64,
+) -> std::io::Result<VlogCheckpointEntry> {
+    let path = vchk_path(dir);
+    let existing = if path.exists() {
+        read_vlog_checkpoints(&path)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
+    } else {
+        Vec::new()
+    };
+
+    let checkpoint_seq = existing.len() as u64;
+    let prev_checkpoint_digest = existing
+        .last()
+        .map(|e| e.checkpoint_digest)
+        .unwrap_or(VCHK_GENESIS_DIGEST);
+    let pruned_records = pre_compact_records.saturating_sub(post_compact_records);
+
+    let entry = VlogCheckpointEntry::new(
+        checkpoint_seq,
+        timestamp_secs,
+        pre_compact_records,
+        pre_compact_terminal_tag,
+        pruned_records,
+        post_compact_records,
+        post_compact_first_tag,
+        post_compact_terminal_tag,
+        prev_checkpoint_digest,
+    );
+
+    let tmp_path = dir.join("journal.vchk.tmp");
+    {
+        let mut f = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp_path)?;
+        for prev in &existing {
+            f.write_all(&prev.to_bytes())?;
+        }
+        f.write_all(&entry.to_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp_path, &path)?;
+    Ok(entry)
+}
+
+/// Compute `(first_frame_tag, terminal_frame_tag)` for a slice of records chained from `VLOG_GENESIS_TAG`.
+pub fn compute_records_chain_tags(records: &[Record]) -> (u64, u64) {
+    if records.is_empty() {
+        return (VLOG_GENESIS_TAG, VLOG_GENESIS_TAG);
+    }
+    let mut prev_tag = VLOG_GENESIS_TAG;
+    let mut first_tag = VLOG_GENESIS_TAG;
+    for (seq_idx, rec) in records.iter().enumerate() {
+        let payload = encode_record_payload(rec);
+        let next_tag = compute_frame_chain_tag(prev_tag, seq_idx as u64, &payload);
+        if seq_idx == 0 {
+            first_tag = next_tag;
+        }
+        prev_tag = next_tag;
+    }
+    (first_tag, prev_tag)
+}
+
 fn write_all_vidx(dir: &Path, header: &VlogHeader, index_entries: &[VlogIndexEntry]) -> std::io::Result<()> {
     let path = vidx_path(dir);
     let tmp_path = dir.join("journal.vidx.tmp");
@@ -1059,8 +1401,54 @@ pub fn poll_vlog_delta(
     out
 }
 
+/// Verify the existing `journal.vlog` chain, write the compacted records to `journal.vlog`
+/// and `journal.vidx`, and atomically append a `VlogCheckpointEntry` to `journal.vchk`.
+pub fn write_compacted_vlog_with_checkpoint(
+    dir: &Path,
+    compacted_recs: &[Record],
+) -> std::io::Result<()> {
+    create_dir_all(dir)?;
+    let path = vlog_path(dir);
+    if !path.exists() {
+        return write_all_vlog(dir, compacted_recs);
+    }
+    let pre_report = verify_vlog_integrity(&path)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    if !pre_report.valid {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "refusing to compact corrupted journal.vlog: {:?}",
+                pre_report.tamper_finding
+            ),
+        ));
+    }
+    if pre_report.verified_records == 0 {
+        return Ok(());
+    }
+
+    let (post_first_tag, post_terminal_tag) = compute_records_chain_tags(compacted_recs);
+    write_all_vlog(dir, compacted_recs)?;
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    append_vlog_checkpoint(
+        dir,
+        now_secs,
+        pre_report.verified_records,
+        pre_report.terminal_chain_tag,
+        compacted_recs.len() as u64,
+        post_first_tag,
+        post_terminal_tag,
+    )?;
+    Ok(())
+}
+
 /// Incrementally compact `journal.vlog` and `journal.vidx` according to `JournalPolicy`,
-/// collapsing duplicate historical runs while preserving aggregated execution counts.
+/// collapsing duplicate historical runs while preserving aggregated execution counts,
+/// and recording a cryptographically chained checkpoint entry in `journal.vchk`.
 pub fn compact_vlog(
     dir: &Path,
     policy: &crate::journal::JournalPolicy,
@@ -1077,7 +1465,7 @@ pub fn compact_vlog(
         return Ok(crate::journal::CompactionStats::default());
     }
     let (compacted_recs, stats) = crate::journal::compact_records(&recs, policy);
-    write_all_vlog(dir, &compacted_recs)?;
+    write_compacted_vlog_with_checkpoint(dir, &compacted_recs)?;
     Ok(stats)
 }
 
@@ -1104,6 +1492,10 @@ pub enum VlogTamperKind {
     SidecarIndexMismatch {
         detail: String,
     },
+    CheckpointContinuityBroken {
+        checkpoint_seq: u64,
+        reason: String,
+    },
 }
 
 /// Complete audit report returned by `verify_vlog_integrity`.
@@ -1111,12 +1503,13 @@ pub enum VlogTamperKind {
 pub struct VlogIntegrityReport {
     pub valid: bool,
     pub verified_records: u64,
+    pub verified_checkpoints: u64,
     pub terminal_chain_tag: u64,
     pub tamper_finding: Option<VlogTamperKind>,
 }
 
 /// Verify the cryptographic hash chain, CRC32 frame checksums, 32-byte header, index footer,
-/// and sidecar `journal.vidx` consistency of a `.vlog` binary journal file.
+/// sidecar `journal.vidx` consistency, and detached `journal.vchk` compaction lineage of a `.vlog` binary journal file.
 pub fn verify_vlog_integrity(path: &Path) -> Result<VlogIntegrityReport, String> {
     let data_path = resolve_vlog_data_path(path);
     let bytes = std::fs::read(&data_path).map_err(|e| format!("failed to read vlog: {e}"))?;
@@ -1124,6 +1517,7 @@ pub fn verify_vlog_integrity(path: &Path) -> Result<VlogIntegrityReport, String>
         return Ok(VlogIntegrityReport {
             valid: true,
             verified_records: 0,
+            verified_checkpoints: 0,
             terminal_chain_tag: VLOG_GENESIS_TAG,
             tamper_finding: None,
         });
@@ -1135,6 +1529,7 @@ pub fn verify_vlog_integrity(path: &Path) -> Result<VlogIntegrityReport, String>
             return Ok(VlogIntegrityReport {
                 valid: false,
                 verified_records: 0,
+                verified_checkpoints: 0,
                 terminal_chain_tag: VLOG_GENESIS_TAG,
                 tamper_finding: Some(VlogTamperKind::HeaderCorrupted { detail }),
             });
@@ -1148,6 +1543,7 @@ pub fn verify_vlog_integrity(path: &Path) -> Result<VlogIntegrityReport, String>
     let mut prev_tag = VLOG_GENESIS_TAG;
     let mut verified_records = 0u64;
     let mut expected_bounds: Vec<(u64, u32)> = Vec::with_capacity(header.record_count as usize);
+    let mut chain_tags_by_seq: Vec<u64> = Vec::with_capacity(header.record_count as usize);
 
     for seq_idx in 0..header.record_count {
         if offset + VLOG_FRAME_HEADER_LEN > bytes.len() || offset + VLOG_FRAME_HEADER_LEN > idx_offset
@@ -1155,6 +1551,7 @@ pub fn verify_vlog_integrity(path: &Path) -> Result<VlogIntegrityReport, String>
             return Ok(VlogIntegrityReport {
                 valid: false,
                 verified_records,
+                verified_checkpoints: 0,
                 terminal_chain_tag: prev_tag,
                 tamper_finding: Some(VlogTamperKind::TruncatedFrame {
                     seq_idx,
@@ -1173,6 +1570,7 @@ pub fn verify_vlog_integrity(path: &Path) -> Result<VlogIntegrityReport, String>
             return Ok(VlogIntegrityReport {
                 valid: false,
                 verified_records,
+                verified_checkpoints: 0,
                 terminal_chain_tag: prev_tag,
                 tamper_finding: Some(VlogTamperKind::TruncatedFrame {
                     seq_idx,
@@ -1187,6 +1585,7 @@ pub fn verify_vlog_integrity(path: &Path) -> Result<VlogIntegrityReport, String>
             return Ok(VlogIntegrityReport {
                 valid: false,
                 verified_records,
+                verified_checkpoints: 0,
                 terminal_chain_tag: prev_tag,
                 tamper_finding: Some(VlogTamperKind::FrameCrcMismatch {
                     seq_idx,
@@ -1199,6 +1598,7 @@ pub fn verify_vlog_integrity(path: &Path) -> Result<VlogIntegrityReport, String>
             return Ok(VlogIntegrityReport {
                 valid: false,
                 verified_records,
+                verified_checkpoints: 0,
                 terminal_chain_tag: prev_tag,
                 tamper_finding: Some(VlogTamperKind::TruncatedFrame {
                     seq_idx,
@@ -1212,6 +1612,7 @@ pub fn verify_vlog_integrity(path: &Path) -> Result<VlogIntegrityReport, String>
             return Ok(VlogIntegrityReport {
                 valid: false,
                 verified_records,
+                verified_checkpoints: 0,
                 terminal_chain_tag: prev_tag,
                 tamper_finding: Some(VlogTamperKind::ChainLinkBroken {
                     seq_idx,
@@ -1224,6 +1625,7 @@ pub fn verify_vlog_integrity(path: &Path) -> Result<VlogIntegrityReport, String>
 
         let frame_total_len = (VLOG_FRAME_HEADER_LEN + len) as u32;
         expected_bounds.push((offset as u64, frame_total_len));
+        chain_tags_by_seq.push(actual_tag);
         prev_tag = actual_tag;
         verified_records += 1;
         offset = payload_end;
@@ -1233,6 +1635,7 @@ pub fn verify_vlog_integrity(path: &Path) -> Result<VlogIntegrityReport, String>
         return Ok(VlogIntegrityReport {
             valid: false,
             verified_records,
+            verified_checkpoints: 0,
             terminal_chain_tag: prev_tag,
             tamper_finding: Some(VlogTamperKind::HeaderCorrupted {
                 detail: format!(
@@ -1246,6 +1649,7 @@ pub fn verify_vlog_integrity(path: &Path) -> Result<VlogIntegrityReport, String>
         return Ok(VlogIntegrityReport {
             valid: false,
             verified_records,
+            verified_checkpoints: 0,
             terminal_chain_tag: prev_tag,
             tamper_finding: Some(VlogTamperKind::TruncatedFrame {
                 seq_idx: header.record_count,
@@ -1263,6 +1667,7 @@ pub fn verify_vlog_integrity(path: &Path) -> Result<VlogIntegrityReport, String>
             return Ok(VlogIntegrityReport {
                 valid: false,
                 verified_records,
+                verified_checkpoints: 0,
                 terminal_chain_tag: prev_tag,
                 tamper_finding: Some(VlogTamperKind::HeaderCorrupted {
                     detail: format!("invalid footer index entry at {i}"),
@@ -1273,6 +1678,7 @@ pub fn verify_vlog_integrity(path: &Path) -> Result<VlogIntegrityReport, String>
             return Ok(VlogIntegrityReport {
                 valid: false,
                 verified_records,
+                verified_checkpoints: 0,
                 terminal_chain_tag: prev_tag,
                 tamper_finding: Some(VlogTamperKind::HeaderCorrupted {
                     detail: format!(
@@ -1293,6 +1699,7 @@ pub fn verify_vlog_integrity(path: &Path) -> Result<VlogIntegrityReport, String>
                     return Ok(VlogIntegrityReport {
                         valid: false,
                         verified_records,
+                        verified_checkpoints: 0,
                         terminal_chain_tag: prev_tag,
                         tamper_finding: Some(VlogTamperKind::SidecarIndexMismatch {
                             detail: format!(
@@ -1309,6 +1716,7 @@ pub fn verify_vlog_integrity(path: &Path) -> Result<VlogIntegrityReport, String>
                     return Ok(VlogIntegrityReport {
                         valid: false,
                         verified_records,
+                        verified_checkpoints: 0,
                         terminal_chain_tag: prev_tag,
                         tamper_finding: Some(VlogTamperKind::SidecarIndexMismatch {
                             detail: "sidecar index entries diverge from vlog footer index"
@@ -1321,6 +1729,7 @@ pub fn verify_vlog_integrity(path: &Path) -> Result<VlogIntegrityReport, String>
                 return Ok(VlogIntegrityReport {
                     valid: false,
                     verified_records,
+                    verified_checkpoints: 0,
                     terminal_chain_tag: prev_tag,
                     tamper_finding: Some(VlogTamperKind::SidecarIndexMismatch { detail }),
                 });
@@ -1328,9 +1737,84 @@ pub fn verify_vlog_integrity(path: &Path) -> Result<VlogIntegrityReport, String>
         }
     }
 
+    let mut verified_checkpoints = 0u64;
+    let checkpoint_path = data_path.with_extension("vchk");
+    if checkpoint_path.exists() {
+        let checkpoints = match read_vlog_checkpoints(&checkpoint_path) {
+            Ok(ckpts) => ckpts,
+            Err(reason) => {
+                return Ok(VlogIntegrityReport {
+                    valid: false,
+                    verified_records,
+                    verified_checkpoints: 0,
+                    terminal_chain_tag: prev_tag,
+                    tamper_finding: Some(VlogTamperKind::CheckpointContinuityBroken {
+                        checkpoint_seq: 0,
+                        reason,
+                    }),
+                });
+            }
+        };
+
+        if let Some(last_ckpt) = checkpoints.last() {
+            if verified_records < last_ckpt.post_compact_records {
+                return Ok(VlogIntegrityReport {
+                    valid: false,
+                    verified_records,
+                    verified_checkpoints: checkpoints.len().saturating_sub(1) as u64,
+                    terminal_chain_tag: prev_tag,
+                    tamper_finding: Some(VlogTamperKind::CheckpointContinuityBroken {
+                        checkpoint_seq: last_ckpt.checkpoint_seq,
+                        reason: format!(
+                            "live vlog record count ({verified_records}) is smaller than checkpoint post_compact_records ({})",
+                            last_ckpt.post_compact_records
+                        ),
+                    }),
+                });
+            }
+            if last_ckpt.post_compact_records > 0 {
+                let actual_first_tag = chain_tags_by_seq[0];
+                if actual_first_tag != last_ckpt.post_compact_first_tag {
+                    return Ok(VlogIntegrityReport {
+                        valid: false,
+                        verified_records,
+                        verified_checkpoints: checkpoints.len().saturating_sub(1) as u64,
+                        terminal_chain_tag: prev_tag,
+                        tamper_finding: Some(VlogTamperKind::CheckpointContinuityBroken {
+                            checkpoint_seq: last_ckpt.checkpoint_seq,
+                            reason: format!(
+                                "live vlog first frame tag ({actual_first_tag:016x}) != checkpoint post_compact_first_tag ({:016x})",
+                                last_ckpt.post_compact_first_tag
+                            ),
+                        }),
+                    });
+                }
+                let anchor_idx = (last_ckpt.post_compact_records - 1) as usize;
+                let actual_anchor_tag = chain_tags_by_seq[anchor_idx];
+                if actual_anchor_tag != last_ckpt.post_compact_terminal_tag {
+                    return Ok(VlogIntegrityReport {
+                        valid: false,
+                        verified_records,
+                        verified_checkpoints: checkpoints.len().saturating_sub(1) as u64,
+                        terminal_chain_tag: prev_tag,
+                        tamper_finding: Some(VlogTamperKind::CheckpointContinuityBroken {
+                            checkpoint_seq: last_ckpt.checkpoint_seq,
+                            reason: format!(
+                                "live vlog anchor frame {anchor_idx} tag ({actual_anchor_tag:016x}) != checkpoint post_compact_terminal_tag ({:016x})",
+                                last_ckpt.post_compact_terminal_tag
+                            ),
+                        }),
+                    });
+                }
+            }
+        }
+        verified_checkpoints = checkpoints.len() as u64;
+    }
+
     Ok(VlogIntegrityReport {
         valid: true,
         verified_records,
+        verified_checkpoints,
         terminal_chain_tag: prev_tag,
         tamper_finding: None,
     })

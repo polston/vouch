@@ -194,20 +194,16 @@ impl TuiEngine {
         count
     }
 
-    fn build_amended_config_toml(
+    pub fn build_cumulative_amended_config_toml(
         &self,
-        cand: &ReviewCandidate,
+        cands: &[ReviewCandidate],
     ) -> Result<(String, String, bool), String> {
-        if !cand.proposable {
-            return Err(cand
-                .blocked_reason
-                .clone()
-                .unwrap_or_else(|| "Candidate is not proposable".to_string()));
+        if cands.is_empty() {
+            return Err("No candidate rules provided".to_string());
         }
-
         let config_path = crate::knowledge::config_dir(&self.home).join("config.toml");
-        let content = std::fs::read_to_string(&config_path).unwrap_or_default();
-        let orig_doc: toml_edit::DocumentMut = content
+        let mut current_content = std::fs::read_to_string(&config_path).unwrap_or_default();
+        let orig_doc: toml_edit::DocumentMut = current_content
             .parse()
             .map_err(|e| format!("Invalid TOML: {e}"))?;
         let has_explicit_bash_default = orig_doc
@@ -216,54 +212,87 @@ impl TuiEngine {
             .and_then(|b| b.get("default"))
             .is_some();
 
-        if cand.section == "write.allow_paths" {
-            let path_to_add = cand.name.strip_prefix("path: ").unwrap_or(&cand.name);
-            let mut doc = orig_doc;
-
-            let write_table = doc
-                .entry("write")
-                .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
-            let write_table = write_table
-                .as_table_like_mut()
-                .ok_or_else(|| "write is not a table")?;
-
-            let allow_paths = write_table.entry("allow_paths").or_insert(
-                toml_edit::Item::Value(toml_edit::Value::Array(toml_edit::Array::new())),
-            );
-            if let Some(arr) = allow_paths.as_array_mut() {
-                if !arr.iter().any(|v| v.as_str() == Some(path_to_add)) {
-                    arr.push(path_to_add);
-                }
+        let mut summaries = Vec::with_capacity(cands.len());
+        for cand in cands {
+            if !cand.proposable {
+                return Err(cand
+                    .blocked_reason
+                    .clone()
+                    .unwrap_or_else(|| "Candidate is not proposable".to_string()));
             }
-            let summary = format!("[write] allow_paths += {:?}", path_to_add);
-            Ok((doc.to_string(), summary, has_explicit_bash_default))
-        } else {
-            let c = Candidate {
-                name: cand.name.clone(),
-                section: cand.section.clone(),
-                approved: cand.approved.max(1),
-                denied: cand.denied,
-                unknown: cand.unknown,
-                sessions: cand.sessions.max(1),
-                proposable: true,
-                blocked: None,
-                example: cand.example_cmd.clone(),
-            };
-            let updated = review::apply(&content, &c)?;
-            let summary = format!("[{}] {} = \"allow\"", cand.section, cand.name);
-            Ok((updated, summary, has_explicit_bash_default))
+            if cand.section == "write.allow_paths" {
+                let path_to_add = cand.name.strip_prefix("path: ").unwrap_or(&cand.name);
+                let mut doc: toml_edit::DocumentMut = current_content
+                    .parse()
+                    .map_err(|e| format!("Invalid TOML: {e}"))?;
+                let write_table = doc
+                    .entry("write")
+                    .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+                let write_table = write_table
+                    .as_table_like_mut()
+                    .ok_or_else(|| "write is not a table")?;
+
+                let allow_paths = write_table.entry("allow_paths").or_insert(
+                    toml_edit::Item::Value(toml_edit::Value::Array(toml_edit::Array::new())),
+                );
+                if let Some(arr) = allow_paths.as_array_mut() {
+                    if !arr.iter().any(|v| v.as_str() == Some(path_to_add)) {
+                        arr.push(path_to_add);
+                    }
+                }
+                current_content = doc.to_string();
+                summaries.push(format!("[write] allow_paths += {:?}", path_to_add));
+            } else {
+                let c = Candidate {
+                    name: cand.name.clone(),
+                    section: cand.section.clone(),
+                    approved: cand.approved.max(1),
+                    denied: cand.denied,
+                    unknown: cand.unknown,
+                    sessions: cand.sessions.max(1),
+                    proposable: true,
+                    blocked: None,
+                    example: cand.example_cmd.clone(),
+                };
+                current_content = review::apply(&current_content, &c)?;
+                summaries.push(format!("[{}] {} = \"allow\"", cand.section, cand.name));
+            }
         }
+
+        Ok((
+            current_content,
+            summaries.join(" + "),
+            has_explicit_bash_default,
+        ))
     }
 
-    /// Simulates a candidate policy amendment in-memory against a `DecisionItem` without writing to disk.
+    fn build_amended_config_toml(
+        &self,
+        cand: &ReviewCandidate,
+    ) -> Result<(String, String, bool), String> {
+        self.build_cumulative_amended_config_toml(std::slice::from_ref(cand))
+    }
+
+    /// Simulates a single candidate policy amendment in-memory against a `DecisionItem` without writing to disk.
     pub fn simulate_candidate(
         &self,
         decision: &DecisionItem,
         cand: &ReviewCandidate,
         target_node_id: usize,
     ) -> Result<super::graph::PolicySimulationResult, String> {
+        self.simulate_candidates(decision, std::slice::from_ref(cand), vec![target_node_id])
+    }
+
+    /// Simulates one or more staged candidate policy amendments cumulatively in-memory against a `DecisionItem`
+    /// and computes session-wide batch impact (`session_flipped_to_allow` / `session_ask_total`).
+    pub fn simulate_candidates(
+        &self,
+        decision: &DecisionItem,
+        cands: &[ReviewCandidate],
+        staged_node_ids: Vec<usize>,
+    ) -> Result<super::graph::PolicySimulationResult, String> {
         let (amended_toml, amendment_summary, has_explicit_bash_default) =
-            self.build_amended_config_toml(cand)?;
+            self.build_cumulative_amended_config_toml(cands)?;
         let mut cfg = crate::config::load(&amended_toml)?;
         if !has_explicit_bash_default && !decision.reason.contains("default") {
             cfg.langs
@@ -287,13 +316,36 @@ impl TuiEngine {
             crate::protocol::Decision::Abstain => ("ABSTAIN".to_string(), "abstained".to_string()),
         };
 
+        let mut session_ask_total = 0usize;
+        let mut session_flipped_to_allow = 0usize;
+        for d in &self.decisions {
+            if d.verdict.eq_ignore_ascii_case("ask") {
+                session_ask_total += 1;
+                let sim_d = crate::engine::decide_command_at(
+                    &cfg,
+                    "bash",
+                    &d.cmd,
+                    Some(&self.home),
+                    Some(&d.cwd),
+                    Some(&d.cwd),
+                );
+                if matches!(sim_d, crate::protocol::Decision::Allow(_)) {
+                    session_flipped_to_allow += 1;
+                }
+            }
+        }
+
+        let target_node_id = staged_node_ids.last().copied().unwrap_or(0);
         Ok(super::graph::PolicySimulationResult {
             target_node_id,
+            staged_node_ids,
             amendment_summary,
             before_verdict: decision.verdict.to_uppercase(),
             after_verdict,
             before_reason: decision.reason.clone(),
             after_reason,
+            session_ask_total,
+            session_flipped_to_allow,
         })
     }
 
@@ -310,6 +362,22 @@ impl TuiEngine {
         } else {
             Ok(format!("Added [{}] {} = \"allow\" to config.toml", cand.section, cand.name))
         }
+    }
+
+    /// Atomically applies multiple staged candidate rules to `config.toml`.
+    pub fn apply_candidates(&self, cands: &[ReviewCandidate]) -> Result<String, String> {
+        if cands.len() == 1 {
+            return self.apply_candidate(&cands[0]);
+        }
+        let (updated_toml, summary, _) = self.build_cumulative_amended_config_toml(cands)?;
+        let config_path = crate::knowledge::config_dir(&self.home).join("config.toml");
+        std::fs::write(&config_path, updated_toml)
+            .map_err(|e| format!("Failed to write config: {e}"))?;
+        Ok(format!(
+            "Applied {} staged amendments ({}) to config.toml",
+            cands.len(),
+            summary
+        ))
     }
 }
 

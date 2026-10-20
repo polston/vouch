@@ -725,3 +725,153 @@ fn tui_visualizer_interactive_simulation_and_impact_diff_without_disk_mutation()
 
     let _ = std::fs::remove_dir_all(&tmp_path);
 }
+
+#[test]
+fn tui_visualizer_multi_node_cumulative_simulation_session_impact_and_atomic_apply() {
+    let tag = format!("tui_test_vis_multi_sim_{}_{}", std::process::id(), line!());
+    let tmp_path = std::env::temp_dir().join(tag);
+    let _ = std::fs::remove_dir_all(&tmp_path);
+    let home = tmp_path.to_str().unwrap();
+    let config_dir = tmp_path.join(".config").join("vouch");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let config_file = config_dir.join("config.toml");
+    let initial_toml = "version = 1\n[write]\nallow_paths = [\"/tmp/**\"]\n";
+    std::fs::write(&config_file, initial_toml).unwrap();
+
+    // Records where one command requires BOTH command_substitution AND /var/log/audit.log write path,
+    // plus another ASK decision in the session that asks on /var/log/audit.log alone.
+    let records = vec![
+        Record {
+            id: "1".into(),
+            ts: "2026-10-18T12:00:00Z".into(),
+            cmd: "touch /var/log/audit.log".into(),
+            verdict: "ask".into(),
+            reason: "vouch stopped on: path outside every allowed area\n  /var/log/audit.log\n  to allow this permanently: write.allow_paths = [\"/var/log/audit.log\"]".into(),
+            mode: "live".into(),
+            outcome: Outcome::Executed,
+            session: "sess-multi".into(),
+            lang: "bash".into(),
+            cwd: "/home/dev".into(),
+            tool: "bash".into(),
+            permission_mode: "".into(),
+            measurement: false,
+            host: "claude".into(),
+            count: 1,
+        },
+        Record {
+            id: "2".into(),
+            ts: "2026-10-18T12:01:00Z".into(),
+            cmd: "echo $(date) && touch /var/log/audit.log".into(),
+            verdict: "ask".into(),
+            reason: "vouch stopped on: subshell\n  to allow this permanently: [lang.bash.constructs] subshell = \"allow\"".into(),
+            mode: "live".into(),
+            outcome: Outcome::Executed,
+            session: "sess-multi".into(),
+            lang: "bash".into(),
+            cwd: "/home/dev".into(),
+            tool: "bash".into(),
+            permission_mode: "".into(),
+            measurement: false,
+            host: "claude".into(),
+            count: 1,
+        },
+    ];
+
+    let engine = TuiEngine::from_records(home, &records);
+    let mut app = TuiApp::new(engine);
+
+    // Switch to Policy Visualizer tab (Decision 0 is "echo $(date) && touch /var/log/audit.log")
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('v')));
+    assert_eq!(app.active_tab, vouch::tui::ViewTab::Visualizer);
+    assert_eq!(app.visualizer_decision_idx, 0);
+
+    // Verify graph has both [RULE] subshell and [PATH] /var/log/audit.log
+    let init_frame = app.render();
+    assert!(init_frame.contains("[RULE] policy gate: subshell"));
+    assert!(init_frame.contains("[PATH] unpermitted write path: /var/log/audit.log"));
+
+    // Navigate down to [RULE] policy gate: subshell
+    while app
+        .policy_graph
+        .selected_node()
+        .is_some_and(|n| !n.label.contains("subshell"))
+    {
+        app.handle_event(TerminalEvent::Key(KeyCode::Char('j')));
+    }
+    assert!(
+        app.policy_graph
+            .selected_node()
+            .unwrap()
+            .label
+            .contains("subshell")
+    );
+
+    // Stage 1st node with 'D': subshell alone STILL results in ASK -> ASK because /var/log/audit.log is unpermitted!
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('D')));
+    assert_eq!(app.policy_graph.staged_node_ids.len(), 1);
+    let sim1 = app.policy_graph.simulation.as_ref().expect("simulation present");
+    assert_eq!(sim1.before_verdict, "ASK");
+    assert_eq!(
+        sim1.after_verdict, "ASK",
+        "Staging only subshell should still ASK on unpermitted write path, got: {:?}",
+        sim1
+    );
+    assert_eq!(sim1.session_flipped_to_allow, 0);
+
+    // Navigate down to [PATH] unpermitted write path: /var/log/audit.log and stage it with 'D'
+    while app
+        .policy_graph
+        .selected_node()
+        .is_some_and(|n| n.kind != vouch::tui::NodeKind::PathCheck)
+    {
+        app.handle_event(TerminalEvent::Key(KeyCode::Char('j')));
+    }
+    assert!(
+        app.policy_graph
+            .selected_node()
+            .unwrap()
+            .label
+            .contains("/var/log/audit.log")
+    );
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('D')));
+    assert_eq!(app.policy_graph.staged_node_ids.len(), 2);
+
+    let sim2 = app
+        .policy_graph
+        .simulation
+        .as_ref()
+        .expect("cumulative simulation present");
+    assert_eq!(sim2.before_verdict, "ASK");
+    assert_eq!(
+        sim2.after_verdict, "ALLOW",
+        "Staging both subshell and /var/log/audit.log must flip ASK -> ALLOW: {:?}",
+        sim2
+    );
+    assert_eq!(sim2.session_ask_total, 2);
+    assert_eq!(
+        sim2.session_flipped_to_allow, 2,
+        "Both ASK decisions in the session should flip to ALLOW under the cumulative amendment"
+    );
+
+    let rendered_sim2 = app.render();
+    assert!(rendered_sim2.contains("[STAGED]"));
+    assert!(rendered_sim2.contains("Session Impact: 2/2 ASK decision(s) would flip to ALLOW"));
+
+    // Verify disk is still untouched before pressing 'a'
+    assert_eq!(std::fs::read_to_string(&config_file).unwrap(), initial_toml);
+
+    // Press 'a' to atomically apply all staged amendments to config.toml
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('a')));
+    assert!(
+        app.status_message.contains("Applied 2 staged amendments"),
+        "Expected atomic apply message, got: {}",
+        app.status_message
+    );
+    assert!(app.policy_graph.staged_node_ids.is_empty());
+
+    let final_toml = std::fs::read_to_string(&config_file).unwrap();
+    assert!(final_toml.contains("subshell = \"allow\""));
+    assert!(final_toml.contains("/var/log/audit.log"));
+
+    let _ = std::fs::remove_dir_all(&tmp_path);
+}

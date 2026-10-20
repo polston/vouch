@@ -30,6 +30,7 @@ pub struct PipelineStage {
 pub enum PsToken {
     Identifier(String),
     Variable(String),        // e.g. "$_", "$proc", "$item"
+    SplatVariable(String),   // e.g. "@params", "@splatArgs"
     MemberAccess(String),    // e.g. ".Kill", ".Delete"
     StringLiteral(String),   // Quoted strings '...' or "..." (immunity against substring false positives)
     OpenParen,
@@ -245,6 +246,18 @@ impl<'a> PsLexer<'a> {
                 }
             }
 
+            // 7b. Splat variables: starts with @ followed by variable characters (e.g. @params)
+            if c == '@' && self.peek_char(1).is_some_and(is_var_char) {
+                self.cursor += 1;
+                let mut splat_name = String::from("@");
+                while self.cursor < self.chars.len() && is_var_char(self.chars[self.cursor].1) {
+                    splat_name.push(self.chars[self.cursor].1);
+                    self.cursor += 1;
+                }
+                tokens.push(PsToken::SplatVariable(splat_name));
+                continue;
+            }
+
             // 8. Member access or dot: .
             if c == '.' {
                 if self.peek_char(1).is_some_and(|ch| ch.is_ascii_digit()) {
@@ -421,6 +434,7 @@ pub enum VariableOrigin {
 #[derive(Debug, Clone)]
 pub struct VariableTaintTable {
     variables: std::collections::HashMap<String, VariableOrigin>,
+    splat_args: std::collections::HashMap<String, Vec<String>>,
 }
 
 impl Default for VariableTaintTable {
@@ -433,6 +447,7 @@ impl VariableTaintTable {
     pub fn new() -> Self {
         let mut table = Self {
             variables: std::collections::HashMap::new(),
+            splat_args: std::collections::HashMap::new(),
         };
         table.set("$_", VariableOrigin::PipelineItem);
         table.set("$PSItem", VariableOrigin::PipelineItem);
@@ -441,8 +456,10 @@ impl VariableTaintTable {
 
     fn normalize_key(name: &str) -> String {
         let trimmed = name.trim();
-        let key = if !trimmed.starts_with('$') {
-            format!("${}", trimmed)
+        let key = if let Some(rest) = trimmed.strip_prefix('@') {
+            format!("${rest}")
+        } else if !trimmed.starts_with('$') {
+            format!("${trimmed}")
         } else {
             trimmed.to_string()
         };
@@ -458,6 +475,27 @@ impl VariableTaintTable {
 
     pub fn set(&mut self, name: &str, origin: VariableOrigin) {
         self.variables.insert(Self::normalize_key(name), origin);
+    }
+
+    pub fn set_splat_args(&mut self, name: &str, args: Vec<String>) {
+        self.splat_args.insert(Self::normalize_key(name), args);
+    }
+
+    pub fn get_splat_args(&self, name: &str) -> Option<&Vec<String>> {
+        let key = Self::normalize_key(name);
+        if let Some(args) = self.splat_args.get(&key) {
+            return Some(args);
+        }
+        if !key.contains(':') && key.starts_with('$') {
+            let bare = &key[1..];
+            if let Some(args) = self.splat_args.get(&format!("$script:{bare}")) {
+                return Some(args);
+            }
+            if let Some(args) = self.splat_args.get(&format!("$global:{bare}")) {
+                return Some(args);
+            }
+        }
+        None
     }
 
     pub fn get(&self, name: &str) -> Option<&VariableOrigin> {
@@ -485,11 +523,18 @@ impl VariableTaintTable {
                 self.variables.insert(k.clone(), v.clone());
             }
         }
+        for (k, v) in &callee.splat_args {
+            if k.starts_with("$script:") || k.starts_with("$global:") {
+                self.splat_args.insert(k.clone(), v.clone());
+            }
+        }
     }
 
     pub fn is_tainted_or_dynamic(&self, name: &str) -> bool {
         match self.get(name) {
-            Some(VariableOrigin::DynamicInput { .. }) | Some(VariableOrigin::TaintedExpression) => true,
+            Some(VariableOrigin::DynamicInput { .. })
+            | Some(VariableOrigin::TaintedExpression)
+            | Some(VariableOrigin::Environment(_)) => true,
             _ => false,
         }
     }
@@ -935,21 +980,27 @@ impl PsControlFlowGraph {
         call_depth: usize,
     ) -> Option<usize> {
         let mut cursor = start_idx + 1;
-        let mut is_pattern_match = false;
+        let mut match_mode = SwitchMatchMode::Exact;
+        let mut is_file_switch = false;
         let mut case_sensitive = false;
 
-        // Skip optional switch flags: -Regex, -Wildcard, -Exact, -CaseSensitive, -File
+        // Parse optional switch flags: -Regex, -Wildcard, -Exact, -CaseSensitive, -File
         while cursor < tokens.len() {
             while cursor < tokens.len() && matches!(tokens[cursor], PsToken::Newline) {
                 cursor += 1;
             }
             if let Some(PsToken::Other(flag)) = tokens.get(cursor) {
                 if flag.starts_with('-') {
-                    if flag.eq_ignore_ascii_case("-regex") || flag.eq_ignore_ascii_case("-wildcard")
-                    {
-                        is_pattern_match = true;
+                    if flag.eq_ignore_ascii_case("-regex") {
+                        match_mode = SwitchMatchMode::Regex;
+                    } else if flag.eq_ignore_ascii_case("-wildcard") {
+                        match_mode = SwitchMatchMode::Wildcard;
+                    } else if flag.eq_ignore_ascii_case("-exact") {
+                        match_mode = SwitchMatchMode::Exact;
                     } else if flag.eq_ignore_ascii_case("-casesensitive") {
                         case_sensitive = true;
+                    } else if flag.eq_ignore_ascii_case("-file") {
+                        is_file_switch = true;
                     }
                     cursor += 1;
                     continue;
@@ -992,7 +1043,7 @@ impl PsControlFlowGraph {
             .iter()
             .filter(|t| !matches!(t, PsToken::Newline | PsToken::OpenParen | PsToken::CloseParen))
             .collect();
-        let selector_scalar = if !is_pattern_match && filtered_cond.len() == 1 {
+        let selector_scalar = if !is_file_switch && filtered_cond.len() == 1 {
             resolve_static_scalar(filtered_cond[0], taint_table)
         } else {
             None
@@ -1018,15 +1069,20 @@ impl PsControlFlowGraph {
                         SwitchCasePattern::Token(ref case_tok) => {
                             match (&selector_scalar, resolve_static_scalar(case_tok, taint_table)) {
                                 (Some(sel), Some(case_val)) => {
-                                    let matched = if case_sensitive {
-                                        sel == &case_val
-                                    } else {
-                                        sel.eq_ignore_ascii_case(&case_val)
-                                    };
-                                    if matched {
-                                        (true, format!("case == {case_val}"), true)
-                                    } else {
-                                        (false, format!("case != {case_val} (dead)"), false)
+                                    match evaluate_switch_case_match(
+                                        match_mode,
+                                        case_sensitive,
+                                        sel,
+                                        &case_val,
+                                    ) {
+                                        Some(true) => (true, format!("case == {case_val}"), true),
+                                        Some(false) => {
+                                            (false, format!("case != {case_val} (dead)"), false)
+                                        }
+                                        None => {
+                                            any_unknown_case = true;
+                                            (true, "case == invalid_pattern".to_string(), false)
+                                        }
                                     }
                                 }
                                 _ => {
@@ -1616,6 +1672,85 @@ fn scope_can_throw(tokens: &[PsToken]) -> bool {
     block_can_throw(&non_trap)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SwitchMatchMode {
+    Exact,
+    Wildcard,
+    Regex,
+}
+
+fn evaluate_switch_case_match(
+    mode: SwitchMatchMode,
+    case_sensitive: bool,
+    selector: &str,
+    pattern: &str,
+) -> Option<bool> {
+    match mode {
+        SwitchMatchMode::Exact => {
+            if case_sensitive {
+                Some(selector == pattern)
+            } else {
+                Some(selector.eq_ignore_ascii_case(pattern))
+            }
+        }
+        SwitchMatchMode::Wildcard => {
+            let regex_str = wildcard_to_regex(pattern);
+            let built = regex::RegexBuilder::new(&regex_str)
+                .case_insensitive(!case_sensitive)
+                .build()
+                .ok()?;
+            Some(built.is_match(selector))
+        }
+        SwitchMatchMode::Regex => {
+            let built = regex::RegexBuilder::new(pattern)
+                .case_insensitive(!case_sensitive)
+                .build()
+                .ok()?;
+            Some(built.is_match(selector))
+        }
+    }
+}
+
+fn wildcard_to_regex(pat: &str) -> String {
+    let mut out = String::from("^");
+    let chars: Vec<char> = pat.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '`' if i + 1 < chars.len() => {
+                out.push_str(&regex::escape(&chars[i + 1].to_string()));
+                i += 2;
+            }
+            '*' => {
+                out.push_str(".*");
+                i += 1;
+            }
+            '?' => {
+                out.push('.');
+                i += 1;
+            }
+            '[' => {
+                if let Some(rel_close) = chars[i + 1..].iter().position(|&c| c == ']') {
+                    out.push('[');
+                    for &ch in &chars[i + 1..=i + 1 + rel_close] {
+                        out.push(ch);
+                    }
+                    i += rel_close + 2;
+                } else {
+                    out.push_str("\\[");
+                    i += 1;
+                }
+            }
+            c => {
+                out.push_str(&regex::escape(&c.to_string()));
+                i += 1;
+            }
+        }
+    }
+    out.push('$');
+    out
+}
+
 #[derive(Debug, Clone)]
 enum SwitchCasePattern {
     Token(PsToken),
@@ -1800,6 +1935,18 @@ impl VariableTaintTable {
                 }
                 _ => {}
             }
+        }
+        for (k, v) in &other.splat_args {
+            self.splat_args
+                .entry(k.clone())
+                .and_modify(|existing| {
+                    for arg in v {
+                        if !existing.contains(arg) {
+                            existing.push(arg.clone());
+                        }
+                    }
+                })
+                .or_insert_with(|| v.clone());
         }
     }
 }
@@ -2153,6 +2300,82 @@ pub fn extract_scriptblock_synthesized_commands_with_table(
 }
 
 fn analyze_statement(stmt: &[PsToken], taint_table: &mut VariableTaintTable, out: &mut Vec<Cmd>) {
+    // 0. If statement contains top-level pipeline segments (`|`), analyze each segment sequentially
+    // so `-PipelineVariable` / `-pv` and `$_` propagate across inline scriptblock pipelines.
+    if stmt.iter().any(|t| matches!(t, PsToken::Pipe)) {
+        let mut depth_brace = 0usize;
+        let mut depth_paren = 0usize;
+        let mut segments: Vec<Vec<PsToken>> = Vec::new();
+        let mut current = Vec::new();
+        for tok in stmt {
+            match tok {
+                PsToken::OpenBrace => {
+                    depth_brace += 1;
+                    current.push(tok.clone());
+                }
+                PsToken::CloseBrace => {
+                    depth_brace = depth_brace.saturating_sub(1);
+                    current.push(tok.clone());
+                }
+                PsToken::OpenParen => {
+                    depth_paren += 1;
+                    current.push(tok.clone());
+                }
+                PsToken::CloseParen => {
+                    depth_paren = depth_paren.saturating_sub(1);
+                    current.push(tok.clone());
+                }
+                PsToken::Pipe if depth_brace == 0 && depth_paren == 0 => {
+                    if !current.is_empty() {
+                        segments.push(std::mem::take(&mut current));
+                    }
+                }
+                _ => current.push(tok.clone()),
+            }
+        }
+        if !current.is_empty() {
+            segments.push(current);
+        }
+        if segments.len() > 1 {
+            for seg in &segments {
+                analyze_statement(seg, taint_table, out);
+            }
+            return;
+        }
+    }
+
+    // Track `-PipelineVariable <name>` / `-pv <name>` on any command in this statement
+    if let Some(PsToken::Identifier(head)) = stmt.first() {
+        let stage_origin = classify_cmd_head_origin(head);
+        if let Some(orig) = stage_origin {
+            taint_table.set("$_", orig.clone());
+            taint_table.set("$PSItem", orig.clone());
+            for pv in extract_pipeline_variables_from_tokens(&stmt[1..]) {
+                taint_table.set(&pv, orig.clone());
+            }
+        }
+        let head_lower = head.to_ascii_lowercase();
+        if matches!(
+            head_lower.as_str(),
+            "foreach-object" | "foreach" | "%" | "where-object" | "where" | "?"
+        ) {
+            let mut cursor = 1;
+            while cursor < stmt.len() {
+                if matches!(stmt[cursor], PsToken::OpenBrace) {
+                    if let Some((inner, next_c)) = extract_delimited_group(stmt, cursor, false) {
+                        let mut sub_cfg = PsControlFlowGraph::default();
+                        let entry_id = sub_cfg.new_block("inline_stage", true);
+                        sub_cfg.walk_tokens(&inner, entry_id, true, taint_table, 0);
+                        out.extend(sub_cfg.synthesized_commands);
+                        cursor = next_c;
+                        continue;
+                    }
+                }
+                cursor += 1;
+            }
+        }
+    }
+
     // 1. Variable assignments: look for $var = <expr>
     for (idx, tok) in stmt.iter().enumerate() {
         if let PsToken::Other(op) = tok {
@@ -2161,6 +2384,17 @@ fn analyze_statement(stmt: &[PsToken], taint_table: &mut VariableTaintTable, out
                     let rhs = &stmt[idx + 1..];
                     let origin = classify_rhs_origin(rhs, taint_table);
                     taint_table.set(var, origin);
+                    let splat_args = extract_splat_args_from_rhs(rhs, taint_table);
+                    if !splat_args.is_empty() {
+                        if op == "+=" {
+                            let mut combined =
+                                taint_table.get_splat_args(var).cloned().unwrap_or_default();
+                            combined.extend(splat_args);
+                            taint_table.set_splat_args(var, combined);
+                        } else {
+                            taint_table.set_splat_args(var, splat_args);
+                        }
+                    }
                 }
             }
         }
@@ -2171,18 +2405,40 @@ fn analyze_statement(stmt: &[PsToken], taint_table: &mut VariableTaintTable, out
         if head.eq_ignore_ascii_case("foreach") {
             let filtered: Vec<&PsToken> = stmt
                 .iter()
-                .filter(|t| !matches!(t, PsToken::OpenParen | PsToken::CloseParen | PsToken::Newline))
+                .filter(|t| {
+                    !matches!(
+                        t,
+                        PsToken::OpenParen | PsToken::CloseParen | PsToken::Newline
+                    )
+                })
                 .collect();
             if filtered.len() >= 4 {
-                if let (PsToken::Variable(var), PsToken::Identifier(in_kw), PsToken::Identifier(cmd)) =
-                    (filtered[1], filtered[2], filtered[3])
+                if let (
+                    PsToken::Variable(var),
+                    PsToken::Identifier(in_kw),
+                    PsToken::Identifier(cmd),
+                ) = (filtered[1], filtered[2], filtered[3])
                 {
                     if in_kw.eq_ignore_ascii_case("in") {
                         let cmd_lower = cmd.to_lowercase();
                         if cmd_lower.starts_with("get-process") || cmd_lower == "gps" {
-                            taint_table.set(var, VariableOrigin::CmdletResult { cmdlet: "Get-Process".into() });
-                        } else if cmd_lower.starts_with("get-childitem") || cmd_lower == "gci" || cmd_lower == "dir" || cmd_lower == "ls" {
-                            taint_table.set(var, VariableOrigin::CmdletResult { cmdlet: "Get-ChildItem".into() });
+                            taint_table.set(
+                                var,
+                                VariableOrigin::CmdletResult {
+                                    cmdlet: "Get-Process".into(),
+                                },
+                            );
+                        } else if cmd_lower.starts_with("get-childitem")
+                            || cmd_lower == "gci"
+                            || cmd_lower == "dir"
+                            || cmd_lower == "ls"
+                        {
+                            taint_table.set(
+                                var,
+                                VariableOrigin::CmdletResult {
+                                    cmdlet: "Get-ChildItem".into(),
+                                },
+                            );
                         }
                     }
                 }
@@ -2243,27 +2499,71 @@ fn analyze_statement(stmt: &[PsToken], taint_table: &mut VariableTaintTable, out
         }
     }
 
-    // 4. Destructive command invocations
+    // 4. Destructive or splatted command invocations
     if let Some(first) = stmt.first() {
         if let PsToken::Identifier(head) = first {
             let name_lower = head.to_lowercase();
+            let has_splat = stmt
+                .iter()
+                .skip(1)
+                .any(|t| matches!(t, PsToken::SplatVariable(_)));
             if name_lower.starts_with("remove-")
                 || name_lower.starts_with("stop-")
                 || name_lower.starts_with("set-")
-                || matches!(name_lower.as_str(), "rm" | "del" | "erase" | "spps" | "kill")
+                || matches!(
+                    name_lower.as_str(),
+                    "rm"
+                        | "del"
+                        | "erase"
+                        | "spps"
+                        | "kill"
+                        | "invoke-expression"
+                        | "iex"
+                        | "invoke-command"
+                        | "icm"
+                        | "invoke-restmethod"
+                        | "irm"
+                        | "invoke-webrequest"
+                        | "iwr"
+                )
+                || has_splat
             {
                 let mut args = Vec::new();
                 let mut has_untrusted_var = false;
 
-                for tok in &stmt[1..] {
-                    match tok {
+                let mut idx = 1;
+                while idx < stmt.len() {
+                    match &stmt[idx] {
                         PsToken::Variable(v) => {
-                            if let Some(VariableOrigin::Literal(lit)) = taint_table.get(v) {
-                                args.push(lit.clone());
-                            } else {
-                                args.push(v.clone());
+                            let has_member =
+                                matches!(stmt.get(idx + 1), Some(PsToken::MemberAccess(_)));
+                            if !has_member {
+                                if let Some(VariableOrigin::Literal(lit)) = taint_table.get(v) {
+                                    args.push(lit.clone());
+                                } else {
+                                    args.push(v.clone());
+                                    if taint_table.is_tainted_or_dynamic(v) {
+                                        has_untrusted_var = true;
+                                    }
+                                }
+                            } else if let Some(PsToken::MemberAccess(m)) = stmt.get(idx + 1) {
+                                args.push(format!("{}{}", v, m));
                                 if taint_table.is_tainted_or_dynamic(v) {
                                     has_untrusted_var = true;
+                                }
+                                idx += 1;
+                            }
+                        }
+                        PsToken::SplatVariable(sv) => {
+                            if let Some(expanded) = taint_table.get_splat_args(sv) {
+                                args.extend(expanded.iter().cloned());
+                            } else {
+                                args.push(sv.clone());
+                            }
+                            if taint_table.is_tainted_or_dynamic(sv) {
+                                has_untrusted_var = true;
+                                if !args.iter().any(|a| a == "untrusted_input") {
+                                    args.push("untrusted_input".to_string());
                                 }
                             }
                         }
@@ -2274,12 +2574,19 @@ fn analyze_statement(stmt: &[PsToken], taint_table: &mut VariableTaintTable, out
                         }
                         _ => {}
                     }
+                    idx += 1;
                 }
 
                 // If variable passed is untrusted/dynamic, ensure -Recurse is included so path guards evaluate
-                if has_untrusted_var && (name_lower.starts_with("remove-") || matches!(name_lower.as_str(), "rm" | "del")) {
+                if has_untrusted_var
+                    && (name_lower.starts_with("remove-")
+                        || matches!(name_lower.as_str(), "rm" | "del" | "erase"))
+                {
                     if !args.iter().any(|a| a.eq_ignore_ascii_case("-recurse")) {
                         args.push("-Recurse".to_string());
+                    }
+                    if !args.iter().any(|a| a == "untrusted_input") {
+                        args.push("untrusted_input".to_string());
                     }
                 }
 
@@ -2293,7 +2600,290 @@ fn analyze_statement(stmt: &[PsToken], taint_table: &mut VariableTaintTable, out
     }
 }
 
+fn classify_cmd_head_origin(head: &str) -> Option<VariableOrigin> {
+    let head_lower = head.to_ascii_lowercase();
+    if matches!(
+        head_lower.as_str(),
+        "read-host"
+            | "get-content"
+            | "gc"
+            | "cat"
+            | "type"
+            | "invoke-restmethod"
+            | "irm"
+            | "invoke-webrequest"
+            | "iwr"
+    ) {
+        Some(VariableOrigin::DynamicInput {
+            source: head.to_string(),
+        })
+    } else if head_lower.starts_with("get-process") || head_lower == "gps" {
+        Some(VariableOrigin::CmdletResult {
+            cmdlet: "Get-Process".into(),
+        })
+    } else if head_lower.starts_with("get-childitem")
+        || matches!(head_lower.as_str(), "gci" | "dir" | "ls")
+    {
+        Some(VariableOrigin::CmdletResult {
+            cmdlet: "Get-ChildItem".into(),
+        })
+    } else if head_lower.starts_with("get-") {
+        Some(VariableOrigin::CmdletResult {
+            cmdlet: head.to_string(),
+        })
+    } else {
+        None
+    }
+}
+
+fn extract_pipeline_variables_from_tokens(tokens: &[PsToken]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        if let PsToken::Identifier(id) | PsToken::Other(id) = &tokens[i] {
+            let lower = id.to_ascii_lowercase();
+            if lower == "-pipelinevariable" || lower == "-pv" {
+                if let Some(next_tok) = tokens.get(i + 1) {
+                    let name = match next_tok {
+                        PsToken::Identifier(s)
+                        | PsToken::StringLiteral(s)
+                        | PsToken::Variable(s)
+                        | PsToken::Other(s) => Some(s.trim_start_matches('$').to_string()),
+                        _ => None,
+                    };
+                    if let Some(n) = name {
+                        if !n.is_empty() {
+                            out.push(format!("${n}"));
+                        }
+                        i += 2;
+                        continue;
+                    }
+                }
+            } else if let Some(rest) = lower
+                .strip_prefix("-pipelinevariable:")
+                .or_else(|| lower.strip_prefix("-pv:"))
+            {
+                let colon_idx = id.find(':').unwrap_or(0);
+                let raw_name = id[colon_idx + 1..].trim_start_matches('$');
+                if !raw_name.is_empty() && !rest.is_empty() {
+                    out.push(format!("${raw_name}"));
+                }
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+fn extract_pipeline_variables_from_args(args: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].trim();
+        let lower = arg.to_ascii_lowercase();
+        if (lower == "-pipelinevariable" || lower == "-pv") && i + 1 < args.len() {
+            let name = args[i + 1]
+                .trim()
+                .trim_matches(|c| c == '\'' || c == '"')
+                .trim_start_matches('$');
+            if !name.is_empty() {
+                out.push(format!("${name}"));
+            }
+            i += 2;
+            continue;
+        } else if lower.starts_with("-pipelinevariable:") || lower.starts_with("-pv:") {
+            if let Some(idx) = arg.find(':') {
+                let name = arg[idx + 1..]
+                    .trim()
+                    .trim_matches(|c| c == '\'' || c == '"')
+                    .trim_start_matches('$');
+                if !name.is_empty() {
+                    out.push(format!("${name}"));
+                }
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+fn tokens_to_arg_string(tokens: &[PsToken]) -> String {
+    let mut parts = Vec::new();
+    for tok in tokens {
+        match tok {
+            PsToken::Identifier(s)
+            | PsToken::Variable(s)
+            | PsToken::SplatVariable(s)
+            | PsToken::MemberAccess(s)
+            | PsToken::StringLiteral(s)
+            | PsToken::Other(s) => parts.push(s.as_str()),
+            _ => {}
+        }
+    }
+    parts.join(" ")
+}
+
+fn extract_splat_args_from_rhs(rhs: &[PsToken], taint_table: &VariableTaintTable) -> Vec<String> {
+    if rhs.len() < 2 {
+        return Vec::new();
+    }
+    let Some(PsToken::Other(at)) = rhs.first() else {
+        return Vec::new();
+    };
+    if at != "@" {
+        return Vec::new();
+    }
+
+    // Hashtable literal: @{ Key = Val; Switch = $true; ... }
+    if matches!(rhs.get(1), Some(PsToken::OpenBrace)) {
+        let Some((inner, _)) = extract_delimited_group(rhs, 1, false) else {
+            return Vec::new();
+        };
+        let mut args = Vec::new();
+        let mut i = 0;
+        while i < inner.len() {
+            while i < inner.len()
+                && matches!(inner[i], PsToken::Semicolon | PsToken::Newline)
+            {
+                i += 1;
+            }
+            if i >= inner.len() {
+                break;
+            }
+            let key_opt = match &inner[i] {
+                PsToken::Identifier(k) | PsToken::StringLiteral(k) => Some(k.clone()),
+                _ => None,
+            };
+            if let Some(key) = key_opt {
+                if matches!(inner.get(i + 1), Some(PsToken::Other(op)) if op == "=") {
+                    i += 2;
+                    let mut val_tokens = Vec::new();
+                    let mut depth = 0usize;
+                    while i < inner.len() {
+                        match &inner[i] {
+                            PsToken::OpenParen | PsToken::OpenBrace => {
+                                depth += 1;
+                                val_tokens.push(inner[i].clone());
+                            }
+                            PsToken::CloseParen | PsToken::CloseBrace => {
+                                depth = depth.saturating_sub(1);
+                                val_tokens.push(inner[i].clone());
+                            }
+                            PsToken::Semicolon | PsToken::Newline if depth == 0 => {
+                                break;
+                            }
+                            _ => val_tokens.push(inner[i].clone()),
+                        }
+                        i += 1;
+                    }
+                    let flag_name = if key.starts_with('-') {
+                        key
+                    } else {
+                        format!("-{key}")
+                    };
+                    if val_tokens.len() == 1 {
+                        if let PsToken::Variable(v) = &val_tokens[0] {
+                            if v.eq_ignore_ascii_case("$true") {
+                                args.push(flag_name);
+                                continue;
+                            } else if v.eq_ignore_ascii_case("$false") {
+                                continue;
+                            } else if let Some(VariableOrigin::Literal(lit)) = taint_table.get(v) {
+                                args.push(flag_name);
+                                args.push(lit.clone());
+                                continue;
+                            } else {
+                                args.push(flag_name);
+                                args.push(v.clone());
+                                continue;
+                            }
+                        } else if let PsToken::StringLiteral(s)
+                        | PsToken::Identifier(s)
+                        | PsToken::Other(s) = &val_tokens[0]
+                        {
+                            args.push(flag_name);
+                            args.push(s.clone());
+                            continue;
+                        }
+                    }
+                    args.push(flag_name);
+                    if !val_tokens.is_empty() {
+                        args.push(tokens_to_arg_string(&val_tokens));
+                    }
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        return args;
+    }
+
+    // Array literal: @( arg1, arg2, ... )
+    if matches!(rhs.get(1), Some(PsToken::OpenParen)) {
+        let Some((inner, _)) = extract_delimited_group(rhs, 1, true) else {
+            return Vec::new();
+        };
+        let mut args = Vec::new();
+        for tok in &inner {
+            match tok {
+                PsToken::Other(c) if c == "," => continue,
+                PsToken::Newline | PsToken::Semicolon => continue,
+                PsToken::StringLiteral(s) | PsToken::Identifier(s) | PsToken::Other(s) => {
+                    args.push(s.clone());
+                }
+                PsToken::Variable(v) => {
+                    if let Some(VariableOrigin::Literal(lit)) = taint_table.get(v) {
+                        args.push(lit.clone());
+                    } else {
+                        args.push(v.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        return args;
+    }
+
+    Vec::new()
+}
+
 fn classify_rhs_origin(rhs: &[PsToken], taint_table: &VariableTaintTable) -> VariableOrigin {
+    // Handle hashtable `@{ ... }` and array `@( ... )` literals: inspect inner expressions for taint
+    if matches!(rhs.first(), Some(PsToken::Other(at)) if at == "@") {
+        for tok in &rhs[1..] {
+            match tok {
+                PsToken::Identifier(id) => {
+                    let lower = id.to_ascii_lowercase();
+                    if matches!(
+                        lower.as_str(),
+                        "read-host"
+                            | "get-content"
+                            | "gc"
+                            | "invoke-restmethod"
+                            | "irm"
+                            | "invoke-webrequest"
+                            | "iwr"
+                    ) {
+                        return VariableOrigin::DynamicInput { source: id.clone() };
+                    }
+                }
+                PsToken::Variable(v) => {
+                    if v.eq_ignore_ascii_case("$true") || v.eq_ignore_ascii_case("$false") {
+                        continue;
+                    }
+                    let v_lower = v.to_ascii_lowercase();
+                    if v_lower.starts_with("$env:") {
+                        return VariableOrigin::Environment(v.clone());
+                    } else if taint_table.is_tainted_or_dynamic(v) {
+                        return VariableOrigin::TaintedExpression;
+                    }
+                }
+                _ => {}
+            }
+        }
+        return VariableOrigin::Literal("splat_literal".to_string());
+    }
+
     let meaningful: Vec<&PsToken> = rhs
         .iter()
         .filter(|t| !matches!(t, PsToken::OpenParen | PsToken::CloseParen | PsToken::Newline))
@@ -2306,7 +2896,14 @@ fn classify_rhs_origin(rhs: &[PsToken], taint_table: &VariableTaintTable) -> Var
     // Check if right-hand side is a command invocation
     if let Some(PsToken::Identifier(cmd)) = meaningful.first() {
         let cmd_lower = cmd.to_lowercase();
-        if cmd_lower == "read-host" || cmd_lower == "get-content" || cmd_lower == "gc" {
+        if cmd_lower == "read-host"
+            || cmd_lower == "get-content"
+            || cmd_lower == "gc"
+            || cmd_lower == "invoke-restmethod"
+            || cmd_lower == "irm"
+            || cmd_lower == "invoke-webrequest"
+            || cmd_lower == "iwr"
+        {
             return VariableOrigin::DynamicInput { source: (*cmd).clone() };
         } else if cmd_lower.starts_with("get-process") || cmd_lower == "gps" {
             return VariableOrigin::CmdletResult { cmdlet: "Get-Process".into() };
@@ -2360,28 +2957,17 @@ pub fn analyze_pipeline_stages(cmds: &[Cmd]) -> Vec<Cmd> {
         let head_lower = cmd.head.to_lowercase();
 
         // Dataflow origin propagation across pipeline stages
-        if head_lower == "read-host" || head_lower == "get-content" || head_lower == "gc" {
-            let orig = VariableOrigin::DynamicInput {
-                source: cmd.head.clone(),
-            };
+        let stage_origin = classify_cmd_head_origin(&cmd.head);
+        if let Some(orig) = &stage_origin {
             taint_table.set("$_", orig.clone());
-            taint_table.set("$PSItem", orig);
-        } else if head_lower == "get-process" || head_lower == "gps" {
-            let orig = VariableOrigin::CmdletResult {
-                cmdlet: "Get-Process".into(),
-            };
-            taint_table.set("$_", orig.clone());
-            taint_table.set("$PSItem", orig);
-        } else if head_lower == "get-childitem"
-            || head_lower == "gci"
-            || head_lower == "dir"
-            || head_lower == "ls"
-        {
-            let orig = VariableOrigin::CmdletResult {
-                cmdlet: "Get-ChildItem".into(),
-            };
-            taint_table.set("$_", orig.clone());
-            taint_table.set("$PSItem", orig);
+            taint_table.set("$PSItem", orig.clone());
+        }
+
+        // Bind any `-PipelineVariable <var>` / `-pv <var>` on this stage so it persists across ALL downstream stages
+        if let Some(orig) = stage_origin.or_else(|| taint_table.get("$_").cloned()) {
+            for pv in extract_pipeline_variables_from_args(&cmd.args) {
+                taint_table.set(&pv, orig.clone());
+            }
         }
 
         // Check if command is an iterator or filter cmdlet
@@ -2399,6 +2985,9 @@ pub fn analyze_pipeline_stages(cmds: &[Cmd]) -> Vec<Cmd> {
                 out.extend(cfg.synthesized_commands);
             }
             if let Some(orig) = next_stage_origin {
+                for pv in extract_pipeline_variables_from_args(&cmd.args) {
+                    taint_table.set(&pv, orig.clone());
+                }
                 taint_table.set("$_", orig.clone());
                 taint_table.set("$PSItem", orig);
             }
@@ -2444,6 +3033,12 @@ fn order_foreach_scriptblocks(args: &[String]) -> Vec<&str> {
             i += 2;
         } else if matches!(lower.as_str(), "-end" | "-e") && i + 1 < args.len() {
             end_blocks.push(args[i + 1].as_str());
+            i += 2;
+        } else if matches!(
+            lower.as_str(),
+            "-pipelinevariable" | "-pv" | "-outvariable" | "-ov" | "-errorvariable" | "-ev"
+        ) && i + 1 < args.len()
+        {
             i += 2;
         } else if a.starts_with('-') && !a.starts_with('{') {
             i += 1;

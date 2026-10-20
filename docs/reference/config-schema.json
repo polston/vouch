@@ -112,7 +112,7 @@
       ]
     },
     "CgroupsConfig": {
-      "description": "The `[sandbox.cgroups]` table: Linux cgroups v2 memory limits for worker processes.",
+      "description": "The `[sandbox.cgroups]` table: Linux cgroups v2 memory and process count limits for worker processes.",
       "type": "object",
       "properties": {
         "high_memory_mb": {
@@ -127,6 +127,16 @@
         },
         "max_memory_mb": {
           "description": "Hard memory limit in megabytes (`memory.max` in cgroups v2).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
+        "pids_max": {
+          "description": "Hard process and thread count limit (`pids.max` in cgroups v2).",
           "type": [
             "integer",
             "null"
@@ -492,11 +502,11 @@
       "additionalProperties": false
     },
     "SandboxConfig": {
-      "description": "The `[sandbox]` table: worker process sandboxing, namespaces, seccomp-BPF, and cgroups v2 limits.",
+      "description": "The `[sandbox]` table: worker process sandboxing, namespaces, seccomp-BPF, setrlimit, and cgroups v2 limits.",
       "type": "object",
       "properties": {
         "cgroups": {
-          "description": "Linux cgroups v2 memory limits (`[sandbox.cgroups]`).",
+          "description": "Linux cgroups v2 memory and PID limits (`[sandbox.cgroups]`).",
           "$ref": "#/$defs/CgroupsConfig"
         },
         "isolate_network": {
@@ -508,6 +518,36 @@
           "description": "Whether to enforce Linux Landlock LSM unprivileged filesystem access rules (`[write].allow_paths`).",
           "type": "boolean",
           "default": false
+        },
+        "max_cpu_seconds": {
+          "description": "Maximum CPU time in seconds (`RLIMIT_CPU`).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
+        "max_open_files": {
+          "description": "Maximum open file descriptor count (`RLIMIT_NOFILE`).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
+        "max_pids": {
+          "description": "Maximum process and thread count (`RLIMIT_NPROC` and cgroups v2 `pids.max` fallback).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
         },
         "seccomp_profile": {
           "description": "Optional seccomp-BPF syscall filter profile (`\"strict\"`, `\"baseline\"`, or `\"none\"`).",
