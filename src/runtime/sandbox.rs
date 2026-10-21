@@ -395,6 +395,149 @@ impl CgroupPidsEvents {
     }
 }
 
+pub const DEFAULT_CPU_MAX_PERIOD_US: u64 = 100_000;
+
+/// Parsed statistics from a cgroup v2 `cpu.stat` control file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CgroupCpuStat {
+    pub usage_usec: u64,
+    pub user_usec: u64,
+    pub system_usec: u64,
+    pub nr_periods: u64,
+    pub nr_throttled: u64,
+    pub throttled_usec: u64,
+}
+
+impl CgroupCpuStat {
+    pub fn parse(text: &str) -> Self {
+        let mut stat = Self::default();
+        for line in text.lines() {
+            let mut parts = line.split_whitespace();
+            let Some(key) = parts.next() else { continue };
+            let Some(val_str) = parts.next() else { continue };
+            let Ok(val) = val_str.parse::<u64>() else { continue };
+            match key {
+                "usage_usec" => stat.usage_usec = val,
+                "user_usec" => stat.user_usec = val,
+                "system_usec" => stat.system_usec = val,
+                "nr_periods" => stat.nr_periods = val,
+                "nr_throttled" => stat.nr_throttled = val,
+                "throttled_usec" => stat.throttled_usec = val,
+                _ => {}
+            }
+        }
+        stat
+    }
+
+    /// Returns true if the kernel throttled CPU execution in at least one scheduling period (`cpu.max`).
+    pub fn is_throttled(&self) -> bool {
+        self.nr_throttled > 0 || self.throttled_usec > 0
+    }
+}
+
+/// A single Linux cgroups v2 `io.max` per-device bandwidth and IOPS throttling rule
+/// (`"<major>:<minor> rbps=<bytes|max> wbps=<bytes|max> riops=<ops|max> wiops=<ops|max>"`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CgroupIoMaxRule {
+    pub major: u32,
+    pub minor: u32,
+    pub rbps: Option<u64>,
+    pub wbps: Option<u64>,
+    pub riops: Option<u64>,
+    pub wiops: Option<u64>,
+}
+
+impl CgroupIoMaxRule {
+    /// Parse and validate a cgroup v2 `io.max` line (`"259:0 rbps=104857600 wbps=52428800 wiops=5000"`).
+    pub fn parse(line: &str) -> Result<Self, String> {
+        let mut tokens = line.split_whitespace();
+        let dev_token = tokens
+            .next()
+            .ok_or_else(|| "io.max rule is empty".to_string())?;
+        let (maj_str, min_str) = dev_token.split_once(':').ok_or_else(|| {
+            format!("io.max device '{dev_token}' must be in '<major>:<minor>' format")
+        })?;
+        let major = maj_str
+            .parse::<u32>()
+            .map_err(|_| format!("invalid device major number '{maj_str}'"))?;
+        let minor = min_str
+            .parse::<u32>()
+            .map_err(|_| format!("invalid device minor number '{min_str}'"))?;
+
+        let mut rbps = None;
+        let mut wbps = None;
+        let mut riops = None;
+        let mut wiops = None;
+        let mut count = 0usize;
+
+        for tok in tokens {
+            let (key, val_str) = tok.split_once('=').ok_or_else(|| {
+                format!("io.max token '{tok}' must be in '<key>=<value>' format")
+            })?;
+            let parsed_val = if val_str == "max" {
+                None
+            } else {
+                let v = val_str.parse::<u64>().map_err(|_| {
+                    format!("io.max key '{key}' has invalid value '{val_str}' (expected positive integer or 'max')")
+                })?;
+                if v == 0 {
+                    return Err(format!("io.max key '{key}' value must be greater than 0"));
+                }
+                Some(v)
+            };
+            match key {
+                "rbps" => rbps = parsed_val,
+                "wbps" => wbps = parsed_val,
+                "riops" => riops = parsed_val,
+                "wiops" => wiops = parsed_val,
+                other => {
+                    return Err(format!(
+                        "unknown io.max key '{other}' (expected rbps, wbps, riops, or wiops)"
+                    ));
+                }
+            }
+            count += 1;
+        }
+
+        if count == 0 {
+            return Err(
+                "io.max rule must specify at least one limit (rbps, wbps, riops, or wiops)"
+                    .to_string(),
+            );
+        }
+
+        Ok(Self {
+            major,
+            minor,
+            rbps,
+            wbps,
+            riops,
+            wiops,
+        })
+    }
+
+    /// Format this rule as a canonical cgroup v2 `io.max` line.
+    pub fn format_line(&self) -> String {
+        let mut parts = vec![format!("{}:{}", self.major, self.minor)];
+        if let Some(v) = self.rbps {
+            parts.push(format!("rbps={v}"));
+        }
+        if let Some(v) = self.wbps {
+            parts.push(format!("wbps={v}"));
+        }
+        if let Some(v) = self.riops {
+            parts.push(format!("riops={v}"));
+        }
+        if let Some(v) = self.wiops {
+            parts.push(format!("wiops={v}"));
+        }
+        if parts.len() == 1 {
+            parts.push("rbps=max wbps=max riops=max wiops=max".to_string());
+        }
+        parts.join(" ")
+    }
+}
+
 /// POSIX `setrlimit(2)` resource type enforced for sandboxed worker processes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RlimitResource {
@@ -530,7 +673,7 @@ impl CgroupV2Manager {
         self.cgroup_root.is_dir() && self.cgroup_root.join("cgroup.controllers").exists()
     }
 
-    /// Provision a cgroup v2 directory for `scope_id` and apply configured memory and PID limits.
+    /// Provision a cgroup v2 directory for `scope_id` and apply configured memory, PID, CPU bandwidth, and block I/O limits.
     pub fn provision_scope(
         &self,
         scope_id: &str,
@@ -560,11 +703,49 @@ impl CgroupV2Manager {
             write_control_file(&dir.join("pids.max"), "max")?;
         }
 
+        let effective_cpu_quota = cfg.cpu_max_quota_us.filter(|&v| v > 0);
+        let effective_cpu_period = if effective_cpu_quota.is_some() || cfg.cpu_max_period_us.is_some()
+        {
+            Some(
+                cfg.cpu_max_period_us
+                    .filter(|&v| v > 0)
+                    .unwrap_or(DEFAULT_CPU_MAX_PERIOD_US),
+            )
+        } else {
+            None
+        };
+        if let Some(period) = effective_cpu_period {
+            if let Some(quota) = effective_cpu_quota {
+                write_control_file(&dir.join("cpu.max"), &format!("{quota} {period}"))?;
+            } else {
+                write_control_file(&dir.join("cpu.max"), &format!("max {period}"))?;
+            }
+        } else {
+            write_control_file(&dir.join("cpu.max"), &format!("max {DEFAULT_CPU_MAX_PERIOD_US}"))?;
+        }
+
+        let mut io_max_rules = Vec::with_capacity(cfg.io_max.len());
+        for raw_rule in &cfg.io_max {
+            let rule = CgroupIoMaxRule::parse(raw_rule)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+            io_max_rules.push(rule);
+        }
+        if !io_max_rules.is_empty() {
+            let lines: Vec<String> = io_max_rules
+                .iter()
+                .map(CgroupIoMaxRule::format_line)
+                .collect();
+            write_control_file(&dir.join("io.max"), &lines.join("\n"))?;
+        }
+
         Ok(CgroupScope {
             dir,
             max_memory_bytes: cfg.max_memory_mb.map(|mb| mb.saturating_mul(1024 * 1024)),
             high_memory_bytes: cfg.high_memory_mb.map(|mb| mb.saturating_mul(1024 * 1024)),
             pids_max: effective_pids_max,
+            cpu_max_quota_us: effective_cpu_quota,
+            cpu_max_period_us: effective_cpu_period,
+            io_max_rules,
         })
     }
 }
@@ -587,6 +768,9 @@ pub struct CgroupScope {
     pub max_memory_bytes: Option<u64>,
     pub high_memory_bytes: Option<u64>,
     pub pids_max: Option<u64>,
+    pub cpu_max_quota_us: Option<u64>,
+    pub cpu_max_period_us: Option<u64>,
+    pub io_max_rules: Vec<CgroupIoMaxRule>,
 }
 
 impl CgroupScope {
@@ -641,6 +825,26 @@ impl CgroupScope {
         CgroupPidsEvents::parse(&text)
     }
 
+    /// Read and parse `cpu.stat` (including `nr_periods`, `nr_throttled`, and `throttled_usec`).
+    pub fn read_cpu_stat(&self) -> CgroupCpuStat {
+        let Ok(text) = std::fs::read_to_string(self.dir.join("cpu.stat")) else {
+            return CgroupCpuStat::default();
+        };
+        CgroupCpuStat::parse(&text)
+    }
+
+    /// Read and parse `io.max` device throttling rules currently written in this scope.
+    pub fn read_io_max(&self) -> Vec<CgroupIoMaxRule> {
+        let Ok(text) = std::fs::read_to_string(self.dir.join("io.max")) else {
+            return Vec::new();
+        };
+        text.lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .filter_map(|l| CgroupIoMaxRule::parse(l).ok())
+            .collect()
+    }
+
     /// Remove the worker cgroup directory when no processes remain.
     pub fn teardown(&self) -> std::io::Result<()> {
         if self.dir.exists() {
@@ -653,6 +857,10 @@ impl CgroupScope {
                 "pids.max",
                 "pids.current",
                 "pids.events",
+                "cpu.max",
+                "cpu.stat",
+                "io.max",
+                "io.stat",
             ] {
                 let p = self.dir.join(file);
                 if p.is_file() {
@@ -824,6 +1032,9 @@ pub struct SandboxExecutionPlan {
     pub max_memory_bytes: Option<u64>,
     pub high_memory_bytes: Option<u64>,
     pub pids_max: Option<u64>,
+    pub cpu_max_quota_us: Option<u64>,
+    pub cpu_max_period_us: Option<u64>,
+    pub io_max_rules: Vec<CgroupIoMaxRule>,
     pub rlimits: RlimitSet,
     pub namespaces: NamespaceSpec,
     pub clone_flags: i32,
@@ -861,10 +1072,16 @@ impl SandboxExecutionPlan {
             max_memory_mb: cfg.cgroups.max_memory_mb,
             high_memory_mb: cfg.cgroups.high_memory_mb,
             pids_max: cfg.cgroups.pids_max.or(cfg.max_pids),
+            cpu_max_quota_us: cfg.cgroups.cpu_max_quota_us,
+            cpu_max_period_us: cfg.cgroups.cpu_max_period_us,
+            io_max: cfg.cgroups.io_max.clone(),
         };
         let has_cgroup_limits = effective_cgroups.max_memory_mb.is_some()
             || effective_cgroups.high_memory_mb.is_some()
-            || effective_cgroups.pids_max.is_some();
+            || effective_cgroups.pids_max.is_some()
+            || effective_cgroups.cpu_max_quota_us.is_some()
+            || effective_cgroups.cpu_max_period_us.is_some()
+            || !effective_cgroups.io_max.is_empty();
 
         let scope = if has_cgroup_limits {
             Some(manager.provision_scope(scope_id, &effective_cgroups)?)
@@ -896,6 +1113,12 @@ impl SandboxExecutionPlan {
             max_memory_bytes: scope.as_ref().and_then(|s| s.max_memory_bytes),
             high_memory_bytes: scope.as_ref().and_then(|s| s.high_memory_bytes),
             pids_max: scope.as_ref().and_then(|s| s.pids_max),
+            cpu_max_quota_us: scope.as_ref().and_then(|s| s.cpu_max_quota_us),
+            cpu_max_period_us: scope.as_ref().and_then(|s| s.cpu_max_period_us),
+            io_max_rules: scope
+                .as_ref()
+                .map(|s| s.io_max_rules.clone())
+                .unwrap_or_default(),
             rlimits,
             namespaces,
             clone_flags,

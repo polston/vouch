@@ -30,6 +30,11 @@ pub const VCHK_ENTRY_LEN: usize = 96;
 pub const VCHK_GENESIS_SEED: [u8; 32] = *b"VOUCH_VCHK_GENESIS_SHA256_V00001";
 pub const VCHK_GENESIS_DIGEST: u64 = 0x564f_5543_485f_434b; // "VOUCH_CK"
 
+pub const VBUNDLE_MAGIC: [u8; 4] = *b"VBND";
+pub const VBUNDLE_VERSION: u32 = 1;
+pub const VBUNDLE_HEADER_LEN: usize = 96;
+pub const VBUNDLE_SEAL_SEED: [u8; 32] = *b"VOUCH_VBUNDLE_SEAL_SHA256_V00001";
+
 /// Compute a 64-bit rolling cryptographic hash chain tag over `(VLOG_GENESIS_SEED, prev_tag, seq_idx, payload)`.
 pub fn compute_frame_chain_tag(prev_tag: u64, seq_idx: u64, payload: &[u8]) -> u64 {
     let mut hasher = Sha256::new();
@@ -896,6 +901,11 @@ pub fn vchk_path(dir: &Path) -> PathBuf {
 /// Verifies entry CRC32, SHA-256 checkpoint digest, sequential `checkpoint_seq`, and cross-checkpoint continuity.
 pub fn read_vlog_checkpoints(path: &Path) -> Result<Vec<VlogCheckpointEntry>, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("failed to read vchk: {e}"))?;
+    parse_vlog_checkpoints_bytes(&bytes)
+}
+
+/// Parse and validate all `VlogCheckpointEntry` records from raw `journal.vchk` bytes.
+pub fn parse_vlog_checkpoints_bytes(bytes: &[u8]) -> Result<Vec<VlogCheckpointEntry>, String> {
     if bytes.is_empty() {
         return Err("vchk file is empty".to_string());
     }
@@ -1056,7 +1066,12 @@ fn write_all_vidx(dir: &Path, header: &VlogHeader, index_entries: &[VlogIndexEnt
 /// Read the header and 24-byte index entries from a sidecar `journal.vidx` file.
 pub fn read_vidx_entries(path: &Path) -> Result<(VlogHeader, Vec<VlogIndexEntry>), String> {
     let bytes = std::fs::read(path).map_err(|e| format!("failed to read vidx: {e}"))?;
-    let header = VlogHeader::from_bytes(&bytes)?;
+    parse_vidx_bytes(&bytes)
+}
+
+/// Parse the header and 24-byte index entries from raw `journal.vidx` bytes.
+pub fn parse_vidx_bytes(bytes: &[u8]) -> Result<(VlogHeader, Vec<VlogIndexEntry>), String> {
+    let header = VlogHeader::from_bytes(bytes)?;
     let expected_len = VLOG_HEADER_LEN
         .saturating_add((header.record_count as usize).saturating_mul(VLOG_INDEX_ENTRY_LEN));
     if bytes.len() < expected_len {
@@ -1496,9 +1511,12 @@ pub enum VlogTamperKind {
         checkpoint_seq: u64,
         reason: String,
     },
+    BundleSealCorrupted {
+        detail: String,
+    },
 }
 
-/// Complete audit report returned by `verify_vlog_integrity`.
+/// Complete audit report returned by `verify_vlog_integrity` and `verify_vlog_bundle`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VlogIntegrityReport {
     pub valid: bool,
@@ -1513,6 +1531,28 @@ pub struct VlogIntegrityReport {
 pub fn verify_vlog_integrity(path: &Path) -> Result<VlogIntegrityReport, String> {
     let data_path = resolve_vlog_data_path(path);
     let bytes = std::fs::read(&data_path).map_err(|e| format!("failed to read vlog: {e}"))?;
+    let sidecar_path = data_path.with_extension("vidx");
+    let vidx_bytes = if sidecar_path.exists() {
+        Some(std::fs::read(&sidecar_path).map_err(|e| format!("failed to read vidx: {e}"))?)
+    } else {
+        None
+    };
+    let checkpoint_path = data_path.with_extension("vchk");
+    let vchk_bytes = if checkpoint_path.exists() {
+        Some(std::fs::read(&checkpoint_path).map_err(|e| format!("failed to read vchk: {e}"))?)
+    } else {
+        None
+    };
+    verify_vlog_slices(&bytes, vidx_bytes.as_deref(), vchk_bytes.as_deref())
+}
+
+/// Verify `.vlog` frames, optional `.vidx` sidecar index, and optional `.vchk` compaction checkpoints
+/// entirely in memory from byte slices without requiring active filesystem state directory access.
+pub fn verify_vlog_slices(
+    bytes: &[u8],
+    vidx_bytes: Option<&[u8]>,
+    vchk_bytes: Option<&[u8]>,
+) -> Result<VlogIntegrityReport, String> {
     if bytes.is_empty() {
         return Ok(VlogIntegrityReport {
             valid: true,
@@ -1523,7 +1563,7 @@ pub fn verify_vlog_integrity(path: &Path) -> Result<VlogIntegrityReport, String>
         });
     }
 
-    let header = match VlogHeader::from_bytes(&bytes) {
+    let header = match VlogHeader::from_bytes(bytes) {
         Ok(h) => h,
         Err(detail) => {
             return Ok(VlogIntegrityReport {
@@ -1691,9 +1731,8 @@ pub fn verify_vlog_integrity(path: &Path) -> Result<VlogIntegrityReport, String>
         footer_entries.push(entry);
     }
 
-    let sidecar_path = data_path.with_extension("vidx");
-    if sidecar_path.exists() {
-        match read_vidx_entries(&sidecar_path) {
+    if let Some(vidx_raw) = vidx_bytes {
+        match parse_vidx_bytes(vidx_raw) {
             Ok((vidx_header, vidx_entries)) => {
                 if vidx_header != header {
                     return Ok(VlogIntegrityReport {
@@ -1738,43 +1777,26 @@ pub fn verify_vlog_integrity(path: &Path) -> Result<VlogIntegrityReport, String>
     }
 
     let mut verified_checkpoints = 0u64;
-    let checkpoint_path = data_path.with_extension("vchk");
-    if checkpoint_path.exists() {
-        let checkpoints = match read_vlog_checkpoints(&checkpoint_path) {
-            Ok(ckpts) => ckpts,
-            Err(reason) => {
-                return Ok(VlogIntegrityReport {
-                    valid: false,
-                    verified_records,
-                    verified_checkpoints: 0,
-                    terminal_chain_tag: prev_tag,
-                    tamper_finding: Some(VlogTamperKind::CheckpointContinuityBroken {
-                        checkpoint_seq: 0,
-                        reason,
-                    }),
-                });
-            }
-        };
+    if let Some(vchk_raw) = vchk_bytes {
+        if !vchk_raw.is_empty() {
+            let checkpoints = match parse_vlog_checkpoints_bytes(vchk_raw) {
+                Ok(ckpts) => ckpts,
+                Err(reason) => {
+                    return Ok(VlogIntegrityReport {
+                        valid: false,
+                        verified_records,
+                        verified_checkpoints: 0,
+                        terminal_chain_tag: prev_tag,
+                        tamper_finding: Some(VlogTamperKind::CheckpointContinuityBroken {
+                            checkpoint_seq: 0,
+                            reason,
+                        }),
+                    });
+                }
+            };
 
-        if let Some(last_ckpt) = checkpoints.last() {
-            if verified_records < last_ckpt.post_compact_records {
-                return Ok(VlogIntegrityReport {
-                    valid: false,
-                    verified_records,
-                    verified_checkpoints: checkpoints.len().saturating_sub(1) as u64,
-                    terminal_chain_tag: prev_tag,
-                    tamper_finding: Some(VlogTamperKind::CheckpointContinuityBroken {
-                        checkpoint_seq: last_ckpt.checkpoint_seq,
-                        reason: format!(
-                            "live vlog record count ({verified_records}) is smaller than checkpoint post_compact_records ({})",
-                            last_ckpt.post_compact_records
-                        ),
-                    }),
-                });
-            }
-            if last_ckpt.post_compact_records > 0 {
-                let actual_first_tag = chain_tags_by_seq[0];
-                if actual_first_tag != last_ckpt.post_compact_first_tag {
+            if let Some(last_ckpt) = checkpoints.last() {
+                if verified_records < last_ckpt.post_compact_records {
                     return Ok(VlogIntegrityReport {
                         valid: false,
                         verified_records,
@@ -1783,32 +1805,50 @@ pub fn verify_vlog_integrity(path: &Path) -> Result<VlogIntegrityReport, String>
                         tamper_finding: Some(VlogTamperKind::CheckpointContinuityBroken {
                             checkpoint_seq: last_ckpt.checkpoint_seq,
                             reason: format!(
-                                "live vlog first frame tag ({actual_first_tag:016x}) != checkpoint post_compact_first_tag ({:016x})",
-                                last_ckpt.post_compact_first_tag
+                                "live vlog record count ({verified_records}) is smaller than checkpoint post_compact_records ({})",
+                                last_ckpt.post_compact_records
                             ),
                         }),
                     });
                 }
-                let anchor_idx = (last_ckpt.post_compact_records - 1) as usize;
-                let actual_anchor_tag = chain_tags_by_seq[anchor_idx];
-                if actual_anchor_tag != last_ckpt.post_compact_terminal_tag {
-                    return Ok(VlogIntegrityReport {
-                        valid: false,
-                        verified_records,
-                        verified_checkpoints: checkpoints.len().saturating_sub(1) as u64,
-                        terminal_chain_tag: prev_tag,
-                        tamper_finding: Some(VlogTamperKind::CheckpointContinuityBroken {
-                            checkpoint_seq: last_ckpt.checkpoint_seq,
-                            reason: format!(
-                                "live vlog anchor frame {anchor_idx} tag ({actual_anchor_tag:016x}) != checkpoint post_compact_terminal_tag ({:016x})",
-                                last_ckpt.post_compact_terminal_tag
-                            ),
-                        }),
-                    });
+                if last_ckpt.post_compact_records > 0 {
+                    let actual_first_tag = chain_tags_by_seq[0];
+                    if actual_first_tag != last_ckpt.post_compact_first_tag {
+                        return Ok(VlogIntegrityReport {
+                            valid: false,
+                            verified_records,
+                            verified_checkpoints: checkpoints.len().saturating_sub(1) as u64,
+                            terminal_chain_tag: prev_tag,
+                            tamper_finding: Some(VlogTamperKind::CheckpointContinuityBroken {
+                                checkpoint_seq: last_ckpt.checkpoint_seq,
+                                reason: format!(
+                                    "live vlog first frame tag ({actual_first_tag:016x}) != checkpoint post_compact_first_tag ({:016x})",
+                                    last_ckpt.post_compact_first_tag
+                                ),
+                            }),
+                        });
+                    }
+                    let anchor_idx = (last_ckpt.post_compact_records - 1) as usize;
+                    let actual_anchor_tag = chain_tags_by_seq[anchor_idx];
+                    if actual_anchor_tag != last_ckpt.post_compact_terminal_tag {
+                        return Ok(VlogIntegrityReport {
+                            valid: false,
+                            verified_records,
+                            verified_checkpoints: checkpoints.len().saturating_sub(1) as u64,
+                            terminal_chain_tag: prev_tag,
+                            tamper_finding: Some(VlogTamperKind::CheckpointContinuityBroken {
+                                checkpoint_seq: last_ckpt.checkpoint_seq,
+                                reason: format!(
+                                    "live vlog anchor frame {anchor_idx} tag ({actual_anchor_tag:016x}) != checkpoint post_compact_terminal_tag ({:016x})",
+                                    last_ckpt.post_compact_terminal_tag
+                                ),
+                            }),
+                        });
+                    }
                 }
             }
+            verified_checkpoints = checkpoints.len() as u64;
         }
-        verified_checkpoints = checkpoints.len() as u64;
     }
 
     Ok(VlogIntegrityReport {
@@ -1818,4 +1858,320 @@ pub fn verify_vlog_integrity(path: &Path) -> Result<VlogIntegrityReport, String>
         terminal_chain_tag: prev_tag,
         tamper_finding: None,
     })
+}
+
+/// Fixed 96-byte header at offset 0 of a portable cryptographic audit export bundle (`.vbundle`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VlogBundleHeader {
+    pub version: u32,
+    pub exported_at_secs: u64,
+    pub vlog_offset: u64,
+    pub vlog_len: u64,
+    pub vidx_offset: u64,
+    pub vidx_len: u64,
+    pub vchk_offset: u64,
+    pub vchk_len: u64,
+    pub bundle_sha256: [u8; 32],
+}
+
+/// Compute the 256-bit SHA-256 cryptographic seal over the 64-byte bundle header prefix and all embedded sections.
+pub fn compute_bundle_seal_sha256(
+    header_prefix_64: &[u8; 64],
+    vlog_bytes: &[u8],
+    vidx_bytes: &[u8],
+    vchk_bytes: &[u8],
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(VBUNDLE_SEAL_SEED);
+    hasher.update(header_prefix_64);
+    hasher.update(vlog_bytes);
+    hasher.update(vidx_bytes);
+    hasher.update(vchk_bytes);
+    let digest = hasher.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest[0..32]);
+    out
+}
+
+impl VlogBundleHeader {
+    pub fn new(
+        exported_at_secs: u64,
+        vlog_bytes: &[u8],
+        vidx_bytes: &[u8],
+        vchk_bytes: &[u8],
+    ) -> Self {
+        let vlog_offset = VBUNDLE_HEADER_LEN as u64;
+        let vlog_len = vlog_bytes.len() as u64;
+        let vidx_offset = vlog_offset.saturating_add(vlog_len);
+        let vidx_len = vidx_bytes.len() as u64;
+        let vchk_offset = vidx_offset.saturating_add(vidx_len);
+        let vchk_len = vchk_bytes.len() as u64;
+
+        let mut h = Self {
+            version: VBUNDLE_VERSION,
+            exported_at_secs,
+            vlog_offset,
+            vlog_len,
+            vidx_offset,
+            vidx_len,
+            vchk_offset,
+            vchk_len,
+            bundle_sha256: [0u8; 32],
+        };
+        let prefix = h.encode_prefix_64();
+        h.bundle_sha256 =
+            compute_bundle_seal_sha256(&prefix, vlog_bytes, vidx_bytes, vchk_bytes);
+        h
+    }
+
+    pub fn encode_prefix_64(&self) -> [u8; 64] {
+        let mut buf = [0u8; 64];
+        buf[0..4].copy_from_slice(&VBUNDLE_MAGIC);
+        buf[4..8].copy_from_slice(&self.version.to_le_bytes());
+        buf[8..16].copy_from_slice(&self.exported_at_secs.to_le_bytes());
+        buf[16..24].copy_from_slice(&self.vlog_offset.to_le_bytes());
+        buf[24..32].copy_from_slice(&self.vlog_len.to_le_bytes());
+        buf[32..40].copy_from_slice(&self.vidx_offset.to_le_bytes());
+        buf[40..48].copy_from_slice(&self.vidx_len.to_le_bytes());
+        buf[48..56].copy_from_slice(&self.vchk_offset.to_le_bytes());
+        buf[56..64].copy_from_slice(&self.vchk_len.to_le_bytes());
+        buf
+    }
+
+    pub fn to_bytes(&self) -> [u8; VBUNDLE_HEADER_LEN] {
+        let mut out = [0u8; VBUNDLE_HEADER_LEN];
+        let prefix = self.encode_prefix_64();
+        out[0..64].copy_from_slice(&prefix);
+        out[64..96].copy_from_slice(&self.bundle_sha256);
+        out
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.len() < VBUNDLE_HEADER_LEN {
+            return Err(format!(
+                "vbundle header truncated: expected at least {VBUNDLE_HEADER_LEN} bytes, got {}",
+                bytes.len()
+            ));
+        }
+        if bytes[0..4] != VBUNDLE_MAGIC {
+            return Err("invalid vbundle magic".to_string());
+        }
+        let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        if version != VBUNDLE_VERSION {
+            return Err(format!("unsupported vbundle version: {version}"));
+        }
+        let exported_at_secs = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+        let vlog_offset = u64::from_le_bytes(bytes[16..24].try_into().unwrap());
+        let vlog_len = u64::from_le_bytes(bytes[24..32].try_into().unwrap());
+        let vidx_offset = u64::from_le_bytes(bytes[32..40].try_into().unwrap());
+        let vidx_len = u64::from_le_bytes(bytes[40..48].try_into().unwrap());
+        let vchk_offset = u64::from_le_bytes(bytes[48..56].try_into().unwrap());
+        let vchk_len = u64::from_le_bytes(bytes[56..64].try_into().unwrap());
+        let mut bundle_sha256 = [0u8; 32];
+        bundle_sha256.copy_from_slice(&bytes[64..96]);
+
+        if vlog_offset != VBUNDLE_HEADER_LEN as u64 {
+            return Err(format!(
+                "invalid vbundle vlog_offset: expected {VBUNDLE_HEADER_LEN}, got {vlog_offset}"
+            ));
+        }
+        if vidx_offset != vlog_offset.saturating_add(vlog_len) {
+            return Err(format!(
+                "invalid vbundle vidx_offset: expected {}, got {vidx_offset}",
+                vlog_offset.saturating_add(vlog_len)
+            ));
+        }
+        if vchk_offset != vidx_offset.saturating_add(vidx_len) {
+            return Err(format!(
+                "invalid vbundle vchk_offset: expected {}, got {vchk_offset}",
+                vidx_offset.saturating_add(vidx_len)
+            ));
+        }
+        let expected_total = vchk_offset.saturating_add(vchk_len) as usize;
+        if bytes.len() != expected_total {
+            return Err(format!(
+                "vbundle file size mismatch: header expects {expected_total} bytes, got {}",
+                bytes.len()
+            ));
+        }
+
+        Ok(Self {
+            version,
+            exported_at_secs,
+            vlog_offset,
+            vlog_len,
+            vidx_offset,
+            vidx_len,
+            vchk_offset,
+            vchk_len,
+            bundle_sha256,
+        })
+    }
+}
+
+/// Package `journal.vlog`, `journal.vidx`, and `journal.vchk` from `dir` into a self-contained,
+/// cryptographically sealed `.vbundle` file at `bundle_path`.
+///
+/// Refuses to export if the live `.vlog` chain fails integrity verification.
+pub fn export_vlog_bundle(dir: &Path, bundle_path: &Path) -> Result<VlogIntegrityReport, String> {
+    let vlog_file = vlog_path(dir);
+    if !vlog_file.exists() {
+        return Err(format!(
+            "cannot export bundle: {} does not exist",
+            vlog_file.display()
+        ));
+    }
+    let vlog_bytes =
+        std::fs::read(&vlog_file).map_err(|e| format!("failed to read journal.vlog: {e}"))?;
+    let vidx_file = vidx_path(dir);
+    let vidx_bytes = if vidx_file.exists() {
+        std::fs::read(&vidx_file).map_err(|e| format!("failed to read journal.vidx: {e}"))?
+    } else {
+        Vec::new()
+    };
+    let vchk_file = vchk_path(dir);
+    let vchk_bytes = if vchk_file.exists() {
+        std::fs::read(&vchk_file).map_err(|e| format!("failed to read journal.vchk: {e}"))?
+    } else {
+        Vec::new()
+    };
+
+    let vidx_opt = if vidx_bytes.is_empty() {
+        None
+    } else {
+        Some(vidx_bytes.as_slice())
+    };
+    let vchk_opt = if vchk_bytes.is_empty() {
+        None
+    } else {
+        Some(vchk_bytes.as_slice())
+    };
+    let report = verify_vlog_slices(&vlog_bytes, vidx_opt, vchk_opt)?;
+    if !report.valid {
+        return Err(format!(
+            "refusing to export corrupted journal.vlog: {:?}",
+            report.tamper_finding
+        ));
+    }
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let header = VlogBundleHeader::new(now_secs, &vlog_bytes, &vidx_bytes, &vchk_bytes);
+
+    if let Some(parent) = bundle_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            create_dir_all(parent)
+                .map_err(|e| format!("failed to create bundle parent directory: {e}"))?;
+        }
+    }
+    let tmp_path = bundle_path.with_extension("vbundle.tmp");
+    {
+        let mut f = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp_path)
+            .map_err(|e| format!("failed to open temporary bundle file: {e}"))?;
+        f.write_all(&header.to_bytes())
+            .map_err(|e| format!("failed to write bundle header: {e}"))?;
+        f.write_all(&vlog_bytes)
+            .map_err(|e| format!("failed to write bundle vlog section: {e}"))?;
+        f.write_all(&vidx_bytes)
+            .map_err(|e| format!("failed to write bundle vidx section: {e}"))?;
+        f.write_all(&vchk_bytes)
+            .map_err(|e| format!("failed to write bundle vchk section: {e}"))?;
+        f.sync_all()
+            .map_err(|e| format!("failed to sync bundle file: {e}"))?;
+    }
+    std::fs::rename(&tmp_path, bundle_path)
+        .map_err(|e| format!("failed to finalize bundle file: {e}"))?;
+
+    Ok(report)
+}
+
+/// Verify an exported `.vbundle` cryptographic audit bundle completely offline without
+/// requiring access to an active state directory.
+///
+/// Validates the 96-byte `VlogBundleHeader`, the whole-bundle SHA-256 seal (`VBUNDLE_SEAL_SEED`),
+/// intra-file `.vlog` frame CRC32s and rolling hash chain (`VLOG_GENESIS_SEED`), `.vidx` index
+/// consistency, and `.vchk` cross-compaction continuity lineage (`VCHK_GENESIS_SEED`).
+pub fn verify_vlog_bundle(bundle_path: &Path) -> Result<VlogIntegrityReport, String> {
+    let bytes =
+        std::fs::read(bundle_path).map_err(|e| format!("failed to read vbundle: {e}"))?;
+    let header = match VlogBundleHeader::from_bytes(&bytes) {
+        Ok(h) => h,
+        Err(detail) => {
+            return Ok(VlogIntegrityReport {
+                valid: false,
+                verified_records: 0,
+                verified_checkpoints: 0,
+                terminal_chain_tag: VLOG_GENESIS_TAG,
+                tamper_finding: Some(VlogTamperKind::BundleSealCorrupted { detail }),
+            });
+        }
+    };
+
+    let vlog_start = header.vlog_offset as usize;
+    let vlog_end = vlog_start + header.vlog_len as usize;
+    let vidx_start = header.vidx_offset as usize;
+    let vidx_end = vidx_start + header.vidx_len as usize;
+    let vchk_start = header.vchk_offset as usize;
+    let vchk_end = vchk_start + header.vchk_len as usize;
+
+    let vlog_slice = &bytes[vlog_start..vlog_end];
+    let vidx_slice = &bytes[vidx_start..vidx_end];
+    let vchk_slice = &bytes[vchk_start..vchk_end];
+
+    let mut prefix = [0u8; 64];
+    prefix.copy_from_slice(&bytes[0..64]);
+    let expected_seal = compute_bundle_seal_sha256(&prefix, vlog_slice, vidx_slice, vchk_slice);
+    if expected_seal != header.bundle_sha256 {
+        return Ok(VlogIntegrityReport {
+            valid: false,
+            verified_records: 0,
+            verified_checkpoints: 0,
+            terminal_chain_tag: VLOG_GENESIS_TAG,
+            tamper_finding: Some(VlogTamperKind::BundleSealCorrupted {
+                detail: "bundle SHA-256 cryptographic seal mismatch".to_string(),
+            }),
+        });
+    }
+
+    let vidx_opt = if vidx_slice.is_empty() {
+        None
+    } else {
+        Some(vidx_slice)
+    };
+    let vchk_opt = if vchk_slice.is_empty() {
+        None
+    } else {
+        Some(vchk_slice)
+    };
+    verify_vlog_slices(vlog_slice, vidx_opt, vchk_opt)
+}
+
+/// Verify a `.vbundle` archive offline and decode all contained `Record` entries.
+pub fn read_records_from_vlog_bundle(bundle_path: &Path) -> Result<Vec<Record>, String> {
+    let report = verify_vlog_bundle(bundle_path)?;
+    if !report.valid {
+        return Err(format!(
+            "bundle failed integrity verification: {:?}",
+            report.tamper_finding
+        ));
+    }
+    let bytes =
+        std::fs::read(bundle_path).map_err(|e| format!("failed to read vbundle: {e}"))?;
+    let header = VlogBundleHeader::from_bytes(&bytes)?;
+    let vlog_start = header.vlog_offset as usize;
+    let vlog_end = vlog_start + header.vlog_len as usize;
+    let vlog_slice = &bytes[vlog_start..vlog_end];
+    if vlog_slice.is_empty() {
+        return Ok(Vec::new());
+    }
+    let vlog_header = VlogHeader::from_bytes(vlog_slice)?;
+    let (records, _, _) =
+        scan_and_rebuild_index(vlog_slice, Some(vlog_header.index_offset as usize));
+    Ok(records)
 }

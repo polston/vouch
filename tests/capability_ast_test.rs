@@ -949,3 +949,142 @@ import escaped_pkg
         py_report.unresolved_imports
     );
 }
+
+#[test]
+fn python_uv_lock_and_poetry_lock_resolve_local_editable_and_directory_packages() {
+    let ws = TestWorkspace::new("uv_and_poetry_lock_local");
+
+    // 1. uv.lock editable package in `packages/uv-net-client`
+    ws.write_file(
+        "uv.lock",
+        r#"version = 1
+requires-python = ">=3.12"
+
+[[package]]
+name = "uv-net-client"
+version = "0.1.0"
+source = { editable = "packages/uv-net-client" }
+"#,
+    );
+    ws.write_file(
+        "packages/uv-net-client/src/uv_net_client/__init__.py",
+        "import socket\ndef connect_remote():\n    return socket.create_connection(('example.com', 443))\n",
+    );
+
+    // 2. poetry.lock directory package in `packages/poetry-cleaner`
+    ws.write_file(
+        "poetry.lock",
+        r#"[[package]]
+name = "poetry-cleaner"
+version = "0.2.0"
+description = "Local cleaner"
+optional = false
+python-versions = ">=3.11"
+
+[package.source]
+type = "directory"
+url = "packages/poetry-cleaner"
+"#,
+    );
+    ws.write_file(
+        "packages/poetry-cleaner/poetry_cleaner/__init__.py",
+        "import shutil\ndef wipe_dir():\n    shutil.rmtree('/tmp/cache')\n",
+    );
+
+    let entry = ws.write_file(
+        "app.py",
+        "import uv_net_client\nimport poetry_cleaner\nuv_net_client.connect_remote()\npoetry_cleaner.wipe_dir()\n",
+    );
+
+    let resolver = TransitiveImportResolver::new(ws.path());
+    let report = resolver.resolve_python(&fs::read_to_string(&entry).unwrap(), Some(&entry));
+
+    assert!(
+        report.capabilities.network,
+        "uv.lock editable package importing socket must propagate network capability"
+    );
+    assert!(
+        report.capabilities.external_paths,
+        "poetry.lock directory package calling shutil.rmtree('/tmp/cache') must propagate external_paths"
+    );
+    assert_eq!(report.resolved_files.len(), 2);
+}
+#[test]
+fn bun_and_pnpm_workspace_catalogs_resolve_local_links_and_external_capabilities() {
+    let ws = TestWorkspace::new("bun_pnpm_catalogs");
+
+    // 1. `pnpm-workspace.yaml` with `catalog:` and `catalogs:`
+    ws.write_file(
+        "pnpm-workspace.yaml",
+        r#"packages:
+  - 'packages/*'
+
+catalog:
+  '@acme/shared-fs': link:packages/shared-fs
+  axios: ^1.7.2
+
+catalogs:
+  daemon_tools:
+    '@acme/worker-pool': file:packages/worker-pool
+"#,
+    );
+
+    ws.write_file(
+        "packages/shared-fs/package.json",
+        r#"{ "name": "@acme/shared-fs", "main": "index.ts" }"#,
+    );
+    ws.write_file(
+        "packages/shared-fs/index.ts",
+        "import fs from 'node:fs';\nexport function readSecret() { return fs.readFileSync('/etc/hosts'); }\n",
+    );
+
+    ws.write_file(
+        "packages/worker-pool/package.json",
+        r#"{ "name": "@acme/worker-pool", "main": "index.ts" }"#,
+    );
+    ws.write_file(
+        "packages/worker-pool/index.ts",
+        "import cp from 'node:child_process';\nexport function spawnWorker() { return cp.fork('worker.js'); }\n",
+    );
+
+    ws.write_file(
+        "packages/app/package.json",
+        r#"{
+  "name": "@acme/app",
+  "dependencies": {
+    "@acme/shared-fs": "catalog:",
+    "@acme/worker-pool": "catalog:daemon_tools",
+    "axios": "catalog:"
+  }
+}"#,
+    );
+
+    let entry = ws.write_file(
+        "packages/app/main.ts",
+        r#"
+import { readSecret } from "@acme/shared-fs";
+import { spawnWorker } from "@acme/worker-pool";
+import axios from "axios";
+readSecret();
+spawnWorker();
+console.log(axios);
+"#,
+    );
+
+    let resolver = TransitiveImportResolver::new(ws.path());
+    let report = resolver.resolve_javascript(&fs::read_to_string(&entry).unwrap(), Some(&entry));
+
+    assert!(
+        report.capabilities.external_paths,
+        "catalog: local package '@acme/shared-fs' importing node:fs must propagate external_paths"
+    );
+    assert!(
+        report.capabilities.daemon,
+        "catalog:daemon_tools local package '@acme/worker-pool' importing node:child_process must propagate daemon"
+    );
+    assert!(
+        report.capabilities.network,
+        "catalog: external package 'axios' must propagate network capability"
+    );
+    assert_eq!(report.resolved_files.len(), 2);
+}

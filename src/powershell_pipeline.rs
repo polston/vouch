@@ -435,6 +435,11 @@ pub enum VariableOrigin {
 pub struct VariableTaintTable {
     variables: std::collections::HashMap<String, VariableOrigin>,
     splat_args: std::collections::HashMap<String, Vec<String>>,
+    /// `$PSDefaultParameterValues` bindings keyed by normalized `"cmdlet_pattern:parameter_name"`
+    /// mapping to `(raw_cmdlet_pattern, param_name, rendered_value, origin)`.
+    default_param_values: std::collections::HashMap<String, (String, String, String, VariableOrigin)>,
+    /// Variable-to-class-type bindings (`$var` -> `"ClassName"` lowercased) for instance method dispatch.
+    class_instances: std::collections::HashMap<String, String>,
 }
 
 impl Default for VariableTaintTable {
@@ -448,6 +453,8 @@ impl VariableTaintTable {
         let mut table = Self {
             variables: std::collections::HashMap::new(),
             splat_args: std::collections::HashMap::new(),
+            default_param_values: std::collections::HashMap::new(),
+            class_instances: std::collections::HashMap::new(),
         };
         table.set("$_", VariableOrigin::PipelineItem);
         table.set("$PSItem", VariableOrigin::PipelineItem);
@@ -475,6 +482,85 @@ impl VariableTaintTable {
 
     pub fn set(&mut self, name: &str, origin: VariableOrigin) {
         self.variables.insert(Self::normalize_key(name), origin);
+    }
+
+    pub fn set_class_instance(&mut self, var_name: &str, class_name: &str) {
+        self.class_instances.insert(
+            Self::normalize_key(var_name),
+            class_name.trim().to_ascii_lowercase(),
+        );
+    }
+
+    pub fn get_class_instance(&self, var_name: &str) -> Option<&String> {
+        let key = Self::normalize_key(var_name);
+        if let Some(cls) = self.class_instances.get(&key) {
+            return Some(cls);
+        }
+        if !key.contains(':') && key.starts_with('$') {
+            let bare = &key[1..];
+            if let Some(cls) = self.class_instances.get(&format!("$script:{bare}")) {
+                return Some(cls);
+            }
+            if let Some(cls) = self.class_instances.get(&format!("$global:{bare}")) {
+                return Some(cls);
+            }
+        }
+        None
+    }
+
+    pub fn set_default_param(
+        &mut self,
+        cmd_pattern: &str,
+        param_name: &str,
+        rendered_val: String,
+        origin: VariableOrigin,
+    ) {
+        let cmd_pat = cmd_pattern.trim();
+        let param = param_name.trim().trim_start_matches('-');
+        if cmd_pat.is_empty() || param.is_empty() {
+            return;
+        }
+        let norm_key = format!(
+            "{}:{}",
+            cmd_pat.to_ascii_lowercase(),
+            param.to_ascii_lowercase()
+        );
+        self.default_param_values.insert(
+            norm_key,
+            (
+                cmd_pat.to_string(),
+                param.to_string(),
+                rendered_val,
+                origin,
+            ),
+        );
+    }
+
+    /// Return all `$PSDefaultParameterValues` entries whose cmdlet pattern (exact or wildcard)
+    /// matches `cmd_head`.
+    pub fn matching_default_params(
+        &self,
+        cmd_head: &str,
+    ) -> Vec<(String, String, VariableOrigin)> {
+        let mut matches = Vec::new();
+        for (cmd_pat, param, rendered_val, origin) in self.default_param_values.values() {
+            let is_match = if cmd_pat.contains('*') || cmd_pat.contains('?') || cmd_pat.contains('[')
+            {
+                let rx_str = wildcard_to_regex(cmd_pat);
+                regex::RegexBuilder::new(&rx_str)
+                    .case_insensitive(true)
+                    .build()
+                    .map(|rx| rx.is_match(cmd_head))
+                    .unwrap_or(false)
+            } else {
+                cmd_pat.eq_ignore_ascii_case(cmd_head)
+            };
+            if is_match {
+                matches.push((param.clone(), rendered_val.clone(), origin.clone()));
+            }
+        }
+        matches.sort_by(|a, b| a.0.cmp(&b.0));
+        matches
     }
 
     pub fn set_splat_args(&mut self, name: &str, args: Vec<String>) {
@@ -515,17 +601,26 @@ impl VariableTaintTable {
         None
     }
 
-    /// Propagate `$script:` and `$global:` variable origins from a callee scope back into the caller scope,
-    /// while keeping function-local (`$x`, `$local:x`, `$private:x`) mutations isolated.
+    /// Propagate `$script:`, `$global:`, `$this.*`, and `$PSDefaultParameterValues` origins from a
+    /// callee scope back into the caller scope while keeping function-local (`$x`, `$local:x`, `$private:x`)
+    /// mutations isolated.
     pub fn propagate_cross_scope_from(&mut self, callee: &VariableTaintTable) {
         for (k, v) in &callee.variables {
-            if k.starts_with("$script:") || k.starts_with("$global:") {
+            if k.starts_with("$script:") || k.starts_with("$global:") || k.starts_with("$this.") {
                 self.variables.insert(k.clone(), v.clone());
             }
         }
         for (k, v) in &callee.splat_args {
-            if k.starts_with("$script:") || k.starts_with("$global:") {
+            if k.starts_with("$script:") || k.starts_with("$global:") || k.starts_with("$this.") {
                 self.splat_args.insert(k.clone(), v.clone());
+            }
+        }
+        for (k, v) in &callee.default_param_values {
+            self.default_param_values.insert(k.clone(), v.clone());
+        }
+        for (k, v) in &callee.class_instances {
+            if k.starts_with("$script:") || k.starts_with("$global:") || k.starts_with("$this.") {
+                self.class_instances.insert(k.clone(), v.clone());
             }
         }
     }
@@ -697,6 +792,17 @@ impl PsControlFlowGraph {
                 if kw.eq_ignore_ascii_case("function") {
                     if let Some((summary, next_idx)) = parse_function_declaration(tokens, i) {
                         self.functions.insert(summary);
+                        i = next_idx;
+                        continue;
+                    }
+                }
+
+                // 1b. PowerShell class definition: `class <ClassName> [: <Base>] { <members & methods> }`
+                if kw.eq_ignore_ascii_case("class") {
+                    if let Some((methods, next_idx)) = parse_class_declaration(tokens, i) {
+                        for method in methods {
+                            self.functions.insert(method);
+                        }
                         i = next_idx;
                         continue;
                     }
@@ -1490,15 +1596,38 @@ impl PsControlFlowGraph {
     ) {
         analyze_statement(stmt, taint_table, &mut self.synthesized_commands);
 
-        // Check if statement invokes a locally declared function
+        // Check if statement invokes a locally declared function, dynamic call (`& $fn`), or class instance method
         if call_depth < MAX_INTERPROCEDURAL_CALL_DEPTH {
-            if let Some(PsToken::Identifier(head)) = stmt.first() {
-                if let Some(func) = self.functions.get(head).cloned() {
+            // 1. Direct or dynamic function call
+            let resolved_call: Option<(String, &[PsToken])> = match stmt.first() {
+                Some(PsToken::Identifier(head)) => Some((head.clone(), &stmt[1..])),
+                Some(PsToken::Other(op)) if op == "&" || op == "." => match stmt.get(1) {
+                    Some(PsToken::StringLiteral(s)) | Some(PsToken::Identifier(s)) => {
+                        Some((s.clone(), stmt.get(2..).unwrap_or(&[])))
+                    }
+                    Some(PsToken::Variable(v)) => match taint_table.get(v) {
+                        Some(VariableOrigin::Literal(lit)) if !lit.is_empty() && lit != "value" => {
+                            Some((lit.clone(), stmt.get(2..).unwrap_or(&[])))
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                },
+                _ => None,
+            };
+
+            if let Some((head, rest_tokens)) = resolved_call {
+                if let Some(func) = self.functions.get(&head).cloned() {
                     let mut callee_taint = taint_table.clone();
                     // Bind positional arguments to declared function parameters
-                    let arg_tokens: Vec<&PsToken> = stmt[1..]
+                    let arg_tokens: Vec<&PsToken> = rest_tokens
                         .iter()
-                        .filter(|t| !matches!(t, PsToken::OpenParen | PsToken::CloseParen | PsToken::Newline))
+                        .filter(|t| {
+                            !matches!(
+                                t,
+                                PsToken::OpenParen | PsToken::CloseParen | PsToken::Newline
+                            )
+                        })
                         .collect();
                     for (param_idx, param_name) in func.params.iter().enumerate() {
                         if let Some(arg_tok) = arg_tokens.get(param_idx) {
@@ -1517,6 +1646,89 @@ impl PsControlFlowGraph {
                     );
                     taint_table.propagate_cross_scope_from(&callee_taint);
                 }
+            }
+
+            // 2. Class instance method invocations: `$instance.Method($arg1, $arg2)`
+            let mut idx = 0;
+            while idx + 2 < stmt.len() {
+                if let (
+                    PsToken::Variable(inst_var),
+                    PsToken::MemberAccess(member),
+                    PsToken::OpenParen,
+                ) = (&stmt[idx], &stmt[idx + 1], &stmt[idx + 2])
+                {
+                    let method_name = member.trim_start_matches('.');
+                    let method_summary = taint_table
+                        .get_class_instance(inst_var)
+                        .and_then(|cls| self.functions.get(&format!("{cls}::{method_name}")))
+                        .or_else(|| self.functions.get(&format!("method::{method_name}")))
+                        .cloned();
+
+                    if let Some(method_func) = method_summary {
+                        if let Some((call_args, after_paren)) =
+                            extract_delimited_group(stmt, idx + 2, true)
+                        {
+                            let mut callee_taint = taint_table.clone();
+                            // Alias any existing `$inst_var.<prop>` entries into `$this.<prop>` for method body
+                            let inst_prefix = format!("{}.", VariableTaintTable::normalize_key(inst_var));
+                            let prop_snapshots: Vec<(String, VariableOrigin)> = callee_taint
+                                .variables
+                                .iter()
+                                .filter_map(|(k, v)| {
+                                    k.strip_prefix(&inst_prefix)
+                                        .map(|prop| (format!("$this.{prop}"), v.clone()))
+                                })
+                                .collect();
+                            for (this_prop, orig) in prop_snapshots {
+                                callee_taint.set(&this_prop, orig);
+                            }
+
+                            // Split comma-separated argument expressions inside `(...)`
+                            let arg_exprs = split_comma_separated_tokens(&call_args);
+                            for (param_idx, param_name) in method_func.params.iter().enumerate() {
+                                if let Some(arg_slice) = arg_exprs.get(param_idx) {
+                                    let orig = classify_rhs_origin(arg_slice, taint_table);
+                                    callee_taint.set(param_name, orig);
+                                }
+                            }
+
+                            let call_block =
+                                self.new_block(format!("method_{}", method_func.name), true);
+                            self.walk_tokens(
+                                &method_func.body_tokens,
+                                call_block,
+                                true,
+                                &mut callee_taint,
+                                call_depth + 1,
+                            );
+                            taint_table.propagate_cross_scope_from(&callee_taint);
+
+                            // Copy any `$this.<prop>` mutations back onto `$inst_var.<prop>`
+                            let this_updates: Vec<(String, VariableOrigin)> = taint_table
+                                .variables
+                                .iter()
+                                .filter_map(|(k, v)| {
+                                    k.strip_prefix("$this.").map(|prop| {
+                                        (
+                                            format!(
+                                                "{}.{prop}",
+                                                VariableTaintTable::normalize_key(inst_var)
+                                            ),
+                                            v.clone(),
+                                        )
+                                    })
+                                })
+                                .collect();
+                            for (inst_prop, orig) in this_updates {
+                                taint_table.set(&inst_prop, orig);
+                            }
+
+                            idx = after_paren;
+                            continue;
+                        }
+                    }
+                }
+                idx += 1;
             }
         }
     }
@@ -1948,6 +2160,34 @@ impl VariableTaintTable {
                 })
                 .or_insert_with(|| v.clone());
         }
+        for (k, v) in &other.default_param_values {
+            match self.default_param_values.get(k) {
+                None => {
+                    self.default_param_values.insert(k.clone(), v.clone());
+                }
+                Some((pat, param, val, existing_orig)) if existing_orig != &v.3 => {
+                    let merged_orig = if matches!(
+                        existing_orig,
+                        VariableOrigin::DynamicInput { .. } | VariableOrigin::TaintedExpression
+                    ) || matches!(
+                        v.3,
+                        VariableOrigin::DynamicInput { .. } | VariableOrigin::TaintedExpression
+                    ) {
+                        VariableOrigin::TaintedExpression
+                    } else {
+                        v.3.clone()
+                    };
+                    self.default_param_values.insert(
+                        k.clone(),
+                        (pat.clone(), param.clone(), val.clone(), merged_orig),
+                    );
+                }
+                _ => {}
+            }
+        }
+        for (k, v) in &other.class_instances {
+            self.class_instances.insert(k.clone(), v.clone());
+        }
     }
 }
 
@@ -2078,6 +2318,108 @@ fn parse_function_declaration(tokens: &[PsToken], start_idx: usize) -> Option<(P
         },
         after_body,
     ))
+}
+
+fn parse_class_declaration(
+    tokens: &[PsToken],
+    start_idx: usize,
+) -> Option<(Vec<PsFunctionSummary>, usize)> {
+    let mut cursor = start_idx + 1;
+    while cursor < tokens.len() && matches!(tokens[cursor], PsToken::Newline) {
+        cursor += 1;
+    }
+    let PsToken::Identifier(class_name) = tokens.get(cursor)? else {
+        return None;
+    };
+    let class_lower = class_name.to_ascii_lowercase();
+    cursor += 1;
+
+    // Skip optional `: BaseClass, IInterface` up to `{`
+    while cursor < tokens.len() && tokens[cursor] != PsToken::OpenBrace {
+        cursor += 1;
+    }
+    let (class_body, after_body) = extract_delimited_group(tokens, cursor, false)?;
+
+    let mut methods = Vec::new();
+    let mut i = 0;
+    while i < class_body.len() {
+        while i < class_body.len()
+            && matches!(class_body[i], PsToken::Newline | PsToken::Semicolon)
+        {
+            i += 1;
+        }
+        if i >= class_body.len() {
+            break;
+        }
+        // Look for `<MethodName> ( <params> ) { <body> }` (optionally preceded by `[Type]` or `hidden`/`static`)
+        if let PsToken::Identifier(ident) = &class_body[i] {
+            let mut look = i + 1;
+            while look < class_body.len() && matches!(class_body[look], PsToken::Newline) {
+                look += 1;
+            }
+            if class_body.get(look) == Some(&PsToken::OpenParen) {
+                if let Some((param_tokens, after_paren)) =
+                    extract_delimited_group(&class_body, look, true)
+                {
+                    if let Some((method_body, after_method)) =
+                        extract_delimited_group(&class_body, after_paren, false)
+                    {
+                        let mut params = Vec::new();
+                        for pt in param_tokens {
+                            if let PsToken::Variable(v) = pt {
+                                params.push(v);
+                            }
+                        }
+                        let method_lower = ident.to_ascii_lowercase();
+                        methods.push(PsFunctionSummary {
+                            name: format!("{class_lower}::{method_lower}"),
+                            params: params.clone(),
+                            body_tokens: method_body.clone(),
+                        });
+                        methods.push(PsFunctionSummary {
+                            name: format!("method::{method_lower}"),
+                            params,
+                            body_tokens: method_body,
+                        });
+                        i = after_method;
+                        continue;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+
+    Some((methods, after_body))
+}
+
+fn split_comma_separated_tokens(tokens: &[PsToken]) -> Vec<Vec<PsToken>> {
+    let mut groups = Vec::new();
+    let mut current = Vec::new();
+    let mut depth = 0usize;
+    for tok in tokens {
+        match tok {
+            PsToken::OpenParen | PsToken::OpenBrace => {
+                depth += 1;
+                current.push(tok.clone());
+            }
+            PsToken::CloseParen | PsToken::CloseBrace => {
+                depth = depth.saturating_sub(1);
+                current.push(tok.clone());
+            }
+            PsToken::Other(op) if op == "," && depth == 0 => {
+                if !current.is_empty() {
+                    groups.push(std::mem::take(&mut current));
+                }
+            }
+            PsToken::Newline if depth == 0 => {}
+            _ => current.push(tok.clone()),
+        }
+    }
+    if !current.is_empty() {
+        groups.push(current);
+    }
+    groups
 }
 
 fn collect_next_statement(tokens: &[PsToken], start_idx: usize) -> (Vec<PsToken>, usize) {
@@ -2376,14 +2718,22 @@ fn analyze_statement(stmt: &[PsToken], taint_table: &mut VariableTaintTable, out
         }
     }
 
-    // 1. Variable assignments: look for $var = <expr>
+    // 1. Variable, property (`$this.Prop` / `$obj.Prop`), and `$PSDefaultParameterValues` assignments
     for (idx, tok) in stmt.iter().enumerate() {
         if let PsToken::Other(op) = tok {
             if (op == "=" || op == "+=") && idx > 0 {
+                let rhs = &stmt[idx + 1..];
+                let origin = classify_rhs_origin(rhs, taint_table);
+
+                // 1a. Direct variable assignment: `$var = <expr>`
                 if let PsToken::Variable(var) = &stmt[idx - 1] {
-                    let rhs = &stmt[idx + 1..];
-                    let origin = classify_rhs_origin(rhs, taint_table);
-                    taint_table.set(var, origin);
+                    if var.eq_ignore_ascii_case("$PSDefaultParameterValues") {
+                        parse_ps_default_parameter_hashtable(rhs, taint_table);
+                    }
+                    if let Some(cls) = extract_class_instantiation_name(rhs) {
+                        taint_table.set_class_instance(var, &cls);
+                    }
+                    taint_table.set(var, origin.clone());
                     let splat_args = extract_splat_args_from_rhs(rhs, taint_table);
                     if !splat_args.is_empty() {
                         if op == "+=" {
@@ -2393,6 +2743,73 @@ fn analyze_statement(stmt: &[PsToken], taint_table: &mut VariableTaintTable, out
                             taint_table.set_splat_args(var, combined);
                         } else {
                             taint_table.set_splat_args(var, splat_args);
+                        }
+                    }
+                }
+                // 1b. Instance property assignment: `$this.Prop = <expr>` or `$obj.Prop = <expr>`
+                else if idx >= 2 {
+                    if let (PsToken::Variable(var), PsToken::MemberAccess(member)) =
+                        (&stmt[idx - 2], &stmt[idx - 1])
+                    {
+                        let prop_key = format!("{}{}", var, member);
+                        taint_table.set(&prop_key, origin.clone());
+                        let splat_args = extract_splat_args_from_rhs(rhs, taint_table);
+                        if !splat_args.is_empty() {
+                            taint_table.set_splat_args(&prop_key, splat_args);
+                        }
+                    }
+                }
+
+                // 1c. Indexed `$PSDefaultParameterValues['Cmd:Param'] = <expr>`
+                if idx >= 4 {
+                    if let (
+                        PsToken::Variable(var),
+                        PsToken::Other(open_br),
+                        PsToken::StringLiteral(key_str) | PsToken::Identifier(key_str),
+                        PsToken::Other(close_br),
+                    ) = (
+                        &stmt[idx - 4],
+                        &stmt[idx - 3],
+                        &stmt[idx - 2],
+                        &stmt[idx - 1],
+                    ) {
+                        if var.eq_ignore_ascii_case("$PSDefaultParameterValues")
+                            && open_br == "["
+                            && close_br == "]"
+                        {
+                            record_ps_default_parameter_entry(key_str, rhs, origin, taint_table);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 1d. `$PSDefaultParameterValues.Add('Cmd:Param', <expr>)`
+    for i in 0..stmt.len() {
+        if let (
+            Some(PsToken::Variable(var)),
+            Some(PsToken::MemberAccess(member)),
+            Some(PsToken::OpenParen),
+        ) = (stmt.get(i), stmt.get(i + 1), stmt.get(i + 2))
+        {
+            if var.eq_ignore_ascii_case("$PSDefaultParameterValues")
+                && member.trim_start_matches('.').eq_ignore_ascii_case("add")
+            {
+                if let Some((call_args, _)) = extract_delimited_group(stmt, i + 2, true) {
+                    let arg_groups = split_comma_separated_tokens(&call_args);
+                    if arg_groups.len() >= 2 {
+                        if let Some(PsToken::StringLiteral(key_str) | PsToken::Identifier(key_str)) =
+                            arg_groups[0].first()
+                        {
+                            let val_rhs = &arg_groups[1];
+                            let val_orig = classify_rhs_origin(val_rhs, taint_table);
+                            record_ps_default_parameter_entry(
+                                key_str,
+                                val_rhs,
+                                val_orig,
+                                taint_table,
+                            );
                         }
                     }
                 }
@@ -2499,7 +2916,69 @@ fn analyze_statement(stmt: &[PsToken], taint_table: &mut VariableTaintTable, out
         }
     }
 
-    // 4. Destructive or splatted command invocations
+    // 3b. Dynamic call operator (`& <target> [args...]`) and dot-source operator (`. <target> [args...]`)
+    if let Some(PsToken::Other(op)) = stmt.first() {
+        if op == "&" || op == "." {
+            if let Some(target_tok) = stmt.get(1) {
+                match target_tok {
+                    PsToken::Variable(v) => {
+                        if let Some(VariableOrigin::Literal(lit)) = taint_table.get(v).cloned() {
+                            if !lit.is_empty() && lit != "value" {
+                                let mut synthetic_stmt = vec![PsToken::Identifier(lit)];
+                                synthetic_stmt.extend_from_slice(stmt.get(2..).unwrap_or(&[]));
+                                analyze_statement(&synthetic_stmt, taint_table, out);
+                                return;
+                            }
+                        }
+                        // Unresolved or tainted dynamic call/dot-source target -> synthesize Invoke-Expression
+                        let mut args = vec!["-Command".to_string(), v.clone()];
+                        let mut has_taint = taint_table.is_tainted_or_dynamic(v);
+                        for tok in stmt.iter().skip(2) {
+                            match tok {
+                                PsToken::Variable(arg_v) => {
+                                    args.push(arg_v.clone());
+                                    if taint_table.is_tainted_or_dynamic(arg_v) {
+                                        has_taint = true;
+                                    }
+                                }
+                                PsToken::StringLiteral(s)
+                                | PsToken::Identifier(s)
+                                | PsToken::Other(s) => args.push(s.clone()),
+                                _ => {}
+                            }
+                        }
+                        if has_taint {
+                            args.push("untrusted_input".to_string());
+                        }
+                        out.push(Cmd {
+                            head: "Invoke-Expression".to_string(),
+                            args,
+                            ..Default::default()
+                        });
+                        return;
+                    }
+                    PsToken::StringLiteral(s) | PsToken::Identifier(s) => {
+                        let mut synthetic_stmt = vec![PsToken::Identifier(s.clone())];
+                        synthetic_stmt.extend_from_slice(stmt.get(2..).unwrap_or(&[]));
+                        analyze_statement(&synthetic_stmt, taint_table, out);
+                        return;
+                    }
+                    PsToken::OpenBrace => {
+                        if let Some((inner, _)) = extract_delimited_group(stmt, 1, false) {
+                            let mut sub_cfg = PsControlFlowGraph::default();
+                            let entry_id = sub_cfg.new_block("call_scriptblock", true);
+                            sub_cfg.walk_tokens(&inner, entry_id, true, taint_table, 0);
+                            out.extend(sub_cfg.synthesized_commands);
+                            return;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // 4. Destructive, splatted, or `$PSDefaultParameterValues`-augmented command invocations
     if let Some(first) = stmt.first() {
         if let PsToken::Identifier(head) = first {
             let name_lower = head.to_lowercase();
@@ -2507,6 +2986,7 @@ fn analyze_statement(stmt: &[PsToken], taint_table: &mut VariableTaintTable, out
                 .iter()
                 .skip(1)
                 .any(|t| matches!(t, PsToken::SplatVariable(_)));
+            let matching_defaults = taint_table.matching_default_params(head);
             if name_lower.starts_with("remove-")
                 || name_lower.starts_with("stop-")
                 || name_lower.starts_with("set-")
@@ -2527,6 +3007,7 @@ fn analyze_statement(stmt: &[PsToken], taint_table: &mut VariableTaintTable, out
                         | "iwr"
                 )
                 || has_splat
+                || !matching_defaults.is_empty()
             {
                 let mut args = Vec::new();
                 let mut has_untrusted_var = false;
@@ -2547,9 +3028,18 @@ fn analyze_statement(stmt: &[PsToken], taint_table: &mut VariableTaintTable, out
                                     }
                                 }
                             } else if let Some(PsToken::MemberAccess(m)) = stmt.get(idx + 1) {
-                                args.push(format!("{}{}", v, m));
-                                if taint_table.is_tainted_or_dynamic(v) {
-                                    has_untrusted_var = true;
+                                let prop_expr = format!("{}{}", v, m);
+                                if let Some(VariableOrigin::Literal(lit)) =
+                                    taint_table.get(&prop_expr)
+                                {
+                                    args.push(lit.clone());
+                                } else {
+                                    args.push(prop_expr.clone());
+                                    if taint_table.is_tainted_or_dynamic(&prop_expr)
+                                        || taint_table.is_tainted_or_dynamic(v)
+                                    {
+                                        has_untrusted_var = true;
+                                    }
                                 }
                                 idx += 1;
                             }
@@ -2575,6 +3065,35 @@ fn analyze_statement(stmt: &[PsToken], taint_table: &mut VariableTaintTable, out
                         _ => {}
                     }
                     idx += 1;
+                }
+
+                // Inject matching `$PSDefaultParameterValues` parameters not already explicitly passed
+                for (param, rendered_val, origin) in matching_defaults {
+                    let flag_name = format!("-{param}");
+                    let already_present = args
+                        .iter()
+                        .any(|a| a.eq_ignore_ascii_case(&flag_name));
+                    if !already_present {
+                        if rendered_val.eq_ignore_ascii_case("$true") {
+                            args.push(flag_name);
+                        } else if !rendered_val.eq_ignore_ascii_case("$false") {
+                            args.push(flag_name);
+                            if !rendered_val.is_empty() {
+                                args.push(rendered_val);
+                            }
+                        }
+                    }
+                    if matches!(
+                        origin,
+                        VariableOrigin::DynamicInput { .. }
+                            | VariableOrigin::TaintedExpression
+                            | VariableOrigin::Environment(_)
+                    ) {
+                        has_untrusted_var = true;
+                        if !args.iter().any(|a| a == "untrusted_input") {
+                            args.push("untrusted_input".to_string());
+                        }
+                    }
                 }
 
                 // If variable passed is untrusted/dynamic, ensure -Recurse is included so path guards evaluate
@@ -2916,9 +3435,17 @@ fn classify_rhs_origin(rhs: &[PsToken], taint_table: &VariableTaintTable) -> Var
         }
     }
 
-    // Check if right-hand side references other variables
-    for tok in &meaningful {
+    // Check if right-hand side references other variables (including `$this.Prop` / `$obj.Prop`)
+    for (idx, tok) in meaningful.iter().enumerate() {
         if let PsToken::Variable(v) = tok {
+            if let Some(PsToken::MemberAccess(m)) = meaningful.get(idx + 1) {
+                let prop_expr = format!("{}{}", v, m);
+                if taint_table.is_tainted_or_dynamic(&prop_expr) {
+                    return VariableOrigin::TaintedExpression;
+                } else if let Some(orig) = taint_table.get(&prop_expr) {
+                    return orig.clone();
+                }
+            }
             let v_lower = v.to_lowercase();
             if v_lower.starts_with("$env:") {
                 return VariableOrigin::Environment((*v).clone());
@@ -2943,6 +3470,126 @@ fn classify_rhs_origin(rhs: &[PsToken], taint_table: &VariableTaintTable) -> Var
     }
 
     VariableOrigin::Literal("value".to_string())
+}
+
+fn extract_class_instantiation_name(rhs: &[PsToken]) -> Option<String> {
+    // 1. `[ClassName]::new(...)`
+    for i in 0..rhs.len() {
+        if let (
+            Some(PsToken::Other(open_br)),
+            Some(PsToken::Identifier(cls)),
+            Some(PsToken::Other(close_br)),
+        ) = (rhs.get(i), rhs.get(i + 1), rhs.get(i + 2))
+        {
+            if open_br == "[" && close_br == "]" {
+                // Check for `::new` or `:new` following `]`
+                let rest_str = tokens_to_arg_string(rhs.get(i + 3..).unwrap_or(&[]));
+                if rest_str.to_ascii_lowercase().contains("new") {
+                    return Some(cls.clone());
+                }
+            }
+        }
+    }
+    // 2. `New-Object [-TypeName] ClassName`
+    if let Some(PsToken::Identifier(cmd)) = rhs.first() {
+        if cmd.eq_ignore_ascii_case("new-object") {
+            for tok in rhs.iter().skip(1) {
+                match tok {
+                    PsToken::Other(flag) if flag.starts_with('-') => continue,
+                    PsToken::Identifier(cls) | PsToken::StringLiteral(cls) => {
+                        return Some(cls.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    None
+}
+
+fn record_ps_default_parameter_entry(
+    key_str: &str,
+    val_tokens: &[PsToken],
+    origin: VariableOrigin,
+    taint_table: &mut VariableTaintTable,
+) {
+    let Some((cmd_pat, param_name)) = key_str.split_once(':') else {
+        return;
+    };
+    let rendered = if val_tokens.len() == 1 {
+        match &val_tokens[0] {
+            PsToken::Variable(v) => {
+                if v.eq_ignore_ascii_case("$true") || v.eq_ignore_ascii_case("$false") {
+                    v.clone()
+                } else if let Some(VariableOrigin::Literal(lit)) = taint_table.get(v) {
+                    lit.clone()
+                } else {
+                    v.clone()
+                }
+            }
+            PsToken::StringLiteral(s) | PsToken::Identifier(s) | PsToken::Other(s) => s.clone(),
+            _ => tokens_to_arg_string(val_tokens),
+        }
+    } else {
+        tokens_to_arg_string(val_tokens)
+    };
+    taint_table.set_default_param(cmd_pat, param_name, rendered, origin);
+}
+
+fn parse_ps_default_parameter_hashtable(rhs: &[PsToken], taint_table: &mut VariableTaintTable) {
+    if rhs.len() < 2 {
+        return;
+    }
+    let Some(PsToken::Other(at)) = rhs.first() else {
+        return;
+    };
+    if at != "@" || !matches!(rhs.get(1), Some(PsToken::OpenBrace)) {
+        return;
+    }
+    let Some((inner, _)) = extract_delimited_group(rhs, 1, false) else {
+        return;
+    };
+    let mut i = 0;
+    while i < inner.len() {
+        while i < inner.len() && matches!(inner[i], PsToken::Semicolon | PsToken::Newline) {
+            i += 1;
+        }
+        if i >= inner.len() {
+            break;
+        }
+        let key_opt = match &inner[i] {
+            PsToken::Identifier(k) | PsToken::StringLiteral(k) => Some(k.clone()),
+            _ => None,
+        };
+        if let Some(key_str) = key_opt {
+            if matches!(inner.get(i + 1), Some(PsToken::Other(op)) if op == "=") {
+                i += 2;
+                let mut val_tokens = Vec::new();
+                let mut depth = 0usize;
+                while i < inner.len() {
+                    match &inner[i] {
+                        PsToken::OpenParen | PsToken::OpenBrace => {
+                            depth += 1;
+                            val_tokens.push(inner[i].clone());
+                        }
+                        PsToken::CloseParen | PsToken::CloseBrace => {
+                            depth = depth.saturating_sub(1);
+                            val_tokens.push(inner[i].clone());
+                        }
+                        PsToken::Semicolon | PsToken::Newline if depth == 0 => {
+                            break;
+                        }
+                        _ => val_tokens.push(inner[i].clone()),
+                    }
+                    i += 1;
+                }
+                let origin = classify_rhs_origin(&val_tokens, taint_table);
+                record_ps_default_parameter_entry(&key_str, &val_tokens, origin, taint_table);
+                continue;
+            }
+        }
+        i += 1;
+    }
 }
 
 /// Inspect a list of parsed PowerShell commands to extract member mutations

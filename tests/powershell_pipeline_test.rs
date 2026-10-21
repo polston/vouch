@@ -896,3 +896,127 @@ fn powershell_pipeline_variable_pv_taint_propagation_across_multi_stage_pipeline
         other => panic!("expected Ask on process_control guard via -PipelineVariable, got {other:?}"),
     }
 }
+
+#[test]
+fn powershell_ps_default_parameter_values_taint_injection_and_wildcard_matching() {
+    use vouch::powershell_pipeline::PsControlFlowGraph;
+
+    // 1. Indexed assignment `$PSDefaultParameterValues['Remove-Item:Path'] = (Read-Host)`
+    // and wildcard `$PSDefaultParameterValues['Remove-*:Recurse'] = $true`
+    let script_indexed = "{
+        $PSDefaultParameterValues['Remove-Item:Path'] = (Read-Host)
+        $PSDefaultParameterValues['Remove-*:Recurse'] = $true
+        Remove-Item -Force
+    }";
+    let cfg_idx = PsControlFlowGraph::build(script_indexed);
+    assert_eq!(cfg_idx.synthesized_commands.len(), 1);
+    let cmd = &cfg_idx.synthesized_commands[0];
+    assert_eq!(cmd.head, "Remove-Item");
+    assert!(
+        cmd.args.contains(&"-Path".to_string()),
+        "$PSDefaultParameterValues['Remove-Item:Path'] must inject -Path: {:?}",
+        cmd.args
+    );
+    assert!(
+        cmd.args.contains(&"-Recurse".to_string()),
+        "wildcard $PSDefaultParameterValues['Remove-*:Recurse'] must inject -Recurse: {:?}",
+        cmd.args
+    );
+    assert!(
+        cmd.args.contains(&"untrusted_input".to_string()),
+        "tainted $PSDefaultParameterValues entry must propagate untrusted_input: {:?}",
+        cmd.args
+    );
+
+    // 2. Hashtable assignment `$PSDefaultParameterValues = @{ '*:Path' = $userTarget }`
+    // and `.Add('Stop-Process:Id', $procId)`
+    let script_hash = "{
+        $userTarget = Read-Host
+        $PSDefaultParameterValues = @{ 'Remove-Item:Path' = $userTarget }
+        $PSDefaultParameterValues.Add('Remove-Item:Force', $true)
+        Remove-Item
+    }";
+    let cfg_hash = PsControlFlowGraph::build(script_hash);
+    assert_eq!(cfg_hash.synthesized_commands.len(), 1);
+    let cmd_hash = &cfg_hash.synthesized_commands[0];
+    assert_eq!(cmd_hash.head, "Remove-Item");
+    assert!(cmd_hash.args.contains(&"-Path".to_string()));
+    assert!(cmd_hash.args.contains(&"-Force".to_string()));
+    assert!(cmd_hash.args.contains(&"-Recurse".to_string()));
+    assert!(cmd_hash.args.contains(&"untrusted_input".to_string()));
+}
+
+#[test]
+fn powershell_dynamic_call_and_dot_source_operators_resolve_literals_and_flag_tainted_targets() {
+    use vouch::powershell_pipeline::PsControlFlowGraph;
+
+    // 1. Dynamic call `& $cmd` where `$cmd` is a known literal resolves to the underlying cmdlet
+    let script_resolved = "{
+        $cmd = 'Remove-Item'
+        $target = Read-Host
+        & $cmd $target
+    }";
+    let cfg_res = PsControlFlowGraph::build(script_resolved);
+    assert_eq!(cfg_res.synthesized_commands.len(), 1);
+    assert_eq!(cfg_res.synthesized_commands[0].head, "Remove-Item");
+    assert!(cfg_res.synthesized_commands[0]
+        .args
+        .contains(&"-Recurse".to_string()));
+    assert!(cfg_res.synthesized_commands[0]
+        .args
+        .contains(&"untrusted_input".to_string()));
+
+    // 2. Dynamic call `& $dynCmd` or dot-source `. $dynScript` where target is tainted synthesizes Invoke-Expression
+    let script_tainted = "{
+        $dynCmd = Read-Host
+        & $dynCmd '-Force'
+        $dynScript = Get-Content C:/Users/dev/plugin.ps1
+        . $dynScript
+    }";
+    let cfg_tainted = PsControlFlowGraph::build(script_tainted);
+    assert_eq!(cfg_tainted.synthesized_commands.len(), 2);
+    assert_eq!(cfg_tainted.synthesized_commands[0].head, "Invoke-Expression");
+    assert!(cfg_tainted.synthesized_commands[0]
+        .args
+        .contains(&"untrusted_input".to_string()));
+    assert_eq!(cfg_tainted.synthesized_commands[1].head, "Invoke-Expression");
+    assert!(cfg_tainted.synthesized_commands[1]
+        .args
+        .contains(&"untrusted_input".to_string()));
+}
+
+#[test]
+fn powershell_class_instance_methods_and_this_property_taint_propagation() {
+    use vouch::powershell_pipeline::PsControlFlowGraph;
+
+    let script = "{
+        class Cleaner {
+            [string] $TargetPath
+            SetTarget($p) {
+                $this.TargetPath = $p
+            }
+            Purge() {
+                Remove-Item $this.TargetPath
+            }
+        }
+        $c = [Cleaner]::new()
+        $untrusted = Read-Host
+        $c.SetTarget($untrusted)
+        $c.Purge()
+    }";
+    let cfg = PsControlFlowGraph::build(script);
+    assert_eq!(
+        cfg.synthesized_commands.len(),
+        1,
+        "Cleaner.Purge() must synthesize Remove-Item with tainted $this.TargetPath: {:?}",
+        cfg.synthesized_commands
+    );
+    let cmd = &cfg.synthesized_commands[0];
+    assert_eq!(cmd.head, "Remove-Item");
+    assert!(
+        cmd.args.contains(&"-Recurse".to_string())
+            && cmd.args.contains(&"untrusted_input".to_string()),
+        "$this.TargetPath tainted via SetTarget($untrusted) must trigger -Recurse and untrusted_input in Purge(): {:?}",
+        cmd.args
+    );
+}

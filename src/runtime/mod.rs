@@ -17,11 +17,12 @@ pub use ebpf::{
 pub use noop::NoopVerifier;
 pub use policy::{evaluate_event_borrowed, evaluate_trace, evaluate_trace_zero_copy};
 pub use sandbox::{
-    BpfInstruction, CgroupMemoryEvents, CgroupPidsEvents, CgroupScope, CgroupV2Manager,
-    LandlockPathRule, LandlockRulesetPlan, LandlockVerdict, LoopbackInterfaceSpec, NamespaceSpec,
-    RlimitResource, RlimitRule, RlimitSet, SandboxExecutionPlan, SeccompFilterProgram,
-    AUDIT_ARCH_AARCH64, AUDIT_ARCH_X86_64, CLONE_NEWIPC, CLONE_NEWNET, CLONE_NEWNS, CLONE_NEWPID,
-    CLONE_NEWUSER, CLONE_NEWUTS, LANDLOCK_ACCESS_FS_EXECUTE, LANDLOCK_ACCESS_FS_MAKE_BLOCK,
+    BpfInstruction, CgroupCpuStat, CgroupIoMaxRule, CgroupMemoryEvents, CgroupPidsEvents,
+    CgroupScope, CgroupV2Manager, LandlockPathRule, LandlockRulesetPlan, LandlockVerdict,
+    LoopbackInterfaceSpec, NamespaceSpec, RlimitResource, RlimitRule, RlimitSet,
+    SandboxExecutionPlan, SeccompFilterProgram, AUDIT_ARCH_AARCH64, AUDIT_ARCH_X86_64,
+    CLONE_NEWIPC, CLONE_NEWNET, CLONE_NEWNS, CLONE_NEWPID, CLONE_NEWUSER, CLONE_NEWUTS,
+    DEFAULT_CPU_MAX_PERIOD_US, LANDLOCK_ACCESS_FS_EXECUTE, LANDLOCK_ACCESS_FS_MAKE_BLOCK,
     LANDLOCK_ACCESS_FS_MAKE_CHAR, LANDLOCK_ACCESS_FS_MAKE_DIR, LANDLOCK_ACCESS_FS_MAKE_FIFO,
     LANDLOCK_ACCESS_FS_MAKE_REG, LANDLOCK_ACCESS_FS_MAKE_SOCK, LANDLOCK_ACCESS_FS_MAKE_SYM,
     LANDLOCK_ACCESS_FS_READ_DIR, LANDLOCK_ACCESS_FS_READ_FILE, LANDLOCK_ACCESS_FS_REFER,

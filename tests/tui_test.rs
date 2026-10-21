@@ -650,7 +650,6 @@ fn tui_visualizer_direct_path_and_construct_amendment_and_guard_refusal() {
 
     let _ = std::fs::remove_dir_all(&tmp_path);
 }
-
 #[test]
 fn tui_visualizer_interactive_simulation_and_impact_diff_without_disk_mutation() {
     let tag = format!("tui_test_vis_sim_{}_{}", std::process::id(), line!());
@@ -725,7 +724,6 @@ fn tui_visualizer_interactive_simulation_and_impact_diff_without_disk_mutation()
 
     let _ = std::fs::remove_dir_all(&tmp_path);
 }
-
 #[test]
 fn tui_visualizer_multi_node_cumulative_simulation_session_impact_and_atomic_apply() {
     let tag = format!("tui_test_vis_multi_sim_{}_{}", std::process::id(), line!());
@@ -872,6 +870,84 @@ fn tui_visualizer_multi_node_cumulative_simulation_session_impact_and_atomic_app
     let final_toml = std::fs::read_to_string(&config_file).unwrap();
     assert!(final_toml.contains("subshell = \"allow\""));
     assert!(final_toml.contains("/var/log/audit.log"));
+
+    let _ = std::fs::remove_dir_all(&tmp_path);
+}
+#[test]
+fn tui_visualizer_amendment_undo_stack_and_unified_diff_patch_modal() {
+    let tag = format!("tui_test_vis_undo_diff_{}_{}", std::process::id(), line!());
+    let tmp_path = std::env::temp_dir().join(tag);
+    let _ = std::fs::remove_dir_all(&tmp_path);
+    let home = tmp_path.to_str().unwrap();
+    let config_dir = tmp_path.join(".config").join("vouch");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let config_file = config_dir.join("config.toml");
+    let initial_toml = "version = 1\n[write]\nallow_paths = [\"/tmp/**\"]\n";
+    std::fs::write(&config_file, initial_toml).unwrap();
+
+    let records = sample_records();
+    let engine = TuiEngine::from_records(home, &records);
+    let mut app = TuiApp::new(engine);
+
+    // Switch to Policy Visualizer tab
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('v')));
+    assert_eq!(app.active_tab, vouch::tui::ViewTab::Visualizer);
+
+    // Select [PATH] node ("unpermitted write path: /var/log/custom.log")
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('j')));
+    assert_eq!(app.selected_idx, 1);
+
+    // 1. Press 'P' to open Unified Diff Patch Modal before applying
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('P')));
+    assert!(app.show_diff_modal);
+    let diff_frame = app.render();
+    assert!(diff_frame.contains("[Unified Diff Patch Preview (P)]"));
+    assert!(diff_frame.contains("--- a/config.toml"));
+    assert!(diff_frame.contains("+++ b/config.toml"));
+    assert!(diff_frame.contains("@@ -1,"));
+    assert!(diff_frame.contains("/var/log/custom.log"));
+
+    // Press 'P' again to close modal
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('P')));
+    assert!(!app.show_diff_modal);
+
+    // 2. Press 'a' to apply the [PATH] amendment to config.toml
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('a')));
+    assert_eq!(app.engine.undo_stack.borrow().len(), 1);
+    let amended_toml = std::fs::read_to_string(&config_file).unwrap();
+    assert!(amended_toml.contains("/var/log/custom.log"));
+    assert!(!app
+        .engine
+        .candidates
+        .iter()
+        .any(|c| c.name == "path: /var/log/custom.log"));
+
+    // 3. Press 'u' to undo the last amendment and verify exact byte-for-byte rollback & candidate restoration
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('u')));
+    assert!(
+        app.status_message
+            .contains("Reverted config.toml amendment"),
+        "expected undo confirmation status, got: {}",
+        app.status_message
+    );
+    assert!(app.engine.undo_stack.borrow().is_empty());
+    let reverted_toml = std::fs::read_to_string(&config_file).unwrap();
+    assert_eq!(
+        reverted_toml, initial_toml,
+        "undo ('u') must restore config.toml to exact pre-amendment contents"
+    );
+    assert!(
+        app.engine
+            .candidates
+            .iter()
+            .any(|c| c.name == "path: /var/log/custom.log"),
+        "undo ('u') must restore the reverted candidate to engine.candidates"
+    );
+
+    // 4. Pressing 'u' again when undo stack is empty refuses cleanly without mutating disk
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('u')));
+    assert!(app.status_message.contains("Undo stack is empty"));
+    assert_eq!(std::fs::read_to_string(&config_file).unwrap(), initial_toml);
 
     let _ = std::fs::remove_dir_all(&tmp_path);
 }

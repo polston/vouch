@@ -43,10 +43,18 @@ pub struct DecisionItem {
     pub cwd: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct ConfigUndoSnapshot {
+    pub previous_toml: String,
+    pub description: String,
+    pub restored_candidates: Vec<ReviewCandidate>,
+}
+
 pub struct TuiEngine {
     pub home: String,
     pub decisions: Vec<DecisionItem>,
     pub candidates: Vec<ReviewCandidate>,
+    pub undo_stack: std::cell::RefCell<Vec<ConfigUndoSnapshot>>,
     pub tail_reader: Option<JournalTailReader>,
     pub tail_receiver: Option<std::sync::mpsc::Receiver<Record>>,
 }
@@ -148,6 +156,7 @@ impl TuiEngine {
             home: home.to_string(),
             decisions,
             candidates,
+            undo_stack: std::cell::RefCell::new(Vec::new()),
             tail_reader: None,
             tail_receiver: None,
         }
@@ -349,12 +358,19 @@ impl TuiEngine {
         })
     }
 
-    /// Applies an approved candidate rule to configuration files.
+    /// Applies an approved candidate rule to configuration files and pushes a rollback snapshot onto `undo_stack`.
     pub fn apply_candidate(&self, cand: &ReviewCandidate) -> Result<String, String> {
-        let (updated_toml, _summary, _) = self.build_amended_config_toml(cand)?;
         let config_path = crate::knowledge::config_dir(&self.home).join("config.toml");
+        let previous_toml = std::fs::read_to_string(&config_path).unwrap_or_default();
+        let (updated_toml, summary, _) = self.build_amended_config_toml(cand)?;
         std::fs::write(&config_path, updated_toml)
             .map_err(|e| format!("Failed to write config: {e}"))?;
+
+        self.undo_stack.borrow_mut().push(ConfigUndoSnapshot {
+            previous_toml,
+            description: summary,
+            restored_candidates: vec![cand.clone()],
+        });
 
         if cand.section == "write.allow_paths" {
             let path_to_add = cand.name.strip_prefix("path: ").unwrap_or(&cand.name);
@@ -364,21 +380,122 @@ impl TuiEngine {
         }
     }
 
-    /// Atomically applies multiple staged candidate rules to `config.toml`.
+    /// Atomically applies multiple staged candidate rules to `config.toml` and pushes a rollback snapshot onto `undo_stack`.
     pub fn apply_candidates(&self, cands: &[ReviewCandidate]) -> Result<String, String> {
         if cands.len() == 1 {
             return self.apply_candidate(&cands[0]);
         }
-        let (updated_toml, summary, _) = self.build_cumulative_amended_config_toml(cands)?;
         let config_path = crate::knowledge::config_dir(&self.home).join("config.toml");
+        let previous_toml = std::fs::read_to_string(&config_path).unwrap_or_default();
+        let (updated_toml, summary, _) = self.build_cumulative_amended_config_toml(cands)?;
         std::fs::write(&config_path, updated_toml)
             .map_err(|e| format!("Failed to write config: {e}"))?;
+
+        self.undo_stack.borrow_mut().push(ConfigUndoSnapshot {
+            previous_toml,
+            description: summary.clone(),
+            restored_candidates: cands.to_vec(),
+        });
+
         Ok(format!(
             "Applied {} staged amendments ({}) to config.toml",
             cands.len(),
             summary
         ))
     }
+
+    /// Reverts the most recent `config.toml` amendment from `undo_stack` and restores its candidate entries.
+    pub fn undo_last_amendment(&mut self) -> Result<String, String> {
+        let Some(snapshot) = self.undo_stack.borrow_mut().pop() else {
+            return Err("Undo stack is empty (no applied amendments in this session)".to_string());
+        };
+        let config_path = crate::knowledge::config_dir(&self.home).join("config.toml");
+        std::fs::write(&config_path, &snapshot.previous_toml)
+            .map_err(|e| format!("Failed to write reverted config: {e}"))?;
+
+        for cand in snapshot.restored_candidates {
+            if !self
+                .candidates
+                .iter()
+                .any(|c| c.section == cand.section && c.name == cand.name)
+            {
+                self.candidates.push(cand);
+            }
+        }
+        self.candidates.sort_by(|a, b| {
+            b.proposable
+                .cmp(&a.proposable)
+                .then_with(|| b.approved.cmp(&a.approved))
+        });
+
+        Ok(format!(
+            "Reverted config.toml amendment ({})",
+            snapshot.description
+        ))
+    }
+
+    /// Builds a unified diff (`--- a/config.toml` / `+++ b/config.toml`) between the current on-disk
+    /// `config.toml` and the cumulative amended `config.toml` for `cands`.
+    pub fn build_unified_diff_for_candidates(
+        &self,
+        cands: &[ReviewCandidate],
+    ) -> Result<String, String> {
+        let config_path = crate::knowledge::config_dir(&self.home).join("config.toml");
+        let before = std::fs::read_to_string(&config_path).unwrap_or_default();
+        let (after, summary, _) = self.build_cumulative_amended_config_toml(cands)?;
+        Ok(render_unified_toml_diff(&before, &after, &summary))
+    }
+}
+
+fn render_unified_toml_diff(before: &str, after: &str, summary: &str) -> String {
+    let before_lines: Vec<&str> = before.lines().collect();
+    let after_lines: Vec<&str> = after.lines().collect();
+    let mut out = String::new();
+    out.push_str(&format!("# Amendment Summary: {summary}\n"));
+    out.push_str("--- a/config.toml\n");
+    out.push_str("+++ b/config.toml\n");
+    out.push_str(&format!(
+        "@@ -1,{} +1,{} @@\n",
+        before_lines.len(),
+        after_lines.len()
+    ));
+
+    let mut b_idx = 0usize;
+    let mut a_idx = 0usize;
+    while b_idx < before_lines.len() || a_idx < after_lines.len() {
+        match (before_lines.get(b_idx), after_lines.get(a_idx)) {
+            (Some(&b_line), Some(&a_line)) if b_line == a_line => {
+                out.push_str(&format!(" {b_line}\n"));
+                b_idx += 1;
+                a_idx += 1;
+            }
+            (Some(&b_line), Some(&a_line)) => {
+                // Check if b_line appears shortly ahead in after_lines (insertion in `after`)
+                if after_lines[a_idx + 1..].contains(&b_line) {
+                    out.push_str(&format!("+{a_line}\n"));
+                    a_idx += 1;
+                } else if before_lines[b_idx + 1..].contains(&a_line) {
+                    out.push_str(&format!("-{b_line}\n"));
+                    b_idx += 1;
+                } else {
+                    out.push_str(&format!("-{b_line}\n"));
+                    out.push_str(&format!("+{a_line}\n"));
+                    b_idx += 1;
+                    a_idx += 1;
+                }
+            }
+            (Some(&b_line), None) => {
+                out.push_str(&format!("-{b_line}\n"));
+                b_idx += 1;
+            }
+            (None, Some(&a_line)) => {
+                out.push_str(&format!("+{a_line}\n"));
+                a_idx += 1;
+            }
+            (None, None) => break,
+        }
+    }
+    out
 }
 
 fn extract_unpermitted_path(reason: &str) -> Option<String> {

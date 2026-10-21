@@ -3,10 +3,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use vouch::config::{self, JournalFormat};
 use vouch::journal::{self, JournalPolicy, OutcomeRecord, Record};
 use vouch::journal_vlog::{
-    append_vlog, compact_vlog, encode_record_payload, read_vidx_entries, read_vlog_checkpoints,
-    vchk_path, verify_vlog_integrity, vidx_path, write_all_vlog, VlogHeader, VlogIndexEntry,
-    VlogReader, VlogTamperKind, VCHK_ENTRY_LEN, VLOG_FRAME_HEADER_LEN, VLOG_HEADER_LEN,
-    VLOG_INDEX_ENTRY_LEN, VLOG_MAGIC,
+    append_vlog, compact_vlog, compute_bundle_seal_sha256, encode_record_payload,
+    export_vlog_bundle, read_records_from_vlog_bundle, read_vidx_entries, read_vlog_checkpoints,
+    vchk_path, verify_vlog_bundle, verify_vlog_integrity, vidx_path, write_all_vlog,
+    VlogBundleHeader, VlogHeader, VlogIndexEntry, VlogReader, VlogTamperKind, VBUNDLE_HEADER_LEN,
+    VCHK_ENTRY_LEN, VLOG_FRAME_HEADER_LEN, VLOG_HEADER_LEN, VLOG_INDEX_ENTRY_LEN, VLOG_MAGIC,
 };
 use vouch::journal_wal::crc32;
 use vouch::outcome::Outcome;
@@ -688,4 +689,186 @@ fn vlog_checkpoint_detects_tampered_vchk_and_forged_vlog_replacement() {
     ));
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn vbundle_export_and_offline_verification_succeeds_after_state_dir_removal() {
+    let state_dir = unique_test_dir("vbundle_state");
+    let archive_dir = unique_test_dir("vbundle_archive");
+    let bundle_path = archive_dir.join("session.vbundle");
+
+    // Append 5 records (3 duplicates + 2 unique), compact once, then append 1 more record
+    for i in 0..3 {
+        append_vlog(
+            &state_dir,
+            &sample_record(i, 12_000 + i as u64, "allow", "git status"),
+        )
+        .unwrap();
+    }
+    append_vlog(&state_dir, &sample_record(10, 12_010, "ask", "touch /tmp/x")).unwrap();
+    append_vlog(&state_dir, &sample_record(11, 12_011, "allow", "cargo check")).unwrap();
+
+    let policy = JournalPolicy {
+        max_records: 100,
+        compact_duplicates: true,
+        preserve_recent: 2,
+    };
+    compact_vlog(&state_dir, &policy).expect("compact #1");
+    append_vlog(&state_dir, &sample_record(12, 12_012, "allow", "cargo test")).unwrap();
+
+    // Export portable cryptographic bundle
+    let export_report = export_vlog_bundle(&state_dir, &bundle_path).expect("export bundle");
+    assert!(export_report.valid);
+    assert_eq!(export_report.verified_records, 4);
+    assert_eq!(export_report.verified_checkpoints, 1);
+    assert!(bundle_path.exists());
+
+    //Completely remove the original state_dir to prove offline verification works standalone
+    std::fs::remove_dir_all(&state_dir).expect("remove state_dir");
+    assert!(!state_dir.exists());
+
+    let offline_report = verify_vlog_bundle(&bundle_path).expect("verify bundle offline");
+    assert!(offline_report.valid, "offline verification failed: {offline_report:?}");
+    assert_eq!(offline_report.verified_records, 4);
+    assert_eq!(offline_report.verified_checkpoints, 1);
+    assert_eq!(
+        offline_report.terminal_chain_tag,
+        export_report.terminal_chain_tag
+    );
+
+    let decoded = read_records_from_vlog_bundle(&bundle_path).expect("decode bundle records");
+    assert_eq!(decoded.len(), 4);
+    assert_eq!(decoded[0].cmd, "git status");
+    assert_eq!(decoded[0].count, 3);
+    assert_eq!(decoded[3].cmd, "cargo test");
+
+    let _ = std::fs::remove_dir_all(&archive_dir);
+}
+#[test]
+fn vbundle_detects_outer_seal_corruption_and_re_sealed_inner_tampering() {
+    let state_dir = unique_test_dir("vbundle_tamper_state");
+    let archive_dir = unique_test_dir("vbundle_tamper_archive");
+    let bundle_path = archive_dir.join("tamper.vbundle");
+
+    for i in 0..3 {
+        append_vlog(
+            &state_dir,
+            &sample_record(i, 13_000 + i as u64, "allow", "echo dup"),
+        )
+        .unwrap();
+    }
+    append_vlog(
+        &state_dir,
+        &sample_record(9, 13_009, "deny", "rm -rf /tmp/secret"),
+    )
+    .unwrap();
+    let policy = JournalPolicy {
+        max_records: 100,
+        compact_duplicates: true,
+        preserve_recent: 1,
+    };
+    compact_vlog(&state_dir, &policy).expect("compact");
+    export_vlog_bundle(&state_dir, &bundle_path).expect("export bundle");
+    let orig_bytes = std::fs::read(&bundle_path).unwrap();
+
+    // Case 1: Flip a byte in the bundle payload without updating the SHA-256 seal
+    let mut unsealed_tamper = orig_bytes.clone();
+    let mid = VBUNDLE_HEADER_LEN + 40;
+    unsealed_tamper[mid] ^= 0xFF;
+    std::fs::write(&bundle_path, &unsealed_tamper).unwrap();
+
+    let rep1 = verify_vlog_bundle(&bundle_path).expect("verify unsealed tamper");
+    assert!(!rep1.valid);
+    assert!(matches!(
+        rep1.tamper_finding,
+        Some(VlogTamperKind::BundleSealCorrupted { .. })
+    ));
+
+    // Case 2: Tamper with embedded vchk checkpoint and recompute outer bundle SHA-256 seal
+    let mut resealed_vchk_tamper = orig_bytes.clone();
+    let header = VlogBundleHeader::from_bytes(&resealed_vchk_tamper).unwrap();
+    let vchk_start = header.vchk_offset as usize;
+    resealed_vchk_tamper[vchk_start + 34] ^= 0x01; // flip bit in pre_compact_terminal_tag
+    let mut prefix = [0u8; 64];
+    prefix.copy_from_slice(&resealed_vchk_tamper[0..64]);
+    let vlog_s = &resealed_vchk_tamper[header.vlog_offset as usize..(header.vlog_offset + header.vlog_len) as usize];
+    let vidx_s = &resealed_vchk_tamper[header.vidx_offset as usize..(header.vidx_offset + header.vidx_len) as usize];
+    let vchk_s = &resealed_vchk_tamper[header.vchk_offset as usize..(header.vchk_offset + header.vchk_len) as usize];
+    let forged_seal = compute_bundle_seal_sha256(&prefix, vlog_s, vidx_s, vchk_s);
+    resealed_vchk_tamper[64..96].copy_from_slice(&forged_seal);
+    std::fs::write(&bundle_path, &resealed_vchk_tamper).unwrap();
+
+    let rep2 = verify_vlog_bundle(&bundle_path).expect("verify resealed vchk tamper");
+    assert!(!rep2.valid, "re-sealed inner vchk tamper must fail inner checkpoint check");
+    assert!(matches!(
+        rep2.tamper_finding,
+        Some(VlogTamperKind::CheckpointContinuityBroken { .. })
+    ));
+
+    let _ = std::fs::remove_dir_all(&state_dir);
+    let _ = std::fs::remove_dir_all(&archive_dir);
+}
+#[test]
+fn cli_vouch_doctor_export_and_verify_bundle_end_to_end() {
+    let state_dir = unique_test_dir("cli_bundle_state");
+    let archive_dir = unique_test_dir("cli_bundle_archive");
+    let bundle_path = archive_dir.join("cli_audit.vbundle");
+
+    append_vlog(&state_dir, &sample_record(1, 14_001, "allow", "ls -la")).unwrap();
+    append_vlog(&state_dir, &sample_record(2, 14_002, "allow", "ls -la")).unwrap();
+    append_vlog(&state_dir, &sample_record(3, 14_003, "ask", "touch /tmp/cli")).unwrap();
+    let policy = JournalPolicy {
+        max_records: 100,
+        compact_duplicates: true,
+        preserve_recent: 1,
+    };
+    compact_vlog(&state_dir, &policy).unwrap();
+
+    let exe = env!("CARGO_BIN_EXE_vouch");
+    let export_out = std::process::Command::new(exe)
+        .env("VOUCH_STATE_DIR", &state_dir)
+        .args(["doctor", "--export-bundle", bundle_path.to_str().unwrap()])
+        .output()
+        .expect("run vouch doctor --export-bundle");
+    assert!(
+        export_out.status.success(),
+        "export-bundle failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&export_out.stdout),
+        String::from_utf8_lossy(&export_out.stderr)
+    );
+    let export_stdout = String::from_utf8_lossy(&export_out.stdout);
+    assert!(export_stdout.contains("exported cryptographic audit bundle:"));
+    assert!(export_stdout.contains("records: 2, compaction generations: 1"));
+
+    // Remove state_dir and run --verify-bundle pointing VOUCH_STATE_DIR to a non-existent directory
+    std::fs::remove_dir_all(&state_dir).unwrap();
+    let verify_out = std::process::Command::new(exe)
+        .env("VOUCH_STATE_DIR", &state_dir)
+        .args(["doctor", "--verify-bundle", bundle_path.to_str().unwrap()])
+        .output()
+        .expect("run vouch doctor --verify-bundle");
+    assert!(
+        verify_out.status.success(),
+        "verify-bundle failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&verify_out.stdout),
+        String::from_utf8_lossy(&verify_out.stderr)
+    );
+    let verify_stdout = String::from_utf8_lossy(&verify_out.stdout);
+    assert!(verify_stdout.contains("bundle integrity verified: 2 records, 1 compaction checkpoints, hash chain unbroken"));
+
+    // Corrupt bundle and verify non-zero exit code
+    let mut raw = std::fs::read(&bundle_path).unwrap();
+    raw[VBUNDLE_HEADER_LEN + 10] ^= 0xAA;
+    std::fs::write(&bundle_path, &raw).unwrap();
+
+    let bad_out = std::process::Command::new(exe)
+        .env("VOUCH_STATE_DIR", &state_dir)
+        .args(["doctor", "--verify-bundle", bundle_path.to_str().unwrap()])
+        .output()
+        .expect("run vouch doctor --verify-bundle on corrupted bundle");
+    assert!(!bad_out.status.success(), "corrupted bundle must exit non-zero");
+    let bad_stdout = String::from_utf8_lossy(&bad_out.stdout);
+    assert!(bad_stdout.contains("bundle integrity check FAILED"));
+
+    let _ = std::fs::remove_dir_all(&archive_dir);
 }

@@ -1,5 +1,72 @@
 # Changelog
 
+## 0.62.0 (2026-10-21)
+
+
+### Features
+
+* **Add an in-session config.toml amendment undo stack and unified diff patch preview modal to the Policy Visualizer TUI**
+  - **Problem & Explanation:** Applying single (`a`) or batch (`A`) policy amendments from `ViewTab::Visualizer` in `vouch tui` previously wrote directly to `config.toml` without an in-session rollback mechanism or a unified TOML patch preview across staged nodes. `TuiEngine` (`src/tui/engine.rs`) and `TuiApp` (`src/tui/app.rs`) now maintain an in-session `ConfigUndoSnapshot` stack (`u` key) that atomically restores the pre-amendment `config.toml` contents, re-evaluates the active policy DAG, and restores reverted review candidates, alongside a unified diff patch preview modal (`Shift+P` / `P` key) that renders the exact `--- a/config.toml` / `+++ b/config.toml` diff for all staged nodes before saving.
+  - **Example Scenario:**
+    ```text
+    # In `vouch tui` -> Tab (Policy Visualizer):
+    # Stage [PATH] and [RULE] nodes with Space, press 'P' to inspect the unified config.toml diff,
+    # press 'A' to apply atomically, and press 'u' to roll back the last applied amendment.
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged (TUI workflow enhancement).
+    - *Behavior Contrast:* Before: applied amendments (`a`/`A`) in the Policy Visualizer required manual editing of `config.toml` to revert. After: maintains an in-session undo stack (`u`) with atomic rollback and unified TOML diff preview (`P`).
+
+* **Enforce Linux cgroups v2 cpu.max bandwidth quotas with cpu.stat throttling inspection and io.max block device throughput limits**
+  - **Problem & Explanation:** Linux cgroups v2 sandboxed execution scopes previously enforced `memory.max`, `memory.high`, and `pids.max` while relying on hard process-killing `RLIMIT_CPU` for processor bounds and leaving block device I/O unthrottled. `CgroupsConfig` (`src/config.rs`) and `CgroupV2Manager` (`src/runtime/sandbox.rs`) now support `cpu_max_quota_us` and `cpu_max_period_us` (writing `"$QUOTA $PERIOD"` to `cpu.max` and parsing `nr_periods`, `nr_throttled`, and `throttled_usec` from `cpu.stat`) alongside `io_max` per-device block I/O limits (validating `"MAJ:MIN rbps=... wbps=... riops=... wiops=..."` rules and writing `io.max`).
+  - **Example Scenario:**
+    ```toml
+    [sandbox.cgroups]
+    cpu_max_quota_us = 50000
+    cpu_max_period_us = 100000
+    io_max = ["259:0 rbps=104857600 wbps=52428800 wiops=1000"]
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Added optional `[sandbox.cgroups] cpu_max_quota_us`, `cpu_max_period_us`, and `io_max`.
+    - *Behavior Contrast:* Before: cgroups v2 enforced memory and pids caps without kernel CPU bandwidth throttling or block I/O ceilings. After: enforces `cpu.max` quota/period bandwidth throttling (`cpu.stat` inspection) and `io.max` device throughput limits.
+
+* **Export self-contained .vbundle cryptographic audit archives and verify offline frame, index, and compaction lineage in vouch doctor**
+  - **Problem & Explanation:** Archiving or transferring binary audit logs across hosts previously required copying separate `journal.vlog`, `journal.vidx`, and `journal.vchk` files from the active state directory. `src/journal_vlog.rs` and `src/main.rs` now implement self-contained `.vbundle` archives (`VBND` 96-byte binary header with a SHA-256 bundle seal over the header metadata and concatenated `.vlog`, `.vidx`, and `.vchk` payload slices) via `vouch doctor --export-bundle <path>` and standalone offline verification of bundle seal, intra-file frame chaining, and cross-compaction continuity via `vouch doctor --verify-bundle <path>`.
+  - **Example Scenario:**
+    ```bash
+    vouch doctor --export-bundle /tmp/session-audit.vbundle
+    vouch doctor --verify-bundle /tmp/session-audit.vbundle
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged (uses `[logging] journal_format = "binary"`).
+    - *Behavior Contrast:* Before: `verify_vlog_chain` operated only on live `.vlog`/`.vidx`/`.vchk` files in the active state directory. After: supports deterministic `.vbundle` export (`--export-bundle`) and standalone offline verification (`--verify-bundle`).
+
+* **Resolve Python uv.lock and poetry.lock local editable and directory packages and Bun/pnpm catalog: workspace dependencies in transitive capability analysis**
+  - **Problem & Explanation:** Transitive AST capability analysis previously indexed `pyproject.toml`, `requirements.txt`, PEP 723 headers, `package.json`, `pnpm-lock.yaml`, `tsconfig.json`, and `deno.json`, but did not resolve local package paths recorded in `uv.lock` or `poetry.lock` or workspace `"catalog:"` protocol dependencies in Bun and pnpm monorepos. `WorkspaceManifestIndex` in `src/capability.rs` now parses `uv.lock` (`source = { editable = "..." }` / `{ directory = "..." }`) and `poetry.lock` (`[package.source] type = "directory"`) local packages and resolves default and named `catalog:` / `catalogs:` mappings in `pnpm-workspace.yaml` and root `package.json` to local workspace packages and external capability sets.
+  - **Example Scenario:**
+    ```yaml
+    # pnpm-workspace.yaml
+    packages:
+      - "packages/*"
+    catalog:
+      "@acme/shared-fs": "workspace:*"
+      axios: "^1.7.0"
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged (automatic lockfile and workspace catalog discovery within workspace root).
+    - *Behavior Contrast:* Before: `uv.lock` / `poetry.lock` local package sources and `catalog:` dependencies were unindexed during transitive import resolution. After: resolves local `uv.lock` / `poetry.lock` packages and `catalog:` references within workspace bounds.
+
+* **Track taint through PowerShell PSDefaultParameterValues parameter injection, dynamic call and dot-source operators, and class instance properties**
+  - **Problem & Explanation:** PowerShell scripts can inject tainted parameter values ambiently via `$PSDefaultParameterValues['Remove-Item:Path'] = $untrusted`, invoke commands dynamically via `& $cmd` or `. $script`, or store tainted values on PowerShell `class` instance properties (`$this.TargetPath = $untrusted`) before invoking another method that executes a sink. `PsControlFlowGraph` and `VariableTaintTable` in `src/powershell_pipeline.rs` now model `$PSDefaultParameterValues` hashtable literals, indexed assignments, `.Add(...)` calls, and wildcard cmdlet keys (`*:Path`), resolve literal targets or flag tainted targets passed to `&` and `.`, and propagate taint across PowerShell class properties (`$this.Prop`, `$obj.Prop`) and method calls.
+  - **Example Scenario:**
+    ```powershell
+    $PSDefaultParameterValues['Remove-Item:Path'] = $env:UNTRUSTED_TARGET
+    Remove-Item -Recurse
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged (engine analysis enhancement).
+    - *Behavior Contrast:* Before: taint tracking covered direct variables, scopes, `@params` splatting, and `-PipelineVariable`. After: also tracks `$PSDefaultParameterValues` ambient injection, `& $cmd` / `. $script` dynamic calls, and PowerShell `class` instance properties.
+
 ## 0.61.0 (2026-10-20)
 
 

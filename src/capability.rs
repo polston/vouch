@@ -205,6 +205,16 @@ pub struct WorkspaceManifestIndex {
     pub ts_project_references: Vec<PathBuf>,
     /// Resolved W3C / Deno / Bun import map entries (`deno.json`, `deno.jsonc`, `import_map.json`).
     pub import_map_entries: Vec<ImportMapEntry>,
+    /// Workspace-wide default catalog mappings (`"catalog"` in `package.json` or `pnpm-workspace.yaml`)
+    /// mapping package name -> target specifier (`workspace:*`, `file:...`, `link:...`, or version).
+    pub default_catalog: std::collections::HashMap<String, String>,
+    /// Named workspace catalogs (`"catalogs"` in `package.json` or `pnpm-workspace.yaml`)
+    /// mapping catalog name -> (package name -> target specifier).
+    pub named_catalogs:
+        std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+    /// Pending `catalog:` / `catalog:<name>` dependency references discovered in `package.json` manifests,
+    /// stored as `(pkg_dir, dep_name, catalog_name_opt)` for post-scan resolution.
+    pub pending_catalog_deps: Vec<(PathBuf, String, Option<String>)>,
 }
 
 impl WorkspaceManifestIndex {
@@ -216,7 +226,27 @@ impl WorkspaceManifestIndex {
         }
         let mut visited_dirs = HashSet::new();
         index.scan_dir_bounded(workspace_root, workspace_root, 0, 4, &mut visited_dirs);
+        index.resolve_pending_catalog_deps(workspace_root);
         index
+    }
+
+    /// Resolves capabilities for a bare JS/TS import specifier if it maps to a catalog-managed
+    /// dependency (`catalog:` or `catalog:<name>`) or direct catalog entry.
+    pub fn resolve_catalog_external_capabilities(&self, specifier: &str) -> CapabilitySet {
+        let mut caps = CapabilitySet::EMPTY;
+        let trimmed = specifier.trim();
+        let (pkg_name, _) = split_node_package_specifier(trimmed);
+        if let Some(target_spec) = self.default_catalog.get(pkg_name) {
+            caps.union(classify_external_js_specifier_capabilities(pkg_name));
+            caps.union(classify_external_js_specifier_capabilities(target_spec));
+        }
+        for cat_map in self.named_catalogs.values() {
+            if let Some(target_spec) = cat_map.get(pkg_name) {
+                caps.union(classify_external_js_specifier_capabilities(pkg_name));
+                caps.union(classify_external_js_specifier_capabilities(target_spec));
+            }
+        }
+        caps
     }
 
     /// Returns true if `specifier` matches any configured `tsconfig.json` / `jsconfig.json` path alias pattern.
@@ -346,9 +376,24 @@ impl WorkspaceManifestIndex {
             self.parse_requirements_txt(workspace_root, dir, &requirements);
         }
 
+        let uv_lock = dir.join("uv.lock");
+        if uv_lock.is_file() {
+            self.parse_uv_lock(workspace_root, dir, &uv_lock);
+        }
+
+        let poetry_lock = dir.join("poetry.lock");
+        if poetry_lock.is_file() {
+            self.parse_poetry_lock(workspace_root, dir, &poetry_lock);
+        }
+
         let package_json = dir.join("package.json");
         if package_json.is_file() {
             self.parse_package_json(workspace_root, dir, &package_json);
+        }
+
+        let pnpm_workspace = dir.join("pnpm-workspace.yaml");
+        if pnpm_workspace.is_file() {
+            self.parse_pnpm_workspace_yaml(workspace_root, dir, &pnpm_workspace);
         }
 
         let pnpm_lock = dir.join("pnpm-lock.yaml");
@@ -621,20 +666,67 @@ impl WorkspaceManifestIndex {
             }
         }
 
-        // Check dependencies / devDependencies for file: or link: references
+        // Check dependencies / devDependencies for file:, link:, workspace:, or catalog: references
         for dep_section in &["dependencies", "devDependencies", "peerDependencies"] {
             if let Some(deps) = val.get(*dep_section).and_then(|d| d.as_object()) {
                 for (dep_name, dep_spec) in deps {
                     if let Some(spec_str) = dep_spec.as_str() {
+                        if let Some(cat_rest) = spec_str.strip_prefix("catalog:") {
+                            let cat_name = cat_rest.trim();
+                            let cat_opt = if cat_name.is_empty() || cat_name == "default" {
+                                None
+                            } else {
+                                Some(cat_name.to_string())
+                            };
+                            self.pending_catalog_deps.push((
+                                pkg_dir.to_path_buf(),
+                                dep_name.clone(),
+                                cat_opt,
+                            ));
+                            continue;
+                        }
                         let local_rel = spec_str
                             .strip_prefix("file:")
                             .or_else(|| spec_str.strip_prefix("link:"))
                             .or_else(|| spec_str.strip_prefix("workspace:"));
                         if let Some(rel) = local_rel {
                             let trimmed_rel = rel.trim();
-                            if !trimmed_rel.is_empty() && trimmed_rel != "*" && trimmed_rel != "^" && trimmed_rel != "~" {
+                            if !trimmed_rel.is_empty()
+                                && trimmed_rel != "*"
+                                && trimmed_rel != "^"
+                                && trimmed_rel != "~"
+                            {
                                 let target_dir = pkg_dir.join(trimmed_rel);
                                 self.node_packages.insert(dep_name.clone(), target_dir);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Extract Bun / pnpm workspace catalogs from top-level `"catalog"` / `"catalogs"`
+        // or nested `"workspaces": { "catalog": ..., "catalogs": ... }`
+        let catalog_containers = [Some(&val), val.get("workspaces")];
+        for container in catalog_containers.into_iter().flatten() {
+            if let Some(cat_obj) = container.get("catalog").and_then(|c| c.as_object()) {
+                for (k, v) in cat_obj {
+                    if let Some(spec_str) = v.as_str() {
+                        self.default_catalog
+                            .insert(k.clone(), spec_str.trim().to_string());
+                    }
+                }
+            }
+            if let Some(cats_obj) = container.get("catalogs").and_then(|c| c.as_object()) {
+                for (cat_name, inner_val) in cats_obj {
+                    if let Some(inner_obj) = inner_val.as_object() {
+                        let entry_map = self
+                            .named_catalogs
+                            .entry(cat_name.clone())
+                            .or_default();
+                        for (k, v) in inner_obj {
+                            if let Some(spec_str) = v.as_str() {
+                                entry_map.insert(k.clone(), spec_str.trim().to_string());
                             }
                         }
                     }
@@ -677,6 +769,224 @@ impl WorkspaceManifestIndex {
         let mut targets = Vec::new();
         Self::collect_export_targets(val, &mut targets);
         targets.into_iter().next()
+    }
+
+    fn parse_uv_lock(&mut self, workspace_root: &Path, lock_dir: &Path, lock_path: &Path) {
+        let Ok(content) = std::fs::read_to_string(lock_path) else {
+            return;
+        };
+        let Ok(val) = toml::from_str::<toml::Value>(&content) else {
+            return;
+        };
+        let Some(packages) = val.get("package").and_then(|p| p.as_array()) else {
+            return;
+        };
+        for pkg in packages {
+            let Some(name) = pkg.get("name").and_then(|n| n.as_str()) else {
+                continue;
+            };
+            let Some(source) = pkg.get("source") else {
+                continue;
+            };
+            let rel_path_opt = source
+                .get("editable")
+                .and_then(|v| v.as_str())
+                .or_else(|| source.get("directory").and_then(|v| v.as_str()))
+                .or_else(|| source.get("path").and_then(|v| v.as_str()))
+                .or_else(|| source.get("virtual").and_then(|v| v.as_str()));
+            if let Some(rel_path) = rel_path_opt {
+                let trimmed_rel = rel_path.trim();
+                if trimmed_rel.is_empty() {
+                    continue;
+                }
+                let raw_target = lock_dir.join(trimmed_rel);
+                let norm_target = raw_target
+                    .canonicalize()
+                    .unwrap_or_else(|_| normalize_lexical_path(&raw_target));
+                if norm_target.starts_with(workspace_root) {
+                    self.register_python_package_dir(name, &norm_target);
+                }
+            }
+        }
+    }
+
+    fn parse_poetry_lock(&mut self, workspace_root: &Path, lock_dir: &Path, lock_path: &Path) {
+        let Ok(content) = std::fs::read_to_string(lock_path) else {
+            return;
+        };
+        let Ok(val) = toml::from_str::<toml::Value>(&content) else {
+            return;
+        };
+        let Some(packages) = val.get("package").and_then(|p| p.as_array()) else {
+            return;
+        };
+        for pkg in packages {
+            let Some(name) = pkg.get("name").and_then(|n| n.as_str()) else {
+                continue;
+            };
+            let Some(source) = pkg.get("source") else {
+                continue;
+            };
+            let src_type = source.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            if matches!(src_type, "directory" | "file" | "path") {
+                if let Some(url) = source.get("url").and_then(|u| u.as_str()) {
+                    let trimmed_url = url.trim().trim_start_matches("file://");
+                    if trimmed_url.is_empty() {
+                        continue;
+                    }
+                    let raw_target = lock_dir.join(trimmed_url);
+                    let norm_target = raw_target
+                        .canonicalize()
+                        .unwrap_or_else(|_| normalize_lexical_path(&raw_target));
+                    if norm_target.starts_with(workspace_root) {
+                        self.register_python_package_dir(name, &norm_target);
+                    }
+                }
+            }
+        }
+    }
+
+    fn parse_pnpm_workspace_yaml(
+        &mut self,
+        _workspace_root: &Path,
+        _ws_dir: &Path,
+        ws_path: &Path,
+    ) {
+        let Ok(content) = std::fs::read_to_string(ws_path) else {
+            return;
+        };
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum YamlSection {
+            None,
+            Catalog,
+            Catalogs,
+        }
+        let mut section = YamlSection::None;
+        let mut current_named_catalog: Option<(usize, String)> = None;
+
+        for raw_line in content.lines() {
+            let without_comment = raw_line.split('#').next().unwrap_or("");
+            let trimmed = without_comment.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let indent = without_comment.len() - without_comment.trim_start().len();
+
+            if indent == 0 {
+                current_named_catalog = None;
+                if let Some(rest) = trimmed.strip_prefix("catalog:") {
+                    section = YamlSection::Catalog;
+                    let inline = rest.trim();
+                    if inline.starts_with('{') && inline.ends_with('}') {
+                        Self::parse_inline_yaml_map(inline, &mut self.default_catalog);
+                    }
+                } else if trimmed.starts_with("catalogs:") {
+                    section = YamlSection::Catalogs;
+                } else {
+                    section = YamlSection::None;
+                }
+                continue;
+            }
+
+            match section {
+                YamlSection::Catalog => {
+                    if let Some((k, v)) = Self::split_yaml_key_val(trimmed) {
+                        if !v.is_empty() {
+                            self.default_catalog.insert(k, v);
+                        }
+                    }
+                }
+                YamlSection::Catalogs => {
+                    if let Some((k, v)) = Self::split_yaml_key_val(trimmed) {
+                        let is_new_catalog_header = v.is_empty()
+                            || (v.starts_with('{') && v.ends_with('}'))
+                            || current_named_catalog
+                                .as_ref()
+                                .is_some_and(|(cat_indent, _)| indent <= *cat_indent);
+                        if is_new_catalog_header && v.is_empty() {
+                            current_named_catalog = Some((indent, k));
+                        } else if is_new_catalog_header && v.starts_with('{') && v.ends_with('}') {
+                            let map = self.named_catalogs.entry(k).or_default();
+                            Self::parse_inline_yaml_map(&v, map);
+                            current_named_catalog = None;
+                        } else if let Some((_, ref cat_name)) = current_named_catalog {
+                            let map = self.named_catalogs.entry(cat_name.clone()).or_default();
+                            map.insert(k, v);
+                        }
+                    }
+                }
+                YamlSection::None => {}
+            }
+        }
+    }
+
+    fn split_yaml_key_val(line: &str) -> Option<(String, String)> {
+        let (left, right) = line.split_once(':')?;
+        let key = left.trim().trim_matches('\'').trim_matches('"').to_string();
+        let val = right
+            .trim()
+            .trim_matches('\'')
+            .trim_matches('"')
+            .to_string();
+        if key.is_empty() {
+            None
+        } else {
+            Some((key, val))
+        }
+    }
+
+    fn parse_inline_yaml_map(
+        inline: &str,
+        out: &mut std::collections::HashMap<String, String>,
+    ) {
+        let inner = inline
+            .trim()
+            .trim_start_matches('{')
+            .trim_end_matches('}');
+        for pair in inner.split(',') {
+            if let Some((k, v)) = Self::split_yaml_key_val(pair.trim()) {
+                if !v.is_empty() {
+                    out.insert(k, v);
+                }
+            }
+        }
+    }
+
+    fn resolve_pending_catalog_deps(&mut self, workspace_root: &Path) {
+        let pending = std::mem::take(&mut self.pending_catalog_deps);
+        for (pkg_dir, dep_name, cat_opt) in pending {
+            let resolved_spec = match &cat_opt {
+                None => self.default_catalog.get(&dep_name).cloned(),
+                Some(cat_name) => self
+                    .named_catalogs
+                    .get(cat_name)
+                    .and_then(|m| m.get(&dep_name))
+                    .cloned(),
+            };
+            let Some(spec_str) = resolved_spec else {
+                continue;
+            };
+            let local_rel = spec_str
+                .strip_prefix("file:")
+                .or_else(|| spec_str.strip_prefix("link:"))
+                .or_else(|| spec_str.strip_prefix("workspace:"));
+            if let Some(rel) = local_rel {
+                let trimmed_rel = rel.trim();
+                if !trimmed_rel.is_empty()
+                    && trimmed_rel != "*"
+                    && trimmed_rel != "^"
+                    && trimmed_rel != "~"
+                {
+                    let cand_from_root = workspace_root.join(trimmed_rel);
+                    let target_dir = if cand_from_root.exists() {
+                        cand_from_root
+                    } else {
+                        pkg_dir.join(trimmed_rel)
+                    };
+                    self.node_packages.entry(dep_name).or_insert(target_dir);
+                }
+            }
+        }
     }
 
     fn parse_pnpm_lock(&mut self, _workspace_root: &Path, lock_dir: &Path, lock_path: &Path) {
@@ -1225,14 +1535,18 @@ impl TransitiveImportResolver {
         };
 
         for spec in imports {
-            // Propagate capabilities from direct external specifiers (`npm:`, `jsr:`, `https://`, `node:`, `bun:`)
-            // and from `deno.json` / `import_map.json` external specifier mappings.
+            // Propagate capabilities from direct external specifiers (`npm:`, `jsr:`, `https://`, `node:`, `bun:`),
+            // `deno.json` / `import_map.json` external specifier mappings, and `catalog:` workspace catalogs.
             report
                 .capabilities
                 .union(classify_external_js_specifier_capabilities(&spec));
             report.capabilities.union(
                 self.manifest_index
                     .resolve_import_map_external_capabilities(&spec, current_file),
+            );
+            report.capabilities.union(
+                self.manifest_index
+                    .resolve_catalog_external_capabilities(&spec),
             );
 
             let is_relative_or_local = spec.starts_with("./")

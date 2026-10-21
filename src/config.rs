@@ -555,7 +555,7 @@ pub struct LoggingConfig {
     pub journal_format: JournalFormat,
 }
 
-/// The `[sandbox.cgroups]` table: Linux cgroups v2 memory and process count limits for worker processes.
+/// The `[sandbox.cgroups]` table: Linux cgroups v2 memory, process count, CPU bandwidth, and block I/O limits for worker processes.
 #[derive(Debug, Deserialize, Clone, JsonSchema, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct CgroupsConfig {
@@ -568,6 +568,15 @@ pub struct CgroupsConfig {
     /// Hard process and thread count limit (`pids.max` in cgroups v2).
     #[serde(default)]
     pub pids_max: Option<u64>,
+    /// CPU bandwidth quota in microseconds per period (`cpu.max` first token in cgroups v2).
+    #[serde(default)]
+    pub cpu_max_quota_us: Option<u64>,
+    /// CPU bandwidth period in microseconds (`cpu.max` second token in cgroups v2; defaults to 100000 when `cpu_max_quota_us` is set).
+    #[serde(default)]
+    pub cpu_max_period_us: Option<u64>,
+    /// Block device I/O bandwidth and IOPS limits (`io.max` lines in cgroups v2, e.g. `"259:0 rbps=104857600 wbps=52428800"`).
+    #[serde(default)]
+    pub io_max: Vec<String>,
 }
 
 /// Seccomp-BPF syscall filter profile under `[sandbox]`.
@@ -1085,6 +1094,16 @@ fn validate(cfg: &Config) -> Result<(), String> {
                         modes that stand vouch down, or set stand_down = \"off\""
                 .into());
         }
+    }
+    if cfg.sandbox.cgroups.cpu_max_quota_us == Some(0) {
+        return Err("[sandbox.cgroups] cpu_max_quota_us must be greater than 0".into());
+    }
+    if cfg.sandbox.cgroups.cpu_max_period_us == Some(0) {
+        return Err("[sandbox.cgroups] cpu_max_period_us must be greater than 0".into());
+    }
+    for rule in &cfg.sandbox.cgroups.io_max {
+        crate::runtime::sandbox::CgroupIoMaxRule::parse(rule)
+            .map_err(|e| format!("[sandbox.cgroups] invalid io_max rule '{rule}': {e}"))?;
     }
     Ok(())
 }

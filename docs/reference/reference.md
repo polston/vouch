@@ -40,11 +40,14 @@ through, stop and ask the operator, or refuse it outright.
 
 ### `CgroupsConfig`
 
-The `[sandbox.cgroups]` table: Linux cgroups v2 memory and process count limits for worker processes.
+The `[sandbox.cgroups]` table: Linux cgroups v2 memory, process count, CPU bandwidth, and block I/O limits for worker processes.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
+| `cpu_max_period_us` | integer (optional) | (unset) | CPU bandwidth period in microseconds (`cpu.max` second token in cgroups v2; defaults to 100000 when `cpu_max_quota_us` is set). |
+| `cpu_max_quota_us` | integer (optional) | (unset) | CPU bandwidth quota in microseconds per period (`cpu.max` first token in cgroups v2). |
 | `high_memory_mb` | integer (optional) | (unset) | Throttle memory high-water mark in megabytes (`memory.high` in cgroups v2). |
+| `io_max` | array of string | [] | Block device I/O bandwidth and IOPS limits (`io.max` lines in cgroups v2, e.g. `"259:0 rbps=104857600 wbps=52428800"`). |
 | `max_memory_mb` | integer (optional) | (unset) | Hard memory limit in megabytes (`memory.max` in cgroups v2). |
 | `pids_max` | integer (optional) | (unset) | Hard process and thread count limit (`pids.max` in cgroups v2). |
 

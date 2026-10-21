@@ -1386,6 +1386,61 @@ fn main() {
     // `vouch doctor` — what vouch could not read or describe. These are vouch's
     // own gaps, surfaced so they get fixed instead of silently becoming prompts.
     if args.first().map(String::as_str) == Some("doctor") {
+        if let Some(pos) = args.iter().position(|a| a == "--verify-bundle") {
+            let Some(bundle_arg) = args.get(pos + 1) else {
+                eprintln!("usage: vouch doctor --verify-bundle <bundle.vbundle>");
+                std::process::exit(2);
+            };
+            let bundle_path = std::path::Path::new(bundle_arg);
+            match vouch::journal_vlog::verify_vlog_bundle(bundle_path) {
+                Ok(report) if report.valid => {
+                    println!(
+                        "bundle integrity verified: {} records, {} compaction checkpoints, hash chain unbroken (terminal tag: {:016x})",
+                        report.verified_records,
+                        report.verified_checkpoints,
+                        report.terminal_chain_tag
+                    );
+                    std::process::exit(0);
+                }
+                Ok(report) => {
+                    println!(
+                        "bundle integrity check FAILED (verified {} records, {} checkpoints, finding: {:?})",
+                        report.verified_records, report.verified_checkpoints, report.tamper_finding
+                    );
+                    std::process::exit(1);
+                }
+                Err(err) => {
+                    eprintln!("bundle integrity check ERROR: {err}");
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        if let Some(pos) = args.iter().position(|a| a == "--export-bundle") {
+            let Some(bundle_arg) = args.get(pos + 1) else {
+                eprintln!("usage: vouch doctor --export-bundle <bundle.vbundle>");
+                std::process::exit(2);
+            };
+            let bundle_path = std::path::Path::new(bundle_arg);
+            let dir = journal::state_dir();
+            match vouch::journal_vlog::export_vlog_bundle(&dir, bundle_path) {
+                Ok(report) => {
+                    println!(
+                        "exported cryptographic audit bundle: {} (records: {}, compaction generations: {}, terminal tag: {:016x})",
+                        vouch::knowledge::display_path(bundle_path),
+                        report.verified_records,
+                        report.verified_checkpoints,
+                        report.terminal_chain_tag
+                    );
+                    std::process::exit(0);
+                }
+                Err(err) => {
+                    eprintln!("failed to export audit bundle: {err}");
+                    std::process::exit(1);
+                }
+            }
+        }
+
         let here = judged_from(None);
         let root = project_root(&here);
         // `vouch::engine::parse_undeclared_option_line` scrapes one line of a

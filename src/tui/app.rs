@@ -23,6 +23,7 @@ pub struct TuiApp {
     pub selected_idx: usize,
     pub status_message: String,
     pub show_preview: bool,
+    pub show_diff_modal: bool,
     pub search_mode: bool,
     pub search_query: String,
     pub search_filter_active: bool,
@@ -43,6 +44,7 @@ impl TuiApp {
             selected_idx: 0,
             status_message: "Press [Tab] to switch views, [v] for Policy Graph, [/] to search, [a] to accept rule, [p] to preview TOML, [q] to quit".to_string(),
             show_preview: false,
+            show_diff_modal: false,
             search_mode: false,
             search_query: String::new(),
             search_filter_active: false,
@@ -228,6 +230,28 @@ impl TuiApp {
                     self.show_preview = !self.show_preview;
                 }
             }
+            TerminalEvent::Key(KeyCode::Char('P')) => {
+                if self.active_tab == ViewTab::Candidates || self.active_tab == ViewTab::Visualizer {
+                    self.show_diff_modal = !self.show_diff_modal;
+                    if self.show_diff_modal {
+                        self.status_message = "Opened Unified Diff Patch Modal (press [P] to close)".to_string();
+                    } else {
+                        self.status_message = "Closed Unified Diff Patch Modal.".to_string();
+                    }
+                }
+            }
+            TerminalEvent::Key(KeyCode::Char('u')) => {
+                if self.active_tab == ViewTab::Candidates || self.active_tab == ViewTab::Visualizer {
+                    match self.engine.undo_last_amendment() {
+                        Ok(msg) => {
+                            self.status_message = format!("↺ {msg}");
+                        }
+                        Err(err) => {
+                            self.status_message = format!("✗ Refused undo: {err}");
+                        }
+                    }
+                }
+            }
             TerminalEvent::Key(KeyCode::Enter) => {
                 if self.active_tab == ViewTab::Candidates {
                     self.show_preview = !self.show_preview;
@@ -277,8 +301,8 @@ impl TuiApp {
             self.status_message = "No candidates available to accept.".to_string();
             return;
         }
-        let cand = &self.engine.candidates[self.selected_idx];
-        match self.engine.apply_candidate(cand) {
+        let cand = self.engine.candidates[self.selected_idx].clone();
+        match self.engine.apply_candidate(&cand) {
             Ok(msg) => {
                 self.status_message = format!("✓ {}", msg);
                 // Mark candidate as accepted / remove from proposable
@@ -483,6 +507,15 @@ impl TuiApp {
                             out.push_str("\n--- Proposed TOML Delta ---\n");
                             out.push_str(&selected.proposed_toml);
                         }
+                        if self.show_diff_modal {
+                            out.push_str("\n================================================================================\n");
+                            out.push_str(" [Unified Diff Patch Preview (P)]\n");
+                            out.push_str("================================================================================\n");
+                            match self.engine.build_unified_diff_for_candidates(std::slice::from_ref(selected)) {
+                                Ok(diff_text) => out.push_str(&diff_text),
+                                Err(err) => out.push_str(&format!("# Diff error: {err}\n")),
+                            }
+                        }
                     }
                 }
             }
@@ -526,7 +559,7 @@ impl TuiApp {
             ViewTab::Visualizer => {
                 if !self.engine.decisions.is_empty() {
                     out.push_str(&format!(
-                        "  [Decision {}/{} — press [h/l] to switch decision, [Space/Enter] to fold node, [p] preview, [a] accept]\n",
+                        "  [Decision {}/{} — press [h/l] to switch decision, [Space/Enter] to fold node, [p] preview, [P] diff patch, [u] undo, [a] accept]\n",
                         self.visualizer_decision_idx + 1,
                         self.engine.decisions.len()
                     ));
@@ -544,6 +577,39 @@ impl TuiApp {
                         match sel_node.to_review_candidate(example_cmd) {
                             Ok(cand) => out.push_str(&cand.proposed_toml),
                             Err(err) => out.push_str(&format!("# Not proposable: {err}\n")),
+                        }
+                    }
+                }
+                if self.show_diff_modal {
+                    out.push_str("\n================================================================================\n");
+                    out.push_str(" [Unified Diff Patch Preview (P)]\n");
+                    out.push_str("================================================================================\n");
+                    let example_cmd = self
+                        .engine
+                        .decisions
+                        .get(self.visualizer_decision_idx)
+                        .map(|d| d.cmd.as_str())
+                        .unwrap_or("");
+                    let mut diff_cands = Vec::new();
+                    if !self.policy_graph.staged_node_ids.is_empty() {
+                        for &id in &self.policy_graph.staged_node_ids {
+                            if let Some(node) = self.policy_graph.nodes.get(id) {
+                                if let Ok(cand) = node.to_review_candidate(example_cmd) {
+                                    diff_cands.push(cand);
+                                }
+                            }
+                        }
+                    } else if let Some(sel_node) = self.policy_graph.selected_node() {
+                        if let Ok(cand) = sel_node.to_review_candidate(example_cmd) {
+                            diff_cands.push(cand);
+                        }
+                    }
+                    if diff_cands.is_empty() {
+                        out.push_str("# No proposable candidate or staged nodes selected for diff preview.\n");
+                    } else {
+                        match self.engine.build_unified_diff_for_candidates(&diff_cands) {
+                            Ok(diff_text) => out.push_str(&diff_text),
+                            Err(err) => out.push_str(&format!("# Diff error: {err}\n")),
                         }
                     }
                 }
