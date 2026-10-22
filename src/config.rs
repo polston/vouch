@@ -330,6 +330,24 @@ impl WriteScope {
     }
 }
 
+/// One `[[lang.<name>.script_constructs]]` entry: per-script construct action
+/// overrides for an inspected script file on disk.
+#[derive(Debug, Deserialize, Default, Clone, JsonSchema)]
+pub struct ScriptConstructOverride {
+    /// Allowed script file paths or trees (`path` or `path/**`, supporting `~`,
+    /// `$PROJECT_ROOT`, and `$WORKSPACE_ROOT`). Evaluated against the
+    /// symlink-resolved canonical path of the inspected script file.
+    pub under: Vec<String>,
+    /// Optional lowercase 64-character hex SHA-256 content digests. When
+    /// present, the inspected script's SHA-256 digest must match one of the
+    /// listed digests.
+    #[serde(default)]
+    pub sha256: Option<Vec<String>>,
+    /// Per-construct verdicts (`construct_name = "allow" | "ask" | "deny"`).
+    #[serde(flatten)]
+    pub constructs: HashMap<String, Action>,
+}
+
 /// Settings for one language: `[lang.bash]`, `[lang.powershell]`,
 /// `[lang.python]` — one shape for every scanner, looked up by name.
 #[derive(Debug, Deserialize, Default, Clone, JsonSchema)]
@@ -345,6 +363,10 @@ pub struct LangConfig {
     /// above — absence of a setting must never become permission.
     #[serde(default)]
     pub constructs: HashMap<String, Action>,
+    /// Per-script construct overrides for inspected script files on disk,
+    /// written as `[[lang.<name>.script_constructs]]`.
+    #[serde(default)]
+    pub script_constructs: Vec<ScriptConstructOverride>,
     /// How many layers of wrapper nesting are scanned before a deeper nest
     /// trips `wrap_depth_exceeded` and asks. `None` means the operator has
     /// not set it, so the built-in cap (4) applies. Read by the engine's
@@ -556,7 +578,7 @@ pub struct LoggingConfig {
 }
 
 /// The `[sandbox.cgroups]` table: Linux cgroups v2 memory, process count, CPU bandwidth, and block I/O limits for worker processes.
-#[derive(Debug, Deserialize, Clone, JsonSchema, PartialEq, Eq, Default)]
+#[derive(Debug, Deserialize, Clone, JsonSchema, PartialEq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct CgroupsConfig {
     /// Hard memory limit in megabytes (`memory.max` in cgroups v2).
@@ -577,6 +599,11 @@ pub struct CgroupsConfig {
     /// Block device I/O bandwidth and IOPS limits (`io.max` lines in cgroups v2, e.g. `"259:0 rbps=104857600 wbps=52428800"`).
     #[serde(default)]
     pub io_max: Vec<String>,
+    /// Optional Pressure Stall Information (`cpu.pressure`, `memory.pressure`, `io.pressure`)
+    /// `avg10` stall percentage threshold (`0.0 < pct <= 100.0`) above which worker backpressure
+    /// warnings are triggered.
+    #[serde(default)]
+    pub psi_stall_warn_pct: Option<f64>,
 }
 
 /// Seccomp-BPF syscall filter profile under `[sandbox]`.
@@ -592,7 +619,7 @@ pub enum SeccompProfile {
 }
 
 /// The `[sandbox]` table: worker process sandboxing, namespaces, seccomp-BPF, setrlimit, and cgroups v2 limits.
-#[derive(Debug, Deserialize, Clone, JsonSchema, PartialEq, Eq, Default)]
+#[derive(Debug, Deserialize, Clone, JsonSchema, PartialEq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxConfig {
     /// Linux cgroups v2 memory and PID limits (`[sandbox.cgroups]`).
@@ -1104,6 +1131,56 @@ fn validate(cfg: &Config) -> Result<(), String> {
     for rule in &cfg.sandbox.cgroups.io_max {
         crate::runtime::sandbox::CgroupIoMaxRule::parse(rule)
             .map_err(|e| format!("[sandbox.cgroups] invalid io_max rule '{rule}': {e}"))?;
+    }
+    if let Some(pct) = cfg.sandbox.cgroups.psi_stall_warn_pct {
+        if !pct.is_finite() || pct <= 0.0 || pct > 100.0 {
+            return Err(format!(
+                "[sandbox.cgroups] psi_stall_warn_pct ({pct}) must be in the range (0.0, 100.0]"
+            ));
+        }
+    }
+    for (lang_name, lang_cfg) in &cfg.langs {
+        for (i, rule) in lang_cfg.script_constructs.iter().enumerate() {
+            let label = format!("[[lang.{lang_name}.script_constructs]] #{}", i + 1);
+            if rule.under.is_empty() {
+                return Err(format!("{label} has an empty `under` list"));
+            }
+            for pattern in &rule.under {
+                if pattern.is_empty() {
+                    return Err(format!("{label} `under` contains an empty path"));
+                }
+                let portable = pattern.replace('\\', "/");
+                let tree_suffix = portable.ends_with("/**");
+                let stem = portable.strip_suffix("/**").unwrap_or(&portable);
+                if stem.contains('*')
+                    || portable.contains('?')
+                    || portable.contains('[')
+                    || portable.contains(']')
+                    || (!tree_suffix && portable.contains('*'))
+                {
+                    return Err(format!(
+                        "{label} `under` contains '{pattern}' — use an exact path or one tree ending in `/**`"
+                    ));
+                }
+            }
+            if let Some(digests) = &rule.sha256 {
+                if digests.is_empty() {
+                    return Err(format!(
+                        "{label} has an empty `sha256` list — remove the key or list at least one 64-character hex SHA-256 digest"
+                    ));
+                }
+                for d in digests {
+                    if d.len() != 64 || !d.chars().all(|c| c.is_ascii_hexdigit()) {
+                        return Err(format!(
+                            "{label} `sha256` contains '{d}' — must be a 64-character hexadecimal SHA-256 digest"
+                        ));
+                    }
+                }
+            }
+            if rule.constructs.is_empty() {
+                return Err(format!("{label} sets no construct action"));
+            }
+        }
     }
     Ok(())
 }

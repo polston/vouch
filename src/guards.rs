@@ -358,11 +358,22 @@ pub struct Program {
     /// Each non-empty inner vector is matched from the first positional word
     /// under this entry's flag grammar. `[["mcp", "get"]]` recognises that
     /// operation without recognising `mcp add` or another sibling. Either
-    /// this key or `subcommands` being present makes the entry scoped; both
-    /// absent still means whole-program coverage. When both are present their
-    /// scopes are unioned.
+    /// this key, `subcommands`, or `exact_args` being present makes the entry
+    /// scoped; all three absent still means whole-program coverage. When
+    /// present their scopes are unioned.
     #[serde(default)]
     pub subcommand_paths: Option<Vec<Vec<String>>>,
+    /// Complete argument vectors this entry recognises.
+    ///
+    /// Each non-empty inner vector is matched whole-token against the
+    /// invocation's complete, readable unquoted argument list under this
+    /// entry's `case_sensitive_flags` rule (for example,
+    /// `[["-a", "Calendar"], ["-a", "Preview"]]`). Unlisted argument vectors,
+    /// incomplete or unreadable arguments, or runs under an argument-appending
+    /// wrapper remain unmodeled. All normal guards and write checks still
+    /// apply.
+    #[serde(default)]
+    pub exact_args: Option<Vec<Vec<String>>>,
     /// Flags this entry vouches for ALONE: a run whose every argument is one
     /// of these (whole-token, unquoted view, the entry's case rule) is a
     /// standalone run — covered by the entry, and read as evaluating no
@@ -1457,6 +1468,50 @@ fn standalone_run(p: &Program, cmd: &Cmd, sub: Option<&str>, eligible: bool) -> 
     cmd.args.iter().all(|a| declares(&p.standalone_flags, crate::paths::unquote(a), case_sensitive))
 }
 
+/// Whether one of this entry's declared `exact_args` vectors matches the
+/// invocation's complete, readable unquoted argument list.
+///
+/// Requires `eligible` (`args_complete && !args_from_input`) and every
+/// argument token to be readable (`!token_is_unreadable`), matching each
+/// unquoted token whole-word under `case_sensitive_flags`.
+fn entry_exact_args_matches(p: &Program, cmd: &Cmd, lang: &str, eligible: bool) -> bool {
+    if !eligible || cmd.args.is_empty() {
+        return false;
+    }
+    let Some(vectors) = &p.exact_args else {
+        return false;
+    };
+    if vectors.is_empty() {
+        return false;
+    }
+    for (i, raw) in cmd.args.iter().enumerate() {
+        if cmd.unread_args.contains(&i) {
+            return false;
+        }
+        let unquoted = crate::paths::unquote(raw);
+        let unreadable = match lang {
+            "python" => false,
+            "powershell" => cmd.expandable_args.contains(&i),
+            _ => unquoted.contains(['\'', '"']) || carries_expansion(raw),
+        };
+        if unreadable {
+            return false;
+        }
+    }
+    let case_sensitive = p.case_sensitive_flags.unwrap_or(false);
+    vectors.iter().any(|vec| {
+        vec.len() == cmd.args.len()
+            && vec.iter().zip(cmd.args.iter()).all(|(want, got_raw)| {
+                let got = crate::paths::unquote(got_raw);
+                if case_sensitive {
+                    want == got
+                } else {
+                    want.eq_ignore_ascii_case(got)
+                }
+            })
+    })
+}
+
 /// Whether this entry's declared recognition scope covers this invocation —
 /// the SAME question `recognition_at`'s own `covers` local used to answer a
 /// second time, with a subtly different case rule (review finding, M2.236: an
@@ -1470,26 +1525,27 @@ fn standalone_run(p: &Program, cmd: &Cmd, sub: Option<&str>, eligible: bool) -> 
 /// !standalone_run(...)`, since the two callers ask opposite-sense questions
 /// ("is this recognised" vs. "does the unread-code claim still apply").
 ///
-/// An entry with neither scope key covers the whole program, which is what
+/// An entry with no scope key covers the whole program, which is what
 /// every shipped `evaluates_input` entry is, so this is a no-op for all of
 /// them. An entry that names verbs is claiming something about those verbs;
 /// reading its claim as program-wide gives a verb outside the scope the
 /// right verdict for a reason that is not true of it (M2.37's shape).
 ///
-/// `subcommands`/`subcommand_paths` are `Option`, not a bare list: `None` on
-/// both is the whole-program state (spec 2026-08-20 §3), and that state is
-/// what every shipped `evaluates_input` entry is in today, which is why this
-/// is a no-op for them. `all_subcommands` needs no separate reading here —
-/// the merge already folds it back to `None`/`None` before this ever runs
-/// (`knowledge::overlay_all`).
-fn entry_covers(p: &Program, cmd: &Cmd, sub: Option<&str>, lang: &str) -> bool {
-    if p.subcommands.is_none() && p.subcommand_paths.is_none() {
+/// `subcommands`/`subcommand_paths`/`exact_args` are `Option`, not a bare
+/// list: `None` on all three is the whole-program state (spec 2026-08-20 §3),
+/// and that state is what every shipped `evaluates_input` entry is in today,
+/// which is why this is a no-op for them. `all_subcommands` needs no separate
+/// reading here — the merge already folds it back to `None`/`None`/`None`
+/// before this ever runs (`knowledge::overlay_all`).
+fn entry_covers(p: &Program, cmd: &Cmd, sub: Option<&str>, lang: &str, eligible: bool) -> bool {
+    if p.subcommands.is_none() && p.subcommand_paths.is_none() && p.exact_args.is_none() {
         return true;
     }
     p.subcommands
         .as_ref()
         .is_some_and(|subs| sub.is_some_and(|s| subs.iter().any(|k| k.eq_ignore_ascii_case(s))))
         || entry_subcommand_path_matches(p, cmd, lang)
+        || entry_exact_args_matches(p, cmd, lang, eligible)
 }
 
 /// What `standalone_hint` found: the flags-only ask that remains may name
@@ -2193,8 +2249,8 @@ fn entry_applies<'a>(
     standalone_eligible: bool,
 ) -> (bool, Option<&'a str>) {
     let sub = entry_subcommand(prog, cmd, lang);
-    let applies =
-        entry_covers(prog, cmd, sub, lang) && !standalone_run(prog, cmd, sub, standalone_eligible);
+    let applies = entry_covers(prog, cmd, sub, lang, standalone_eligible)
+        && !standalone_run(prog, cmd, sub, standalone_eligible);
     (applies, sub)
 }
 
@@ -3836,7 +3892,8 @@ pub fn recognition_at(
         // subcommands, or subcommand_paths); the verb it reads is looked up
         // once here and handed to both halves, exactly as before.
         let sub = entry_subcommand(p, cmd, lang);
-        let covers = entry_covers(p, cmd, sub, lang) || standalone_run(p, cmd, sub, standalone_eligible);
+        let covers = entry_covers(p, cmd, sub, lang, standalone_eligible)
+            || standalone_run(p, cmd, sub, standalone_eligible);
         if covers {
             return match at_place {
                 Some(glob) => Recognised::AtPlace(glob.clone()),
@@ -4578,6 +4635,7 @@ fn scan_snippet(
         construct_details: Vec::new(),
         heredocs: Vec::new(),
         commands: Vec::new(),
+        inspected_script: None,
     });
     let Some(scanner) = crate::syntax::scanner_for(lang) else {
         return Ok(SnippetScan::default());
@@ -4911,6 +4969,24 @@ pub enum WrapScope {
     },
 }
 
+/// Verified provenance of an inspected script file on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InspectedScriptProvenance {
+    /// Whether the target script path before resolving against `cwd` was relative.
+    pub relative_target: bool,
+    /// The `cwd` that `inspect_script_file` resolved a relative target against.
+    pub inspected_cwd: Option<String>,
+    /// Symlink-resolved canonical path of the inspected script file on disk.
+    pub canonical_path: String,
+    /// Lowercase 64-character hex SHA-256 digest of the inspected script file contents.
+    pub sha256_hex: String,
+    /// Index of the script runner command in `ExpandedWrappers::occurrences`.
+    pub runner_occurrence: usize,
+    /// Whether the runner command's run-place timeline at its execution site
+    /// is proven to match `inspected_cwd`.
+    pub place_proven: bool,
+}
+
 /// One snippet the walk handed to a scanner, and where its own scan structure
 /// landed in the expansion's scope numbering.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4935,6 +5011,10 @@ pub struct SnippetSource {
     pub construct_details: Vec<(String, String)>,
     pub heredocs: Vec<crate::syntax::Heredoc>,
     pub commands: Vec<Cmd>,
+    /// Verified provenance when this snippet came directly from an inspected
+    /// script file on disk (`inspect_script_file`). `None` for inline `-c`
+    /// snippets, flag-carried snippets, and consumed here-documents.
+    pub inspected_script: Option<InspectedScriptProvenance>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5910,6 +5990,28 @@ pub fn expand_wrappers_forking_with_context(
                                     &mut out.failures,
                                     &mut out.constructs,
                                 );
+                                let canonical_raw = crate::paths::resolve_links_with_base(
+                                    &resolved,
+                                    cwd.map(std::path::Path::new),
+                                );
+                                let canonical_path = crate::paths::normalize(&canonical_raw, "");
+                                let sha256_hex = {
+                                    use sha2::{Digest, Sha256};
+                                    let mut hasher = Sha256::new();
+                                    hasher.update(content.as_bytes());
+                                    format!("{:x}", hasher.finalize())
+                                };
+                                let relative_target = std::path::Path::new(&resolved).is_relative();
+                                if let Some(src_entry) = out.srcs.get_mut(script_src_mark) {
+                                    src_entry.inspected_script = Some(InspectedScriptProvenance {
+                                        relative_target,
+                                        inspected_cwd: cwd.map(|c| crate::paths::normalize(&crate::paths::resolve_links(c), "")),
+                                        canonical_path,
+                                        sha256_hex,
+                                        runner_occurrence: self_idx,
+                                        place_proven: !relative_target,
+                                    });
+                                }
                                 out.occurrences[self_idx].provenance =
                                     SourceProvenance::InspectedScript;
                                 for inner_cmd in &mut scan.cmds {

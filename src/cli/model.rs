@@ -8,8 +8,8 @@ pub fn run_model(args: &[String], home: &str) -> Result<String, String> {
     if args.is_empty() {
         return Err(
             "usage: vouch model <program|tool> <name> [options]\n\n  \
-             vouch model program <name> [--subcommand <verb>...] [--value-flag <flag>...] [--write-flag <flag>...] [--changes-dir] [--evaluates-input]\n  \
-             vouch model tool <name> [--snippet <field:lang>] [--write-path <field>] [--cwd-from-call]\n\n  \
+             vouch model program <name> [--subcommand <verb>...] [--exact-args <tok1,tok2>...] [--value-flag <flag>...] [--write-flag <flag>...] [--changes-dir] [--evaluates-input]\n  \
+             vouch model tool <name> [--snippet <field:lang>] [--snippet-from <field:lang_field:k=v,...>] [--write-path <field>] [--cwd-from-call]\n\n  \
              Describes objective program or tool syntax in my-knowledge.toml."
                 .to_string(),
         );
@@ -54,13 +54,13 @@ pub fn run_model(args: &[String], home: &str) -> Result<String, String> {
         }
         "program" => {
             if args.len() < 2 {
-                return Err("usage: vouch model program <name> [--subcommand <verb>...] [--all-subcommands] [--value-flag <flag>...] [--write-flag <flag>...] [--standalone-flag <flag>...] [--changes-dir] [--evaluates-input] [--update]".to_string());
+                return Err("usage: vouch model program <name> [--subcommand <verb>...] [--all-subcommands] [--exact-args <tok1,tok2>...] [--value-flag <flag>...] [--write-flag <flag>...] [--standalone-flag <flag>...] [--changes-dir] [--evaluates-input] [--update]".to_string());
             }
             model_program(&args[1..], home)
         }
         "tool" => {
             if args.len() < 2 {
-                return Err("usage: vouch model tool <name> [--snippet <field:lang>] [--write-path <field>] [--cwd-from-call] [--rule <field:action:match>] [--update]".to_string());
+                return Err("usage: vouch model tool <name> [--snippet <field:lang>] [--snippet-from <field:lang_field:k=v,...>] [--write-path <field>] [--cwd-from-call] [--rule <field:action:match>] [--update]".to_string());
             }
             model_tool(&args[1..], home)
         }
@@ -76,6 +76,7 @@ fn model_program(args: &[String], home: &str) -> Result<String, String> {
 
     let mut subcommands = Vec::new();
     let mut all_subcommands = false;
+    let mut exact_args: Vec<Vec<String>> = Vec::new();
     let mut value_flags = Vec::new();
     let mut write_flags = Vec::new();
     let mut standalone_flags = Vec::new();
@@ -95,6 +96,19 @@ fn model_program(args: &[String], home: &str) -> Result<String, String> {
                     i += 1;
                 } else {
                     return Err("--subcommand requires a verb argument".to_string());
+                }
+            }
+            "--exact-args" => {
+                if i + 1 < args.len() {
+                    let raw_vec = &args[i + 1];
+                    let tokens: Vec<String> = raw_vec.split(',').map(str::to_string).collect();
+                    if tokens.is_empty() || tokens.iter().any(|t| t.is_empty()) {
+                        return Err("--exact-args requires comma-separated non-empty tokens (e.g. -a,Calendar)".to_string());
+                    }
+                    exact_args.push(tokens);
+                    i += 1;
+                } else {
+                    return Err("--exact-args requires comma-separated tokens".to_string());
                 }
             }
             "--value-flag" => {
@@ -207,6 +221,19 @@ fn model_program(args: &[String], home: &str) -> Result<String, String> {
         tbl.insert("subcommands", Item::Value(sub_arr.into()));
     }
 
+    if !exact_args.is_empty() {
+        tbl.insert("case_sensitive_flags", value(true));
+        let mut outer_arr = Array::new();
+        for vec in exact_args {
+            let mut inner_arr = Array::new();
+            for tok in vec {
+                inner_arr.push(tok.as_str());
+            }
+            outer_arr.push(inner_arr);
+        }
+        tbl.insert("exact_args", Item::Value(outer_arr.into()));
+    }
+
     if !standalone_flags.is_empty() {
         tbl.insert("case_sensitive_flags", value(true));
         let mut flg_arr = Array::new();
@@ -269,6 +296,7 @@ fn model_tool(args: &[String], home: &str) -> Result<String, String> {
     let tool_name = &args[0];
 
     let mut snippet: Option<(String, String)> = None;
+    let mut snippets_from: Vec<(String, String, Vec<(String, String)>)> = Vec::new();
     let mut write_path_field: Option<String> = None;
     let mut cwd_from_call = false;
     let mut rules: Vec<crate::guards::ToolRule> = Vec::new();
@@ -288,6 +316,32 @@ fn model_tool(args: &[String], home: &str) -> Result<String, String> {
                     i += 1;
                 } else {
                     return Err("--snippet requires <field:language>".to_string());
+                }
+            }
+            "--snippet-from" => {
+                if i + 1 < args.len() {
+                    let spec = &args[i + 1];
+                    let parts: Vec<&str> = spec.splitn(3, ':').collect();
+                    if parts.len() != 3 || parts[0].is_empty() || parts[1].is_empty() || parts[2].is_empty() {
+                        return Err("--snippet-from requires <field:lang_field:k1=v1,k2=v2,...> format".to_string());
+                    }
+                    let mut pairs = Vec::new();
+                    for item in parts[2].split(',') {
+                        let Some((k, v)) = item.split_once('=') else {
+                            return Err(format!("--snippet-from mapping '{item}' must be in <key=language> format"));
+                        };
+                        if k.is_empty() || v.is_empty() {
+                            return Err("--snippet-from mapping keys and values must be non-empty".to_string());
+                        }
+                        pairs.push((k.to_string(), v.to_string()));
+                    }
+                    if pairs.is_empty() {
+                        return Err("--snippet-from requires at least one <key=language> mapping".to_string());
+                    }
+                    snippets_from.push((parts[0].to_string(), parts[1].to_string(), pairs));
+                    i += 1;
+                } else {
+                    return Err("--snippet-from requires <field:lang_field:k1=v1,...>".to_string());
                 }
             }
             "--write-path" => {
@@ -385,12 +439,25 @@ fn model_tool(args: &[String], home: &str) -> Result<String, String> {
     tbl.insert("match", Item::Value(match_arr.into()));
     tbl.insert("source", value(format!("modeled via vouch model")));
 
-    if let Some((field, lang)) = snippet {
+    if snippet.is_some() || !snippets_from.is_empty() {
         let mut snip_arr = toml_edit::ArrayOfTables::new();
-        let mut snip_tbl = Table::new();
-        snip_tbl.insert("field", value(field));
-        snip_tbl.insert("language", value(lang));
-        snip_arr.push(snip_tbl);
+        if let Some((field, lang)) = snippet {
+            let mut snip_tbl = Table::new();
+            snip_tbl.insert("field", value(field));
+            snip_tbl.insert("language", value(lang));
+            snip_arr.push(snip_tbl);
+        }
+        for (field, lang_field, pairs) in snippets_from {
+            let mut snip_tbl = Table::new();
+            snip_tbl.insert("field", value(field));
+            snip_tbl.insert("language_from", value(lang_field));
+            let mut lv_tbl = toml_edit::InlineTable::new();
+            for (k, v) in pairs {
+                lv_tbl.insert(k, v.into());
+            }
+            snip_tbl.insert("language_values", Item::Value(toml_edit::Value::InlineTable(lv_tbl)));
+            snip_arr.push(snip_tbl);
+        }
         tbl.insert("snippet", Item::ArrayOfTables(snip_arr));
     }
 

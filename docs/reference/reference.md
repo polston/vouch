@@ -50,6 +50,7 @@ The `[sandbox.cgroups]` table: Linux cgroups v2 memory, process count, CPU bandw
 | `io_max` | array of string | [] | Block device I/O bandwidth and IOPS limits (`io.max` lines in cgroups v2, e.g. `"259:0 rbps=104857600 wbps=52428800"`). |
 | `max_memory_mb` | integer (optional) | (unset) | Hard memory limit in megabytes (`memory.max` in cgroups v2). |
 | `pids_max` | integer (optional) | (unset) | Hard process and thread count limit (`pids.max` in cgroups v2). |
+| `psi_stall_warn_pct` | number (optional) | (unset) | Optional Pressure Stall Information (`cpu.pressure`, `memory.pressure`, `io.pressure`) `avg10` stall percentage threshold (`0.0 < pct <= 100.0`) above which worker backpressure warnings are triggered. |
 
 ### `DaemonConfig`
 
@@ -117,6 +118,7 @@ Settings for one language: `[lang.bash]`, `[lang.powershell]`,
 | `default` | Action | (none) | Verdict when nothing this language's scanner recognised objected. Never applies to a construct — an unset construct always resolves to `ask`, whatever this says. |
 | `max_script_bytes` | integer (optional) | (unset) | Maximum size in bytes of a script file to inspect at decision time. Files exceeding this limit are not read and fall back to evaluated_input. Defaults to 65536 (64 KiB) when unset. |
 | `parser_mode` | string (optional) | (unset) | Parser mode for language execution: "reference" (daemon worker with fallback) or "scanner" (pure-Rust). |
+| `script_constructs` | array of ScriptConstructOverride | (none) | Per-script construct overrides for inspected script files on disk, written as `[[lang.<name>.script_constructs]]`. |
 | `worker_binary` | string (optional) | (unset) | Worker binary name (e.g. "pwsh" or "dotnet"). |
 | `worker_timeout_ms` | integer (optional) | (unset) | Timeout in milliseconds for reference worker calls before falling back. |
 | `wrap_depth` | integer (optional) | (unset) | How many layers of wrapper nesting are scanned before a deeper nest trips `wrap_depth_exceeded` and asks. `None` means the operator has not set it, so the built-in cap (4) applies. Read by the engine's wrapper walk, not by this file. |
@@ -209,6 +211,16 @@ The `[sandbox]` table: worker process sandboxing, namespaces, seccomp-BPF, setrl
 | `max_pids` | integer (optional) | (unset) | Maximum process and thread count (`RLIMIT_NPROC` and cgroups v2 `pids.max` fallback). |
 | `seccomp_profile` | SeccompProfile (optional) | (none) | Optional seccomp-BPF syscall filter profile (`"strict"`, `"baseline"`, or `"none"`). |
 | `unshare_namespaces` | boolean | false | Whether to isolate user, PID, and mount namespaces (`CLONE_NEWUSER \| CLONE_NEWPID \| CLONE_NEWNS`). |
+
+### `ScriptConstructOverride`
+
+One `[[lang.<name>.script_constructs]]` entry: per-script construct action
+overrides for an inspected script file on disk.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `sha256` | array of string (optional) | (unset) | Optional lowercase 64-character hex SHA-256 content digests. When present, the inspected script's SHA-256 digest must match one of the listed digests. |
+| `under` | array of string | (required) | Allowed script file paths or trees (`path` or `path/**`, supporting `~`, `$PROJECT_ROOT`, and `$WORKSPACE_ROOT`). Evaluated against the symlink-resolved canonical path of the inspected script file. |
 
 ### `SeccompProfile`
 
@@ -368,6 +380,7 @@ name.
 | `container_volume` | ContainerVolume (optional) | (none) | Container volume mount declarations for container tools (e.g. docker, podman). |
 | `dest_dir_flags` | array of string | [] | Options that consume the following token AND that token is the destination the SHELL moves to for everything after this command — sibling of `run_dir_flags` (where THIS command runs) but for where the shell goes next. |
 | `evaluates_input` | string | "" | This program runs text it obtains at execution time, so the thing that actually runs is not in the command vouch was given — unless vouch can prove it IS: a here-document on the same command, consumed and scanned, satisfies the "stdin" claim, because then the code is in the command after all.   "always" — e.g. Invoke-Expression, whatever its argument turns out to be   "stdin"  — a shell with no script and no -c snippet is reading code              from its standard input, as in `curl … \| bash` |
+| `exact_args` | array of array of string (optional) | (unset) | Complete argument vectors this entry recognises.  Each non-empty inner vector is matched whole-token against the invocation's complete, readable unquoted argument list under this entry's `case_sensitive_flags` rule (for example, `[["-a", "Calendar"], ["-a", "Preview"]]`). Unlisted argument vectors, incomplete or unreadable arguments, or runs under an argument-appending wrapper remain unmodeled. All normal guards and write checks still apply. |
 | `flag_prefix` | array of string | [] | How this program spells flags. cmd.exe uses `/s`, not `-s`; without this its flags read as paths and its paths read as flags, so both the guard rules and the written-path list come out wrong.  A list, because one name can belong to two languages: `del /s` is cmd, `del -Recurse` is the PowerShell alias for Remove-Item. Empty means "-". |
 | `here_write` | array of HereWrite | (none) | Shapes in which this program writes into the directory it runs from without naming a destination, written as `[[program.here_write]]`. |
 | `invokes_methods` | array of string | [] | Parameters that receive an object whose own methods are called by the callee (e.g. `datetime.now(tz)` calls methods on `tz`). Distinct from `callback_args` (which asserts callable invocation) and `writes_via_handle` (which asserts file writing). |
@@ -393,7 +406,7 @@ name.
 | `sub_capability` | array of SubCapability | (none) | Subcommand-specific capability declarations, written as `[[program.sub_capability]]`. |
 | `sub_write` | array of SubWrite | (none) | Write targets that depend on the SUBCOMMAND, not on the program.  `git` writes wherever `clone`, `init` and `worktree add` are told to, and nowhere for `status` or `log`. A single `writes` for the whole program cannot say that. |
 | `subcommand_options` | array of SubcommandOptions | (none) | Subcommand-specific options for programs where flag semantics differ by subcommand. |
-| `subcommand_paths` | array of array of string (optional) | (unset) | Exact positional command paths this entry recognises.  Each non-empty inner vector is matched from the first positional word under this entry's flag grammar. `[["mcp", "get"]]` recognises that operation without recognising `mcp add` or another sibling. Either this key or `subcommands` being present makes the entry scoped; both absent still means whole-program coverage. When both are present their scopes are unioned. |
+| `subcommand_paths` | array of array of string (optional) | (unset) | Exact positional command paths this entry recognises.  Each non-empty inner vector is matched from the first positional word under this entry's flag grammar. `[["mcp", "get"]]` recognises that operation without recognising `mcp add` or another sibling. Either this key, `subcommands`, or `exact_args` being present makes the entry scoped; all three absent still means whole-program coverage. When present their scopes are unioned. |
 | `subcommands` | array of string (optional) | (unset) | Which subcommands this entry recognises.  Three states (spec 2026-08-20 §3): the key ABSENT (`None`) covers the whole program — every run; a non-empty list covers those verbs, plus standalone runs when `standalone_flags` is present; an explicitly EMPTY list covers no verb at all — only standalone runs, and the loader refuses that spelling without a non-empty `standalone_flags` (an entry that can never recognise anything reads as installed protection and is worse than none). |
 | `value_options` | array of string | [] | Options that consume the following token. Needed to find the subcommand. |
 | `wrap_exec_flags` | array of string | [] | For `wraps = "after_exec"`: the flags after which the wrapped command begins. `find` spells four of them — `-exec`, `-execdir`, `-ok`, `-okdir` — and the walk expands EVERY occurrence, not just the first.  Was two hardcoded literals in the wrap arm, which is a program name in `src/` (§10: no program or tool names in code) and which left `-ok`/`-okdir` — the confirming twins of the two that were listed — running unjudged. |

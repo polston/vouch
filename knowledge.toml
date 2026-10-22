@@ -2181,16 +2181,28 @@ any_arg_prefix = ["of="]
 # unset-by-default ask, so recognising the CLI does not silently allow those writes.
 [[program]]
 match = ["vouch"]
-subcommands = ["explain", "why", "doctor", "review", "import", "install", "schema", "trust", "uninstall"]
+subcommands = ["explain", "why", "doctor", "review", "import", "install", "schema", "trust", "model", "uninstall"]
 standalone_flags = ["--help", "--version"]
-value_options = ["--accept", "--host", "--shell", "--state-dir"]
-no_value_options = ["--help", "--version", "--write", "--print", "--shadow", "--whole-server", "--all-subcommands", "--hook", "--hook-batch"]
+value_options = ["--accept", "--host", "--shell", "--state-dir", "--subcommand", "--value-flag", "--write-flag", "--standalone-flag", "--exact-args", "--snippet", "--snippet-from", "--write-path", "--rule", "--auto"]
+no_value_options = ["--help", "--version", "--write", "--print", "--shadow", "--whole-server", "--all-subcommands", "--hook", "--hook-batch", "--evaluates-input", "--cwd-from-call", "--update", "--changes-dir"]
 case_sensitive_flags = true
 
 [[program.rule]]
 guard = "in_place_edit"
 source = "requested: vouch trust updates the operator's knowledge file"
 subcommand_in = ["trust"]
+
+[[program.rule]]
+guard = "in_place_edit"
+source = "requested: vouch model updates the operator's knowledge file"
+subcommand_in = ["model"]
+sub_arg_0_in = ["program", "tool"]
+
+[[program.rule]]
+guard = "in_place_edit"
+source = "requested: vouch model --write updates the operator's knowledge file"
+subcommand_in = ["model"]
+any_flag = ["--write"]
 
 [[program.rule]]
 guard = "in_place_edit"

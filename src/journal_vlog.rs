@@ -32,7 +32,9 @@ pub const VCHK_GENESIS_DIGEST: u64 = 0x564f_5543_485f_434b; // "VOUCH_CK"
 
 pub const VBUNDLE_MAGIC: [u8; 4] = *b"VBND";
 pub const VBUNDLE_VERSION: u32 = 1;
+pub const VBUNDLE_DELTA_VERSION: u32 = 2;
 pub const VBUNDLE_HEADER_LEN: usize = 96;
+pub const VBUNDLE_DELTA_ANCHOR_LEN: usize = 48;
 pub const VBUNDLE_SEAL_SEED: [u8; 32] = *b"VOUCH_VBUNDLE_SEAL_SHA256_V00001";
 
 /// Compute a 64-bit rolling cryptographic hash chain tag over `(VLOG_GENESIS_SEED, prev_tag, seq_idx, payload)`.
@@ -1514,6 +1516,9 @@ pub enum VlogTamperKind {
     BundleSealCorrupted {
         detail: String,
     },
+    DeltaParentMismatch {
+        detail: String,
+    },
 }
 
 /// Complete audit report returned by `verify_vlog_integrity` and `verify_vlog_bundle`.
@@ -1553,12 +1558,26 @@ pub fn verify_vlog_slices(
     vidx_bytes: Option<&[u8]>,
     vchk_bytes: Option<&[u8]>,
 ) -> Result<VlogIntegrityReport, String> {
+    verify_vlog_slices_from_anchor(bytes, vidx_bytes, vchk_bytes, 0, VLOG_GENESIS_TAG)
+}
+
+/// Verify `.vlog` frames starting from an explicit parent anchor `(base_seq_idx, initial_prev_tag)`.
+/// For full genesis journals, `base_seq_idx == 0` and `initial_prev_tag == VLOG_GENESIS_TAG`.
+/// For incremental delta slices, frame `i` (`0..record_count`) is verified against
+/// `compute_frame_chain_tag(prev_tag, base_seq_idx + i, payload)` without re-encoding frame tags.
+pub fn verify_vlog_slices_from_anchor(
+    bytes: &[u8],
+    vidx_bytes: Option<&[u8]>,
+    vchk_bytes: Option<&[u8]>,
+    base_seq_idx: u64,
+    initial_prev_tag: u64,
+) -> Result<VlogIntegrityReport, String> {
     if bytes.is_empty() {
         return Ok(VlogIntegrityReport {
             valid: true,
             verified_records: 0,
             verified_checkpoints: 0,
-            terminal_chain_tag: VLOG_GENESIS_TAG,
+            terminal_chain_tag: initial_prev_tag,
             tamper_finding: None,
         });
     }
@@ -1570,7 +1589,7 @@ pub fn verify_vlog_slices(
                 valid: false,
                 verified_records: 0,
                 verified_checkpoints: 0,
-                terminal_chain_tag: VLOG_GENESIS_TAG,
+                terminal_chain_tag: initial_prev_tag,
                 tamper_finding: Some(VlogTamperKind::HeaderCorrupted { detail }),
             });
         }
@@ -1580,12 +1599,13 @@ pub fn verify_vlog_slices(
     let expected_idx_bytes = (header.record_count as usize).saturating_mul(VLOG_INDEX_ENTRY_LEN);
 
     let mut offset = VLOG_HEADER_LEN;
-    let mut prev_tag = VLOG_GENESIS_TAG;
+    let mut prev_tag = initial_prev_tag;
     let mut verified_records = 0u64;
     let mut expected_bounds: Vec<(u64, u32)> = Vec::with_capacity(header.record_count as usize);
     let mut chain_tags_by_seq: Vec<u64> = Vec::with_capacity(header.record_count as usize);
 
-    for seq_idx in 0..header.record_count {
+    for rel_idx in 0..header.record_count {
+        let seq_idx = base_seq_idx.saturating_add(rel_idx);
         if offset + VLOG_FRAME_HEADER_LEN > bytes.len() || offset + VLOG_FRAME_HEADER_LEN > idx_offset
         {
             return Ok(VlogIntegrityReport {
@@ -1874,6 +1894,43 @@ pub struct VlogBundleHeader {
     pub bundle_sha256: [u8; 32],
 }
 
+/// Fixed 48-byte parent lineage anchor stored immediately after the 96-byte `VlogBundleHeader`
+/// (`bytes[96..144]`) when `version == VBUNDLE_DELTA_VERSION` (`2`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VlogDeltaAnchor {
+    pub base_seq_idx: u64,
+    pub parent_terminal_chain_tag: u64,
+    pub parent_bundle_sha256: [u8; 32],
+}
+
+impl VlogDeltaAnchor {
+    pub fn to_bytes(&self) -> [u8; VBUNDLE_DELTA_ANCHOR_LEN] {
+        let mut out = [0u8; VBUNDLE_DELTA_ANCHOR_LEN];
+        out[0..8].copy_from_slice(&self.base_seq_idx.to_le_bytes());
+        out[8..16].copy_from_slice(&self.parent_terminal_chain_tag.to_le_bytes());
+        out[16..48].copy_from_slice(&self.parent_bundle_sha256);
+        out
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.len() < VBUNDLE_DELTA_ANCHOR_LEN {
+            return Err(format!(
+                "vbundle delta anchor truncated: expected {VBUNDLE_DELTA_ANCHOR_LEN} bytes, got {}",
+                bytes.len()
+            ));
+        }
+        let base_seq_idx = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+        let parent_terminal_chain_tag = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+        let mut parent_bundle_sha256 = [0u8; 32];
+        parent_bundle_sha256.copy_from_slice(&bytes[16..48]);
+        Ok(Self {
+            base_seq_idx,
+            parent_terminal_chain_tag,
+            parent_bundle_sha256,
+        })
+    }
+}
+
 /// Compute the 256-bit SHA-256 cryptographic seal over the 64-byte bundle header prefix and all embedded sections.
 pub fn compute_bundle_seal_sha256(
     header_prefix_64: &[u8; 64],
@@ -1881,9 +1938,24 @@ pub fn compute_bundle_seal_sha256(
     vidx_bytes: &[u8],
     vchk_bytes: &[u8],
 ) -> [u8; 32] {
+    compute_bundle_seal_sha256_with_anchor(header_prefix_64, None, vlog_bytes, vidx_bytes, vchk_bytes)
+}
+
+/// Compute the 256-bit SHA-256 cryptographic seal over the 64-byte bundle header prefix, optional
+/// 48-byte delta anchor, and all embedded sections.
+pub fn compute_bundle_seal_sha256_with_anchor(
+    header_prefix_64: &[u8; 64],
+    delta_anchor: Option<&VlogDeltaAnchor>,
+    vlog_bytes: &[u8],
+    vidx_bytes: &[u8],
+    vchk_bytes: &[u8],
+) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(VBUNDLE_SEAL_SEED);
     hasher.update(header_prefix_64);
+    if let Some(anchor) = delta_anchor {
+        hasher.update(anchor.to_bytes());
+    }
     hasher.update(vlog_bytes);
     hasher.update(vidx_bytes);
     hasher.update(vchk_bytes);
@@ -1900,7 +1972,24 @@ impl VlogBundleHeader {
         vidx_bytes: &[u8],
         vchk_bytes: &[u8],
     ) -> Self {
-        let vlog_offset = VBUNDLE_HEADER_LEN as u64;
+        Self::new_with_anchor(exported_at_secs, None, vlog_bytes, vidx_bytes, vchk_bytes)
+    }
+
+    pub fn new_with_anchor(
+        exported_at_secs: u64,
+        delta_anchor: Option<&VlogDeltaAnchor>,
+        vlog_bytes: &[u8],
+        vidx_bytes: &[u8],
+        vchk_bytes: &[u8],
+    ) -> Self {
+        let (version, vlog_offset) = if delta_anchor.is_some() {
+            (
+                VBUNDLE_DELTA_VERSION,
+                (VBUNDLE_HEADER_LEN + VBUNDLE_DELTA_ANCHOR_LEN) as u64,
+            )
+        } else {
+            (VBUNDLE_VERSION, VBUNDLE_HEADER_LEN as u64)
+        };
         let vlog_len = vlog_bytes.len() as u64;
         let vidx_offset = vlog_offset.saturating_add(vlog_len);
         let vidx_len = vidx_bytes.len() as u64;
@@ -1908,7 +1997,7 @@ impl VlogBundleHeader {
         let vchk_len = vchk_bytes.len() as u64;
 
         let mut h = Self {
-            version: VBUNDLE_VERSION,
+            version,
             exported_at_secs,
             vlog_offset,
             vlog_len,
@@ -1919,8 +2008,13 @@ impl VlogBundleHeader {
             bundle_sha256: [0u8; 32],
         };
         let prefix = h.encode_prefix_64();
-        h.bundle_sha256 =
-            compute_bundle_seal_sha256(&prefix, vlog_bytes, vidx_bytes, vchk_bytes);
+        h.bundle_sha256 = compute_bundle_seal_sha256_with_anchor(
+            &prefix,
+            delta_anchor,
+            vlog_bytes,
+            vidx_bytes,
+            vchk_bytes,
+        );
         h
     }
 
@@ -1957,7 +2051,7 @@ impl VlogBundleHeader {
             return Err("invalid vbundle magic".to_string());
         }
         let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
-        if version != VBUNDLE_VERSION {
+        if version != VBUNDLE_VERSION && version != VBUNDLE_DELTA_VERSION {
             return Err(format!("unsupported vbundle version: {version}"));
         }
         let exported_at_secs = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
@@ -1970,9 +2064,14 @@ impl VlogBundleHeader {
         let mut bundle_sha256 = [0u8; 32];
         bundle_sha256.copy_from_slice(&bytes[64..96]);
 
-        if vlog_offset != VBUNDLE_HEADER_LEN as u64 {
+        let expected_vlog_offset = if version == VBUNDLE_DELTA_VERSION {
+            (VBUNDLE_HEADER_LEN + VBUNDLE_DELTA_ANCHOR_LEN) as u64
+        } else {
+            VBUNDLE_HEADER_LEN as u64
+        };
+        if vlog_offset != expected_vlog_offset {
             return Err(format!(
-                "invalid vbundle vlog_offset: expected {VBUNDLE_HEADER_LEN}, got {vlog_offset}"
+                "invalid vbundle vlog_offset: expected {expected_vlog_offset}, got {vlog_offset}"
             ));
         }
         if vidx_offset != vlog_offset.saturating_add(vlog_len) {
@@ -2007,6 +2106,125 @@ impl VlogBundleHeader {
             bundle_sha256,
         })
     }
+
+    pub fn parse_delta_anchor(&self, bytes: &[u8]) -> Result<Option<VlogDeltaAnchor>, String> {
+        if self.version != VBUNDLE_DELTA_VERSION {
+            return Ok(None);
+        }
+        let anchor_end = VBUNDLE_HEADER_LEN + VBUNDLE_DELTA_ANCHOR_LEN;
+        if bytes.len() < anchor_end {
+            return Err("vbundle delta anchor out of bounds".to_string());
+        }
+        VlogDeltaAnchor::from_bytes(&bytes[VBUNDLE_HEADER_LEN..anchor_end]).map(Some)
+    }
+}
+
+/// Inspect a `.vbundle` file and return its cumulative chain state `(header, delta_anchor, cumulative_end_seq, report)`.
+fn inspect_bundle_chain_state(
+    bundle_path: &Path,
+) -> Result<(VlogBundleHeader, Option<VlogDeltaAnchor>, u64, VlogIntegrityReport), String> {
+    let bytes = std::fs::read(bundle_path).map_err(|e| format!("failed to read vbundle: {e}"))?;
+    let header = match VlogBundleHeader::from_bytes(&bytes) {
+        Ok(h) => h,
+        Err(detail) => {
+            return Ok((
+                VlogBundleHeader {
+                    version: 0,
+                    exported_at_secs: 0,
+                    vlog_offset: 0,
+                    vlog_len: 0,
+                    vidx_offset: 0,
+                    vidx_len: 0,
+                    vchk_offset: 0,
+                    vchk_len: 0,
+                    bundle_sha256: [0u8; 32],
+                },
+                None,
+                0,
+                VlogIntegrityReport {
+                    valid: false,
+                    verified_records: 0,
+                    verified_checkpoints: 0,
+                    terminal_chain_tag: VLOG_GENESIS_TAG,
+                    tamper_finding: Some(VlogTamperKind::BundleSealCorrupted { detail }),
+                },
+            ));
+        }
+    };
+
+    let delta_anchor = match header.parse_delta_anchor(&bytes) {
+        Ok(a) => a,
+        Err(detail) => {
+            return Ok((
+                header,
+                None,
+                0,
+                VlogIntegrityReport {
+                    valid: false,
+                    verified_records: 0,
+                    verified_checkpoints: 0,
+                    terminal_chain_tag: VLOG_GENESIS_TAG,
+                    tamper_finding: Some(VlogTamperKind::BundleSealCorrupted { detail }),
+                },
+            ));
+        }
+    };
+
+    let vlog_start = header.vlog_offset as usize;
+    let vlog_end = vlog_start + header.vlog_len as usize;
+    let vidx_start = header.vidx_offset as usize;
+    let vidx_end = vidx_start + header.vidx_len as usize;
+    let vchk_start = header.vchk_offset as usize;
+    let vchk_end = vchk_start + header.vchk_len as usize;
+
+    let vlog_slice = &bytes[vlog_start..vlog_end];
+    let vidx_slice = &bytes[vidx_start..vidx_end];
+    let vchk_slice = &bytes[vchk_start..vchk_end];
+
+    let mut prefix = [0u8; 64];
+    prefix.copy_from_slice(&bytes[0..64]);
+    let expected_seal = compute_bundle_seal_sha256_with_anchor(
+        &prefix,
+        delta_anchor.as_ref(),
+        vlog_slice,
+        vidx_slice,
+        vchk_slice,
+    );
+    if expected_seal != header.bundle_sha256 {
+        return Ok((
+            header,
+            delta_anchor,
+            0,
+            VlogIntegrityReport {
+                valid: false,
+                verified_records: 0,
+                verified_checkpoints: 0,
+                terminal_chain_tag: VLOG_GENESIS_TAG,
+                tamper_finding: Some(VlogTamperKind::BundleSealCorrupted {
+                    detail: "bundle SHA-256 cryptographic seal mismatch".to_string(),
+                }),
+            },
+        ));
+    }
+
+    let vidx_opt = if vidx_slice.is_empty() {
+        None
+    } else {
+        Some(vidx_slice)
+    };
+    let vchk_opt = if vchk_slice.is_empty() {
+        None
+    } else {
+        Some(vchk_slice)
+    };
+    let (base_seq, init_tag) = match delta_anchor {
+        Some(ref a) => (a.base_seq_idx, a.parent_terminal_chain_tag),
+        None => (0, VLOG_GENESIS_TAG),
+    };
+    let report =
+        verify_vlog_slices_from_anchor(vlog_slice, vidx_opt, vchk_opt, base_seq, init_tag)?;
+    let cumulative_end_seq = base_seq.saturating_add(report.verified_records);
+    Ok((header, delta_anchor, cumulative_end_seq, report))
 }
 
 /// Package `journal.vlog`, `journal.vidx`, and `journal.vchk` from `dir` into a self-contained,
@@ -2014,6 +2232,18 @@ impl VlogBundleHeader {
 ///
 /// Refuses to export if the live `.vlog` chain fails integrity verification.
 pub fn export_vlog_bundle(dir: &Path, bundle_path: &Path) -> Result<VlogIntegrityReport, String> {
+    export_vlog_bundle_since(dir, bundle_path, None)
+}
+
+/// Package `journal.vlog`, `journal.vidx`, and `journal.vchk` from `dir` into a `.vbundle` file at
+/// `bundle_path`. When `since_bundle` is `Some(parent_path)`, exports an incremental delta `.vbundle`
+/// (`version == VBUNDLE_DELTA_VERSION`) containing only frames appended after `parent_path` and
+/// cryptographically anchored to `parent_path`'s `bundle_sha256` and `terminal_chain_tag`.
+pub fn export_vlog_bundle_since(
+    dir: &Path,
+    bundle_path: &Path,
+    since_bundle: Option<&Path>,
+) -> Result<VlogIntegrityReport, String> {
     let vlog_file = vlog_path(dir);
     if !vlog_file.exists() {
         return Err(format!(
@@ -2021,44 +2251,168 @@ pub fn export_vlog_bundle(dir: &Path, bundle_path: &Path) -> Result<VlogIntegrit
             vlog_file.display()
         ));
     }
-    let vlog_bytes =
+    let full_vlog_bytes =
         std::fs::read(&vlog_file).map_err(|e| format!("failed to read journal.vlog: {e}"))?;
     let vidx_file = vidx_path(dir);
-    let vidx_bytes = if vidx_file.exists() {
+    let full_vidx_bytes = if vidx_file.exists() {
         std::fs::read(&vidx_file).map_err(|e| format!("failed to read journal.vidx: {e}"))?
     } else {
         Vec::new()
     };
     let vchk_file = vchk_path(dir);
-    let vchk_bytes = if vchk_file.exists() {
+    let full_vchk_bytes = if vchk_file.exists() {
         std::fs::read(&vchk_file).map_err(|e| format!("failed to read journal.vchk: {e}"))?
     } else {
         Vec::new()
     };
 
-    let vidx_opt = if vidx_bytes.is_empty() {
+    let vidx_opt = if full_vidx_bytes.is_empty() {
         None
     } else {
-        Some(vidx_bytes.as_slice())
+        Some(full_vidx_bytes.as_slice())
     };
-    let vchk_opt = if vchk_bytes.is_empty() {
+    let vchk_opt = if full_vchk_bytes.is_empty() {
         None
     } else {
-        Some(vchk_bytes.as_slice())
+        Some(full_vchk_bytes.as_slice())
     };
-    let report = verify_vlog_slices(&vlog_bytes, vidx_opt, vchk_opt)?;
-    if !report.valid {
+    let live_report = verify_vlog_slices(&full_vlog_bytes, vidx_opt, vchk_opt)?;
+    if !live_report.valid {
         return Err(format!(
             "refusing to export corrupted journal.vlog: {:?}",
-            report.tamper_finding
+            live_report.tamper_finding
         ));
     }
+
+    let (delta_anchor, vlog_bytes, vidx_bytes, vchk_bytes, export_report) =
+        if let Some(parent_path) = since_bundle {
+            let (parent_hdr, _, parent_end_seq, parent_rep) =
+                inspect_bundle_chain_state(parent_path)?;
+            if !parent_rep.valid {
+                return Err(format!(
+                    "parent bundle {} failed integrity verification: {:?}",
+                    parent_path.display(),
+                    parent_rep.tamper_finding
+                ));
+            }
+            if live_report.verified_records < parent_end_seq {
+                return Err(format!(
+                    "cannot export delta bundle: live journal has {} records, which is fewer than parent bundle cumulative sequence {}",
+                    live_report.verified_records, parent_end_seq
+                ));
+            }
+
+            let full_header = VlogHeader::from_bytes(&full_vlog_bytes)?;
+            let idx_offset = full_header.index_offset as usize;
+            let total_recs = full_header.record_count as usize;
+            let base_idx = parent_end_seq as usize;
+
+            // Verify that the live journal's chain tag at `base_idx - 1` matches `parent_rep.terminal_chain_tag`
+            let live_prefix_tag = if base_idx == 0 {
+                VLOG_GENESIS_TAG
+            } else {
+                let entry_start = idx_offset + (base_idx - 1) * VLOG_INDEX_ENTRY_LEN;
+                let entry = VlogIndexEntry::from_bytes(
+                    &full_vlog_bytes[entry_start..entry_start + VLOG_INDEX_ENTRY_LEN],
+                )
+                .ok_or_else(|| "failed to read parent anchor index entry".to_string())?;
+                let tag_off = (entry.record_offset as usize) + 8;
+                u64::from_le_bytes(full_vlog_bytes[tag_off..tag_off + 8].try_into().unwrap())
+            };
+            if live_prefix_tag != parent_rep.terminal_chain_tag {
+                return Err(format!(
+                    "cannot export delta bundle: live journal chain tag at sequence {} ({:016x}) does not match parent bundle terminal chain tag ({:016x}) — journal was compacted or diverged since parent bundle",
+                    parent_end_seq, live_prefix_tag, parent_rep.terminal_chain_tag
+                ));
+            }
+
+            let delta_count = (total_recs - base_idx) as u64;
+            let first_delta_offset = if base_idx < total_recs {
+                let entry_start = idx_offset + base_idx * VLOG_INDEX_ENTRY_LEN;
+                let entry = VlogIndexEntry::from_bytes(
+                    &full_vlog_bytes[entry_start..entry_start + VLOG_INDEX_ENTRY_LEN],
+                )
+                .ok_or_else(|| "failed to read first delta index entry".to_string())?;
+                entry.record_offset as usize
+            } else {
+                idx_offset
+            };
+
+            let raw_delta_frames = &full_vlog_bytes[first_delta_offset..idx_offset];
+            let shift = (first_delta_offset - VLOG_HEADER_LEN) as u64;
+            let delta_index_offset = (VLOG_HEADER_LEN + raw_delta_frames.len()) as u64;
+            let delta_vlog_hdr = VlogHeader::new(delta_count, delta_index_offset);
+
+            let mut delta_idx_entries = Vec::with_capacity(delta_count as usize);
+            for i in base_idx..total_recs {
+                let entry_start = idx_offset + i * VLOG_INDEX_ENTRY_LEN;
+                let mut entry = VlogIndexEntry::from_bytes(
+                    &full_vlog_bytes[entry_start..entry_start + VLOG_INDEX_ENTRY_LEN],
+                )
+                .ok_or_else(|| "failed to read delta index entry".to_string())?;
+                entry.record_offset = entry.record_offset.saturating_sub(shift);
+                delta_idx_entries.push(entry);
+            }
+
+            let mut d_vlog = Vec::with_capacity(
+                VLOG_HEADER_LEN
+                    + raw_delta_frames.len()
+                    + (delta_count as usize) * VLOG_INDEX_ENTRY_LEN,
+            );
+            d_vlog.extend_from_slice(&delta_vlog_hdr.to_bytes());
+            d_vlog.extend_from_slice(raw_delta_frames);
+            for e in &delta_idx_entries {
+                d_vlog.extend_from_slice(&e.to_bytes());
+            }
+
+            let mut d_vidx = Vec::with_capacity(
+                VLOG_HEADER_LEN + (delta_count as usize) * VLOG_INDEX_ENTRY_LEN,
+            );
+            d_vidx.extend_from_slice(&delta_vlog_hdr.to_bytes());
+            for e in &delta_idx_entries {
+                d_vidx.extend_from_slice(&e.to_bytes());
+            }
+
+            let anchor = VlogDeltaAnchor {
+                base_seq_idx: parent_end_seq,
+                parent_terminal_chain_tag: parent_rep.terminal_chain_tag,
+                parent_bundle_sha256: parent_hdr.bundle_sha256,
+            };
+            let delta_rep = verify_vlog_slices_from_anchor(
+                &d_vlog,
+                Some(&d_vidx),
+                None,
+                anchor.base_seq_idx,
+                anchor.parent_terminal_chain_tag,
+            )?;
+            if !delta_rep.valid {
+                return Err(format!(
+                    "internal error verifying constructed delta bundle: {:?}",
+                    delta_rep.tamper_finding
+                ));
+            }
+            (Some(anchor), d_vlog, d_vidx, Vec::new(), delta_rep)
+        } else {
+            (
+                None,
+                full_vlog_bytes,
+                full_vidx_bytes,
+                full_vchk_bytes,
+                live_report,
+            )
+        };
 
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let header = VlogBundleHeader::new(now_secs, &vlog_bytes, &vidx_bytes, &vchk_bytes);
+    let header = VlogBundleHeader::new_with_anchor(
+        now_secs,
+        delta_anchor.as_ref(),
+        &vlog_bytes,
+        &vidx_bytes,
+        &vchk_bytes,
+    );
 
     if let Some(parent) = bundle_path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -2076,6 +2430,10 @@ pub fn export_vlog_bundle(dir: &Path, bundle_path: &Path) -> Result<VlogIntegrit
             .map_err(|e| format!("failed to open temporary bundle file: {e}"))?;
         f.write_all(&header.to_bytes())
             .map_err(|e| format!("failed to write bundle header: {e}"))?;
+        if let Some(ref anchor) = delta_anchor {
+            f.write_all(&anchor.to_bytes())
+                .map_err(|e| format!("failed to write bundle delta anchor: {e}"))?;
+        }
         f.write_all(&vlog_bytes)
             .map_err(|e| format!("failed to write bundle vlog section: {e}"))?;
         f.write_all(&vidx_bytes)
@@ -2088,7 +2446,7 @@ pub fn export_vlog_bundle(dir: &Path, bundle_path: &Path) -> Result<VlogIntegrit
     std::fs::rename(&tmp_path, bundle_path)
         .map_err(|e| format!("failed to finalize bundle file: {e}"))?;
 
-    Ok(report)
+    Ok(export_report)
 }
 
 /// Verify an exported `.vbundle` cryptographic audit bundle completely offline without
@@ -2098,58 +2456,154 @@ pub fn export_vlog_bundle(dir: &Path, bundle_path: &Path) -> Result<VlogIntegrit
 /// intra-file `.vlog` frame CRC32s and rolling hash chain (`VLOG_GENESIS_SEED`), `.vidx` index
 /// consistency, and `.vchk` cross-compaction continuity lineage (`VCHK_GENESIS_SEED`).
 pub fn verify_vlog_bundle(bundle_path: &Path) -> Result<VlogIntegrityReport, String> {
-    let bytes =
-        std::fs::read(bundle_path).map_err(|e| format!("failed to read vbundle: {e}"))?;
-    let header = match VlogBundleHeader::from_bytes(&bytes) {
-        Ok(h) => h,
-        Err(detail) => {
+    let (_, _, _, report) = inspect_bundle_chain_state(bundle_path)?;
+    Ok(report)
+}
+
+/// Verify an ordered sequence of `.vbundle` archives (`[genesis_bundle, delta_1, delta_2, ...]`)
+/// completely offline, asserting both intra-bundle cryptographic integrity and cross-bundle
+/// parent SHA-256 seal, sequence index, and rolling hash chain continuity.
+pub fn verify_vlog_bundle_chain(bundle_paths: &[PathBuf]) -> Result<VlogIntegrityReport, String> {
+    if bundle_paths.is_empty() {
+        return Err("no bundle paths provided".to_string());
+    }
+    if bundle_paths.len() == 1 {
+        let (_, delta_anchor, _, report) = inspect_bundle_chain_state(&bundle_paths[0])?;
+        if !report.valid {
+            return Ok(report);
+        }
+        if let Some(anchor) = delta_anchor {
             return Ok(VlogIntegrityReport {
                 valid: false,
-                verified_records: 0,
-                verified_checkpoints: 0,
-                terminal_chain_tag: VLOG_GENESIS_TAG,
-                tamper_finding: Some(VlogTamperKind::BundleSealCorrupted { detail }),
+                verified_records: report.verified_records,
+                verified_checkpoints: report.verified_checkpoints,
+                terminal_chain_tag: report.terminal_chain_tag,
+                tamper_finding: Some(VlogTamperKind::DeltaParentMismatch {
+                    detail: format!(
+                        "delta bundle (base_seq_idx={}) requires its parent bundle to verify full chain lineage from genesis",
+                        anchor.base_seq_idx
+                    ),
+                }),
             });
         }
-    };
-
-    let vlog_start = header.vlog_offset as usize;
-    let vlog_end = vlog_start + header.vlog_len as usize;
-    let vidx_start = header.vidx_offset as usize;
-    let vidx_end = vidx_start + header.vidx_len as usize;
-    let vchk_start = header.vchk_offset as usize;
-    let vchk_end = vchk_start + header.vchk_len as usize;
-
-    let vlog_slice = &bytes[vlog_start..vlog_end];
-    let vidx_slice = &bytes[vidx_start..vidx_end];
-    let vchk_slice = &bytes[vchk_start..vchk_end];
-
-    let mut prefix = [0u8; 64];
-    prefix.copy_from_slice(&bytes[0..64]);
-    let expected_seal = compute_bundle_seal_sha256(&prefix, vlog_slice, vidx_slice, vchk_slice);
-    if expected_seal != header.bundle_sha256 {
-        return Ok(VlogIntegrityReport {
-            valid: false,
-            verified_records: 0,
-            verified_checkpoints: 0,
-            terminal_chain_tag: VLOG_GENESIS_TAG,
-            tamper_finding: Some(VlogTamperKind::BundleSealCorrupted {
-                detail: "bundle SHA-256 cryptographic seal mismatch".to_string(),
-            }),
-        });
+        return Ok(report);
     }
 
-    let vidx_opt = if vidx_slice.is_empty() {
-        None
-    } else {
-        Some(vidx_slice)
-    };
-    let vchk_opt = if vchk_slice.is_empty() {
-        None
-    } else {
-        Some(vchk_slice)
-    };
-    verify_vlog_slices(vlog_slice, vidx_opt, vchk_opt)
+    let mut total_verified_records = 0u64;
+    let mut total_verified_checkpoints = 0u64;
+    let mut prev_bundle_sha256 = [0u8; 32];
+    let mut prev_terminal_tag = VLOG_GENESIS_TAG;
+    let mut prev_end_seq = 0u64;
+
+    for (idx, path) in bundle_paths.iter().enumerate() {
+        let (hdr, delta_anchor, end_seq, rep) = inspect_bundle_chain_state(path)?;
+        if !rep.valid {
+            return Ok(VlogIntegrityReport {
+                valid: false,
+                verified_records: total_verified_records + rep.verified_records,
+                verified_checkpoints: total_verified_checkpoints + rep.verified_checkpoints,
+                terminal_chain_tag: rep.terminal_chain_tag,
+                tamper_finding: rep.tamper_finding,
+            });
+        }
+
+        if idx == 0 {
+            if let Some(anchor) = delta_anchor {
+                return Ok(VlogIntegrityReport {
+                    valid: false,
+                    verified_records: 0,
+                    verified_checkpoints: 0,
+                    terminal_chain_tag: VLOG_GENESIS_TAG,
+                    tamper_finding: Some(VlogTamperKind::DeltaParentMismatch {
+                        detail: format!(
+                            "first bundle in chain ({}) is a delta bundle (base_seq_idx={}), expected a genesis bundle",
+                            path.display(),
+                            anchor.base_seq_idx
+                        ),
+                    }),
+                });
+            }
+        } else {
+            let Some(anchor) = delta_anchor else {
+                return Ok(VlogIntegrityReport {
+                    valid: false,
+                    verified_records: total_verified_records,
+                    verified_checkpoints: total_verified_checkpoints,
+                    terminal_chain_tag: prev_terminal_tag,
+                    tamper_finding: Some(VlogTamperKind::DeltaParentMismatch {
+                        detail: format!(
+                            "bundle #{} ({}) is a standalone genesis bundle, expected a delta bundle anchored to bundle #{}",
+                            idx + 1,
+                            path.display(),
+                            idx
+                        ),
+                    }),
+                });
+            };
+            if anchor.parent_bundle_sha256 != prev_bundle_sha256 {
+                return Ok(VlogIntegrityReport {
+                    valid: false,
+                    verified_records: total_verified_records,
+                    verified_checkpoints: total_verified_checkpoints,
+                    terminal_chain_tag: prev_terminal_tag,
+                    tamper_finding: Some(VlogTamperKind::DeltaParentMismatch {
+                        detail: format!(
+                            "bundle #{} ({}) parent_bundle_sha256 does not match bundle #{} seal",
+                            idx + 1,
+                            path.display(),
+                            idx
+                        ),
+                    }),
+                });
+            }
+            if anchor.base_seq_idx != prev_end_seq {
+                return Ok(VlogIntegrityReport {
+                    valid: false,
+                    verified_records: total_verified_records,
+                    verified_checkpoints: total_verified_checkpoints,
+                    terminal_chain_tag: prev_terminal_tag,
+                    tamper_finding: Some(VlogTamperKind::DeltaParentMismatch {
+                        detail: format!(
+                            "bundle #{} ({}) base_seq_idx ({}) != parent cumulative record count ({prev_end_seq})",
+                            idx + 1,
+                            path.display(),
+                            anchor.base_seq_idx
+                        ),
+                    }),
+                });
+            }
+            if anchor.parent_terminal_chain_tag != prev_terminal_tag {
+                return Ok(VlogIntegrityReport {
+                    valid: false,
+                    verified_records: total_verified_records,
+                    verified_checkpoints: total_verified_checkpoints,
+                    terminal_chain_tag: prev_terminal_tag,
+                    tamper_finding: Some(VlogTamperKind::DeltaParentMismatch {
+                        detail: format!(
+                            "bundle #{} ({}) parent_terminal_chain_tag ({:016x}) != parent terminal tag ({prev_terminal_tag:016x})",
+                            idx + 1,
+                            path.display(),
+                            anchor.parent_terminal_chain_tag
+                        ),
+                    }),
+                });
+            }
+        }
+
+        total_verified_records += rep.verified_records;
+        total_verified_checkpoints += rep.verified_checkpoints;
+        prev_bundle_sha256 = hdr.bundle_sha256;
+        prev_terminal_tag = rep.terminal_chain_tag;
+        prev_end_seq = end_seq;
+    }
+
+    Ok(VlogIntegrityReport {
+        valid: true,
+        verified_records: total_verified_records,
+        verified_checkpoints: total_verified_checkpoints,
+        terminal_chain_tag: prev_terminal_tag,
+        tamper_finding: None,
+    })
 }
 
 /// Verify a `.vbundle` archive offline and decode all contained `Record` entries.

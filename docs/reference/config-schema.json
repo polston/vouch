@@ -172,6 +172,15 @@
           "format": "uint64",
           "default": null,
           "minimum": 0
+        },
+        "psi_stall_warn_pct": {
+          "description": "Optional Pressure Stall Information (`cpu.pressure`, `memory.pressure`, `io.pressure`)\n`avg10` stall percentage threshold (`0.0 < pct <= 100.0`) above which worker backpressure\nwarnings are triggered.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
         }
       },
       "additionalProperties": false
@@ -337,6 +346,13 @@
             "null"
           ],
           "default": null
+        },
+        "script_constructs": {
+          "description": "Per-script construct overrides for inspected script files on disk,\nwritten as `[[lang.<name>.script_constructs]]`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ScriptConstructOverride"
+          }
         },
         "worker_binary": {
           "description": "Worker binary name (e.g. \"pwsh\" or \"dotnet\").",
@@ -595,6 +611,36 @@
         }
       },
       "additionalProperties": false
+    },
+    "ScriptConstructOverride": {
+      "description": "One `[[lang.<name>.script_constructs]]` entry: per-script construct action\noverrides for an inspected script file on disk.",
+      "type": "object",
+      "properties": {
+        "sha256": {
+          "description": "Optional lowercase 64-character hex SHA-256 content digests. When\npresent, the inspected script's SHA-256 digest must match one of the\nlisted digests.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "default": null,
+          "items": {
+            "type": "string"
+          }
+        },
+        "under": {
+          "description": "Allowed script file paths or trees (`path` or `path/**`, supporting `~`,\n`$PROJECT_ROOT`, and `$WORKSPACE_ROOT`). Evaluated against the\nsymlink-resolved canonical path of the inspected script file.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/Action"
+      },
+      "required": [
+        "under"
+      ]
     },
     "SeccompProfile": {
       "description": "Seccomp-BPF syscall filter profile under `[sandbox]`.",

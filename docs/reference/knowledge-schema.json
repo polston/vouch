@@ -297,6 +297,20 @@
           "type": "string",
           "default": ""
         },
+        "exact_args": {
+          "description": "Complete argument vectors this entry recognises.\n\nEach non-empty inner vector is matched whole-token against the\ninvocation's complete, readable unquoted argument list under this\nentry's `case_sensitive_flags` rule (for example,\n`[[\"-a\", \"Calendar\"], [\"-a\", \"Preview\"]]`). Unlisted argument vectors,\nincomplete or unreadable arguments, or runs under an argument-appending\nwrapper remain unmodeled. All normal guards and write checks still\napply.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "default": null,
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
         "flag_prefix": {
           "description": "How this program spells flags. cmd.exe uses `/s`, not `-s`; without this\nits flags read as paths and its paths read as flags, so both the guard\nrules and the written-path list come out wrong.\n\nA list, because one name can belong to two languages: `del /s` is cmd,\n`del -Recurse` is the PowerShell alias for Remove-Item. Empty means \"-\".",
           "type": "array",
@@ -498,7 +512,7 @@
           }
         },
         "subcommand_paths": {
-          "description": "Exact positional command paths this entry recognises.\n\nEach non-empty inner vector is matched from the first positional word\nunder this entry's flag grammar. `[[\"mcp\", \"get\"]]` recognises that\noperation without recognising `mcp add` or another sibling. Either\nthis key or `subcommands` being present makes the entry scoped; both\nabsent still means whole-program coverage. When both are present their\nscopes are unioned.",
+          "description": "Exact positional command paths this entry recognises.\n\nEach non-empty inner vector is matched from the first positional word\nunder this entry's flag grammar. `[[\"mcp\", \"get\"]]` recognises that\noperation without recognising `mcp add` or another sibling. Either\nthis key, `subcommands`, or `exact_args` being present makes the entry\nscoped; all three absent still means whole-program coverage. When\npresent their scopes are unioned.",
           "type": [
             "array",
             "null"

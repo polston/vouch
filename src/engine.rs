@@ -273,6 +273,161 @@ fn construct_grant(lang: &str, key: &str) -> String {
     format!("allowed by lang.{lang}.constructs.{key} = \"allow\" — {}", describe(key))
 }
 
+struct ScriptConstructDecision {
+    action: Action,
+    deciding_key: String,
+    entry_num: usize,
+    matched_under: String,
+    sha256_matched: bool,
+    why_place: String,
+}
+
+fn script_pattern_matches_canonical(
+    pattern: &str,
+    canonical_file: &str,
+    home: &str,
+    project_root: Option<&str>,
+) -> Option<bool> {
+    if let Ok(canon_pat) = crate::paths::canonical_existing_pattern_root(pattern, home, project_root) {
+        return Some(canon_pat.matches(canonical_file));
+    }
+    let expanded = expand(pattern, home, project_root)?;
+    let tree = expanded.ends_with("/**");
+    let stem = expanded.strip_suffix("/**").unwrap_or(&expanded);
+    let resolved_stem = normalize(&resolve_links(stem), home);
+    if tree {
+        Some(glob_match(
+            &format!("{}/**", resolved_stem.trim_end_matches('/')),
+            canonical_file,
+        ))
+    } else {
+        Some(crate::paths::paths_eq(&resolved_stem, canonical_file))
+    }
+}
+
+fn resolve_script_construct_override(
+    cfg: &Config,
+    lang: &str,
+    name: &str,
+    global_action: Action,
+    prov: &crate::guards::InspectedScriptProvenance,
+    home: Option<&str>,
+    project_root: Option<&str>,
+) -> Option<ScriptConstructDecision> {
+    let lang_cfg = cfg.lang(lang)?;
+    if lang_cfg.script_constructs.is_empty() {
+        return None;
+    }
+    let here_home = home.unwrap_or("");
+    let mut best: Option<ScriptConstructDecision> = None;
+
+    for (idx, rule) in lang_cfg.script_constructs.iter().enumerate() {
+        let Some((&want, deciding_key)) = rule
+            .constructs
+            .get(name)
+            .map(|a| (a, name))
+            .or_else(|| {
+                inherits_from(name)
+                    .and_then(|donor| rule.constructs.get(donor).map(|a| (a, donor)))
+            })
+        else {
+            continue;
+        };
+
+        let sha256_matched = match &rule.sha256 {
+            Some(digests) => {
+                if !digests.iter().any(|d| d.eq_ignore_ascii_case(&prov.sha256_hex)) {
+                    continue;
+                }
+                true
+            }
+            None => false,
+        };
+
+        let is_loosening = rank(want) < rank(global_action);
+        let reached: Option<(String, String)> = if is_loosening {
+            if !prov.place_proven {
+                None
+            } else {
+                rule.under.iter().find_map(|pat| {
+                    match script_pattern_matches_canonical(
+                        pat,
+                        &prov.canonical_path,
+                        here_home,
+                        project_root,
+                    ) {
+                        Some(true) => Some((
+                            pat.clone(),
+                            format!("inspected script file: {}", prov.canonical_path),
+                        )),
+                        _ => None,
+                    }
+                })
+            }
+        } else if !prov.place_proven {
+            Some((
+                rule.under.join(", "),
+                format!(
+                    "vouch cannot prove the working directory for relative script '{}' matches the directory it was inspected against",
+                    prov.canonical_path
+                ),
+            ))
+        } else {
+            let mut matched_pat: Option<String> = None;
+            let mut unresolved_pats: Vec<String> = Vec::new();
+            for pat in &rule.under {
+                match script_pattern_matches_canonical(
+                    pat,
+                    &prov.canonical_path,
+                    here_home,
+                    project_root,
+                ) {
+                    Some(true) => {
+                        matched_pat = Some(pat.clone());
+                        break;
+                    }
+                    Some(false) => {}
+                    None => unresolved_pats.push(pat.clone()),
+                }
+            }
+            if let Some(pat) = matched_pat {
+                Some((
+                    pat,
+                    format!("inspected script file: {}", prov.canonical_path),
+                ))
+            } else if !unresolved_pats.is_empty() && !sha256_matched {
+                Some((
+                    unresolved_pats.join(", "),
+                    format!(
+                        "inspected script file: {}\n  pattern '{}' could not be resolved in this context, and a restricting rule applies until proven outside",
+                        prov.canonical_path,
+                        unresolved_pats.join(", ")
+                    ),
+                ))
+            } else {
+                None
+            }
+        };
+
+        let Some((matched_under, why_place)) = reached else {
+            continue;
+        };
+
+        if best.as_ref().map_or(true, |b| rank(want) > rank(b.action)) {
+            best = Some(ScriptConstructDecision {
+                action: want,
+                deciding_key: deciding_key.to_string(),
+                entry_num: idx + 1,
+                matched_under,
+                sha256_matched,
+                why_place,
+            });
+        }
+    }
+
+    best
+}
+
 /// Folds every `(key, detail, lang_override)` construct the wrapper-EXPANSION
 /// walk raised into `worst` — same shape as the parse-failure and wrap-depth
 /// channels just above, kept as its own function so a synthetic entry can
@@ -1342,7 +1497,12 @@ fn judge_parsed(
     // `dynamic_call` nested in a bash line is settable as
     // `lang.python.constructs.dynamic_call`, not bash's (spec's
     // shared-vocabulary paragraph, "on every path").
-    let mut snippet_constructs: Vec<(String, String, String)> = Vec::new();
+    let mut snippet_constructs: Vec<(
+        String,
+        String,
+        String,
+        Option<crate::guards::InspectedScriptProvenance>,
+    )> = Vec::new();
     // Engine scopes for the redirects the fold below appends, parallel to
     // `scan.redirect_targets` and `None` for every redirect the outer scan
     // found itself.
@@ -1359,6 +1519,20 @@ fn judge_parsed(
         if crate::syntax::scanner_for(plang).is_none() {
             continue;
         }
+        let site_script_prov = site.inspected_script.as_ref().map(|prov| {
+            let mut p = prov.clone();
+            if p.relative_target {
+                let base_set = timeline.base_set_at(p.runner_occurrence, &all_cmds);
+                p.place_proven = match (base_set.single_known(), p.inspected_cwd.as_deref()) {
+                    (Some(dir), Some(insp_cwd)) => {
+                        let norm_dir = normalize(&resolve_links(dir), "");
+                        crate::paths::paths_eq(&norm_dir, insp_cwd)
+                    }
+                    _ => false,
+                };
+            }
+            p
+        });
         for j in 0..site.redirect_targets.len() {
             let placed = site
                 .redirect_scope
@@ -1390,13 +1564,18 @@ fn judge_parsed(
                 .find(|(n, _)| n == c)
                 .map(|(_, d)| d.clone())
                 .unwrap_or_default();
-            snippet_constructs.push((plang.clone(), c.clone(), detail));
+            snippet_constructs.push((plang.clone(), c.clone(), detail, site_script_prov.clone()));
         }
         for heredoc in &site.heredocs {
             if let Some(consumer) = site.commands.get(heredoc.cmd_index) {
                 let standalone_eligible = true;
                 if crate::guards::heredoc_feeds(kb, consumer, plang, heredoc, standalone_eligible).is_none() {
-                    snippet_constructs.push((plang.clone(), "heredoc".to_string(), String::new()));
+                    snippet_constructs.push((
+                        plang.clone(),
+                        "heredoc".to_string(),
+                        String::new(),
+                        site_script_prov.clone(),
+                    ));
                 }
             }
         }
@@ -2744,13 +2923,55 @@ fn judge_parsed(
     // resolve under the snippet's OWN language, never the host's — channel 2
     // (`lang` shadowed here on purpose: the source shape criterion 2's
     // coverage scan looks for).
-    for (plang, name, detail) in &snippet_constructs {
+    for (plang, name, detail, script_prov) in &snippet_constructs {
         let lang = plang.as_str();
-        let (a, key) = construct_action_for(cfg, lang, name);
+        let (global_a, key) = construct_action_for(cfg, lang, name);
+        let script_override = script_prov.as_ref().and_then(|prov| {
+            resolve_script_construct_override(
+                cfg,
+                lang,
+                name,
+                global_a,
+                prov,
+                home,
+                project_root,
+            )
+        });
+        let a = script_override.as_ref().map(|o| o.action).unwrap_or(global_a);
         if a == Action::Allow {
-            remember(&mut grants, construct_grant(lang, &key));
+            if let Some(over) = &script_override {
+                let sha_clause = if over.sha256_matched {
+                    " (verified sha256 digest)"
+                } else {
+                    ""
+                };
+                remember(
+                    &mut grants,
+                    format!(
+                        "allowed by [[lang.{lang}.script_constructs]] #{} (under = {:?}) — sets {} = \"allow\"{}{}; {}",
+                        over.entry_num,
+                        over.matched_under,
+                        over.deciding_key,
+                        sha_clause,
+                        format!(" ({})", over.why_place),
+                        describe(&over.deciding_key)
+                    ),
+                );
+            } else {
+                remember(&mut grants, construct_grant(lang, &key));
+            }
         }
         let mut reason = construct_reason(lang, &key);
+        if let Some(over) = &script_override {
+            reason = format!(
+                "{reason}\n  setting: [[lang.{lang}.script_constructs]] #{} (under = {:?}) sets {} = \"{}\"\n  {}",
+                over.entry_num,
+                over.matched_under,
+                over.deciding_key,
+                action_word(over.action),
+                over.why_place
+            );
+        }
         if !detail.is_empty() {
             reason = format!("{reason}\n  could not read: {detail}");
         }
@@ -3733,6 +3954,7 @@ struct SnippetSite {
     construct_details: Vec<(String, String)>,
     heredocs: Vec<crate::syntax::Heredoc>,
     commands: Vec<crate::syntax::Cmd>,
+    inspected_script: Option<crate::guards::InspectedScriptProvenance>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3974,6 +4196,10 @@ fn collect_expanded(
                 construct_details: src.construct_details,
                 heredocs: src.heredocs,
                 commands: src.commands,
+                inspected_script: src.inspected_script.map(|mut p| {
+                    p.runner_occurrence += command_offset;
+                    p
+                }),
             });
         }
         out.parse_failures.extend(ex.parse_failures);

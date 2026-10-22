@@ -4,14 +4,25 @@ use vouch::config::{self, JournalFormat};
 use vouch::journal::{self, JournalPolicy, OutcomeRecord, Record};
 use vouch::journal_vlog::{
     append_vlog, compact_vlog, compute_bundle_seal_sha256, encode_record_payload,
-    export_vlog_bundle, read_records_from_vlog_bundle, read_vidx_entries, read_vlog_checkpoints,
-    vchk_path, verify_vlog_bundle, verify_vlog_integrity, vidx_path, write_all_vlog,
-    VlogBundleHeader, VlogHeader, VlogIndexEntry, VlogReader, VlogTamperKind, VBUNDLE_HEADER_LEN,
-    VCHK_ENTRY_LEN, VLOG_FRAME_HEADER_LEN, VLOG_HEADER_LEN, VLOG_INDEX_ENTRY_LEN, VLOG_MAGIC,
+    export_vlog_bundle, export_vlog_bundle_since, read_records_from_vlog_bundle, read_vidx_entries,
+    read_vlog_checkpoints, vchk_path, verify_vlog_bundle, verify_vlog_bundle_chain,
+    verify_vlog_integrity, vidx_path, write_all_vlog, VlogBundleHeader, VlogHeader, VlogIndexEntry,
+    VlogReader, VlogTamperKind, VBUNDLE_DELTA_VERSION, VBUNDLE_HEADER_LEN, VCHK_ENTRY_LEN,
+    VLOG_FRAME_HEADER_LEN, VLOG_HEADER_LEN, VLOG_INDEX_ENTRY_LEN, VLOG_MAGIC,
 };
 use vouch::journal_wal::crc32;
 use vouch::outcome::Outcome;
 use vouch::tui::engine::JournalTailReader;
+
+fn vouch_exe() -> PathBuf {
+    let mut path = std::env::current_exe().expect("current_exe");
+    path.pop();
+    if path.ends_with("deps") {
+        path.pop();
+    }
+    let bin = if cfg!(windows) { "vouch.exe" } else { "vouch" };
+    path.join(bin)
+}
 
 fn unique_test_dir(tag: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -869,6 +880,123 @@ fn cli_vouch_doctor_export_and_verify_bundle_end_to_end() {
     assert!(!bad_out.status.success(), "corrupted bundle must exit non-zero");
     let bad_stdout = String::from_utf8_lossy(&bad_out.stdout);
     assert!(bad_stdout.contains("bundle integrity check FAILED"));
+
+    let _ = std::fs::remove_dir_all(&archive_dir);
+}
+
+#[test]
+fn vbundle_delta_export_and_multi_bundle_chain_verification_succeeds_and_detects_lineage_breaks() {
+    let state_dir = unique_test_dir("vbundle_delta_state");
+    let archive_dir = unique_test_dir("vbundle_delta_archive");
+    let b0_path = archive_dir.join("b0_genesis.vbundle");
+    let b1_path = archive_dir.join("b1_delta.vbundle");
+    let b2_path = archive_dir.join("b2_delta.vbundle");
+
+    // Step 1: Append 10 records and export genesis bundle B0
+    for i in 0..10 {
+        append_vlog(
+            &state_dir,
+            &sample_record(i, 15_000 + i as u64, "allow", &format!("echo step0_{i}")),
+        )
+        .unwrap();
+    }
+    let rep_b0 = export_vlog_bundle(&state_dir, &b0_path).expect("export B0");
+    assert!(rep_b0.valid);
+    assert_eq!(rep_b0.verified_records, 10);
+
+    // Step 2: Append 5 more records and export delta bundle B1 (--since B0)
+    for i in 10..15 {
+        append_vlog(
+            &state_dir,
+            &sample_record(i, 15_000 + i as u64, "allow", &format!("echo step1_{i}")),
+        )
+        .unwrap();
+    }
+    let rep_b1 =
+        export_vlog_bundle_since(&state_dir, &b1_path, Some(&b0_path)).expect("export delta B1");
+    assert!(rep_b1.valid);
+    assert_eq!(rep_b1.verified_records, 5);
+
+    let b1_bytes = std::fs::read(&b1_path).unwrap();
+    let b1_hdr = VlogBundleHeader::from_bytes(&b1_bytes).unwrap();
+    assert_eq!(b1_hdr.version, VBUNDLE_DELTA_VERSION);
+    let b1_anchor = b1_hdr.parse_delta_anchor(&b1_bytes).unwrap().unwrap();
+    assert_eq!(b1_anchor.base_seq_idx, 10);
+    assert_eq!(b1_anchor.parent_terminal_chain_tag, rep_b0.terminal_chain_tag);
+
+    // Step 3: Append 3 more records and export delta bundle B2 (--since B1)
+    for i in 15..18 {
+        append_vlog(
+            &state_dir,
+            &sample_record(i, 15_000 + i as u64, "ask", &format!("touch /tmp/step2_{i}")),
+        )
+        .unwrap();
+    }
+    let rep_b2 =
+        export_vlog_bundle_since(&state_dir, &b2_path, Some(&b1_path)).expect("export delta B2");
+    assert!(rep_b2.valid);
+    assert_eq!(rep_b2.verified_records, 3);
+
+    let live_final = verify_vlog_integrity(&state_dir.join("journal.vlog")).unwrap();
+    assert_eq!(live_final.verified_records, 18);
+    assert_eq!(rep_b2.terminal_chain_tag, live_final.terminal_chain_tag);
+
+    // Remove state_dir and verify [B0, B1, B2] completely offline
+    std::fs::remove_dir_all(&state_dir).unwrap();
+    let chain_rep = verify_vlog_bundle_chain(&[b0_path.clone(), b1_path.clone(), b2_path.clone()])
+        .expect("verify 3-bundle chain");
+    assert!(chain_rep.valid, "3-bundle chain failed: {chain_rep:?}");
+    assert_eq!(chain_rep.verified_records, 18);
+    assert_eq!(chain_rep.terminal_chain_tag, live_final.terminal_chain_tag);
+
+    // Passing a delta bundle alone to verify_vlog_bundle_chain must report DeltaParentMismatch
+    let lone_delta = verify_vlog_bundle_chain(std::slice::from_ref(&b1_path)).unwrap();
+    assert!(!lone_delta.valid);
+    assert!(matches!(
+        lone_delta.tamper_finding,
+        Some(VlogTamperKind::DeltaParentMismatch { .. })
+    ));
+
+    // Omitting middle bundle B1 ([B0, B2]) must report DeltaParentMismatch
+    let skipped_mid = verify_vlog_bundle_chain(&[b0_path.clone(), b2_path.clone()]).unwrap();
+    assert!(!skipped_mid.valid);
+    assert!(matches!(
+        skipped_mid.tamper_finding,
+        Some(VlogTamperKind::DeltaParentMismatch { .. })
+    ));
+
+    // Reordering ([B1, B0, B2]) must report DeltaParentMismatch
+    let reordered =
+        verify_vlog_bundle_chain(&[b1_path.clone(), b0_path.clone(), b2_path.clone()]).unwrap();
+    assert!(!reordered.valid);
+    assert!(matches!(
+        reordered.tamper_finding,
+        Some(VlogTamperKind::DeltaParentMismatch { .. })
+    ));
+
+    // Also verify CLI `vouch doctor --verify-bundle B0 --verify-bundle B1 --verify-bundle B2`
+    let exe = vouch_exe();
+    let cli_ok = std::process::Command::new(&exe)
+        .env("VOUCH_STATE_DIR", &state_dir)
+        .args([
+            "doctor",
+            "--verify-bundle",
+            b0_path.to_str().unwrap(),
+            "--verify-bundle",
+            b1_path.to_str().unwrap(),
+            "--verify-bundle",
+            b2_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run vouch doctor multi-bundle verify");
+    assert!(
+        cli_ok.status.success(),
+        "cli multi-bundle verify failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&cli_ok.stdout),
+        String::from_utf8_lossy(&cli_ok.stderr)
+    );
+    let cli_stdout = String::from_utf8_lossy(&cli_ok.stdout);
+    assert!(cli_stdout.contains("bundle integrity verified: 18 records"));
 
     let _ = std::fs::remove_dir_all(&archive_dir);
 }

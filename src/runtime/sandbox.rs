@@ -435,6 +435,159 @@ impl CgroupCpuStat {
     }
 }
 
+/// Rolling stall averages (`avg10`, `avg60`, `avg300`) and cumulative stall microseconds (`total_us`)
+/// for a single Linux Pressure Stall Information (`some` or `full`) line.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct PsiWindowMetric {
+    pub avg10: f64,
+    pub avg60: f64,
+    pub avg300: f64,
+    pub total_us: u64,
+}
+
+/// Parsed Linux Pressure Stall Information (`*.pressure`) for a single resource (`cpu`, `memory`, or `io`).
+/// Note that Linux kernel `cpu.pressure` emits `some` and may omit `full` on older kernels.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct PsiResourceMetrics {
+    pub some: PsiWindowMetric,
+    pub full: Option<PsiWindowMetric>,
+}
+
+/// Aggregated Pressure Stall Information (`cpu.pressure`, `memory.pressure`, `io.pressure`)
+/// read from a cgroup v2 scope.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CgroupPsiTelemetry {
+    pub cpu: PsiResourceMetrics,
+    pub memory: PsiResourceMetrics,
+    pub io: PsiResourceMetrics,
+}
+
+fn parse_psi_window_line(kind: &str, rest: &str) -> Result<PsiWindowMetric, String> {
+    let mut avg10 = None;
+    let mut avg60 = None;
+    let mut avg300 = None;
+    let mut total_us = None;
+
+    for tok in rest.split_whitespace() {
+        let (k, v) = tok.split_once('=').ok_or_else(|| {
+            format!("invalid PSI token '{tok}' on '{kind}' line (expected key=value)")
+        })?;
+        match k {
+            "avg10" => {
+                let parsed = v
+                    .parse::<f64>()
+                    .map_err(|_| format!("invalid PSI avg10 float '{v}'"))?;
+                if !parsed.is_finite() || !(0.0..=100.0).contains(&parsed) {
+                    return Err(format!("PSI avg10 '{v}' out of range [0.0, 100.0]"));
+                }
+                avg10 = Some(parsed);
+            }
+            "avg60" => {
+                let parsed = v
+                    .parse::<f64>()
+                    .map_err(|_| format!("invalid PSI avg60 float '{v}'"))?;
+                if !parsed.is_finite() || !(0.0..=100.0).contains(&parsed) {
+                    return Err(format!("PSI avg60 '{v}' out of range [0.0, 100.0]"));
+                }
+                avg60 = Some(parsed);
+            }
+            "avg300" => {
+                let parsed = v
+                    .parse::<f64>()
+                    .map_err(|_| format!("invalid PSI avg300 float '{v}'"))?;
+                if !parsed.is_finite() || !(0.0..=100.0).contains(&parsed) {
+                    return Err(format!("PSI avg300 '{v}' out of range [0.0, 100.0]"));
+                }
+                avg300 = Some(parsed);
+            }
+            "total" => {
+                let parsed = v
+                    .parse::<u64>()
+                    .map_err(|_| format!("invalid PSI total microseconds '{v}'"))?;
+                total_us = Some(parsed);
+            }
+            other => {
+                return Err(format!(
+                    "unknown PSI key '{other}' on '{kind}' line (expected avg10, avg60, avg300, or total)"
+                ));
+            }
+        }
+    }
+
+    Ok(PsiWindowMetric {
+        avg10: avg10.ok_or_else(|| format!("PSI '{kind}' line missing avg10"))?,
+        avg60: avg60.ok_or_else(|| format!("PSI '{kind}' line missing avg60"))?,
+        avg300: avg300.ok_or_else(|| format!("PSI '{kind}' line missing avg300"))?,
+        total_us: total_us.ok_or_else(|| format!("PSI '{kind}' line missing total"))?,
+    })
+}
+
+/// Parse a Linux cgroups v2 `cpu.pressure`, `memory.pressure`, or `io.pressure` payload
+/// (`some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=...`).
+pub fn parse_psi_resource(text: &str) -> Result<PsiResourceMetrics, String> {
+    let mut some_opt = None;
+    let mut full_opt = None;
+
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("some ") {
+            some_opt = Some(parse_psi_window_line("some", rest)?);
+        } else if let Some(rest) = line.strip_prefix("full ") {
+            full_opt = Some(parse_psi_window_line("full", rest)?);
+        } else {
+            return Err(format!(
+                "invalid PSI line '{line}' (expected 'some ...' or 'full ...')"
+            ));
+        }
+    }
+
+    let some = some_opt.ok_or_else(|| "PSI resource missing required 'some' line".to_string())?;
+    Ok(PsiResourceMetrics {
+        some,
+        full: full_opt,
+    })
+}
+
+impl CgroupPsiTelemetry {
+    /// Evaluate whether any resource (`cpu`, `memory`, or `io`) has an `avg10` stall percentage
+    /// (`some.avg10` or `full.avg10`) exceeding `threshold_pct`. Returns a structured diagnostic
+    /// string when exceeded.
+    pub fn exceeds_stall_warn_pct(&self, threshold_pct: f64) -> Option<String> {
+        let mut exceeded = Vec::new();
+        for (name, res) in [
+            ("cpu", &self.cpu),
+            ("memory", &self.memory),
+            ("io", &self.io),
+        ] {
+            if res.some.avg10 > threshold_pct {
+                exceeded.push(format!(
+                    "{name}.pressure some.avg10={:.2}% > {:.2}% (total={}us)",
+                    res.some.avg10, threshold_pct, res.some.total_us
+                ));
+            }
+            if let Some(full) = res.full {
+                if full.avg10 > threshold_pct {
+                    exceeded.push(format!(
+                        "{name}.pressure full.avg10={:.2}% > {:.2}% (total={}us)",
+                        full.avg10, threshold_pct, full.total_us
+                    ));
+                }
+            }
+        }
+        if exceeded.is_empty() {
+            None
+        } else {
+            Some(format!(
+                "cgroup v2 PSI stall warning threshold ({threshold_pct:.2}%) exceeded: {}",
+                exceeded.join("; ")
+            ))
+        }
+    }
+}
+
 /// A single Linux cgroups v2 `io.max` per-device bandwidth and IOPS throttling rule
 /// (`"<major>:<minor> rbps=<bytes|max> wbps=<bytes|max> riops=<ops|max> wiops=<ops|max>"`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -845,6 +998,25 @@ impl CgroupScope {
             .collect()
     }
 
+    /// Read and parse Pressure Stall Information (`cpu.pressure`, `memory.pressure`, `io.pressure`)
+    /// from this cgroup v2 scope directory. Missing pressure files default to zero stall metrics.
+    pub fn read_psi_telemetry(&self) -> std::io::Result<CgroupPsiTelemetry> {
+        let read_one = |filename: &str| -> std::io::Result<PsiResourceMetrics> {
+            let p = self.dir.join(filename);
+            if !p.exists() {
+                return Ok(PsiResourceMetrics::default());
+            }
+            let text = std::fs::read_to_string(&p)?;
+            parse_psi_resource(&text)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        };
+        Ok(CgroupPsiTelemetry {
+            cpu: read_one("cpu.pressure")?,
+            memory: read_one("memory.pressure")?,
+            io: read_one("io.pressure")?,
+        })
+    }
+
     /// Remove the worker cgroup directory when no processes remain.
     pub fn teardown(&self) -> std::io::Result<()> {
         if self.dir.exists() {
@@ -854,13 +1026,16 @@ impl CgroupScope {
                 "memory.high",
                 "memory.current",
                 "memory.events",
+                "memory.pressure",
                 "pids.max",
                 "pids.current",
                 "pids.events",
                 "cpu.max",
                 "cpu.stat",
+                "cpu.pressure",
                 "io.max",
                 "io.stat",
+                "io.pressure",
             ] {
                 let p = self.dir.join(file);
                 if p.is_file() {
@@ -1025,7 +1200,7 @@ impl LandlockRulesetPlan {
 }
 
 /// Summary report of sandbox isolation applied to a worker process.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SandboxExecutionPlan {
     pub scope_id: String,
     pub cgroup_dir: Option<PathBuf>,
@@ -1035,6 +1210,7 @@ pub struct SandboxExecutionPlan {
     pub cpu_max_quota_us: Option<u64>,
     pub cpu_max_period_us: Option<u64>,
     pub io_max_rules: Vec<CgroupIoMaxRule>,
+    pub psi_stall_warn_pct: Option<f64>,
     pub rlimits: RlimitSet,
     pub namespaces: NamespaceSpec,
     pub clone_flags: i32,
@@ -1075,13 +1251,15 @@ impl SandboxExecutionPlan {
             cpu_max_quota_us: cfg.cgroups.cpu_max_quota_us,
             cpu_max_period_us: cfg.cgroups.cpu_max_period_us,
             io_max: cfg.cgroups.io_max.clone(),
+            psi_stall_warn_pct: cfg.cgroups.psi_stall_warn_pct,
         };
         let has_cgroup_limits = effective_cgroups.max_memory_mb.is_some()
             || effective_cgroups.high_memory_mb.is_some()
             || effective_cgroups.pids_max.is_some()
             || effective_cgroups.cpu_max_quota_us.is_some()
             || effective_cgroups.cpu_max_period_us.is_some()
-            || !effective_cgroups.io_max.is_empty();
+            || !effective_cgroups.io_max.is_empty()
+            || effective_cgroups.psi_stall_warn_pct.is_some();
 
         let scope = if has_cgroup_limits {
             Some(manager.provision_scope(scope_id, &effective_cgroups)?)
@@ -1119,6 +1297,7 @@ impl SandboxExecutionPlan {
                 .as_ref()
                 .map(|s| s.io_max_rules.clone())
                 .unwrap_or_default(),
+            psi_stall_warn_pct: effective_cgroups.psi_stall_warn_pct,
             rlimits,
             namespaces,
             clone_flags,

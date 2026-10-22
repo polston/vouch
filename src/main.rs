@@ -1386,13 +1386,22 @@ fn main() {
     // `vouch doctor` — what vouch could not read or describe. These are vouch's
     // own gaps, surfaced so they get fixed instead of silently becoming prompts.
     if args.first().map(String::as_str) == Some("doctor") {
-        if let Some(pos) = args.iter().position(|a| a == "--verify-bundle") {
-            let Some(bundle_arg) = args.get(pos + 1) else {
-                eprintln!("usage: vouch doctor --verify-bundle <bundle.vbundle>");
-                std::process::exit(2);
-            };
-            let bundle_path = std::path::Path::new(bundle_arg);
-            match vouch::journal_vlog::verify_vlog_bundle(bundle_path) {
+        if args.iter().any(|a| a == "--verify-bundle") {
+            let mut bundle_paths = Vec::new();
+            let mut idx = 1usize;
+            while idx < args.len() {
+                if args[idx] == "--verify-bundle" {
+                    let Some(bundle_arg) = args.get(idx + 1) else {
+                        eprintln!("usage: vouch doctor --verify-bundle <bundle.vbundle> [--verify-bundle <delta.vbundle> ...]");
+                        std::process::exit(2);
+                    };
+                    bundle_paths.push(std::path::PathBuf::from(bundle_arg));
+                    idx += 2;
+                } else {
+                    idx += 1;
+                }
+            }
+            match vouch::journal_vlog::verify_vlog_bundle_chain(&bundle_paths) {
                 Ok(report) if report.valid => {
                     println!(
                         "bundle integrity verified: {} records, {} compaction checkpoints, hash chain unbroken (terminal tag: {:016x})",
@@ -1418,12 +1427,25 @@ fn main() {
 
         if let Some(pos) = args.iter().position(|a| a == "--export-bundle") {
             let Some(bundle_arg) = args.get(pos + 1) else {
-                eprintln!("usage: vouch doctor --export-bundle <bundle.vbundle>");
+                eprintln!("usage: vouch doctor --export-bundle <bundle.vbundle> [--since <parent.vbundle>]");
                 std::process::exit(2);
+            };
+            let since_path = if let Some(spos) = args.iter().position(|a| a == "--since") {
+                let Some(sarg) = args.get(spos + 1) else {
+                    eprintln!("usage: vouch doctor --export-bundle <bundle.vbundle> [--since <parent.vbundle>]");
+                    std::process::exit(2);
+                };
+                Some(std::path::PathBuf::from(sarg))
+            } else {
+                None
             };
             let bundle_path = std::path::Path::new(bundle_arg);
             let dir = journal::state_dir();
-            match vouch::journal_vlog::export_vlog_bundle(&dir, bundle_path) {
+            match vouch::journal_vlog::export_vlog_bundle_since(
+                &dir,
+                bundle_path,
+                since_path.as_deref(),
+            ) {
                 Ok(report) => {
                     println!(
                         "exported cryptographic audit bundle: {} (records: {}, compaction generations: {}, terminal tag: {:016x})",

@@ -18,9 +18,9 @@ Per `CLAUDE.md §3`: **Every knowledge entry is a claim that must be true.** Mod
    - If a program modifies working directory (e.g. `cd`, `pushd`, or CLI tools with custom directory switches), declare `changes_dir = "stated"` (or `"unstated"` / `"stack"`).
 3. **Use `vouch model` CLI command for safe editing.**
    - Program syntax:
-     `vouch model program <name> [--subcommand <verb>...] [--value-flag <flag>...] [--write-flag <flag>...] [--standalone-flag <flag>...] [--changes-dir] [--evaluates-input]`
+     `vouch model program <name> [--subcommand <verb>...] [--exact-args <tok1,tok2>...] [--value-flag <flag>...] [--write-flag <flag>...] [--standalone-flag <flag>...] [--changes-dir] [--evaluates-input]`
    - Tool syntax:
-     `vouch model tool <name> [--snippet <field:lang>] [--write-path <field>] [--cwd-from-call] [--rule <field:action:pattern>]`
+     `vouch model tool <name> [--snippet <field:lang>] [--snippet-from <field:lang_field:k1=v1,k2=v2,...>] [--write-path <field>] [--cwd-from-call] [--rule <field:action:pattern>]`
    - Use `--update` when updating existing definitions.
 4. **Scope subcommands appropriately.**
    - Multi-verb tools (`kubectl`, `docker`) must name specific subcommands (`--subcommand <verb>`) rather than blanket `--all-subcommands`, so unmodeled verbs continue to ask until verified.

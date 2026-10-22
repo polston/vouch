@@ -27,6 +27,17 @@ wrap_depth = 4
 # Maximum size in bytes of a script file to inspect at decision time; unset = 65536.
 max_script_bytes = 65536
 
+# Verified script-file construct overrides: relax or tighten construct actions
+# for an inspected script file whose symlink-resolved canonical path matches
+# `under` (and, when `sha256` is given, whose SHA-256 content digest matches).
+# Inline `-c` snippets, stdin heredocs, and nested inline snippets inside the
+# script never inherit these overrides, and all guard rules (`[guards]`) and
+# write policies (`[write]`) still apply.
+# [[lang.bash.script_constructs]]
+# under = ["$PROJECT_ROOT/scripts/**"]
+# sha256 = ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"]
+# subshell = "allow"
+
 [lang.bash.constructs]
 # A variable used as the program name:  PY="/usr/bin/python"; "$PY" script.py
 dynamic_command = "allow"
@@ -549,3 +560,4 @@ paths = [
 # cpu_max_quota_us = 50000
 # cpu_max_period_us = 100000
 # io_max = ["259:0 rbps=104857600 wbps=52428800 wiops=5000"]
+# psi_stall_warn_pct = 25.0

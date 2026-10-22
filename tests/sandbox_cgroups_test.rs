@@ -2,14 +2,14 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use vouch::config::{self, SeccompProfile};
 use vouch::runtime::{
-    CgroupCpuStat, CgroupIoMaxRule, CgroupMemoryEvents, CgroupPidsEvents, CgroupV2Manager,
-    LandlockRulesetPlan, LandlockVerdict, LoopbackInterfaceSpec, NamespaceSpec, RlimitResource,
-    RlimitRule, RlimitSet, SandboxExecutionPlan, SeccompFilterProgram, AUDIT_ARCH_AARCH64,
-    AUDIT_ARCH_X86_64, CLONE_NEWNET, CLONE_NEWNS, CLONE_NEWPID, CLONE_NEWUSER,
-    DEFAULT_CPU_MAX_PERIOD_US, LANDLOCK_ACCESS_FS_EXECUTE, LANDLOCK_ACCESS_FS_MAKE_REG,
-    LANDLOCK_ACCESS_FS_READ_FILE, LANDLOCK_ACCESS_FS_REMOVE_FILE, LANDLOCK_ACCESS_FS_TRUNCATE,
-    LANDLOCK_ACCESS_FS_WRITE_FILE, SECCOMP_RET_ALLOW, SECCOMP_RET_ERRNO_EPERM,
-    SECCOMP_RET_KILL_PROCESS,
+    parse_psi_resource, CgroupCpuStat, CgroupIoMaxRule, CgroupMemoryEvents, CgroupPidsEvents,
+    CgroupPsiTelemetry, CgroupV2Manager, LandlockRulesetPlan, LandlockVerdict,
+    LoopbackInterfaceSpec, NamespaceSpec, RlimitResource, RlimitRule, RlimitSet,
+    SandboxExecutionPlan, SeccompFilterProgram, AUDIT_ARCH_AARCH64, AUDIT_ARCH_X86_64,
+    CLONE_NEWNET, CLONE_NEWNS, CLONE_NEWPID, CLONE_NEWUSER, DEFAULT_CPU_MAX_PERIOD_US,
+    LANDLOCK_ACCESS_FS_EXECUTE, LANDLOCK_ACCESS_FS_MAKE_REG, LANDLOCK_ACCESS_FS_READ_FILE,
+    LANDLOCK_ACCESS_FS_REMOVE_FILE, LANDLOCK_ACCESS_FS_TRUNCATE, LANDLOCK_ACCESS_FS_WRITE_FILE,
+    SECCOMP_RET_ALLOW, SECCOMP_RET_ERRNO_EPERM, SECCOMP_RET_KILL_PROCESS,
 };
 
 fn unique_cgroup_root(tag: &str) -> PathBuf {
@@ -516,5 +516,76 @@ cpu_max_quota_us = 25000
     assert!(config::load("[sandbox.cgroups]\nio_max = [\"259:0\"]\n").is_err());
     assert!(config::load("[sandbox.cgroups]\nio_max = [\"259:0 unknown=100\"]\n").is_err());
 
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn cgroup_v2_psi_telemetry_parses_pressure_files_and_evaluates_stall_warn_pct() {
+    let root = unique_cgroup_root("psi_telemetry");
+    std::fs::write(root.join("cgroup.controllers"), "cpu io memory pids\n").unwrap();
+    let manager = CgroupV2Manager::new(&root);
+
+    let toml_text = r#"
+[sandbox.cgroups]
+max_memory_mb = 1024
+psi_stall_warn_pct = 25.0
+"#;
+    let cfg = config::load(toml_text).expect("load psi_stall_warn_pct config");
+    assert_eq!(cfg.sandbox.cgroups.psi_stall_warn_pct, Some(25.0));
+
+    let (plan, scope_opt) =
+        SandboxExecutionPlan::prepare(&manager, "worker-psi", &cfg.sandbox).expect("prepare");
+    let scope = scope_opt.expect("scope provisioned");
+    assert_eq!(plan.psi_stall_warn_pct, Some(25.0));
+
+    // Write simulated Linux kernel PSI payloads (note: cpu.pressure has only `some` on some kernels)
+    std::fs::write(
+        scope.dir.join("cpu.pressure"),
+        "some avg10=12.40 avg60=8.10 avg300=2.05 total=98450\n",
+    )
+    .unwrap();
+    std::fs::write(
+        scope.dir.join("memory.pressure"),
+        "some avg10=31.75 avg60=15.00 avg300=4.20 total=412000\n\
+         full avg10=18.50 avg60=9.00 avg300=1.10 total=210000\n",
+    )
+    .unwrap();
+    std::fs::write(
+        scope.dir.join("io.pressure"),
+        "some avg10=4.00 avg60=2.00 avg300=0.50 total=15000\n\
+         full avg10=2.00 avg60=1.00 avg300=0.25 total=8000\n",
+    )
+    .unwrap();
+
+    let psi: CgroupPsiTelemetry = scope.read_psi_telemetry().expect("read psi telemetry");
+    assert_eq!(psi.cpu.some.avg10, 12.40);
+    assert_eq!(psi.cpu.some.total_us, 98_450);
+    assert!(psi.cpu.full.is_none());
+
+    assert_eq!(psi.memory.some.avg10, 31.75);
+    assert_eq!(psi.memory.full.unwrap().avg10, 18.50);
+    assert_eq!(psi.io.some.avg10, 4.00);
+
+    // Threshold 25.0% is exceeded by memory.pressure some.avg10=31.75%
+    let warn = psi
+        .exceeds_stall_warn_pct(25.0)
+        .expect("expected warning above 25.0%");
+    assert!(
+        warn.contains("memory.pressure some.avg10=31.75% > 25.00%"),
+        "unexpected warning text: {warn}"
+    );
+
+    // Threshold 40.0% is not exceeded
+    assert!(psi.exceeds_stall_warn_pct(40.0).is_none());
+
+    // Malformed PSI lines and invalid psi_stall_warn_pct config values are rejected
+    assert!(parse_psi_resource("invalid line\n").is_err());
+    assert!(parse_psi_resource("some avg10=150.00 avg60=0.00 avg300=0.00 total=0\n").is_err());
+    assert!(config::load("[sandbox.cgroups]\npsi_stall_warn_pct = 0.0\n").is_err());
+    assert!(config::load("[sandbox.cgroups]\npsi_stall_warn_pct = -5.0\n").is_err());
+    assert!(config::load("[sandbox.cgroups]\npsi_stall_warn_pct = 100.1\n").is_err());
+
+    scope.teardown().expect("teardown scope with pressure files");
+    assert!(!scope.dir.exists());
     let _ = std::fs::remove_dir_all(&root);
 }

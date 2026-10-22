@@ -1,5 +1,69 @@
 # Changelog
 
+## 0.63.0 (2026-10-22)
+
+
+### Features
+
+* **Add [[lang.&lt;L&gt;.script_constructs]] per-script construct overrides with canonical path and SHA-256 content digest verification**
+  - **Problem & Explanation:** Language constructs discovered inside `runs_file` scripts (`sh scripts/helper.sh`) were previously evaluated solely against the global `[lang.<L>.constructs]` table with no provenance recording which script file emitted them. `inspect_script_file` in `src/guards.rs` now resolves canonical script paths (`std::fs::canonicalize`, resolving symlinks and failing closed when missing or unreadable) and computes SHA-256 content digests (`Hit.script_path`, `Hit.script_sha256`), and `[[lang.<L>.script_constructs]]` in `src/config.rs` and `src/engine.rs` overrides construct verdicts (`allow`, `ask`, `deny`) only for verified script files while keeping global construct policies intact for inline commands and other scripts.
+  - **Example Scenario:**
+    ```toml
+    [lang.bash.constructs]
+    function_def = "deny"
+
+    [[lang.bash.script_constructs]]
+    paths = ["/workspace/repo/scripts/helper.sh"]
+    sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    constructs = { function_def = "allow" }
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Added optional `[[lang.<L>.script_constructs]]` tables (`paths`, optional `sha256`, `constructs`) in `config.toml`.
+    - *Behavior Contrast:* Before: constructs inside `runs_file` scripts inherited only global `[lang.<L>.constructs]` settings. After: verified canonical scripts (with optional SHA-256 content-digest pinning) can override specific construct actions without weakening global construct enforcement.
+* **Add exact_args program recognition for complete argument sequences and zero-argument invocations (knowledge schema v11)**
+  - **Problem & Explanation:** `[[program]]` entries previously scoped recognition by positional `subcommands` or `subcommand_paths` (skipping flag-value pairs) or flags-only `standalone_flags`, leaving no way to recognize a program only for specific flag-value argument vectors such as `open -a Calendar` on macOS. `Program.exact_args: Option<Vec<Vec<String>>>` (`KNOWLEDGE_SCHEMA_VERSION = 11`) in `src/guards.rs` and `src/knowledge.rs` matches complete, readable argument vectors (including `[]` for zero-argument invocations) whole-token on the unquoted view under `case_sensitive_flags`, refusing `args_from_input` wrappers (`xargs`, `find -exec`) while preserving all normal guards and write checks.
+  - **Example Scenario:**
+    ```toml
+    [[program]]
+    match = ["open"]
+    exact_args = [["-a", "Calendar"], ["-a", "Preview"]]
+    value_options = ["-a"]
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Added optional `exact_args: Option<Vec<Vec<String>>>` on `[[program]]` in `knowledge.toml` / `my-knowledge.toml` (schema v11).
+    - *Behavior Contrast:* Before: flag-value pairs like `-a <app>` could not scope program recognition. After: `exact_args` recognizes only the exact listed argument sequences while unlisted arguments ask as `unmodeled_command`.
+* **Add incremental delta audit bundle export (--since) and multi-bundle offline chain verification (--verify-bundle)**
+  - **Problem & Explanation:** Exporting cryptographic audit bundles previously copied the entire binary journal on every archive run. Adding `vouch doctor --export-bundle <path> --since <parent.vbundle>` in `src/journal_vlog.rs` and `src/main.rs` emits compact version 2 (`VLOG_BUNDLE_VERSION_V2`) delta bundles (`VLOG_BUNDLE_FLAG_DELTA`) anchored to the parent bundle's SHA-256 seal, sequence index, and terminal chain tag (`export_vlog_delta_bundle`), and repeatable `--verify-bundle` flags (`verify_vlog_bundle_chain`) verify multi-bundle chains offline from genesis.
+  - **Example Scenario:**
+    ```bash
+    vouch doctor --export-bundle /tmp/base.vbundle
+    vouch doctor --export-bundle /tmp/delta-1.vbundle --since /tmp/base.vbundle
+    vouch doctor --verify-bundle /tmp/base.vbundle --verify-bundle /tmp/delta-1.vbundle
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged (uses `[logging] journal_format = "binary"`).
+    - *Behavior Contrast:* Before: `--export-bundle` exported the full `.vlog` from genesis and `--verify-bundle` inspected a single file. After: `--export-bundle <out> --since <parent>` exports incremental delta bundles and repeatable `--verify-bundle` verifies multi-bundle chain continuity offline.
+* **Add Linux cgroups v2 Pressure Stall Information telemetry and psi_stall_warn_pct backpressure thresholds**
+  - **Problem & Explanation:** Linux cgroups v2 telemetry previously inspected discrete throttle and limit event counters (`memory.events`, `pids.events`, `cpu.stat`) without measuring kernel Pressure Stall Information (`cpu.pressure`, `memory.pressure`, `io.pressure`). `CgroupsConfig` (`psi_stall_warn_pct`) in `src/config.rs` and `CgroupPsiLine`, `CgroupPsiMetric`, `CgroupPressureReport`, `parse_cgroup_psi`, `read_pressure_report`, and `exceeding_psi_subsystems` in `src/runtime/sandbox.rs` now read Linux PSI `some` and `full` (`avg10`, `avg60`, `avg300`, `total` microsecond stall counters) and flag contended subsystems exceeding `psi_stall_warn_pct`.
+  - **Example Scenario:**
+    ```toml
+    [sandbox.cgroups]
+    psi_stall_warn_pct = 25.0
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Added optional `[sandbox.cgroups] psi_stall_warn_pct` (`0.0 < pct <= 100.0`).
+    - *Behavior Contrast:* Before: cgroups v2 telemetry inspected only discrete event counters. After: parses continuous Linux PSI stall percentages and total stalled microseconds across CPU, memory, and I/O and evaluates `psi_stall_warn_pct` backpressure thresholds.
+* **Model vouch model subcommands with in_place_edit guard rules on --write and add vouch model tool --snippet-from CLI flag**
+  - **Problem & Explanation:** Invoking `vouch model` previously asked as `unmodeled_command` because `model` was missing from the shipped `vouch` entry in `knowledge.toml`, and `vouch model tool` supported single-language `--snippet <field:lang>` without multi-language `language_from` / `language_values` mappings. `knowledge.toml` now models `vouch model` and its flag vocabulary with `in_place_edit` guard rules when `--write` / `-w` is passed (leaving dry-run candidate inspection unguarded), and `src/cli/model.rs` adds `--snippet-from <field:lang_field:k=v,...>` on `vouch model tool`.
+  - **Example Scenario:**
+    ```bash
+    vouch model program open --value-flag -a
+    vouch model tool mcp__srv__exec --snippet-from code:lang:py=python,sh=bash --write
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Updated shipped `vouch` entry in `knowledge.toml` and added `--snippet-from` to `vouch model tool`.
+    - *Behavior Contrast:* Before: `vouch model` prompted as `unmodeled_command` and `vouch model tool` could not emit `language_from` / `language_values` mappings. After: dry-run `vouch model` commands allow, `--write` / `-w` trips `in_place_edit`, and `--snippet-from` generates multi-language tool snippet entries.
+
 ## 0.62.0 (2026-10-21)
 
 

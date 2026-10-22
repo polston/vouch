@@ -605,16 +605,42 @@ pub(crate) fn validate(kb: &Knowledge) -> Result<(), String> {
                 }
             }
         }
+        if let Some(vectors) = &prog.exact_args {
+            if prog.match_names.iter().any(|m| m.starts_with("python:")) {
+                return Err(format!(
+                    "[[program]] {:?}: exact_args describes command-line argument vectors, \
+                     and a python callable has no command-line argument tokens",
+                    prog.match_names
+                ));
+            }
+            for vec in vectors {
+                if vec.is_empty() {
+                    return Err(format!(
+                        "[[program]] {:?}: exact_args contains an empty argument vector — every entry must name at least one argument token",
+                        prog.match_names
+                    ));
+                }
+                if vec.iter().any(|tok| tok.is_empty()) {
+                    return Err(format!(
+                        "[[program]] {:?}: exact_args contains an empty token in {:?}",
+                        prog.match_names, vec
+                    ));
+                }
+            }
+        }
         let standalone_declared = !prog.standalone_flags.is_empty();
-        let scope_is_stated = prog.subcommands.is_some() || prog.subcommand_paths.is_some();
+        let scope_is_stated = prog.subcommands.is_some()
+            || prog.subcommand_paths.is_some()
+            || prog.exact_args.is_some();
         let scope_has_member = prog.subcommands.as_ref().is_some_and(|s| !s.is_empty())
             || prog
                 .subcommand_paths
                 .as_ref()
-                .is_some_and(|p| !p.is_empty());
+                .is_some_and(|p| !p.is_empty())
+            || prog.exact_args.as_ref().is_some_and(|e| !e.is_empty());
         if scope_is_stated && !scope_has_member && !standalone_declared {
             return Err(format!(
-                "[[program]] {:?}: empty subcommands/subcommand_paths cover no operation, and without \
+                "[[program]] {:?}: empty subcommands/subcommand_paths/exact_args cover no operation, and without \
                  standalone_flags the entry can never recognise anything — an \
                  installed-looking entry that covers nothing is refused, the same \
                  rule as a veto with no positive condition",
@@ -1978,8 +2004,11 @@ fn overlay(base: &mut Program, mine: &Program) {
     if mine.all_subcommands {
         base.subcommands = None;
         base.subcommand_paths = None;
+        base.exact_args = None;
     } else {
-        let base_is_scoped = base.subcommands.is_some() || base.subcommand_paths.is_some();
+        let base_is_scoped = base.subcommands.is_some()
+            || base.subcommand_paths.is_some()
+            || base.exact_args.is_some();
         if base_is_scoped {
             if let Some(mine_subcommands) = &mine.subcommands {
                 let base_subcommands = base.subcommands.get_or_insert_default();
@@ -1997,12 +2026,22 @@ fn overlay(base: &mut Program, mine: &Program) {
                     }
                 }
             }
+            if let Some(mine_exact) = &mine.exact_args {
+                let base_exact = base.exact_args.get_or_insert_default();
+                for vec in mine_exact {
+                    if !base_exact.contains(vec) {
+                        base_exact.push(vec.clone());
+                    }
+                }
+            }
         } else {
             let has_subcommands = mine.subcommands.as_ref().is_some_and(|v| !v.is_empty());
             let has_paths = mine.subcommand_paths.as_ref().is_some_and(|v| !v.is_empty());
-            if has_subcommands || has_paths {
+            let has_exact = mine.exact_args.as_ref().is_some_and(|v| !v.is_empty());
+            if has_subcommands || has_paths || has_exact {
                 base.subcommands = mine.subcommands.clone();
                 base.subcommand_paths = mine.subcommand_paths.clone();
+                base.exact_args = mine.exact_args.clone();
             }
         }
     }
@@ -2477,7 +2516,7 @@ pub fn validate_place_scopes(shipped: &Knowledge, mine: &Knowledge) -> Result<()
 fn narrowing_noops(base: &Knowledge, own: &Knowledge) -> Vec<String> {
     let mut notes = Vec::new();
     for m in &own.program {
-        if m.subcommands.is_none() && m.subcommand_paths.is_none() {
+        if m.subcommands.is_none() && m.subcommand_paths.is_none() && m.exact_args.is_none() {
             continue;
         }
         for n in &m.match_names {
@@ -2486,9 +2525,11 @@ fn narrowing_noops(base: &Knowledge, own: &Knowledge) -> Vec<String> {
                 .iter()
                 .filter(|p| p.match_names.iter().any(|sn| Program::same_name(sn, n)))
             {
-                let base_is_whole = b.subcommands.is_none() && b.subcommand_paths.is_none();
+                let base_is_whole = b.subcommands.is_none()
+                    && b.subcommand_paths.is_none()
+                    && b.exact_args.is_none();
                 if base_is_whole {
-                    // Non-empty subcommands/paths refine whole-program coverage and are applied.
+                    // Non-empty subcommands/paths/exact_args refine whole-program coverage and are applied.
                     // Only an explicit empty list is discarded as unioning with nothing.
                     if m.subcommands.as_ref().is_some_and(Vec::is_empty) {
                         notes.push(format!(
@@ -2500,6 +2541,13 @@ fn narrowing_noops(base: &Knowledge, own: &Knowledge) -> Vec<String> {
                     if m.subcommand_paths.as_ref().is_some_and(Vec::is_empty) {
                         notes.push(format!(
                             "[[program]] {n:?}: your subcommand_paths = [] is discarded by the \
+                             merge — the shipped whole-program coverage still stands (an empty list \
+                             unions with nothing)"
+                        ));
+                    }
+                    if m.exact_args.as_ref().is_some_and(Vec::is_empty) {
+                        notes.push(format!(
+                            "[[program]] {n:?}: your exact_args = [] is discarded by the \
                              merge — the shipped whole-program coverage still stands (an empty list \
                              unions with nothing)"
                         ));
@@ -2521,6 +2569,15 @@ fn narrowing_noops(base: &Knowledge, own: &Knowledge) -> Vec<String> {
                     notes.push(format!(
                         "[[program]] {n:?}: your subcommand_paths = [] is discarded by the \
                          merge — the shipped nested-path coverage still stands (an empty list \
+                         unions with nothing)"
+                    ));
+                }
+                if m.exact_args.as_ref().is_some_and(Vec::is_empty)
+                    && b.exact_args.as_ref().is_some_and(|v| !v.is_empty())
+                {
+                    notes.push(format!(
+                        "[[program]] {n:?}: your exact_args = [] is discarded by the \
+                         merge — the shipped exact-argument coverage still stands (an empty list \
                          unions with nothing)"
                     ));
                 }
