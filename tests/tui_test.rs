@@ -1096,12 +1096,11 @@ fn tui_rule_builder_script_constructs_sha256_pin_simulation_apply_and_undo() {
     // Create a real local bash script that uses `function_def`
     let script_file = tmp_path.join("deploy_helper.sh");
     std::fs::write(&script_file, "#!/usr/bin/env bash\nhelper() { echo ok; }\nhelper\n").unwrap();
-    let canonical_script = std::fs::canonicalize(&script_file)
-        .unwrap()
-        .to_string_lossy()
-        .replace('\\', "/");
+    let script_str = script_file.to_string_lossy().replace('\\', "/");
+    let canonical_script =
+        vouch::paths::normalize(&vouch::paths::resolve_links(&script_str), "");
 
-    let cmd_str = format!("bash {canonical_script}");
+    let cmd_str = format!("bash {script_str}");
     let records = vec![
         Record {
             id: "1".into(),
