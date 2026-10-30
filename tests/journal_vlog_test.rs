@@ -4,10 +4,11 @@ use vouch::config::{self, JournalFormat};
 use vouch::journal::{self, JournalPolicy, OutcomeRecord, Record};
 use vouch::journal_vlog::{
     append_vlog, compact_vlog, compute_bundle_seal_sha256, encode_record_payload,
-    export_vlog_bundle, export_vlog_bundle_since, read_records_from_vlog_bundle, read_vidx_entries,
-    read_vlog_checkpoints, vchk_path, verify_vlog_bundle, verify_vlog_bundle_chain,
-    verify_vlog_integrity, vidx_path, write_all_vlog, VlogBundleHeader, VlogHeader, VlogIndexEntry,
-    VlogReader, VlogTamperKind, VBUNDLE_DELTA_VERSION, VBUNDLE_HEADER_LEN, VCHK_ENTRY_LEN,
+    export_vlog_bundle, export_vlog_bundle_since, merge_vlog_bundles,
+    read_records_from_vlog_bundle, read_vidx_entries, read_vlog_checkpoints, vchk_path,
+    verify_vlog_bundle, verify_vlog_bundle_chain, verify_vlog_integrity, vidx_path, write_all_vlog,
+    VlogBundleHeader, VlogHeader, VlogIndexEntry, VlogReader, VlogTamperKind,
+    VBUNDLE_DELTA_VERSION, VBUNDLE_HEADER_LEN, VBUNDLE_VERSION, VCHK_ENTRY_LEN,
     VLOG_FRAME_HEADER_LEN, VLOG_HEADER_LEN, VLOG_INDEX_ENTRY_LEN, VLOG_MAGIC,
 };
 use vouch::journal_wal::crc32;
@@ -997,6 +998,174 @@ fn vbundle_delta_export_and_multi_bundle_chain_verification_succeeds_and_detects
     );
     let cli_stdout = String::from_utf8_lossy(&cli_ok.stdout);
     assert!(cli_stdout.contains("bundle integrity verified: 18 records"));
+
+    let _ = std::fs::remove_dir_all(&archive_dir);
+}
+
+#[test]
+fn vbundle_offline_merge_compacts_genesis_and_delta_chain_into_standalone_bundle_and_serves_as_new_parent() {
+    let state_dir = unique_test_dir("vbundle_merge_state");
+    let archive_dir = unique_test_dir("vbundle_merge_archive");
+    let b0_path = archive_dir.join("b0_genesis.vbundle");
+    let b1_path = archive_dir.join("b1_delta.vbundle");
+    let b2_path = archive_dir.join("b2_delta.vbundle");
+    let merged_path = archive_dir.join("merged_full.vbundle");
+    let b3_path = archive_dir.join("b3_delta_after_merge.vbundle");
+
+    // Step 1: Append 6 records (4 duplicates + 2 unique), compact once, and export B0
+    for i in 0..4 {
+        append_vlog(
+            &state_dir,
+            &sample_record(i, 16_000 + i as u64, "allow", "git status"),
+        )
+        .unwrap();
+    }
+    append_vlog(
+        &state_dir,
+        &sample_record(4, 16_004, "allow", "echo gen0_a"),
+    )
+    .unwrap();
+    append_vlog(
+        &state_dir,
+        &sample_record(5, 16_005, "allow", "echo gen0_b"),
+    )
+    .unwrap();
+    let policy = JournalPolicy {
+        max_records: 100,
+        compact_duplicates: true,
+        preserve_recent: 2,
+    };
+    compact_vlog(&state_dir, &policy).expect("compact before B0");
+    let rep_b0 = export_vlog_bundle(&state_dir, &b0_path).expect("export B0");
+    assert!(rep_b0.valid);
+    assert_eq!(rep_b0.verified_records, 3);
+    assert_eq!(rep_b0.verified_checkpoints, 1);
+
+    // Step 2: Append 4 records and export delta B1 (--since B0)
+    for i in 6..10 {
+        append_vlog(
+            &state_dir,
+            &sample_record(i, 16_000 + i as u64, "allow", &format!("echo delta1_{i}")),
+        )
+        .unwrap();
+    }
+    let rep_b1 =
+        export_vlog_bundle_since(&state_dir, &b1_path, Some(&b0_path)).expect("export delta B1");
+    assert!(rep_b1.valid);
+    assert_eq!(rep_b1.verified_records, 4);
+
+    // Step 3: Append 3 records and export delta B2 (--since B1)
+    for i in 10..13 {
+        append_vlog(
+            &state_dir,
+            &sample_record(i, 16_000 + i as u64, "ask", &format!("touch /tmp/delta2_{i}")),
+        )
+        .unwrap();
+    }
+    let rep_b2 =
+        export_vlog_bundle_since(&state_dir, &b2_path, Some(&b1_path)).expect("export delta B2");
+    assert!(rep_b2.valid);
+    assert_eq!(rep_b2.verified_records, 3);
+
+    // Step 4: Merge [B0, B1, B2] offline into merged_full.vbundle
+    let merge_rep = merge_vlog_bundles(
+        &[b0_path.clone(), b1_path.clone(), b2_path.clone()],
+        &merged_path,
+    )
+    .expect("merge [B0, B1, B2]");
+    assert!(merge_rep.valid, "merge report invalid: {merge_rep:?}");
+    assert_eq!(merge_rep.verified_records, 10);
+    assert_eq!(merge_rep.verified_checkpoints, 1);
+    assert_eq!(merge_rep.terminal_chain_tag, rep_b2.terminal_chain_tag);
+    assert!(merged_path.exists());
+
+    // Verify merged_full.vbundle is a standalone VBUNDLE_VERSION (1) bundle
+    let merged_bytes = std::fs::read(&merged_path).unwrap();
+    let merged_hdr = VlogBundleHeader::from_bytes(&merged_bytes).unwrap();
+    assert_eq!(merged_hdr.version, VBUNDLE_VERSION);
+    assert!(merged_hdr.parse_delta_anchor(&merged_bytes).unwrap().is_none());
+
+    // Standalone verify_vlog_bundle and verify_vlog_bundle_chain(&[merged_path]) must pass
+    let standalone_rep = verify_vlog_bundle(&merged_path).expect("standalone verify merged");
+    assert!(standalone_rep.valid);
+    assert_eq!(standalone_rep.verified_records, 10);
+    assert_eq!(standalone_rep.verified_checkpoints, 1);
+    assert_eq!(standalone_rep.terminal_chain_tag, rep_b2.terminal_chain_tag);
+
+    let single_chain_rep =
+        verify_vlog_bundle_chain(std::slice::from_ref(&merged_path)).expect("single chain verify");
+    assert!(single_chain_rep.valid);
+    assert_eq!(single_chain_rep.verified_records, 10);
+
+    // Decoded records from merged bundle must match the exact 10 records in sequence
+    let decoded = read_records_from_vlog_bundle(&merged_path).expect("decode merged records");
+    assert_eq!(decoded.len(), 10);
+    assert_eq!(decoded[0].cmd, "git status");
+    assert_eq!(decoded[0].count, 4);
+    assert_eq!(decoded[3].cmd, "echo delta1_6");
+    assert_eq!(decoded[9].cmd, "touch /tmp/delta2_12");
+
+    // Step 5: Append 2 more records to live state_dir and export a new delta B3 anchored to merged_full.vbundle!
+    for i in 13..15 {
+        append_vlog(
+            &state_dir,
+            &sample_record(i, 16_000 + i as u64, "allow", &format!("echo delta3_{i}")),
+        )
+        .unwrap();
+    }
+    let rep_b3 = export_vlog_bundle_since(&state_dir, &b3_path, Some(&merged_path))
+        .expect("export delta B3 since merged_full.vbundle");
+    assert!(rep_b3.valid);
+    assert_eq!(rep_b3.verified_records, 2);
+
+    // Remove state_dir and verify [merged_full.vbundle, B3] offline
+    std::fs::remove_dir_all(&state_dir).unwrap();
+    let post_merge_chain =
+        verify_vlog_bundle_chain(&[merged_path.clone(), b3_path.clone()]).expect("verify post-merge chain");
+    assert!(post_merge_chain.valid);
+    assert_eq!(post_merge_chain.verified_records, 12);
+    assert_eq!(post_merge_chain.verified_checkpoints, 1);
+    assert_eq!(post_merge_chain.terminal_chain_tag, rep_b3.terminal_chain_tag);
+
+    // Negative tests: broken chain ([B0, B2] missing B1) must fail and NOT write output file
+    let bad_out_path = archive_dir.join("should_not_exist.vbundle");
+    let bad_rep =
+        merge_vlog_bundles(&[b0_path.clone(), b2_path.clone()], &bad_out_path).expect("merge broken chain");
+    assert!(!bad_rep.valid);
+    assert!(matches!(
+        bad_rep.tamper_finding,
+        Some(VlogTamperKind::DeltaParentMismatch { .. })
+    ));
+    assert!(!bad_out_path.exists(), "failed merge must not create output bundle");
+
+    // Also test CLI `vouch doctor --merge-bundles B0 --merge-bundles B1 --merge-bundles B2 --output cli_merged.vbundle`
+    let cli_merged_path = archive_dir.join("cli_merged.vbundle");
+    let exe = vouch_exe();
+    let cli_merge_out = std::process::Command::new(&exe)
+        .env("VOUCH_STATE_DIR", &state_dir)
+        .args([
+            "doctor",
+            "--merge-bundles",
+            b0_path.to_str().unwrap(),
+            "--merge-bundles",
+            b1_path.to_str().unwrap(),
+            "--merge-bundles",
+            b2_path.to_str().unwrap(),
+            "--output",
+            cli_merged_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run vouch doctor --merge-bundles");
+    assert!(
+        cli_merge_out.status.success(),
+        "cli merge-bundles failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&cli_merge_out.stdout),
+        String::from_utf8_lossy(&cli_merge_out.stderr)
+    );
+    let cli_merge_stdout = String::from_utf8_lossy(&cli_merge_out.stdout);
+    assert!(cli_merge_stdout.contains("merged 3 cryptographic audit bundles into"));
+    assert!(cli_merge_stdout.contains("10 records, 1 compaction checkpoints"));
+    assert!(verify_vlog_bundle(&cli_merged_path).unwrap().valid);
 
     let _ = std::fs::remove_dir_all(&archive_dir);
 }

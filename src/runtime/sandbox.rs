@@ -366,6 +366,11 @@ impl CgroupMemoryEvents {
     pub fn has_oom_kill(&self) -> bool {
         self.oom_kill > 0 || self.oom_group_kill > 0
     }
+
+    /// Returns true if the kernel OOM-killed the entire cgroup process tree as a group (`oom_group_kill > 0`).
+    pub fn has_oom_group_kill(&self) -> bool {
+        self.oom_group_kill > 0
+    }
 }
 
 /// Parsed statistics from a cgroup v2 `pids.events` control file.
@@ -849,6 +854,19 @@ impl CgroupV2Manager {
             write_control_file(&dir.join("memory.high"), "max")?;
         }
 
+        if let Some(swap_bytes) = cfg.memory_swap_max_bytes {
+            write_control_file(&dir.join("memory.swap.max"), &swap_bytes.to_string())?;
+        } else {
+            write_control_file(&dir.join("memory.swap.max"), "max")?;
+        }
+
+        if let Some(oom_group) = cfg.memory_oom_group {
+            write_control_file(
+                &dir.join("memory.oom.group"),
+                if oom_group { "1" } else { "0" },
+            )?;
+        }
+
         let effective_pids_max = cfg.pids_max.filter(|&v| v > 0);
         if let Some(pids_max) = effective_pids_max {
             write_control_file(&dir.join("pids.max"), &pids_max.to_string())?;
@@ -895,6 +913,8 @@ impl CgroupV2Manager {
             dir,
             max_memory_bytes: cfg.max_memory_mb.map(|mb| mb.saturating_mul(1024 * 1024)),
             high_memory_bytes: cfg.high_memory_mb.map(|mb| mb.saturating_mul(1024 * 1024)),
+            memory_swap_max_bytes: cfg.memory_swap_max_bytes,
+            memory_oom_group: cfg.memory_oom_group,
             pids_max: effective_pids_max,
             cpu_max_quota_us: effective_cpu_quota,
             cpu_max_period_us: effective_cpu_period,
@@ -920,6 +940,8 @@ pub struct CgroupScope {
     pub dir: PathBuf,
     pub max_memory_bytes: Option<u64>,
     pub high_memory_bytes: Option<u64>,
+    pub memory_swap_max_bytes: Option<u64>,
+    pub memory_oom_group: Option<bool>,
     pub pids_max: Option<u64>,
     pub cpu_max_quota_us: Option<u64>,
     pub cpu_max_period_us: Option<u64>,
@@ -954,6 +976,33 @@ impl CgroupScope {
     pub fn read_current_memory_bytes(&self) -> Option<u64> {
         let text = std::fs::read_to_string(self.dir.join("memory.current")).ok()?;
         text.trim().parse::<u64>().ok()
+    }
+
+    /// Read current swap memory usage in bytes from `memory.swap.current`.
+    pub fn read_current_swap_bytes(&self) -> Option<u64> {
+        let text = std::fs::read_to_string(self.dir.join("memory.swap.current")).ok()?;
+        text.trim().parse::<u64>().ok()
+    }
+
+    /// Read the configured swap ceiling in bytes from `memory.swap.max` (`None` if `"max"` or absent).
+    pub fn read_memory_swap_max(&self) -> Option<u64> {
+        let text = std::fs::read_to_string(self.dir.join("memory.swap.max")).ok()?;
+        let trimmed = text.trim();
+        if trimmed == "max" {
+            None
+        } else {
+            trimmed.parse::<u64>().ok()
+        }
+    }
+
+    /// Read `memory.oom.group` (`Some(true)` for `"1"`, `Some(false)` for `"0"`, `None` otherwise).
+    pub fn read_memory_oom_group(&self) -> Option<bool> {
+        let text = std::fs::read_to_string(self.dir.join("memory.oom.group")).ok()?;
+        match text.trim() {
+            "1" => Some(true),
+            "0" => Some(false),
+            _ => None,
+        }
     }
 
     /// Read and parse `memory.events` (including `oom_kill` counters).
@@ -1024,6 +1073,9 @@ impl CgroupScope {
                 "cgroup.procs",
                 "memory.max",
                 "memory.high",
+                "memory.swap.max",
+                "memory.swap.current",
+                "memory.oom.group",
                 "memory.current",
                 "memory.events",
                 "memory.pressure",
@@ -1206,6 +1258,8 @@ pub struct SandboxExecutionPlan {
     pub cgroup_dir: Option<PathBuf>,
     pub max_memory_bytes: Option<u64>,
     pub high_memory_bytes: Option<u64>,
+    pub memory_swap_max_bytes: Option<u64>,
+    pub memory_oom_group: Option<bool>,
     pub pids_max: Option<u64>,
     pub cpu_max_quota_us: Option<u64>,
     pub cpu_max_period_us: Option<u64>,
@@ -1247,6 +1301,8 @@ impl SandboxExecutionPlan {
         let effective_cgroups = CgroupsConfig {
             max_memory_mb: cfg.cgroups.max_memory_mb,
             high_memory_mb: cfg.cgroups.high_memory_mb,
+            memory_swap_max_bytes: cfg.cgroups.memory_swap_max_bytes,
+            memory_oom_group: cfg.cgroups.memory_oom_group,
             pids_max: cfg.cgroups.pids_max.or(cfg.max_pids),
             cpu_max_quota_us: cfg.cgroups.cpu_max_quota_us,
             cpu_max_period_us: cfg.cgroups.cpu_max_period_us,
@@ -1255,6 +1311,8 @@ impl SandboxExecutionPlan {
         };
         let has_cgroup_limits = effective_cgroups.max_memory_mb.is_some()
             || effective_cgroups.high_memory_mb.is_some()
+            || effective_cgroups.memory_swap_max_bytes.is_some()
+            || effective_cgroups.memory_oom_group.is_some()
             || effective_cgroups.pids_max.is_some()
             || effective_cgroups.cpu_max_quota_us.is_some()
             || effective_cgroups.cpu_max_period_us.is_some()
@@ -1290,6 +1348,8 @@ impl SandboxExecutionPlan {
             cgroup_dir: scope.as_ref().map(|s| s.dir.clone()),
             max_memory_bytes: scope.as_ref().and_then(|s| s.max_memory_bytes),
             high_memory_bytes: scope.as_ref().and_then(|s| s.high_memory_bytes),
+            memory_swap_max_bytes: scope.as_ref().and_then(|s| s.memory_swap_max_bytes),
+            memory_oom_group: scope.as_ref().and_then(|s| s.memory_oom_group),
             pids_max: scope.as_ref().and_then(|s| s.pids_max),
             cpu_max_quota_us: scope.as_ref().and_then(|s| s.cpu_max_quota_us),
             cpu_max_period_us: scope.as_ref().and_then(|s| s.cpu_max_period_us),

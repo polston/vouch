@@ -589,3 +589,91 @@ psi_stall_warn_pct = 25.0
     assert!(!scope.dir.exists());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn cgroup_v2_provisions_memory_swap_max_and_memory_oom_group_and_monitors_oom_group_kill() {
+    let root = unique_cgroup_root("swap_and_oom_group");
+    std::fs::write(root.join("cgroup.controllers"), "cpu io memory pids\n").unwrap();
+    let manager = CgroupV2Manager::new(&root);
+
+    // Case 1: memory_swap_max_bytes = 0 (strictly disable swap) and memory_oom_group = true
+    let toml_zero_swap = r#"
+[sandbox.cgroups]
+max_memory_mb = 512
+memory_swap_max_bytes = 0
+memory_oom_group = true
+"#;
+    let cfg = config::load(toml_zero_swap).expect("load swap and oom_group config");
+    assert_eq!(cfg.sandbox.cgroups.memory_swap_max_bytes, Some(0));
+    assert_eq!(cfg.sandbox.cgroups.memory_oom_group, Some(true));
+
+    let (plan, scope_opt) =
+        SandboxExecutionPlan::prepare(&manager, "worker-swap-zero", &cfg.sandbox).expect("prepare");
+    let scope = scope_opt.expect("scope provisioned");
+    assert_eq!(plan.memory_swap_max_bytes, Some(0));
+    assert_eq!(plan.memory_oom_group, Some(true));
+    assert_eq!(scope.memory_swap_max_bytes, Some(0));
+    assert_eq!(scope.memory_oom_group, Some(true));
+
+    let swap_max_file = std::fs::read_to_string(scope.dir.join("memory.swap.max")).unwrap();
+    assert_eq!(swap_max_file.trim(), "0");
+    assert_eq!(scope.read_memory_swap_max(), Some(0));
+
+    let oom_group_file = std::fs::read_to_string(scope.dir.join("memory.oom.group")).unwrap();
+    assert_eq!(oom_group_file.trim(), "1");
+    assert_eq!(scope.read_memory_oom_group(), Some(true));
+
+    // Simulate kernel reporting memory.swap.current and oom_group_kill in memory.events
+    std::fs::write(scope.dir.join("memory.swap.current"), "0\n").unwrap();
+    assert_eq!(scope.read_current_swap_bytes(), Some(0));
+
+    std::fs::write(
+        scope.dir.join("memory.events"),
+        "low 0\nhigh 2\nmax 1\noom 1\noom_kill 3\noom_group_kill 1\n",
+    )
+    .unwrap();
+    let mem_events = scope.read_memory_events();
+    assert_eq!(mem_events.oom_kill, 3);
+    assert_eq!(mem_events.oom_group_kill, 1);
+    assert!(mem_events.has_oom_kill());
+    assert!(mem_events.has_oom_group_kill());
+
+    scope
+        .teardown()
+        .expect("teardown scope with swap and oom.group files");
+    assert!(!scope.dir.exists());
+
+    // Case 2: Non-zero swap ceiling (64 MiB) and memory_oom_group = false, plus default ("max") when unset
+    let toml_custom_swap = r#"
+[sandbox.cgroups]
+memory_swap_max_bytes = 67108864
+memory_oom_group = false
+"#;
+    let cfg2 = config::load(toml_custom_swap).expect("load custom swap config");
+    let (_, scope2_opt) =
+        SandboxExecutionPlan::prepare(&manager, "worker-swap-64m", &cfg2.sandbox).expect("prepare");
+    let scope2 = scope2_opt.expect("scope2 provisioned");
+    assert_eq!(scope2.read_memory_swap_max(), Some(67_108_864));
+    assert_eq!(scope2.read_memory_oom_group(), Some(false));
+    std::fs::write(scope2.dir.join("memory.swap.current"), "1048576\n").unwrap();
+    assert_eq!(scope2.read_current_swap_bytes(), Some(1_048_576));
+    scope2.teardown().expect("teardown scope2");
+
+    // Case 3: Unset memory_swap_max_bytes writes "max" to memory.swap.max and omits memory.oom.group
+    let toml_unset = r#"
+[sandbox.cgroups]
+max_memory_mb = 256
+"#;
+    let cfg3 = config::load(toml_unset).expect("load unset swap config");
+    let (_, scope3_opt) =
+        SandboxExecutionPlan::prepare(&manager, "worker-swap-unset", &cfg3.sandbox)
+            .expect("prepare");
+    let scope3 = scope3_opt.expect("scope3 provisioned");
+    let swap_max_unset = std::fs::read_to_string(scope3.dir.join("memory.swap.max")).unwrap();
+    assert_eq!(swap_max_unset.trim(), "max");
+    assert_eq!(scope3.read_memory_swap_max(), None);
+    assert_eq!(scope3.read_memory_oom_group(), None);
+    scope3.teardown().expect("teardown scope3");
+
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -163,6 +163,24 @@
           "default": null,
           "minimum": 0
         },
+        "memory_oom_group": {
+          "description": "Whether to kill the entire cgroup process tree as a single unit on OOM (`memory.oom.group` in cgroups v2).",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "memory_swap_max_bytes": {
+          "description": "Swap memory ceiling in bytes (`memory.swap.max` in cgroups v2; `0` disables swap entirely for the worker scope).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
         "pids_max": {
           "description": "Hard process and thread count limit (`pids.max` in cgroups v2).",
           "type": [

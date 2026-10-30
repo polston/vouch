@@ -2606,6 +2606,139 @@ pub fn verify_vlog_bundle_chain(bundle_paths: &[PathBuf]) -> Result<VlogIntegrit
     })
 }
 
+/// Compact and merge an ordered sequence of `.vbundle` archives (`[genesis_bundle, delta_1, delta_2, ...]`)
+/// completely offline into a single standalone `VBUNDLE_VERSION` (`1`) `.vbundle` file at `output_path`.
+///
+/// Validates full intra-bundle and cross-bundle cryptographic lineage first via `verify_vlog_bundle_chain`.
+/// If any bundle in the chain fails verification or has a broken parent anchor, returns `Ok(report)` with
+/// `report.valid == false` without writing `output_path`.
+pub fn merge_vlog_bundles(
+    bundle_paths: &[PathBuf],
+    output_path: &Path,
+) -> Result<VlogIntegrityReport, String> {
+    let chain_report = verify_vlog_bundle_chain(bundle_paths)?;
+    if !chain_report.valid {
+        return Ok(chain_report);
+    }
+
+    let mut merged_raw_frames: Vec<u8> = Vec::new();
+    let mut merged_idx_entries: Vec<VlogIndexEntry> =
+        Vec::with_capacity(chain_report.verified_records as usize);
+    let mut merged_vchk: Vec<u8> = Vec::new();
+
+    for (idx, path) in bundle_paths.iter().enumerate() {
+        let bytes =
+            std::fs::read(path).map_err(|e| format!("failed to read vbundle {}: {e}", path.display()))?;
+        let hdr = VlogBundleHeader::from_bytes(&bytes)?;
+        let vlog_start = hdr.vlog_offset as usize;
+        let vlog_end = vlog_start + hdr.vlog_len as usize;
+        let vlog_slice = &bytes[vlog_start..vlog_end];
+
+        if idx == 0 {
+            let vchk_start = hdr.vchk_offset as usize;
+            let vchk_end = vchk_start + hdr.vchk_len as usize;
+            merged_vchk.extend_from_slice(&bytes[vchk_start..vchk_end]);
+        }
+
+        if vlog_slice.is_empty() {
+            continue;
+        }
+        let vlog_hdr = VlogHeader::from_bytes(vlog_slice)?;
+        let idx_offset = vlog_hdr.index_offset as usize;
+        let rec_count = vlog_hdr.record_count as usize;
+        if idx_offset < VLOG_HEADER_LEN || idx_offset > vlog_slice.len() {
+            return Err(format!(
+                "invalid vlog index_offset {idx_offset} in bundle {}",
+                path.display()
+            ));
+        }
+
+        let shift = merged_raw_frames.len() as u64;
+        merged_raw_frames.extend_from_slice(&vlog_slice[VLOG_HEADER_LEN..idx_offset]);
+
+        for i in 0..rec_count {
+            let entry_start = idx_offset + i * VLOG_INDEX_ENTRY_LEN;
+            let mut entry = VlogIndexEntry::from_bytes(
+                &vlog_slice[entry_start..entry_start + VLOG_INDEX_ENTRY_LEN],
+            )
+            .ok_or_else(|| format!("failed to decode index entry {i} in {}", path.display()))?;
+            entry.record_offset = entry.record_offset.saturating_add(shift);
+            merged_idx_entries.push(entry);
+        }
+    }
+
+    let total_records = merged_idx_entries.len() as u64;
+    let merged_index_offset = (VLOG_HEADER_LEN + merged_raw_frames.len()) as u64;
+    let merged_vlog_hdr = VlogHeader::new(total_records, merged_index_offset);
+
+    let mut merged_vlog = Vec::with_capacity(
+        VLOG_HEADER_LEN
+            + merged_raw_frames.len()
+            + merged_idx_entries.len() * VLOG_INDEX_ENTRY_LEN,
+    );
+    merged_vlog.extend_from_slice(&merged_vlog_hdr.to_bytes());
+    merged_vlog.extend_from_slice(&merged_raw_frames);
+    for e in &merged_idx_entries {
+        merged_vlog.extend_from_slice(&e.to_bytes());
+    }
+
+    let mut merged_vidx =
+        Vec::with_capacity(VLOG_HEADER_LEN + merged_idx_entries.len() * VLOG_INDEX_ENTRY_LEN);
+    merged_vidx.extend_from_slice(&merged_vlog_hdr.to_bytes());
+    for e in &merged_idx_entries {
+        merged_vidx.extend_from_slice(&e.to_bytes());
+    }
+
+    let vchk_opt = if merged_vchk.is_empty() {
+        None
+    } else {
+        Some(merged_vchk.as_slice())
+    };
+    let merged_report = verify_vlog_slices(&merged_vlog, Some(&merged_vidx), vchk_opt)?;
+    if !merged_report.valid {
+        return Err(format!(
+            "internal error verifying merged bundle: {:?}",
+            merged_report.tamper_finding
+        ));
+    }
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let out_header = VlogBundleHeader::new(now_secs, &merged_vlog, &merged_vidx, &merged_vchk);
+
+    if let Some(parent) = output_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            create_dir_all(parent)
+                .map_err(|e| format!("failed to create merged bundle parent directory: {e}"))?;
+        }
+    }
+    let tmp_path = output_path.with_extension("vbundle.tmp");
+    {
+        let mut f = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp_path)
+            .map_err(|e| format!("failed to open temporary merged bundle file: {e}"))?;
+        f.write_all(&out_header.to_bytes())
+            .map_err(|e| format!("failed to write merged bundle header: {e}"))?;
+        f.write_all(&merged_vlog)
+            .map_err(|e| format!("failed to write merged bundle vlog section: {e}"))?;
+        f.write_all(&merged_vidx)
+            .map_err(|e| format!("failed to write merged bundle vidx section: {e}"))?;
+        f.write_all(&merged_vchk)
+            .map_err(|e| format!("failed to write merged bundle vchk section: {e}"))?;
+        f.sync_all()
+            .map_err(|e| format!("failed to sync merged bundle file: {e}"))?;
+    }
+    std::fs::rename(&tmp_path, output_path)
+        .map_err(|e| format!("failed to finalize merged bundle file: {e}"))?;
+
+    Ok(merged_report)
+}
+
 /// Verify a `.vbundle` archive offline and decode all contained `Record` entries.
 pub fn read_records_from_vlog_bundle(bundle_path: &Path) -> Result<Vec<Record>, String> {
     let report = verify_vlog_bundle(bundle_path)?;

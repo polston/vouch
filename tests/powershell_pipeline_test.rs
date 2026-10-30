@@ -1020,3 +1020,111 @@ fn powershell_class_instance_methods_and_this_property_taint_propagation() {
         cmd.args
     );
 }
+
+#[test]
+fn powershell_using_scope_braced_qualifiers_and_parallel_job_taint_propagation() {
+    use vouch::powershell_pipeline::PsControlFlowGraph;
+
+    // 1. `ForEach-Object -Parallel` propagates `$using:var`, braced `${using:var}`, `${script:var}`,
+    // and `${env:VAR}` from caller scope while isolating runspace-local reassignments from the caller.
+    let script_parallel = "{
+        $userTarget = Read-Host
+        ${script:procTarget} = Get-Process worker
+        1..2 | ForEach-Object -Parallel {
+            Remove-Item $using:userTarget
+            ${using:procTarget}.Kill()
+            & ${env:DYNAMIC_HOOK}
+            $userTarget = 'C:/Users/dev/safe_local_override'
+        }
+        Remove-Item $userTarget
+    }";
+    let cfg_par = PsControlFlowGraph::build(script_parallel);
+    assert_eq!(
+        cfg_par.synthesized_commands.len(),
+        4,
+        "expected Remove-Item ($using:userTarget), Stop-Process (${{using:procTarget}}), Invoke-Expression (${{env:DYNAMIC_HOOK}}), and caller Remove-Item ($userTarget): {:?}",
+        cfg_par.synthesized_commands
+    );
+    assert_eq!(cfg_par.synthesized_commands[0].head, "Remove-Item");
+    assert!(
+        cfg_par.synthesized_commands[0]
+            .args
+            .contains(&"untrusted_input".to_string()),
+        "$using:userTarget inside ForEach-Object -Parallel must retain caller taint: {:?}",
+        cfg_par.synthesized_commands[0].args
+    );
+    assert_eq!(cfg_par.synthesized_commands[1].head, "Stop-Process");
+    assert!(
+        cfg_par.synthesized_commands[1]
+            .args
+            .contains(&"origin:Get-Process".to_string()),
+        "braced ${{using:procTarget}} must resolve caller ${{script:procTarget}} origin: {:?}",
+        cfg_par.synthesized_commands[1].args
+    );
+    assert_eq!(cfg_par.synthesized_commands[2].head, "Invoke-Expression");
+    assert!(
+        cfg_par.synthesized_commands[2]
+            .args
+            .contains(&"untrusted_input".to_string()),
+        "braced ${{env:DYNAMIC_HOOK}} must be treated as tainted environment input: {:?}",
+        cfg_par.synthesized_commands[2].args
+    );
+    assert_eq!(cfg_par.synthesized_commands[3].head, "Remove-Item");
+    assert!(
+        cfg_par.synthesized_commands[3]
+            .args
+            .contains(&"untrusted_input".to_string()),
+        "runspace-local reassignment of $userTarget inside -Parallel must not sanitize caller $userTarget: {:?}",
+        cfg_par.synthesized_commands[3].args
+    );
+
+    // 2. `Start-Job` and `Invoke-Command` propagate `-ArgumentList` into `param($p1, $p2)` and `$args`,
+    // and resolve `$using:` variables and splats (`@using:splatParams`).
+    let script_jobs = "{
+        $taintedPath = Read-Host
+        $safeMode = 'literal_safe'
+        ${global:splatParams} = @{ Path = (Read-Host); Recurse = $true }
+        Start-Job -ScriptBlock {
+            param($target, $mode)
+            Remove-Item $target
+            Remove-Item @using:splatParams
+        } -ArgumentList $taintedPath, $safeMode
+        Invoke-Command -ScriptBlock {
+            & $args
+        } -ArgumentList $taintedPath
+    }";
+    let cfg_jobs = PsControlFlowGraph::build(script_jobs);
+    assert_eq!(
+        cfg_jobs.synthesized_commands.len(),
+        3,
+        "expected 2 Remove-Item commands from Start-Job and 1 Invoke-Expression from Invoke-Command: {:?}",
+        cfg_jobs.synthesized_commands
+    );
+    assert_eq!(cfg_jobs.synthesized_commands[0].head, "Remove-Item");
+    assert!(
+        cfg_jobs.synthesized_commands[0]
+            .args
+            .contains(&"untrusted_input".to_string()),
+        "Start-Job -ArgumentList $taintedPath bound to param($target) must propagate taint: {:?}",
+        cfg_jobs.synthesized_commands[0].args
+    );
+    assert_eq!(cfg_jobs.synthesized_commands[1].head, "Remove-Item");
+    assert!(
+        cfg_jobs.synthesized_commands[1]
+            .args
+            .contains(&"-Recurse".to_string())
+            && cfg_jobs.synthesized_commands[1]
+                .args
+                .contains(&"untrusted_input".to_string()),
+        "@using:splatParams inside Start-Job must resolve caller ${{global:splatParams}}: {:?}",
+        cfg_jobs.synthesized_commands[1].args
+    );
+    assert_eq!(cfg_jobs.synthesized_commands[2].head, "Invoke-Expression");
+    assert!(
+        cfg_jobs.synthesized_commands[2]
+            .args
+            .contains(&"untrusted_input".to_string()),
+        "Invoke-Command -ArgumentList $taintedPath bound to $args must taint `& $args`: {:?}",
+        cfg_jobs.synthesized_commands[2].args
+    );
+}

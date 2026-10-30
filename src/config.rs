@@ -587,6 +587,12 @@ pub struct CgroupsConfig {
     /// Throttle memory high-water mark in megabytes (`memory.high` in cgroups v2).
     #[serde(default)]
     pub high_memory_mb: Option<u64>,
+    /// Swap memory ceiling in bytes (`memory.swap.max` in cgroups v2; `0` disables swap entirely for the worker scope).
+    #[serde(default)]
+    pub memory_swap_max_bytes: Option<u64>,
+    /// Whether to kill the entire cgroup process tree as a single unit on OOM (`memory.oom.group` in cgroups v2).
+    #[serde(default)]
+    pub memory_oom_group: Option<bool>,
     /// Hard process and thread count limit (`pids.max` in cgroups v2).
     #[serde(default)]
     pub pids_max: Option<u64>,

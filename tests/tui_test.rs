@@ -951,3 +951,243 @@ fn tui_visualizer_amendment_undo_stack_and_unified_diff_patch_modal() {
 
     let _ = std::fs::remove_dir_all(&tmp_path);
 }
+
+#[test]
+fn tui_rule_builder_exact_args_synthesis_simulation_apply_and_undo() {
+    let tag = format!("tui_test_exact_args_{}_{}", std::process::id(), line!());
+    let tmp_path = std::env::temp_dir().join(tag);
+    let _ = std::fs::remove_dir_all(&tmp_path);
+    let home = tmp_path.to_str().unwrap();
+    let config_dir = tmp_path.join(".config").join("vouch");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let config_file = config_dir.join("config.toml");
+    let my_kb_file = config_dir.join("my-knowledge.toml");
+    let initial_cfg = "version = 1\n";
+    let initial_kb = "# operator knowledge\n";
+    std::fs::write(&config_file, initial_cfg).unwrap();
+    std::fs::write(&my_kb_file, initial_kb).unwrap();
+
+    let records = vec![
+        Record {
+            id: "1".into(),
+            ts: "2026-10-30T10:00:00Z".into(),
+            cmd: "customdeploy --check --env staging".into(),
+            verdict: "ask".into(),
+            reason: "vouch stopped on: unmodeled_command\n  no description of: customdeploy\n  to allow this permanently: [lang.bash.constructs] unmodeled_command = \"allow\"".into(),
+            mode: "live".into(),
+            outcome: Outcome::Executed,
+            session: "sess-ea".into(),
+            lang: "bash".into(),
+            cwd: "/home/dev".into(),
+            tool: "bash".into(),
+            permission_mode: "".into(),
+            measurement: false,
+            host: "claude".into(),
+            count: 1,
+        },
+        Record {
+            id: "2".into(),
+            ts: "2026-10-30T10:01:00Z".into(),
+            cmd: "customdeploy --production --force".into(),
+            verdict: "ask".into(),
+            reason: "vouch stopped on: unmodeled_command\n  no description of: customdeploy\n  to allow this permanently: [lang.bash.constructs] unmodeled_command = \"allow\"".into(),
+            mode: "live".into(),
+            outcome: Outcome::Denied,
+            session: "sess-ea".into(),
+            lang: "bash".into(),
+            cwd: "/home/dev".into(),
+            tool: "bash".into(),
+            permission_mode: "".into(),
+            measurement: false,
+            host: "claude".into(),
+            count: 1,
+        },
+    ];
+
+    let engine = TuiEngine::from_records(home, &records);
+    // Verify granular exact_args candidate was synthesized for the executed command
+    let ea_cand = engine
+        .candidates
+        .iter()
+        .find(|c| c.section == "program.exact_args")
+        .expect("exact_args candidate should be synthesized");
+    assert_eq!(ea_cand.target_file, vouch::tui::TargetFile::MyKnowledge);
+    assert!(ea_cand.proposed_toml.contains("match = [\"customdeploy\"]"));
+    assert!(ea_cand
+        .proposed_toml
+        .contains("exact_args = [[\"--check\", \"--env\", \"staging\"]]"));
+
+    let mut app = TuiApp::new(engine);
+    // Switch to Policy Visualizer tab
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('v')));
+    // Decision 0 is the most recent ("customdeploy --production --force"), switch to Decision 1 ("customdeploy --check --env staging")
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('l')));
+    assert_eq!(app.visualizer_decision_idx, 1);
+
+    // Select [RULE] policy gate: unmodeled_command
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('j')));
+    let sel = app.policy_graph.selected_node().expect("selected rule node");
+    assert_eq!(sel.builder_presets.len(), 2);
+    assert!(sel.active_preset().unwrap().short_label().contains("exact_args"));
+
+    // Simulate with 'd' (default preset 1/2: exact_args)
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('d')));
+    let sim = app.policy_graph.simulation.as_ref().expect("simulation present");
+    assert_eq!(sim.before_verdict, "ASK");
+    assert_eq!(sim.after_verdict, "ALLOW");
+    // Only 1 of the 2 session ASK commands ("--check --env staging") flips to ALLOW; "--production --force" stays ASK!
+    assert_eq!(sim.session_ask_total, 2);
+    assert_eq!(sim.session_flipped_to_allow, 1);
+
+    // Cycle preset with 'b' to GlobalConstruct ([lang.bash.constructs] unmodeled_command = "allow")
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('b')));
+    assert!(app.status_message.contains("ASK -> ALLOW"));
+    let sim_global = app.policy_graph.simulation.as_ref().expect("global simulation");
+    // Under global unmodeled_command = "allow", BOTH session ASK commands flip to ALLOW!
+    assert_eq!(sim_global.session_flipped_to_allow, 2);
+
+    // Cycle back with 'b' to exact_args preset [1/2]
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('b')));
+    let sim_narrow = app.policy_graph.simulation.as_ref().expect("narrow simulation");
+    assert_eq!(sim_narrow.session_flipped_to_allow, 1);
+
+    // Open Unified Diff Patch Modal ('P') and verify it targets my-knowledge.toml
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('P')));
+    let diff_frame = app.render();
+    assert!(diff_frame.contains("--- a/my-knowledge.toml"));
+    assert!(diff_frame.contains("+++ b/my-knowledge.toml"));
+    assert!(diff_frame.contains("exact_args = [[\"--check\", \"--env\", \"staging\"]]"));
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('P')));
+
+    // Apply with 'a' and verify my-knowledge.toml is written while config.toml is untouched
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('a')));
+    assert!(
+        app.status_message.contains("my-knowledge.toml"),
+        "Expected my-knowledge.toml apply message, got: {}",
+        app.status_message
+    );
+    assert_eq!(std::fs::read_to_string(&config_file).unwrap(), initial_cfg);
+    let updated_kb = std::fs::read_to_string(&my_kb_file).unwrap();
+    assert!(updated_kb.contains("match = [\"customdeploy\"]"));
+    assert!(updated_kb.contains("exact_args = [[\"--check\", \"--env\", \"staging\"]]"));
+    vouch::knowledge::validate_text(&updated_kb).expect("written my-knowledge.toml must validate");
+
+    // Undo with 'u' and verify exact byte-for-byte rollback of my-knowledge.toml
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('u')));
+    assert!(app.status_message.contains("Reverted"));
+    assert_eq!(std::fs::read_to_string(&my_kb_file).unwrap(), initial_kb);
+
+    let _ = std::fs::remove_dir_all(&tmp_path);
+}
+
+#[test]
+fn tui_rule_builder_script_constructs_sha256_pin_simulation_apply_and_undo() {
+    let tag = format!("tui_test_script_constructs_{}_{}", std::process::id(), line!());
+    let tmp_path = std::env::temp_dir().join(tag);
+    let _ = std::fs::remove_dir_all(&tmp_path);
+    std::fs::create_dir_all(&tmp_path).unwrap();
+    let home = tmp_path.to_str().unwrap();
+    let config_dir = tmp_path.join(".config").join("vouch");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let config_file = config_dir.join("config.toml");
+    let initial_cfg = "version = 1\n";
+    std::fs::write(&config_file, initial_cfg).unwrap();
+
+    // Create a real local bash script that uses `function_def`
+    let script_file = tmp_path.join("deploy_helper.sh");
+    std::fs::write(&script_file, "#!/usr/bin/env bash\nhelper() { echo ok; }\nhelper\n").unwrap();
+    let canonical_script = std::fs::canonicalize(&script_file)
+        .unwrap()
+        .to_string_lossy()
+        .replace('\\', "/");
+
+    let cmd_str = format!("bash {canonical_script}");
+    let records = vec![
+        Record {
+            id: "1".into(),
+            ts: "2026-10-30T10:05:00Z".into(),
+            cmd: cmd_str.clone(),
+            verdict: "ask".into(),
+            reason: "vouch stopped on: function_def\n  to allow this permanently: [lang.bash.constructs] function_def = \"allow\"".into(),
+            mode: "live".into(),
+            outcome: Outcome::Executed,
+            session: "sess-sc".into(),
+            lang: "bash".into(),
+            cwd: home.into(),
+            tool: "bash".into(),
+            permission_mode: "".into(),
+            measurement: false,
+            host: "claude".into(),
+            count: 1,
+        },
+        Record {
+            id: "2".into(),
+            ts: "2026-10-30T10:06:00Z".into(),
+            cmd: "foo() { echo inline; }; foo".into(),
+            verdict: "ask".into(),
+            reason: "vouch stopped on: function_def\n  to allow this permanently: [lang.bash.constructs] function_def = \"allow\"".into(),
+            mode: "live".into(),
+            outcome: Outcome::Denied,
+            session: "sess-sc".into(),
+            lang: "bash".into(),
+            cwd: home.into(),
+            tool: "bash".into(),
+            permission_mode: "".into(),
+            measurement: false,
+            host: "claude".into(),
+            count: 1,
+        },
+    ];
+
+    let engine = TuiEngine::from_records(home, &records);
+    let sc_cand = engine
+        .candidates
+        .iter()
+        .find(|c| c.section == "lang.bash.script_constructs")
+        .expect("script_constructs candidate should be synthesized");
+    assert_eq!(sc_cand.target_file, vouch::tui::TargetFile::Config);
+    assert!(sc_cand.proposed_toml.contains("[[lang.bash.script_constructs]]"));
+    assert!(sc_cand.proposed_toml.contains(&canonical_script));
+    assert!(sc_cand.proposed_toml.contains("sha256 = [\""));
+    assert!(sc_cand.proposed_toml.contains("function_def = \"allow\""));
+
+    let mut app = TuiApp::new(engine);
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('v')));
+    // Switch to Decision 1 (the script invocation)
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('l')));
+    assert_eq!(app.visualizer_decision_idx, 1);
+
+    // Select [RULE] policy gate: function_def (past CommandRoot and WrapperExpansion)
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('j')));
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('j')));
+    let sel = app.policy_graph.selected_node().expect("selected rule node");
+    assert_eq!(sel.builder_presets.len(), 2);
+    assert!(sel
+        .active_preset()
+        .unwrap()
+        .short_label()
+        .contains("[[lang.bash.script_constructs]]"));
+
+    // Simulate with 'd' (default preset 1/2: script_constructs)
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('d')));
+    let sim = app.policy_graph.simulation.as_ref().expect("simulation present");
+    assert_eq!(sim.before_verdict, "ASK");
+    assert_eq!(sim.after_verdict, "ALLOW");
+    // Only the script invocation flips to ALLOW; the inline function_def stays ASK!
+    assert_eq!(sim.session_ask_total, 2);
+    assert_eq!(sim.session_flipped_to_allow, 1);
+
+    // Apply with 'a' and verify config.toml contains [[lang.bash.script_constructs]]
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('a')));
+    let updated_cfg = std::fs::read_to_string(&config_file).unwrap();
+    assert!(updated_cfg.contains("[[lang.bash.script_constructs]]"));
+    assert!(updated_cfg.contains(&canonical_script));
+    assert!(updated_cfg.contains("function_def = \"allow\""));
+    vouch::config::load(&updated_cfg).expect("written config.toml must parse cleanly");
+
+    // Undo with 'u' and verify exact rollback
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('u')));
+    assert_eq!(std::fs::read_to_string(&config_file).unwrap(), initial_cfg);
+
+    let _ = std::fs::remove_dir_all(&tmp_path);
+}

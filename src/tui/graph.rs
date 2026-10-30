@@ -33,6 +33,115 @@ impl NodeKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BuilderPreset {
+    ExactArgs {
+        program: String,
+        args: Vec<String>,
+    },
+    ScriptConstruct {
+        lang: String,
+        construct: String,
+        canonical_path: String,
+        sha256_hex: String,
+    },
+    GlobalConstruct {
+        section: String,
+        key: String,
+    },
+}
+
+impl BuilderPreset {
+    pub fn short_label(&self) -> String {
+        match self {
+            BuilderPreset::ExactArgs { program, args } => {
+                let args_fmt = args
+                    .iter()
+                    .map(|a| format!("{a:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("exact_args ({program} [{args_fmt}])")
+            }
+            BuilderPreset::ScriptConstruct {
+                lang,
+                construct,
+                canonical_path,
+                sha256_hex,
+            } => {
+                let short_sha: String = sha256_hex.chars().take(12).collect();
+                format!("[[lang.{lang}.script_constructs]] {construct} @ {canonical_path} (sha256:{short_sha}...)")
+            }
+            BuilderPreset::GlobalConstruct { section, key } => {
+                format!("[{section}] {key} = \"allow\"")
+            }
+        }
+    }
+
+    pub fn to_review_candidate(&self, example_cmd: &str) -> ReviewCandidate {
+        match self {
+            BuilderPreset::ExactArgs { program, args } => {
+                let args_fmt = args
+                    .iter()
+                    .map(|a| format!("{a:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                ReviewCandidate {
+                    name: format!("exact_args: {program} [{args_fmt}]"),
+                    section: "program.exact_args".to_string(),
+                    target_file: TargetFile::MyKnowledge,
+                    proposed_toml: super::engine::format_exact_args_proposed_toml(program, args),
+                    approved: 1,
+                    denied: 0,
+                    unknown: 0,
+                    sessions: 1,
+                    proposable: true,
+                    blocked_reason: None,
+                    example_cmd: example_cmd.to_string(),
+                }
+            }
+            BuilderPreset::ScriptConstruct {
+                lang,
+                construct,
+                canonical_path,
+                sha256_hex,
+            } => {
+                let short_sha: String = sha256_hex.chars().take(12).collect();
+                ReviewCandidate {
+                    name: format!("{construct} @ {canonical_path} (sha256:{short_sha}...)"),
+                    section: format!("lang.{lang}.script_constructs"),
+                    target_file: TargetFile::Config,
+                    proposed_toml: super::engine::format_script_construct_proposed_toml(
+                        lang,
+                        construct,
+                        canonical_path,
+                        sha256_hex,
+                    ),
+                    approved: 1,
+                    denied: 0,
+                    unknown: 0,
+                    sessions: 1,
+                    proposable: true,
+                    blocked_reason: None,
+                    example_cmd: example_cmd.to_string(),
+                }
+            }
+            BuilderPreset::GlobalConstruct { section, key } => ReviewCandidate {
+                name: key.clone(),
+                section: section.clone(),
+                target_file: TargetFile::Config,
+                proposed_toml: format!("[{section}]\n{key} = \"allow\"\n"),
+                approved: 1,
+                denied: 0,
+                unknown: 0,
+                sessions: 1,
+                proposable: true,
+                blocked_reason: None,
+                example_cmd: example_cmd.to_string(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphNode {
     pub id: usize,
     pub kind: NodeKind,
@@ -40,9 +149,24 @@ pub struct GraphNode {
     pub detail: String,
     pub setting_hint: Option<String>,
     pub collapsed: bool,
+    pub builder_presets: Vec<BuilderPreset>,
+    pub active_preset_idx: usize,
 }
 
 impl GraphNode {
+    /// Cycle through available interactive rule-builder presets (`exact_args`, `script_constructs`, `GlobalConstruct`).
+    pub fn cycle_builder_preset(&mut self) -> Option<&BuilderPreset> {
+        if self.builder_presets.len() <= 1 {
+            return self.builder_presets.first();
+        }
+        self.active_preset_idx = (self.active_preset_idx + 1) % self.builder_presets.len();
+        self.builder_presets.get(self.active_preset_idx)
+    }
+
+    pub fn active_preset(&self) -> Option<&BuilderPreset> {
+        self.builder_presets.get(self.active_preset_idx)
+    }
+
     /// Synthesize an actionable `ReviewCandidate` from a Policy Visualizer DAG node (`[RULE]` or `[PATH]`),
     /// or return an explanatory refusal error (e.g. for `[GUARD]` nodes, which ask on purpose per CLAUDE.md §4).
     pub fn to_review_candidate(&self, example_cmd: &str) -> Result<ReviewCandidate, String> {
@@ -73,6 +197,9 @@ impl GraphNode {
                 })
             }
             NodeKind::ConstructHit => {
+                if let Some(preset) = self.active_preset() {
+                    return Ok(preset.to_review_candidate(example_cmd));
+                }
                 if let Some(ref hint) = self.setting_hint {
                     if let Some((section, key)) = parse_construct_setting_hint(hint) {
                         return Ok(ReviewCandidate {
@@ -274,11 +401,48 @@ impl PolicyGraph {
             graph.add_edge(active_parent_id, path_id, "checks_path");
             evaluation_leaf_ids.push(path_id);
         } else if let Some(rule_name) = extract_stopped_rule(&decision.reason) {
-            let rule_id = graph.add_node(
+            let mut presets = Vec::new();
+            if rule_name == "unmodeled_command" {
+                if let Some((prog, args)) =
+                    super::engine::extract_unmodeled_exact_args_from_cmd(&decision.cmd, &decision.reason)
+                {
+                    presets.push(BuilderPreset::ExactArgs {
+                        program: prog,
+                        args,
+                    });
+                }
+            } else if let Some((lang, construct, path, sha)) =
+                super::engine::extract_script_construct_from_cmd(
+                    &decision.cmd,
+                    &decision.cwd,
+                    &decision.reason,
+                )
+            {
+                presets.push(BuilderPreset::ScriptConstruct {
+                    lang,
+                    construct,
+                    canonical_path: path,
+                    sha256_hex: sha,
+                });
+            }
+
+            if let Some(ref hint) = setting_hint {
+                if let Some((sec, key)) = parse_construct_setting_hint(hint) {
+                    presets.push(BuilderPreset::GlobalConstruct { section: sec, key });
+                }
+            } else if !rule_name.is_empty() && !rule_name.ends_with("(guard)") {
+                presets.push(BuilderPreset::GlobalConstruct {
+                    section: "lang.bash.constructs".to_string(),
+                    key: rule_name.clone(),
+                });
+            }
+
+            let rule_id = graph.add_node_with_presets(
                 NodeKind::ConstructHit,
                 format!("policy gate: {rule_name}"),
                 decision.reason.lines().next().unwrap_or(&decision.reason).trim().to_string(),
                 setting_hint.clone(),
+                presets,
             );
             graph.add_edge(active_parent_id, rule_id, "hits_rule");
             evaluation_leaf_ids.push(rule_id);
@@ -372,6 +536,17 @@ impl PolicyGraph {
         detail: String,
         setting_hint: Option<String>,
     ) -> usize {
+        self.add_node_with_presets(kind, label, detail, setting_hint, Vec::new())
+    }
+
+    pub fn add_node_with_presets(
+        &mut self,
+        kind: NodeKind,
+        label: String,
+        detail: String,
+        setting_hint: Option<String>,
+        builder_presets: Vec<BuilderPreset>,
+    ) -> usize {
         let id = self.nodes.len();
         self.nodes.push(GraphNode {
             id,
@@ -380,6 +555,8 @@ impl PolicyGraph {
             detail,
             setting_hint,
             collapsed: false,
+            builder_presets,
+            active_preset_idx: 0,
         });
         id
     }
@@ -452,6 +629,33 @@ impl PolicyGraph {
         let visible = self.visible_entries();
         let (node_id, _, _) = visible.get(self.selected_visible_idx)?;
         self.nodes.get(*node_id)
+    }
+
+    pub fn cycle_selected_builder_preset(&mut self) -> Result<String, String> {
+        let visible = self.visible_entries();
+        let Some(&(node_id, _, _)) = visible.get(self.selected_visible_idx) else {
+            return Err("No policy graph node selected.".to_string());
+        };
+        let Some(node) = self.nodes.get_mut(node_id) else {
+            return Err("No policy graph node selected.".to_string());
+        };
+        if node.kind == NodeKind::GuardHit {
+            return Err(
+                "Guard rules describe operator effects and have no rule-builder presets."
+                    .to_string(),
+            );
+        }
+        if node.builder_presets.len() <= 1 {
+            return Err("Selected node has no alternate rule-builder presets to cycle.".to_string());
+        }
+        let total = node.builder_presets.len();
+        let _ = node.cycle_builder_preset();
+        let idx = node.active_preset_idx + 1;
+        let label = node
+            .active_preset()
+            .map(|p| p.short_label())
+            .unwrap_or_default();
+        Ok(format!("Rule Builder preset [{idx}/{total}]: {label}"))
     }
 
     pub fn move_selection_down(&mut self) {
@@ -577,6 +781,16 @@ impl PolicyGraph {
             out.push_str(&format!("Detail:  {}\n", sel.detail.replace('\n', " | ")));
             if let Some(ref hint) = sel.setting_hint {
                 out.push_str(&format!("Config:  {}\n", hint));
+            }
+            if !sel.builder_presets.is_empty() {
+                if let Some(preset) = sel.active_preset() {
+                    out.push_str(&format!(
+                        "Builder: [{}/{}] {} (press [b] to cycle preset)\n",
+                        sel.active_preset_idx + 1,
+                        sel.builder_presets.len(),
+                        preset.short_label()
+                    ));
+                }
             }
         }
 

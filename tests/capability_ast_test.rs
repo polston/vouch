@@ -1088,3 +1088,91 @@ console.log(axios);
     );
     assert_eq!(report.resolved_files.len(), 2);
 }
+
+#[test]
+fn javascript_dynamic_import_and_create_require_propagate_transitive_capabilities_and_flag_tainted_specifiers() {
+    let ws = TestWorkspace::new("js_dynamic_import_and_create_require");
+
+    ws.write_file(
+        "plugins/net_worker.mjs",
+        "const https = await import('node:https');\nexport function ping() { return https.get('https://example.com'); }\n",
+    );
+    ws.write_file(
+        "legacy/daemon_helper.cjs",
+        "const { execFile } = require('node:child_process');\nmodule.exports = { run: () => execFile('ls') };\n",
+    );
+    ws.write_file(
+        "plugins/fs_cleaner.ts",
+        "import { createRequire } from 'node:module';\nconst req = createRequire(import.meta.url);\nconst fs = req('node:fs/promises');\nexport async function clean() { await fs.rm('/tmp/scratch'); }\n",
+    );
+
+    // 1. Static `import()` and `createRequire(...)` resolve local files and built-in capabilities transitively
+    let static_entry = ws.write_file(
+        "app.mjs",
+        r#"
+import { createRequire } from 'node:module';
+const customRequire = createRequire(import.meta.url);
+const netWorker = await import('./plugins/net_worker.mjs');
+const cleanerPath = './plugins/fs_cleaner.ts';
+import(cleanerPath).then((m) => m.clean());
+const legacy = customRequire('./legacy/daemon_helper.cjs');
+netWorker.ping();
+legacy.run();
+"#,
+    );
+
+    let resolver = TransitiveImportResolver::new(ws.path());
+    let static_report = resolver.resolve_javascript(
+        &fs::read_to_string(&static_entry).unwrap(),
+        Some(&static_entry),
+    );
+
+    assert!(
+        static_report.capabilities.network,
+        "dynamic import('./plugins/net_worker.mjs') -> await import('node:https') must propagate network capability"
+    );
+    assert!(
+        static_report.capabilities.daemon,
+        "createRequire('./legacy/daemon_helper.cjs') -> require('node:child_process') must propagate daemon capability"
+    );
+    assert!(
+        static_report.capabilities.external_paths,
+        "import(cleanerPath) -> createRequire('node:fs/promises') must propagate external_paths capability"
+    );
+    assert!(
+        !static_report.capabilities.dynamic_eval,
+        "static literal import() and createRequire() must not set dynamic_eval"
+    );
+    assert_eq!(
+        static_report.resolved_files.len(),
+        3,
+        "expected all 3 local modules to be transitively resolved"
+    );
+
+    // 2. Non-literal / tainted `import(expr)` and `customRequire(expr)` fail closed with `dynamic_eval = true`
+    let tainted_import_entry = ws.write_file(
+        "tainted_import.mjs",
+        "const pluginName = process.env.USER_PLUGIN;\nconst mod = await import(`./plugins/${pluginName}`);\n",
+    );
+    let tainted_import_report = resolver.resolve_javascript(
+        &fs::read_to_string(&tainted_import_entry).unwrap(),
+        Some(&tainted_import_entry),
+    );
+    assert!(
+        tainted_import_report.capabilities.dynamic_eval,
+        "non-literal template import(`./plugins/${{pluginName}}`) must set dynamic_eval capability"
+    );
+
+    let tainted_req_entry = ws.write_file(
+        "tainted_req.mjs",
+        "import { createRequire } from 'module';\nconst req = createRequire(import.meta.url);\nconst m = req(globalThis.targetModule);\n",
+    );
+    let tainted_req_report = resolver.resolve_javascript(
+        &fs::read_to_string(&tainted_req_entry).unwrap(),
+        Some(&tainted_req_entry),
+    );
+    assert!(
+        tainted_req_report.capabilities.dynamic_eval,
+        "non-literal createRequire alias call req(globalThis.targetModule) must set dynamic_eval capability"
+    );
+}

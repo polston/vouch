@@ -471,12 +471,25 @@ impl VariableTaintTable {
             trimmed.to_string()
         };
         let lower = key.to_lowercase();
-        if let Some(rest) = lower.strip_prefix("$local:") {
-            format!("${rest}")
-        } else if let Some(rest) = lower.strip_prefix("$private:") {
-            format!("${rest}")
+        let unbraced = if let Some(after_dollar) = lower.strip_prefix("${") {
+            if let Some(close_idx) = after_dollar.find('}') {
+                format!(
+                    "${}{}",
+                    &after_dollar[..close_idx],
+                    &after_dollar[close_idx + 1..]
+                )
+            } else {
+                lower
+            }
         } else {
             lower
+        };
+        if let Some(rest) = unbraced.strip_prefix("$local:") {
+            format!("${rest}")
+        } else if let Some(rest) = unbraced.strip_prefix("$private:") {
+            format!("${rest}")
+        } else {
+            unbraced
         }
     }
 
@@ -496,7 +509,17 @@ impl VariableTaintTable {
         if let Some(cls) = self.class_instances.get(&key) {
             return Some(cls);
         }
-        if !key.contains(':') && key.starts_with('$') {
+        if let Some(bare) = key.strip_prefix("$using:") {
+            if let Some(cls) = self.class_instances.get(&format!("${bare}")) {
+                return Some(cls);
+            }
+            if let Some(cls) = self.class_instances.get(&format!("$script:{bare}")) {
+                return Some(cls);
+            }
+            if let Some(cls) = self.class_instances.get(&format!("$global:{bare}")) {
+                return Some(cls);
+            }
+        } else if !key.contains(':') && key.starts_with('$') {
             let bare = &key[1..];
             if let Some(cls) = self.class_instances.get(&format!("$script:{bare}")) {
                 return Some(cls);
@@ -572,7 +595,17 @@ impl VariableTaintTable {
         if let Some(args) = self.splat_args.get(&key) {
             return Some(args);
         }
-        if !key.contains(':') && key.starts_with('$') {
+        if let Some(bare) = key.strip_prefix("$using:") {
+            if let Some(args) = self.splat_args.get(&format!("${bare}")) {
+                return Some(args);
+            }
+            if let Some(args) = self.splat_args.get(&format!("$script:{bare}")) {
+                return Some(args);
+            }
+            if let Some(args) = self.splat_args.get(&format!("$global:{bare}")) {
+                return Some(args);
+            }
+        } else if !key.contains(':') && key.starts_with('$') {
             let bare = &key[1..];
             if let Some(args) = self.splat_args.get(&format!("$script:{bare}")) {
                 return Some(args);
@@ -589,7 +622,17 @@ impl VariableTaintTable {
         if let Some(orig) = self.variables.get(&key) {
             return Some(orig);
         }
-        if !key.contains(':') && key.starts_with('$') {
+        if let Some(bare) = key.strip_prefix("$using:") {
+            if let Some(orig) = self.variables.get(&format!("${bare}")) {
+                return Some(orig);
+            }
+            if let Some(orig) = self.variables.get(&format!("$script:{bare}")) {
+                return Some(orig);
+            }
+            if let Some(orig) = self.variables.get(&format!("$global:{bare}")) {
+                return Some(orig);
+            }
+        } else if !key.contains(':') && key.starts_with('$') {
             let bare = &key[1..];
             if let Some(orig) = self.variables.get(&format!("$script:{bare}")) {
                 return Some(orig);
@@ -626,6 +669,10 @@ impl VariableTaintTable {
     }
 
     pub fn is_tainted_or_dynamic(&self, name: &str) -> bool {
+        let key = Self::normalize_key(name);
+        if key.starts_with("$env:") || key.starts_with("$using:env:") {
+            return true;
+        }
         match self.get(name) {
             Some(VariableOrigin::DynamicInput { .. })
             | Some(VariableOrigin::TaintedExpression)
@@ -2701,19 +2748,84 @@ fn analyze_statement(stmt: &[PsToken], taint_table: &mut VariableTaintTable, out
             head_lower.as_str(),
             "foreach-object" | "foreach" | "%" | "where-object" | "where" | "?"
         ) {
+            let is_parallel = stmt[1..].iter().any(|t| match t {
+                PsToken::Other(f) | PsToken::Identifier(f) => {
+                    f.eq_ignore_ascii_case("-parallel") || f.eq_ignore_ascii_case("-pa")
+                }
+                _ => false,
+            });
             let mut cursor = 1;
+            let mut walked_scriptblock = false;
             while cursor < stmt.len() {
                 if matches!(stmt[cursor], PsToken::OpenBrace) {
                     if let Some((inner, next_c)) = extract_delimited_group(stmt, cursor, false) {
+                        walked_scriptblock = true;
                         let mut sub_cfg = PsControlFlowGraph::default();
                         let entry_id = sub_cfg.new_block("inline_stage", true);
-                        sub_cfg.walk_tokens(&inner, entry_id, true, taint_table, 0);
+                        if is_parallel {
+                            let mut parallel_taint = taint_table.clone();
+                            let body_tokens = strip_and_bind_scriptblock_params(
+                                &inner,
+                                &[],
+                                &mut parallel_taint,
+                            );
+                            sub_cfg.walk_tokens(
+                                &body_tokens,
+                                entry_id,
+                                true,
+                                &mut parallel_taint,
+                                0,
+                            );
+                        } else {
+                            let body_tokens =
+                                strip_and_bind_scriptblock_params(&inner, &[], taint_table);
+                            sub_cfg.walk_tokens(&body_tokens, entry_id, true, taint_table, 0);
+                        }
                         out.extend(sub_cfg.synthesized_commands);
                         cursor = next_c;
                         continue;
                     }
                 }
                 cursor += 1;
+            }
+            if walked_scriptblock {
+                return;
+            }
+        } else if matches!(
+            head_lower.as_str(),
+            "start-job" | "sajb" | "start-threadjob" | "invoke-command" | "icm"
+        ) {
+            let arg_origins = extract_argument_list_origins(&stmt[1..], taint_table);
+            let is_in_process_invoke =
+                matches!(head_lower.as_str(), "invoke-command" | "icm");
+            let mut cursor = 1;
+            let mut walked_scriptblock = false;
+            while cursor < stmt.len() {
+                if matches!(stmt[cursor], PsToken::OpenBrace) {
+                    if let Some((inner, next_c)) = extract_delimited_group(stmt, cursor, false) {
+                        walked_scriptblock = true;
+                        let mut job_taint = taint_table.clone();
+                        bind_argument_list_to_job_scope(&arg_origins, &mut job_taint);
+                        let body_tokens = strip_and_bind_scriptblock_params(
+                            &inner,
+                            &arg_origins,
+                            &mut job_taint,
+                        );
+                        let mut sub_cfg = PsControlFlowGraph::default();
+                        let entry_id = sub_cfg.new_block("job_scriptblock", true);
+                        sub_cfg.walk_tokens(&body_tokens, entry_id, true, &mut job_taint, 0);
+                        if is_in_process_invoke {
+                            taint_table.propagate_cross_scope_from(&job_taint);
+                        }
+                        out.extend(sub_cfg.synthesized_commands);
+                        cursor = next_c;
+                        continue;
+                    }
+                }
+                cursor += 1;
+            }
+            if walked_scriptblock {
+                return;
             }
         }
     }
@@ -3390,8 +3502,8 @@ fn classify_rhs_origin(rhs: &[PsToken], taint_table: &VariableTaintTable) -> Var
                     if v.eq_ignore_ascii_case("$true") || v.eq_ignore_ascii_case("$false") {
                         continue;
                     }
-                    let v_lower = v.to_ascii_lowercase();
-                    if v_lower.starts_with("$env:") {
+                    let norm_v = VariableTaintTable::normalize_key(v);
+                    if norm_v.starts_with("$env:") || norm_v.starts_with("$using:env:") {
                         return VariableOrigin::Environment(v.clone());
                     } else if taint_table.is_tainted_or_dynamic(v) {
                         return VariableOrigin::TaintedExpression;
@@ -3446,8 +3558,8 @@ fn classify_rhs_origin(rhs: &[PsToken], taint_table: &VariableTaintTable) -> Var
                     return orig.clone();
                 }
             }
-            let v_lower = v.to_lowercase();
-            if v_lower.starts_with("$env:") {
+            let norm_v = VariableTaintTable::normalize_key(v);
+            if norm_v.starts_with("$env:") || norm_v.starts_with("$using:env:") {
                 return VariableOrigin::Environment((*v).clone());
             } else if taint_table.is_tainted_or_dynamic(v) {
                 return VariableOrigin::TaintedExpression;
@@ -3622,11 +3734,21 @@ pub fn analyze_pipeline_stages(cmds: &[Cmd]) -> Vec<Cmd> {
         let is_iterator = matches!(head_lower.as_str(), "foreach-object" | "foreach" | "%");
 
         if is_iterator {
+            let is_parallel = cmd.args.iter().any(|a| {
+                let lower = a.trim().to_ascii_lowercase();
+                lower == "-parallel" || lower == "-pa"
+            });
             let ordered_blocks = order_foreach_scriptblocks(&cmd.args);
             let mut next_stage_origin: Option<VariableOrigin> = None;
             for block_arg in ordered_blocks {
-                let cfg = PsControlFlowGraph::build_with_taint(block_arg, &mut taint_table);
-                if let Some(orig) = infer_stage_output_origin(&cfg, &taint_table) {
+                let mut parallel_taint = taint_table.clone();
+                let target_table = if is_parallel {
+                    &mut parallel_taint
+                } else {
+                    &mut taint_table
+                };
+                let cfg = PsControlFlowGraph::build_with_taint(block_arg, target_table);
+                if let Some(orig) = infer_stage_output_origin(&cfg, target_table) {
                     next_stage_origin = Some(orig);
                 }
                 out.extend(cfg.synthesized_commands);
@@ -3648,7 +3770,7 @@ pub fn analyze_pipeline_stages(cmds: &[Cmd]) -> Vec<Cmd> {
                 out.extend(synthesized);
             }
         } else {
-            // Also inspect scriptblock arguments in commands like `& { ... }` or multi-statement blocks
+            // Also inspect scriptblock arguments in commands like `& { ... }`, `Start-Job`, `Invoke-Command`, or multi-statement blocks
             for arg in &cmd.args {
                 if arg.trim_start().starts_with('{') && arg.trim_end().ends_with('}') {
                     let synthesized =
@@ -3660,6 +3782,138 @@ pub fn analyze_pipeline_stages(cmds: &[Cmd]) -> Vec<Cmd> {
     }
 
     out
+}
+
+fn extract_argument_list_origins(
+    stmt_args: &[PsToken],
+    taint_table: &VariableTaintTable,
+) -> Vec<VariableOrigin> {
+    let mut i = 0;
+    while i < stmt_args.len() {
+        let is_arg_list_flag = match &stmt_args[i] {
+            PsToken::Other(f) | PsToken::Identifier(f) => {
+                f.eq_ignore_ascii_case("-argumentlist")
+                    || f.eq_ignore_ascii_case("-args")
+                    || f.eq_ignore_ascii_case("-arg")
+            }
+            _ => false,
+        };
+        if is_arg_list_flag {
+            let mut cursor = i + 1;
+            while cursor < stmt_args.len() && matches!(stmt_args[cursor], PsToken::Newline) {
+                cursor += 1;
+            }
+            if cursor >= stmt_args.len() {
+                break;
+            }
+            // Case 1: `-ArgumentList @( ... )`
+            if matches!(stmt_args.get(cursor), Some(PsToken::Other(at)) if at == "@")
+                && stmt_args.get(cursor + 1) == Some(&PsToken::OpenParen)
+            {
+                if let Some((inner, _)) = extract_delimited_group(stmt_args, cursor + 1, true) {
+                    return split_comma_separated_tokens(&inner)
+                        .into_iter()
+                        .map(|slice| classify_rhs_origin(&slice, taint_table))
+                        .collect();
+                }
+            }
+            // Case 2: `-ArgumentList ( ... )`
+            if stmt_args.get(cursor) == Some(&PsToken::OpenParen) {
+                if let Some((inner, _)) = extract_delimited_group(stmt_args, cursor, true) {
+                    return split_comma_separated_tokens(&inner)
+                        .into_iter()
+                        .map(|slice| classify_rhs_origin(&slice, taint_table))
+                        .collect();
+                }
+            }
+            // Case 3: `-ArgumentList $a, $b` up to next top-level `-Flag` or `{`
+            let mut collected = Vec::new();
+            let mut depth = 0usize;
+            while cursor < stmt_args.len() {
+                match &stmt_args[cursor] {
+                    PsToken::OpenParen => {
+                        depth += 1;
+                        collected.push(stmt_args[cursor].clone());
+                    }
+                    PsToken::CloseParen => {
+                        depth = depth.saturating_sub(1);
+                        collected.push(stmt_args[cursor].clone());
+                    }
+                    PsToken::OpenBrace if depth == 0 => break,
+                    PsToken::Other(fl) if depth == 0 && fl.starts_with('-') => break,
+                    _ => collected.push(stmt_args[cursor].clone()),
+                }
+                cursor += 1;
+            }
+            return split_comma_separated_tokens(&collected)
+                .into_iter()
+                .map(|slice| classify_rhs_origin(&slice, taint_table))
+                .collect();
+        }
+        i += 1;
+    }
+    Vec::new()
+}
+
+fn bind_argument_list_to_job_scope(
+    arg_origins: &[VariableOrigin],
+    job_taint: &mut VariableTaintTable,
+) {
+    if arg_origins.is_empty() {
+        return;
+    }
+    let any_tainted = arg_origins.iter().any(|o| {
+        matches!(
+            o,
+            VariableOrigin::DynamicInput { .. }
+                | VariableOrigin::TaintedExpression
+                | VariableOrigin::Environment(_)
+        )
+    });
+    if any_tainted {
+        job_taint.set("$args", VariableOrigin::TaintedExpression);
+    } else if arg_origins.len() == 1 {
+        job_taint.set("$args", arg_origins[0].clone());
+    }
+    for (idx, orig) in arg_origins.iter().enumerate() {
+        job_taint.set(&format!("$args[{idx}]"), orig.clone());
+    }
+}
+
+fn strip_and_bind_scriptblock_params(
+    inner: &[PsToken],
+    arg_origins: &[VariableOrigin],
+    taint_table: &mut VariableTaintTable,
+) -> Vec<PsToken> {
+    let first_non_nl = inner.iter().position(|t| !matches!(t, PsToken::Newline));
+    if let Some(f_idx) = first_non_nl {
+        if let PsToken::Identifier(id) = &inner[f_idx] {
+            if id.eq_ignore_ascii_case("param") {
+                if let Some((param_group, mut after_p)) =
+                    extract_delimited_group(inner, f_idx + 1, true)
+                {
+                    let mut params = Vec::new();
+                    for pt in param_group {
+                        if let PsToken::Variable(v) = pt {
+                            params.push(v);
+                        }
+                    }
+                    for (param_idx, param_var) in params.iter().enumerate() {
+                        if let Some(orig) = arg_origins.get(param_idx) {
+                            taint_table.set(param_var, orig.clone());
+                        }
+                    }
+                    while after_p < inner.len()
+                        && matches!(inner[after_p], PsToken::Semicolon | PsToken::Newline)
+                    {
+                        after_p += 1;
+                    }
+                    return inner[after_p..].to_vec();
+                }
+            }
+        }
+    }
+    inner.to_vec()
 }
 
 fn order_foreach_scriptblocks(args: &[String]) -> Vec<&str> {

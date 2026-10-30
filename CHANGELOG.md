@@ -1,5 +1,76 @@
 # Changelog
 
+## 0.64.0 (2026-10-30)
+
+
+### Features
+
+* **Add interactive TUI rule builder support for exact_args program rules and verified script_constructs overrides**
+  - **Problem & Explanation:** `vouch tui` previously synthesized subcommand-based `[[program]]` entries and global `[lang.<L>.constructs]` settings, leaving no interactive workflow to build argument-scoped `exact_args` program rules or SHA-256 content-pinned `[[lang.<L>.script_constructs]]` overrides. `TuiEngine` (`src/tui/engine.rs`), `TuiApp` (`src/tui/app.rs`), and `RuleCandidateNode` (`src/tui/graph.rs`) now synthesize `exact_args` candidates (`e` key in the Policy Visualizer) and verified `[[lang.<L>.script_constructs]]` overrides (with canonical script path and SHA-256 content digest when `runs_file` script provenance is present), render live TOML previews in the Rule Builder modal, and persist rules atomically to `my-knowledge.toml` or `config.toml`.
+  - **Example Scenario:**
+    ```toml
+    # Persisted to my-knowledge.toml via 'e' (exact_args mode) in vouch tui:
+    [[program]]
+    match = ["open"]
+    exact_args = [["-a", "Calendar"]]
+    value_options = ["-a"]
+
+    # Persisted to config.toml for a runs_file script construct prompt in vouch tui:
+    [[lang.bash.script_constructs]]
+    paths = ["/workspace/repo/scripts/deploy.sh"]
+    sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    constructs = { function_def = "allow" }
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged (synthesizes existing `[[program]] exact_args` in `my-knowledge.toml` and `[[lang.<L>.script_constructs]]` in `config.toml`).
+    - *Behavior Contrast:* Before: operators had to hand-author `exact_args` vectors and compute script SHA-256 digests manually outside the TUI. After: `vouch tui` interactively previews and persists both `exact_args` rules and SHA-256-pinned `[[lang.<L>.script_constructs]]` overrides.
+* **Add Linux cgroups v2 memory swap ceiling (memory_swap_max_bytes) and OOM group kill (memory_oom_group) enforcement**
+  - **Problem & Explanation:** `[sandbox.cgroups]` previously enforced `memory.max` (`memory_max_bytes`) without bounding anonymous swap usage (`memory.swap.max`) or enforcing atomic whole-cgroup OOM termination (`memory.oom.group`), allowing a runaway child process tree to spill into swap or leave orphaned sibling processes alive after a partial kernel OOM kill. `CgroupsConfig` (`src/config.rs`) and `apply_cgroup_limits_at_root` / `check_cgroups_v2_status_at_root` (`src/runtime/sandbox.rs`) now validate and write `memory.swap.max` (`0` for zero-swap enforcement or positive byte ceilings) and `memory.oom.group` (`1\n` when `true`), surface pre-execution readiness in `vouch doctor`, and update the configuration schema and reference docs.
+  - **Example Scenario:**
+    ```toml
+    [sandbox.cgroups]
+    memory_max_bytes = 2147483648
+    memory_swap_max_bytes = 0
+    memory_oom_group = true
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Added optional `[sandbox.cgroups] memory_swap_max_bytes` (`u64`, `0` allowed) and `memory_oom_group` (`bool`) in `config.toml`.
+    - *Behavior Contrast:* Before: `[sandbox.cgroups]` wrote only `memory.max`, `pids.max`, `cpu.max`, and `io.max`. After: `[sandbox.cgroups]` also enforces `memory.swap.max` and `memory.oom.group` on Linux cgroups v2 hierarchies.
+* **Add offline cryptographic audit bundle compaction and merge via vouch doctor --merge-bundles**
+  - **Problem & Explanation:** Operators exporting incremental delta audit bundles (`--export-bundle <out> --since <parent>`) over time accumulated multi-file `.vbundle` chains that required passing every segment in sequence to `--verify-bundle`. `merge_vlog_bundles` (`src/journal_vlog.rs`) and `vouch doctor --merge-bundles <b1.vbundle> <b2.vbundle> ... --output <merged.vbundle>` (`src/main.rs`) now verify each input bundle's SHA-256 seal, validate contiguous or overlapping sequence-index and BLAKE3 `chain_tag` continuity across segments, deduplicate overlapping records while rejecting divergent tampering at identical sequence numbers, rebuild a unified `.vlog` + `.vidx` + terminal `.vchk` checkpoint, and seal a consolidated `.vbundle`.
+  - **Example Scenario:**
+    ```bash
+    vouch doctor --merge-bundles /tmp/base.vbundle /tmp/delta-1.vbundle /tmp/delta-2.vbundle --output /tmp/consolidated.vbundle
+    vouch doctor --verify-bundle /tmp/consolidated.vbundle
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Updated shipped `vouch` entry in `knowledge.toml` (`value_options` includes `--merge-bundles`, `--output`, `-o`) and added `--merge-bundles` / `--output` (`-o`) to `vouch doctor`.
+    - *Behavior Contrast:* Before: multi-segment `.vbundle` archives could be verified together (`--verify-bundle`) but not compacted offline into a single sealed bundle. After: `--merge-bundles` verifies chain continuity and compacts contiguous or overlapping bundles into one standalone `.vbundle`.
+* **Propagate PowerShell taint across scope-qualified variables (using, script, global) and parallel or background job scriptblocks**
+  - **Problem & Explanation:** `VariableTaintTable` and `PsControlFlowGraph` (`src/powershell_pipeline.rs`) previously normalized variable lookups without stripping outer `${...}` braces or resolving `$using:` cross-runspace variable captures (`$using:var`, `${using:var}`, `@using:splat`) and `Start-Job` / `Start-ThreadJob` / `Invoke-Command` `-ArgumentList` (`$args`, `param(...)`) bindings. `VariableTaintTable` now normalizes braced and unbraced scope qualifiers (`$using:`, `$script:`, `$global:`, `$local:`, `$private:`), isolates child runspace local mutations inside `ForEach-Object -Parallel { ... }` while propagating `$using:` captures from the caller scope, and binds `-ArgumentList` taint into background job and `Invoke-Command` scriptblocks.
+  - **Example Scenario:**
+    ```powershell
+    $cmd = $env:UNTRUSTED_PAYLOAD
+    1..4 | ForEach-Object -Parallel { Invoke-Expression $using:cmd }
+    Start-Job -ScriptBlock { param($p) Invoke-Expression $p } -ArgumentList $cmd
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: `$using:var`, `${script:var}`, and `Start-Job -ArgumentList` did not propagate caller taint across parallel or background scriptblock boundaries. After: scope-qualified variables and parallel/job scriptblocks propagate taint deterministically while keeping parallel child runspace mutations isolated.
+* **Track JavaScript and TypeScript dynamic import() expressions and module.createRequire bindings in AST and transitive capability analysis**
+  - **Problem & Explanation:** The native JavaScript/TypeScript AST scanner (`src/javascript.rs`) and `TransitiveImportResolver` (`src/capability.rs`) previously tracked static `import ... from` declarations and direct `require("...")` calls, missing ESM `await import(...)` (`ImportExpression`) and `createRequire(...)` from `module` / `node:module`. `JsVisitor`, `JsCapVisitor`, and `JsImportVisitor` now resolve literal `import("...")` and `createRequire` alias specifiers (stripping `"node:"` prefixes for built-in capability rules and following relative module edges across the transitive import graph) while emitting `dynamic_call` / `DynamicTarget` taint on variable, template-interpolated, or concatenated module specifiers.
+  - **Example Scenario:**
+    ```javascript
+    import { createRequire } from 'node:module';
+    const customReq = createRequire(import.meta.url);
+    const cp = customReq('node:child_process');
+    cp.execSync('id');
+    const mod = await import('./helper.mjs');
+    ```
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: `createRequire` aliases and dynamic `import(...)` expressions were not followed into imported relative modules or matched against built-in capability rules. After: literal `import()` and `createRequire` specifiers resolve transitively and non-literal specifiers flag dynamic module loading.
+
 ## 0.63.0 (2026-10-22)
 
 

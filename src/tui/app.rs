@@ -277,6 +277,22 @@ impl TuiApp {
                     self.stage_and_simulate_visualizer_node();
                 }
             }
+            TerminalEvent::Key(KeyCode::Char('b')) => {
+                if self.active_tab == ViewTab::Visualizer {
+                    match self.policy_graph.cycle_selected_builder_preset() {
+                        Ok(msg) => {
+                            self.status_message = msg;
+                            if self.policy_graph.simulation.is_some() {
+                                self.policy_graph.simulation = None;
+                                self.simulate_selected_visualizer_node();
+                            }
+                        }
+                        Err(err) => {
+                            self.status_message = format!("✗ {err}");
+                        }
+                    }
+                }
+            }
             _ => {}
         }
         AppStatus::Running
@@ -559,7 +575,7 @@ impl TuiApp {
             ViewTab::Visualizer => {
                 if !self.engine.decisions.is_empty() {
                     out.push_str(&format!(
-                        "  [Decision {}/{} — press [h/l] to switch decision, [Space/Enter] to fold node, [p] preview, [P] diff patch, [u] undo, [a] accept]\n",
+                        "  [Decision {}/{} — press [h/l] to switch decision, [Space/Enter] to fold node, [b] cycle builder preset, [p] preview, [P] diff patch, [u] undo, [a] accept]\n",
                         self.visualizer_decision_idx + 1,
                         self.engine.decisions.len()
                     ));

@@ -1463,6 +1463,59 @@ fn main() {
             }
         }
 
+        if args.iter().any(|a| a == "--merge-bundles") {
+            let mut bundle_paths = Vec::new();
+            let mut output_path: Option<std::path::PathBuf> = None;
+            let mut idx = 1usize;
+            while idx < args.len() {
+                if args[idx] == "--merge-bundles" {
+                    let Some(bundle_arg) = args.get(idx + 1) else {
+                        eprintln!("usage: vouch doctor --merge-bundles <b0.vbundle> [--merge-bundles <b1.vbundle> ...] --output <merged.vbundle>");
+                        std::process::exit(2);
+                    };
+                    bundle_paths.push(std::path::PathBuf::from(bundle_arg));
+                    idx += 2;
+                } else if args[idx] == "--output" || args[idx] == "-o" {
+                    let Some(out_arg) = args.get(idx + 1) else {
+                        eprintln!("usage: vouch doctor --merge-bundles <b0.vbundle> [--merge-bundles <b1.vbundle> ...] --output <merged.vbundle>");
+                        std::process::exit(2);
+                    };
+                    output_path = Some(std::path::PathBuf::from(out_arg));
+                    idx += 2;
+                } else {
+                    idx += 1;
+                }
+            }
+            let Some(out_path) = output_path else {
+                eprintln!("usage: vouch doctor --merge-bundles <b0.vbundle> [--merge-bundles <b1.vbundle> ...] --output <merged.vbundle>");
+                std::process::exit(2);
+            };
+            match vouch::journal_vlog::merge_vlog_bundles(&bundle_paths, &out_path) {
+                Ok(report) if report.valid => {
+                    println!(
+                        "merged {} cryptographic audit bundles into {}: {} records, {} compaction checkpoints, hash chain unbroken (terminal tag: {:016x})",
+                        bundle_paths.len(),
+                        vouch::knowledge::display_path(&out_path),
+                        report.verified_records,
+                        report.verified_checkpoints,
+                        report.terminal_chain_tag
+                    );
+                    std::process::exit(0);
+                }
+                Ok(report) => {
+                    println!(
+                        "bundle merge FAILED (verified {} records, {} checkpoints, finding: {:?})",
+                        report.verified_records, report.verified_checkpoints, report.tamper_finding
+                    );
+                    std::process::exit(1);
+                }
+                Err(err) => {
+                    eprintln!("bundle merge ERROR: {err}");
+                    std::process::exit(1);
+                }
+            }
+        }
+
         let here = judged_from(None);
         let root = project_root(&here);
         // `vouch::engine::parse_undeclared_option_line` scrapes one line of a

@@ -10,8 +10,8 @@ pub mod graph;
 
 pub use app::{AppStatus, TuiApp, ViewTab};
 pub use backend::{ConsoleBackend, MockTerminalBackend, TerminalBackend, TerminalEvent, KeyCode};
-pub use engine::{DecisionItem, JournalTailReader, ReviewCandidate, TuiEngine};
-pub use graph::{GraphEdge, GraphNode, NodeKind, PolicyGraph, PolicySimulationResult};
+pub use engine::{DecisionItem, JournalTailReader, ReviewCandidate, TargetFile, TuiEngine};
+pub use graph::{BuilderPreset, GraphEdge, GraphNode, NodeKind, PolicyGraph, PolicySimulationResult};
 
 /// Launch interactive review session on the active terminal.
 pub fn launch_interactive(home_dir: &str) -> Result<(), String> {

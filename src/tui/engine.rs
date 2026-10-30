@@ -46,6 +46,7 @@ pub struct DecisionItem {
 #[derive(Debug, Clone)]
 pub struct ConfigUndoSnapshot {
     pub previous_toml: String,
+    pub previous_my_knowledge_toml: Option<String>,
     pub description: String,
     pub restored_candidates: Vec<ReviewCandidate>,
 }
@@ -146,6 +147,10 @@ impl TuiEngine {
             }
         }
 
+        // Synthesize granular exact_args (my-knowledge.toml) and script_constructs (config.toml)
+        // candidates from executed ASK records.
+        candidates.extend(synthesize_granular_candidates(records));
+
         // Sort candidates: proposable first, then by approved count
         candidates.sort_by(|a, b| {
             b.proposable.cmp(&a.proposable)
@@ -229,6 +234,9 @@ impl TuiEngine {
                     .clone()
                     .unwrap_or_else(|| "Candidate is not proposable".to_string()));
             }
+            if cand.target_file != TargetFile::Config {
+                continue;
+            }
             if cand.section == "write.allow_paths" {
                 let path_to_add = cand.name.strip_prefix("path: ").unwrap_or(&cand.name);
                 let mut doc: toml_edit::DocumentMut = current_content
@@ -251,6 +259,10 @@ impl TuiEngine {
                 }
                 current_content = doc.to_string();
                 summaries.push(format!("[write] allow_paths += {:?}", path_to_add));
+            } else if cand.section.ends_with(".script_constructs") {
+                let (updated, sum) = apply_script_construct_candidate_to_toml(&current_content, cand)?;
+                current_content = updated;
+                summaries.push(sum);
             } else {
                 let c = Candidate {
                     name: cand.name.clone(),
@@ -273,6 +285,35 @@ impl TuiEngine {
             summaries.join(" + "),
             has_explicit_bash_default,
         ))
+    }
+
+    pub fn build_cumulative_amended_my_knowledge_toml(
+        &self,
+        cands: &[ReviewCandidate],
+    ) -> Result<(String, String), String> {
+        let my_kb_path = crate::knowledge::config_dir(&self.home).join("my-knowledge.toml");
+        let mut current_content = std::fs::read_to_string(&my_kb_path).unwrap_or_default();
+        let mut summaries = Vec::new();
+
+        for cand in cands {
+            if !cand.proposable {
+                return Err(cand
+                    .blocked_reason
+                    .clone()
+                    .unwrap_or_else(|| "Candidate is not proposable".to_string()));
+            }
+            if cand.target_file != TargetFile::MyKnowledge {
+                continue;
+            }
+            let (updated, sum) = apply_exact_args_candidate_to_my_knowledge_toml(&current_content, cand)?;
+            current_content = updated;
+            summaries.push(sum);
+        }
+
+        // Validate against the knowledge schema before returning
+        crate::knowledge::validate_text(&current_content)?;
+
+        Ok((current_content, summaries.join(" + ")))
     }
 
     fn build_amended_config_toml(
@@ -300,7 +341,13 @@ impl TuiEngine {
         cands: &[ReviewCandidate],
         staged_node_ids: Vec<usize>,
     ) -> Result<super::graph::PolicySimulationResult, String> {
-        let (amended_toml, amendment_summary, has_explicit_bash_default) =
+        if cands.is_empty() {
+            return Err("No candidate rules provided".to_string());
+        }
+        let has_config_cands = cands.iter().any(|c| c.target_file == TargetFile::Config);
+        let has_kb_cands = cands.iter().any(|c| c.target_file == TargetFile::MyKnowledge);
+
+        let (amended_toml, cfg_summary, has_explicit_bash_default) =
             self.build_cumulative_amended_config_toml(cands)?;
         let mut cfg = crate::config::load(&amended_toml)?;
         if !has_explicit_bash_default && !decision.reason.contains("default") {
@@ -310,13 +357,35 @@ impl TuiEngine {
                 .default = crate::config::Action::Allow;
         }
 
-        let simulated_decision = crate::engine::decide_command_at(
+        let mut summary_parts = Vec::new();
+        if has_config_cands && !cfg_summary.is_empty() {
+            summary_parts.push(cfg_summary);
+        }
+
+        let merged_kb_opt = if has_kb_cands {
+            let (amended_my_kb, kb_summary) =
+                self.build_cumulative_amended_my_knowledge_toml(cands)?;
+            if !kb_summary.is_empty() {
+                summary_parts.push(kb_summary);
+            }
+            let mine_kb = crate::guards::load(&amended_my_kb)?;
+            crate::knowledge::validate(&mine_kb)?;
+            let base_kb = crate::guards::in_effect().clone();
+            Some(crate::knowledge::merge(base_kb, mine_kb))
+        } else {
+            None
+        };
+
+        let amendment_summary = summary_parts.join(" + ");
+
+        let simulated_decision = crate::engine::decide_command_at_with_knowledge(
             &cfg,
             "bash",
             &decision.cmd,
             Some(&self.home),
             Some(&decision.cwd),
             Some(&decision.cwd),
+            merged_kb_opt.as_ref(),
         );
         let (after_verdict, after_reason) = match simulated_decision {
             crate::protocol::Decision::Allow(r) => ("ALLOW".to_string(), r),
@@ -330,13 +399,14 @@ impl TuiEngine {
         for d in &self.decisions {
             if d.verdict.eq_ignore_ascii_case("ask") {
                 session_ask_total += 1;
-                let sim_d = crate::engine::decide_command_at(
+                let sim_d = crate::engine::decide_command_at_with_knowledge(
                     &cfg,
                     "bash",
                     &d.cmd,
                     Some(&self.home),
                     Some(&d.cwd),
                     Some(&d.cwd),
+                    merged_kb_opt.as_ref(),
                 );
                 if matches!(sim_d, crate::protocol::Decision::Allow(_)) {
                     session_flipped_to_allow += 1;
@@ -360,58 +430,133 @@ impl TuiEngine {
 
     /// Applies an approved candidate rule to configuration files and pushes a rollback snapshot onto `undo_stack`.
     pub fn apply_candidate(&self, cand: &ReviewCandidate) -> Result<String, String> {
-        let config_path = crate::knowledge::config_dir(&self.home).join("config.toml");
+        let config_dir = crate::knowledge::config_dir(&self.home);
+        let config_path = config_dir.join("config.toml");
+        let my_kb_path = config_dir.join("my-knowledge.toml");
         let previous_toml = std::fs::read_to_string(&config_path).unwrap_or_default();
+
+        if cand.target_file == TargetFile::MyKnowledge {
+            let previous_my_kb = std::fs::read_to_string(&my_kb_path).unwrap_or_default();
+            let (updated_my_kb, summary) =
+                self.build_cumulative_amended_my_knowledge_toml(std::slice::from_ref(cand))?;
+            let _ = std::fs::create_dir_all(&config_dir);
+            std::fs::write(&my_kb_path, updated_my_kb)
+                .map_err(|e| format!("Failed to write my-knowledge.toml: {e}"))?;
+
+            self.undo_stack.borrow_mut().push(ConfigUndoSnapshot {
+                previous_toml,
+                previous_my_knowledge_toml: Some(previous_my_kb),
+                description: summary.clone(),
+                restored_candidates: vec![cand.clone()],
+            });
+
+            return Ok(format!("Added {summary} to my-knowledge.toml"));
+        }
+
         let (updated_toml, summary, _) = self.build_amended_config_toml(cand)?;
+        let _ = std::fs::create_dir_all(&config_dir);
         std::fs::write(&config_path, updated_toml)
             .map_err(|e| format!("Failed to write config: {e}"))?;
 
         self.undo_stack.borrow_mut().push(ConfigUndoSnapshot {
             previous_toml,
-            description: summary,
+            previous_my_knowledge_toml: None,
+            description: summary.clone(),
             restored_candidates: vec![cand.clone()],
         });
 
         if cand.section == "write.allow_paths" {
             let path_to_add = cand.name.strip_prefix("path: ").unwrap_or(&cand.name);
             Ok(format!("Added {:?} to write.allow_paths in config.toml", path_to_add))
+        } else if cand.section.ends_with(".script_constructs") {
+            Ok(format!("Added {summary} to config.toml"))
         } else {
             Ok(format!("Added [{}] {} = \"allow\" to config.toml", cand.section, cand.name))
         }
     }
 
-    /// Atomically applies multiple staged candidate rules to `config.toml` and pushes a rollback snapshot onto `undo_stack`.
+    /// Atomically applies multiple staged candidate rules to `config.toml` and/or `my-knowledge.toml` and pushes a rollback snapshot onto `undo_stack`.
     pub fn apply_candidates(&self, cands: &[ReviewCandidate]) -> Result<String, String> {
         if cands.len() == 1 {
             return self.apply_candidate(&cands[0]);
         }
-        let config_path = crate::knowledge::config_dir(&self.home).join("config.toml");
+        let config_dir = crate::knowledge::config_dir(&self.home);
+        let config_path = config_dir.join("config.toml");
+        let my_kb_path = config_dir.join("my-knowledge.toml");
         let previous_toml = std::fs::read_to_string(&config_path).unwrap_or_default();
-        let (updated_toml, summary, _) = self.build_cumulative_amended_config_toml(cands)?;
-        std::fs::write(&config_path, updated_toml)
-            .map_err(|e| format!("Failed to write config: {e}"))?;
 
+        let has_config_cands = cands.iter().any(|c| c.target_file == TargetFile::Config);
+        let has_kb_cands = cands.iter().any(|c| c.target_file == TargetFile::MyKnowledge);
+
+        let mut summaries = Vec::new();
+        let mut updated_toml_opt = None;
+        if has_config_cands {
+            let (updated_toml, summary, _) = self.build_cumulative_amended_config_toml(cands)?;
+            updated_toml_opt = Some(updated_toml);
+            if !summary.is_empty() {
+                summaries.push(summary);
+            }
+        }
+
+        let mut previous_my_kb_opt = None;
+        let mut updated_my_kb_opt = None;
+        if has_kb_cands {
+            let prev = std::fs::read_to_string(&my_kb_path).unwrap_or_default();
+            let (updated_my_kb, summary) = self.build_cumulative_amended_my_knowledge_toml(cands)?;
+            previous_my_kb_opt = Some(prev);
+            updated_my_kb_opt = Some(updated_my_kb);
+            if !summary.is_empty() {
+                summaries.push(summary);
+            }
+        }
+
+        let _ = std::fs::create_dir_all(&config_dir);
+        if let Some(updated_toml) = updated_toml_opt {
+            std::fs::write(&config_path, updated_toml)
+                .map_err(|e| format!("Failed to write config: {e}"))?;
+        }
+        if let Some(updated_my_kb) = updated_my_kb_opt {
+            std::fs::write(&my_kb_path, updated_my_kb)
+                .map_err(|e| format!("Failed to write my-knowledge.toml: {e}"))?;
+        }
+
+        let summary = summaries.join(" + ");
         self.undo_stack.borrow_mut().push(ConfigUndoSnapshot {
             previous_toml,
+            previous_my_knowledge_toml: previous_my_kb_opt,
             description: summary.clone(),
             restored_candidates: cands.to_vec(),
         });
 
+        let target_label = match (has_config_cands, has_kb_cands) {
+            (true, true) => "config.toml & my-knowledge.toml",
+            (false, true) => "my-knowledge.toml",
+            _ => "config.toml",
+        };
+
         Ok(format!(
-            "Applied {} staged amendments ({}) to config.toml",
+            "Applied {} staged amendments ({}) to {}",
             cands.len(),
-            summary
+            summary,
+            target_label
         ))
     }
 
-    /// Reverts the most recent `config.toml` amendment from `undo_stack` and restores its candidate entries.
+    /// Reverts the most recent `config.toml` and/or `my-knowledge.toml` amendment from `undo_stack` and restores its candidate entries.
     pub fn undo_last_amendment(&mut self) -> Result<String, String> {
         let Some(snapshot) = self.undo_stack.borrow_mut().pop() else {
             return Err("Undo stack is empty (no applied amendments in this session)".to_string());
         };
-        let config_path = crate::knowledge::config_dir(&self.home).join("config.toml");
+        let config_dir = crate::knowledge::config_dir(&self.home);
+        let config_path = config_dir.join("config.toml");
         std::fs::write(&config_path, &snapshot.previous_toml)
             .map_err(|e| format!("Failed to write reverted config: {e}"))?;
+
+        if let Some(ref prev_kb) = snapshot.previous_my_knowledge_toml {
+            let my_kb_path = config_dir.join("my-knowledge.toml");
+            std::fs::write(&my_kb_path, prev_kb)
+                .map_err(|e| format!("Failed to write reverted my-knowledge.toml: {e}"))?;
+        }
 
         for cand in snapshot.restored_candidates {
             if !self
@@ -428,32 +573,70 @@ impl TuiEngine {
                 .then_with(|| b.approved.cmp(&a.approved))
         });
 
-        Ok(format!(
-            "Reverted config.toml amendment ({})",
-            snapshot.description
-        ))
+        if snapshot.previous_my_knowledge_toml.is_some() {
+            Ok(format!(
+                "Reverted policy amendment ({})",
+                snapshot.description
+            ))
+        } else {
+            Ok(format!(
+                "Reverted config.toml amendment ({})",
+                snapshot.description
+            ))
+        }
     }
 
-    /// Builds a unified diff (`--- a/config.toml` / `+++ b/config.toml`) between the current on-disk
-    /// `config.toml` and the cumulative amended `config.toml` for `cands`.
+    /// Builds a unified diff (`--- a/config.toml` / `+++ b/config.toml` and/or `my-knowledge.toml`)
+    /// between the current on-disk files and the cumulative amended files for `cands`.
     pub fn build_unified_diff_for_candidates(
         &self,
         cands: &[ReviewCandidate],
     ) -> Result<String, String> {
-        let config_path = crate::knowledge::config_dir(&self.home).join("config.toml");
-        let before = std::fs::read_to_string(&config_path).unwrap_or_default();
-        let (after, summary, _) = self.build_cumulative_amended_config_toml(cands)?;
-        Ok(render_unified_toml_diff(&before, &after, &summary))
+        let has_config_cands = cands.iter().any(|c| c.target_file == TargetFile::Config);
+        let has_kb_cands = cands.iter().any(|c| c.target_file == TargetFile::MyKnowledge);
+        let mut diffs = Vec::new();
+
+        if has_config_cands {
+            let config_path = crate::knowledge::config_dir(&self.home).join("config.toml");
+            let before = std::fs::read_to_string(&config_path).unwrap_or_default();
+            let (after, summary, _) = self.build_cumulative_amended_config_toml(cands)?;
+            diffs.push(render_unified_toml_diff_named(
+                &before,
+                &after,
+                &summary,
+                "config.toml",
+            ));
+        }
+        if has_kb_cands {
+            let my_kb_path = crate::knowledge::config_dir(&self.home).join("my-knowledge.toml");
+            let before = std::fs::read_to_string(&my_kb_path).unwrap_or_default();
+            let (after, summary) = self.build_cumulative_amended_my_knowledge_toml(cands)?;
+            diffs.push(render_unified_toml_diff_named(
+                &before,
+                &after,
+                &summary,
+                "my-knowledge.toml",
+            ));
+        }
+        if diffs.is_empty() {
+            return Err("No candidate rules provided".to_string());
+        }
+        Ok(diffs.join("\n"))
     }
 }
 
-fn render_unified_toml_diff(before: &str, after: &str, summary: &str) -> String {
+fn render_unified_toml_diff_named(
+    before: &str,
+    after: &str,
+    summary: &str,
+    filename: &str,
+) -> String {
     let before_lines: Vec<&str> = before.lines().collect();
     let after_lines: Vec<&str> = after.lines().collect();
     let mut out = String::new();
     out.push_str(&format!("# Amendment Summary: {summary}\n"));
-    out.push_str("--- a/config.toml\n");
-    out.push_str("+++ b/config.toml\n");
+    out.push_str(&format!("--- a/{filename}\n"));
+    out.push_str(&format!("+++ b/{filename}\n"));
     out.push_str(&format!(
         "@@ -1,{} +1,{} @@\n",
         before_lines.len(),
@@ -506,6 +689,392 @@ fn extract_unpermitted_path(reason: &str) -> Option<String> {
         }
     }
     None
+}
+
+pub(crate) fn extract_unmodeled_exact_args_from_cmd(
+    cmd_src: &str,
+    reason: &str,
+) -> Option<(String, Vec<String>)> {
+    if !reason.contains("unmodeled_command") {
+        return None;
+    }
+    let scan = crate::shell::parse(cmd_src).ok()?;
+    let kb = crate::guards::in_effect();
+    let mut fork = crate::guards::ForkCursor::new(&[]);
+    let expanded = crate::guards::expand_wrappers_forking(
+        kb,
+        &scan.commands,
+        &scan.heredocs,
+        &scan.input_source,
+        &scan.args_complete,
+        &[],
+        "bash",
+        &|_| 4,
+        &mut fork,
+    );
+    for occ in &expanded.occurrences {
+        let c = &occ.cmd;
+        if c.head.is_empty() || c.args.is_empty() {
+            continue;
+        }
+        let clang = if occ.lang.is_empty() {
+            "bash"
+        } else {
+            occ.lang.as_str()
+        };
+        let eligible = occ.args_complete && !occ.args_from_input;
+        if !eligible || crate::guards::recognises(kb, c, clang, eligible) {
+            continue;
+        }
+        let prog = crate::guards::base(&c.head);
+        if prog.starts_with("python:") {
+            continue;
+        }
+        let mut vec = Vec::with_capacity(c.args.len());
+        let mut all_readable = true;
+        for (idx, raw) in c.args.iter().enumerate() {
+            if c.unread_args.contains(&idx) {
+                all_readable = false;
+                break;
+            }
+            let unquoted = crate::paths::unquote(raw);
+            if unquoted.is_empty()
+                || unquoted.contains(['\'', '"'])
+                || crate::guards::carries_expansion(raw)
+            {
+                all_readable = false;
+                break;
+            }
+            vec.push(unquoted.to_string());
+        }
+        if all_readable && !vec.is_empty() {
+            return Some((prog, vec));
+        }
+    }
+    None
+}
+
+pub(crate) fn extract_script_construct_from_cmd(
+    cmd_src: &str,
+    cwd: &str,
+    reason: &str,
+) -> Option<(String, String, String, String)> {
+    let first_line = reason.lines().next()?.trim();
+    let rule_name = first_line.strip_prefix("vouch stopped on:")?.trim();
+    if rule_name.ends_with("(guard)")
+        || rule_name == "unmodeled_command"
+        || rule_name.contains("path outside")
+    {
+        return None;
+    }
+    let scan = crate::shell::parse(cmd_src).ok()?;
+    let kb = crate::guards::in_effect();
+    let mut fork = crate::guards::ForkCursor::new(&[]);
+    let cwd_opt = if cwd.is_empty() { None } else { Some(cwd) };
+    let expanded = crate::guards::expand_wrappers_forking_with_context(
+        kb,
+        &scan.commands,
+        &scan.heredocs,
+        &scan.input_source,
+        &scan.args_complete,
+        &[],
+        "bash",
+        &|_| 4,
+        &mut fork,
+        cwd_opt,
+        Some(262_144),
+    );
+    for site in &expanded.srcs {
+        if let Some(ref prov) = site.inspected_script {
+            if site.constructs.iter().any(|c| c == rule_name) {
+                return Some((
+                    site.lang.clone(),
+                    rule_name.to_string(),
+                    prov.canonical_path.clone(),
+                    prov.sha256_hex.clone(),
+                ));
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn format_exact_args_proposed_toml(prog: &str, args: &[String]) -> String {
+    let args_formatted = args
+        .iter()
+        .map(|a| format!("{a:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "[[program]]\nmatch = [{prog:?}]\ncase_sensitive_flags = true\nexact_args = [[{args_formatted}]]\n"
+    )
+}
+
+pub(crate) fn format_script_construct_proposed_toml(
+    lang: &str,
+    construct: &str,
+    canonical_path: &str,
+    sha256_hex: &str,
+) -> String {
+    format!(
+        "[[lang.{lang}.script_constructs]]\nunder = [{canonical_path:?}]\nsha256 = [{sha256_hex:?}]\n{construct} = \"allow\"\n"
+    )
+}
+
+fn synthesize_granular_candidates(records: &[Record]) -> Vec<ReviewCandidate> {
+    let mut out = Vec::new();
+    let mut exact_counts: std::collections::HashMap<
+        (String, Vec<String>),
+        (usize, usize, usize, std::collections::HashSet<String>, String),
+    > = std::collections::HashMap::new();
+    let mut script_counts: std::collections::HashMap<
+        (String, String, String, String),
+        (usize, usize, usize, std::collections::HashSet<String>, String),
+    > = std::collections::HashMap::new();
+
+    for r in records {
+        if r.verdict != "ask" || r.mode != "live" || r.measurement {
+            continue;
+        }
+        if let Some((prog, args)) = extract_unmodeled_exact_args_from_cmd(&r.cmd, &r.reason) {
+            let entry = exact_counts
+                .entry((prog, args))
+                .or_insert_with(|| (0, 0, 0, std::collections::HashSet::new(), r.cmd.clone()));
+            match r.outcome {
+                Outcome::Executed => entry.0 += 1,
+                Outcome::Denied => entry.1 += 1,
+                _ => entry.2 += 1,
+            }
+            entry.3.insert(r.session.clone());
+        }
+        if let Some((lang, construct, path, sha)) =
+            extract_script_construct_from_cmd(&r.cmd, &r.cwd, &r.reason)
+        {
+            let entry = script_counts
+                .entry((lang, construct, path, sha))
+                .or_insert_with(|| (0, 0, 0, std::collections::HashSet::new(), r.cmd.clone()));
+            match r.outcome {
+                Outcome::Executed => entry.0 += 1,
+                Outcome::Denied => entry.1 += 1,
+                _ => entry.2 += 1,
+            }
+            entry.3.insert(r.session.clone());
+        }
+    }
+
+    for ((prog, args), (app, den, unk, sess, example)) in exact_counts {
+        if app > 0 {
+            let args_fmt = args
+                .iter()
+                .map(|a| format!("{a:?}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push(ReviewCandidate {
+                name: format!("exact_args: {prog} [{args_fmt}]"),
+                section: "program.exact_args".to_string(),
+                target_file: TargetFile::MyKnowledge,
+                proposed_toml: format_exact_args_proposed_toml(&prog, &args),
+                approved: app,
+                denied: den,
+                unknown: unk,
+                sessions: sess.len().max(1),
+                proposable: true,
+                blocked_reason: None,
+                example_cmd: example,
+            });
+        }
+    }
+
+    for ((lang, construct, path, sha), (app, den, unk, sess, example)) in script_counts {
+        if app > 0 {
+            let short_sha: String = sha.chars().take(12).collect();
+            out.push(ReviewCandidate {
+                name: format!("{construct} @ {path} (sha256:{short_sha}...)"),
+                section: format!("lang.{lang}.script_constructs"),
+                target_file: TargetFile::Config,
+                proposed_toml: format_script_construct_proposed_toml(
+                    &lang, &construct, &path, &sha,
+                ),
+                approved: app,
+                denied: den,
+                unknown: unk,
+                sessions: sess.len().max(1),
+                proposable: true,
+                blocked_reason: None,
+                example_cmd: example,
+            });
+        }
+    }
+
+    out
+}
+
+fn apply_script_construct_candidate_to_toml(
+    current_content: &str,
+    cand: &ReviewCandidate,
+) -> Result<(String, String), String> {
+    let mut doc: toml_edit::DocumentMut = current_content
+        .parse()
+        .map_err(|e| format!("Invalid TOML: {e}"))?;
+    let prop_doc: toml_edit::DocumentMut = cand
+        .proposed_toml
+        .parse()
+        .map_err(|e| format!("Invalid proposed script_constructs TOML: {e}"))?;
+
+    let lang = cand
+        .section
+        .strip_prefix("lang.")
+        .and_then(|s| s.strip_suffix(".script_constructs"))
+        .ok_or_else(|| format!("Invalid script_constructs section: {}", cand.section))?;
+
+    let prop_aot = prop_doc
+        .get("lang")
+        .and_then(|l| l.get(lang))
+        .and_then(|lg| lg.get("script_constructs"))
+        .and_then(|sc| sc.as_array_of_tables())
+        .and_then(|aot| aot.iter().next())
+        .ok_or_else(|| "Proposed TOML missing [[lang.<L>.script_constructs]] table".to_string())?;
+
+    let lang_item = doc
+        .entry("lang")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let lang_table = lang_item
+        .as_table_like_mut()
+        .ok_or_else(|| "lang is not a table".to_string())?;
+    let sub_item = lang_table
+        .entry(lang)
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let sub_table = sub_item
+        .as_table_like_mut()
+        .ok_or_else(|| format!("lang.{lang} is not a table"))?;
+    let sc_item = sub_table.entry("script_constructs").or_insert(
+        toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()),
+    );
+    let aot = sc_item
+        .as_array_of_tables_mut()
+        .ok_or_else(|| format!("lang.{lang}.script_constructs is not an array of tables"))?;
+
+    let prop_under = prop_aot
+        .get("under")
+        .and_then(|u| u.as_array())
+        .and_then(|a| a.get(0))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let prop_sha = prop_aot
+        .get("sha256")
+        .and_then(|u| u.as_array())
+        .and_then(|a| a.get(0))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let mut construct_key = String::new();
+    for (k, _) in prop_aot.iter() {
+        if k != "under" && k != "sha256" {
+            construct_key = k.to_string();
+            break;
+        }
+    }
+
+    let mut merged = false;
+    for existing in aot.iter_mut() {
+        let same_under = existing
+            .get("under")
+            .and_then(|u| u.as_array())
+            .is_some_and(|a| a.iter().any(|v| v.as_str() == Some(prop_under)));
+        let same_sha = existing
+            .get("sha256")
+            .and_then(|u| u.as_array())
+            .is_some_and(|a| a.iter().any(|v| v.as_str() == Some(prop_sha)));
+        if same_under && same_sha && !construct_key.is_empty() {
+            existing.insert(&construct_key, toml_edit::value("allow"));
+            merged = true;
+            break;
+        }
+    }
+    if !merged {
+        aot.push(prop_aot.clone());
+    }
+
+    let summary = format!(
+        "[[lang.{lang}.script_constructs]] {construct_key} = \"allow\" (under = {prop_under:?})"
+    );
+    Ok((doc.to_string(), summary))
+}
+
+fn apply_exact_args_candidate_to_my_knowledge_toml(
+    current_content: &str,
+    cand: &ReviewCandidate,
+) -> Result<(String, String), String> {
+    let mut doc: toml_edit::DocumentMut = current_content
+        .parse()
+        .map_err(|e| format!("Invalid my-knowledge.toml: {e}"))?;
+    let prop_doc: toml_edit::DocumentMut = cand
+        .proposed_toml
+        .parse()
+        .map_err(|e| format!("Invalid proposed exact_args TOML: {e}"))?;
+
+    let prop_table = prop_doc
+        .get("program")
+        .and_then(|p| p.as_array_of_tables())
+        .and_then(|aot| aot.iter().next())
+        .ok_or_else(|| "Proposed TOML missing [[program]] table".to_string())?;
+
+    let prog_name = prop_table
+        .get("match")
+        .and_then(|m| m.as_array())
+        .and_then(|a| a.get(0))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Proposed [[program]] missing match name".to_string())?;
+
+    let new_vec_val = prop_table
+        .get("exact_args")
+        .and_then(|e| e.as_array())
+        .and_then(|a| a.get(0))
+        .cloned()
+        .ok_or_else(|| "Proposed [[program]] missing exact_args vector".to_string())?;
+
+    let prog_item = doc
+        .entry("program")
+        .or_insert(toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
+    let aot = prog_item
+        .as_array_of_tables_mut()
+        .ok_or_else(|| "program in my-knowledge.toml is not an array of tables".to_string())?;
+
+    let mut merged = false;
+    for existing in aot.iter_mut() {
+        let matches_prog = existing
+            .get("match")
+            .and_then(|m| m.as_array())
+            .is_some_and(|a| {
+                a.len() == 1
+                    && a.get(0)
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|s| s.eq_ignore_ascii_case(prog_name))
+            });
+        if matches_prog {
+            let exact_item = existing.entry("exact_args").or_insert(toml_edit::Item::Value(
+                toml_edit::Value::Array(toml_edit::Array::new()),
+            ));
+            if let Some(arr) = exact_item.as_array_mut() {
+                let new_str = new_vec_val.to_string();
+                if !arr.iter().any(|v| v.to_string().trim() == new_str.trim()) {
+                    arr.push_formatted(new_vec_val.clone());
+                }
+                merged = true;
+                break;
+            }
+        }
+    }
+
+    if !merged {
+        aot.push(prop_table.clone());
+    }
+
+    let summary = format!(
+        "[[program]] match = [{prog_name:?}] exact_args += [{}]",
+        new_vec_val.to_string().trim()
+    );
+    Ok((doc.to_string(), summary))
 }
 
 fn is_binary_journal_path(path: & std::path::Path) -> bool {

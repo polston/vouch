@@ -2151,12 +2151,133 @@ fn collect_javascript_imports(src: &str) -> Result<Vec<String>, String> {
 
     struct JsImportVisitor<'a> {
         imports: Vec<String>,
+        modules: std::collections::HashMap<String, String>,
+        bindings: std::collections::HashMap<String, String>,
+        require_aliases: HashSet<String>,
         _phantom: std::marker::PhantomData<&'a ()>,
+    }
+
+    impl<'a> JsImportVisitor<'a> {
+        fn unwrap_parens<'b>(
+            mut expr: &'b oxc_ast::ast::Expression<'a>,
+        ) -> &'b oxc_ast::ast::Expression<'a> {
+            while let oxc_ast::ast::Expression::ParenthesizedExpression(p) = expr {
+                expr = &p.expression;
+            }
+            expr
+        }
+
+        fn extract_static_spec(&self, expr: &oxc_ast::ast::Expression<'a>) -> Option<String> {
+            match Self::unwrap_parens(expr) {
+                oxc_ast::ast::Expression::StringLiteral(s) => Some(s.value.to_string()),
+                oxc_ast::ast::Expression::TemplateLiteral(t) => {
+                    let mut out = String::new();
+                    let mut quasi_iter = t.quasis.iter();
+                    let mut expr_iter = t.expressions.iter();
+                    while let Some(q) = quasi_iter.next() {
+                        out.push_str(q.value.raw.as_str());
+                        if let Some(e) = expr_iter.next() {
+                            if let oxc_ast::ast::Expression::Identifier(id) = e {
+                                if let Some(val) = self.bindings.get(id.name.as_str()) {
+                                    out.push_str(val);
+                                } else {
+                                    return None;
+                                }
+                            } else {
+                                return None;
+                            }
+                        }
+                    }
+                    Some(out)
+                }
+                oxc_ast::ast::Expression::Identifier(id) => {
+                    self.bindings.get(id.name.as_str()).cloned()
+                }
+                _ => None,
+            }
+        }
+
+        fn is_create_require_call(&self, call: &oxc_ast::ast::CallExpression<'a>) -> bool {
+            match Self::unwrap_parens(&call.callee) {
+                oxc_ast::ast::Expression::Identifier(id) => {
+                    id.name == "createRequire"
+                        || self
+                            .modules
+                            .get(id.name.as_str())
+                            .is_some_and(|m| m == "module.createRequire")
+                }
+                oxc_ast::ast::Expression::StaticMemberExpression(m) => {
+                    if m.property.name != "createRequire" {
+                        return false;
+                    }
+                    match Self::unwrap_parens(&m.object) {
+                        oxc_ast::ast::Expression::Identifier(id) => self
+                            .modules
+                            .get(id.name.as_str())
+                            .is_some_and(|mod_name| mod_name == "module"),
+                        oxc_ast::ast::Expression::CallExpression(inner) => {
+                            if let oxc_ast::ast::Expression::Identifier(id) =
+                                Self::unwrap_parens(&inner.callee)
+                            {
+                                if self.require_aliases.contains(id.name.as_str()) {
+                                    if let Some(arg) =
+                                        inner.arguments.first().and_then(|a| a.as_expression())
+                                    {
+                                        if let Some(spec) = self.extract_static_spec(arg) {
+                                            return spec.strip_prefix("node:").unwrap_or(&spec)
+                                                == "module";
+                                        }
+                                    }
+                                }
+                            }
+                            false
+                        }
+                        _ => false,
+                    }
+                }
+                _ => false,
+            }
+        }
+
+        fn is_require_like_callee(&self, callee: &oxc_ast::ast::Expression<'a>) -> bool {
+            match Self::unwrap_parens(callee) {
+                oxc_ast::ast::Expression::Identifier(id) => {
+                    self.require_aliases.contains(id.name.as_str())
+                }
+                oxc_ast::ast::Expression::CallExpression(inner) => {
+                    self.is_create_require_call(inner)
+                }
+                _ => false,
+            }
+        }
     }
 
     impl<'a> Visit<'a> for JsImportVisitor<'a> {
         fn visit_import_declaration(&mut self, decl: &oxc_ast::ast::ImportDeclaration<'a>) {
-            self.imports.push(decl.source.value.to_string());
+            let raw_mod = decl.source.value.to_string();
+            let norm_mod = raw_mod.strip_prefix("node:").unwrap_or(&raw_mod).to_string();
+            self.imports.push(raw_mod);
+            if let Some(specifiers) = &decl.specifiers {
+                for spec in specifiers {
+                    match spec {
+                        oxc_ast::ast::ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => {
+                            self.modules
+                                .insert(s.local.name.to_string(), norm_mod.clone());
+                        }
+                        oxc_ast::ast::ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => {
+                            self.modules
+                                .insert(s.local.name.to_string(), norm_mod.clone());
+                        }
+                        oxc_ast::ast::ImportDeclarationSpecifier::ImportSpecifier(s) => {
+                            let imported = s.imported.name();
+                            self.modules.insert(
+                                s.local.name.to_string(),
+                                format!("{norm_mod}.{imported}"),
+                            );
+                        }
+                    }
+                }
+            }
             walk::walk_import_declaration(self, decl);
         }
 
@@ -2165,13 +2286,78 @@ fn collect_javascript_imports(src: &str) -> Result<Vec<String>, String> {
             walk::walk_export_all_declaration(self, decl);
         }
 
-        fn visit_call_expression(&mut self, expr: &oxc_ast::ast::CallExpression<'a>) {
-            if let oxc_ast::ast::Expression::Identifier(ident) = &expr.callee {
-                if ident.name == "require" {
-                    if let Some(arg) = expr.arguments.first() {
-                        if let Some(oxc_ast::ast::Expression::StringLiteral(s)) = arg.as_expression() {
-                            self.imports.push(s.value.to_string());
+        fn visit_variable_declaration(&mut self, decl: &oxc_ast::ast::VariableDeclaration<'a>) {
+            for declarator in &decl.declarations {
+                if let Some(init) = &declarator.init {
+                    let unwrapped = Self::unwrap_parens(init);
+                    if let oxc_ast::ast::Expression::CallExpression(call) = unwrapped {
+                        if self.is_create_require_call(call) {
+                            if let oxc_ast::ast::BindingPattern::BindingIdentifier(ident) =
+                                &declarator.id
+                            {
+                                self.require_aliases.insert(ident.name.to_string());
+                            }
+                        } else if self.is_require_like_callee(&call.callee) {
+                            if let Some(arg) =
+                                call.arguments.first().and_then(|a| a.as_expression())
+                            {
+                                if let Some(spec) = self.extract_static_spec(arg) {
+                                    let norm_mod =
+                                        spec.strip_prefix("node:").unwrap_or(&spec).to_string();
+                                    match &declarator.id {
+                                        oxc_ast::ast::BindingPattern::BindingIdentifier(ident) => {
+                                            self.modules.insert(ident.name.to_string(), norm_mod);
+                                        }
+                                        oxc_ast::ast::BindingPattern::ObjectPattern(obj) => {
+                                            for prop in &obj.properties {
+                                                if let oxc_ast::ast::PropertyKey::StaticIdentifier(
+                                                    key,
+                                                ) = &prop.key
+                                                {
+                                                    if let oxc_ast::ast::BindingPattern::BindingIdentifier(
+                                                        alias,
+                                                    ) = &prop.value
+                                                    {
+                                                        self.modules.insert(
+                                                            alias.name.to_string(),
+                                                            format!(
+                                                                "{norm_mod}.{}",
+                                                                key.name.as_str()
+                                                            ),
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
                         }
+                    } else if let Some(lit) = self.extract_static_spec(unwrapped) {
+                        if let oxc_ast::ast::BindingPattern::BindingIdentifier(ident) =
+                            &declarator.id
+                        {
+                            self.bindings.insert(ident.name.to_string(), lit);
+                        }
+                    }
+                }
+            }
+            walk::walk_variable_declaration(self, decl);
+        }
+
+        fn visit_import_expression(&mut self, expr: &oxc_ast::ast::ImportExpression<'a>) {
+            if let Some(spec) = self.extract_static_spec(&expr.source) {
+                self.imports.push(spec);
+            }
+            walk::walk_import_expression(self, expr);
+        }
+
+        fn visit_call_expression(&mut self, expr: &oxc_ast::ast::CallExpression<'a>) {
+            if self.is_require_like_callee(&expr.callee) {
+                if let Some(arg) = expr.arguments.first().and_then(|a| a.as_expression()) {
+                    if let Some(spec) = self.extract_static_spec(arg) {
+                        self.imports.push(spec);
                     }
                 }
             }
@@ -2179,8 +2365,13 @@ fn collect_javascript_imports(src: &str) -> Result<Vec<String>, String> {
         }
     }
 
+    let mut require_aliases = HashSet::new();
+    require_aliases.insert("require".to_string());
     let mut visitor = JsImportVisitor {
         imports: Vec::new(),
+        modules: std::collections::HashMap::new(),
+        bindings: std::collections::HashMap::new(),
+        require_aliases,
         _phantom: std::marker::PhantomData,
     };
     visitor.visit_program(&ret.program);

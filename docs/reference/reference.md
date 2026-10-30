@@ -49,6 +49,8 @@ The `[sandbox.cgroups]` table: Linux cgroups v2 memory, process count, CPU bandw
 | `high_memory_mb` | integer (optional) | (unset) | Throttle memory high-water mark in megabytes (`memory.high` in cgroups v2). |
 | `io_max` | array of string | [] | Block device I/O bandwidth and IOPS limits (`io.max` lines in cgroups v2, e.g. `"259:0 rbps=104857600 wbps=52428800"`). |
 | `max_memory_mb` | integer (optional) | (unset) | Hard memory limit in megabytes (`memory.max` in cgroups v2). |
+| `memory_oom_group` | boolean (optional) | (unset) | Whether to kill the entire cgroup process tree as a single unit on OOM (`memory.oom.group` in cgroups v2). |
+| `memory_swap_max_bytes` | integer (optional) | (unset) | Swap memory ceiling in bytes (`memory.swap.max` in cgroups v2; `0` disables swap entirely for the worker scope). |
 | `pids_max` | integer (optional) | (unset) | Hard process and thread count limit (`pids.max` in cgroups v2). |
 | `psi_stall_warn_pct` | number (optional) | (unset) | Optional Pressure Stall Information (`cpu.pressure`, `memory.pressure`, `io.pressure`) `avg10` stall percentage threshold (`0.0 < pct <= 100.0`) above which worker backpressure warnings are triggered. |
 
