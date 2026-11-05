@@ -57,6 +57,18 @@ pub enum BuilderPreset {
         action: String,
         source: String,
     },
+    WriteScope {
+        programs: Vec<String>,
+        only_under: Vec<String>,
+    },
+    AllowPath {
+        path: String,
+    },
+    PlaceScopedGuard {
+        under: Vec<String>,
+        guard: String,
+        action: String,
+    },
     GlobalConstruct {
         section: String,
         key: String,
@@ -103,6 +115,22 @@ impl BuilderPreset {
                 tool_name, action, ..
             } => {
                 format!("[[tool]] match = [{tool_name:?}] action = {action:?}")
+            }
+            BuilderPreset::WriteScope {
+                programs,
+                only_under,
+            } => {
+                format!("[[write.scope]] programs = {programs:?} only_under = {only_under:?}")
+            }
+            BuilderPreset::AllowPath { path } => {
+                format!("[write] allow_paths = [{path:?}]")
+            }
+            BuilderPreset::PlaceScopedGuard {
+                under,
+                guard,
+                action,
+            } => {
+                format!("[[run.guards]] under = {under:?} {guard} = {action:?}")
             }
             BuilderPreset::GlobalConstruct { section, key } => {
                 format!("[{section}] {key} = \"allow\"")
@@ -215,6 +243,60 @@ impl BuilderPreset {
                 blocked_reason: None,
                 example_cmd: example_cmd.to_string(),
             },
+            BuilderPreset::WriteScope {
+                programs,
+                only_under,
+            } => ReviewCandidate {
+                name: format!(
+                    "write.scope: {} -> {}",
+                    programs.join(", "),
+                    only_under.join(", ")
+                ),
+                section: "write.scope".to_string(),
+                target_file: TargetFile::Config,
+                proposed_toml: super::engine::format_write_scope_proposed_toml(
+                    programs, only_under,
+                ),
+                approved: 1,
+                denied: 0,
+                unknown: 0,
+                sessions: 1,
+                proposable: true,
+                blocked_reason: None,
+                example_cmd: example_cmd.to_string(),
+            },
+            BuilderPreset::AllowPath { path } => ReviewCandidate {
+                name: format!("path: {path}"),
+                section: "write.allow_paths".to_string(),
+                target_file: TargetFile::Config,
+                proposed_toml: format!("[write]\nallow_paths = [\"{path}\"]\n"),
+                approved: 1,
+                denied: 0,
+                unknown: 0,
+                sessions: 1,
+                proposable: true,
+                blocked_reason: None,
+                example_cmd: example_cmd.to_string(),
+            },
+            BuilderPreset::PlaceScopedGuard {
+                under,
+                guard,
+                action,
+            } => ReviewCandidate {
+                name: format!("run.guards: {guard} under {}", under.join(", ")),
+                section: "run.guards".to_string(),
+                target_file: TargetFile::Config,
+                proposed_toml: super::engine::format_place_guard_proposed_toml(
+                    under, guard, action,
+                ),
+                approved: 1,
+                denied: 0,
+                unknown: 0,
+                sessions: 1,
+                proposable: true,
+                blocked_reason: None,
+                example_cmd: example_cmd.to_string(),
+            },
             BuilderPreset::GlobalConstruct { section, key } => ReviewCandidate {
                 name: key.clone(),
                 section: section.clone(),
@@ -242,11 +324,20 @@ pub struct GraphNode {
     pub collapsed: bool,
     pub builder_presets: Vec<BuilderPreset>,
     pub active_preset_idx: usize,
+    pub preset_armed: bool,
 }
 
 impl GraphNode {
-    /// Cycle through available interactive rule-builder presets (`exact_args`, `script_constructs`, `GlobalConstruct`).
+    /// Cycle through available interactive rule-builder presets (`exact_args`, `script_constructs`, `write.scope`, `run.guards`, `GlobalConstruct`).
     pub fn cycle_builder_preset(&mut self) -> Option<&BuilderPreset> {
+        if self.builder_presets.is_empty() {
+            return None;
+        }
+        if !self.preset_armed {
+            self.preset_armed = true;
+            self.active_preset_idx = 0;
+            return self.builder_presets.first();
+        }
         if self.builder_presets.len() <= 1 {
             return self.builder_presets.first();
         }
@@ -255,18 +346,29 @@ impl GraphNode {
     }
 
     pub fn active_preset(&self) -> Option<&BuilderPreset> {
+        if !self.preset_armed {
+            return None;
+        }
         self.builder_presets.get(self.active_preset_idx)
     }
 
-    /// Synthesize an actionable `ReviewCandidate` from a Policy Visualizer DAG node (`[RULE]` or `[PATH]`),
-    /// or return an explanatory refusal error (e.g. for `[GUARD]` nodes, which ask on purpose per CLAUDE.md §4).
+    /// Synthesize an actionable `ReviewCandidate` from a Policy Visualizer DAG node (`[RULE]`, `[PATH]`, or place-scoped `[GUARD]`),
+    /// or return an explanatory refusal error (e.g. for unarmed `[GUARD]` nodes, which ask on purpose per CLAUDE.md §4).
     pub fn to_review_candidate(&self, example_cmd: &str) -> Result<ReviewCandidate, String> {
         match self.kind {
-            NodeKind::GuardHit => Err(
-                "this is a guard — guards ask on purpose and cannot be converted into standing allow rules"
-                    .to_string(),
-            ),
+            NodeKind::GuardHit => {
+                if let Some(preset) = self.active_preset() {
+                    return Ok(preset.to_review_candidate(example_cmd));
+                }
+                Err(
+                    "this is a guard — guards ask on purpose and cannot be converted into standing allow rules"
+                        .to_string(),
+                )
+            }
             NodeKind::PathCheck => {
+                if let Some(preset) = self.active_preset() {
+                    return Ok(preset.to_review_candidate(example_cmd));
+                }
                 let path = self
                     .label
                     .strip_prefix("unpermitted write path:")
@@ -472,26 +574,40 @@ impl PolicyGraph {
         let mut evaluation_leaf_ids = Vec::new();
 
         if let Some(guard_name) = extract_guard_hit(&decision.reason) {
-            let guard_id = graph.add_node(
+            let guard_presets = super::engine::extract_place_guard_presets_from_decision(
+                &decision.cwd,
+                &decision.reason,
+                &guard_name,
+            );
+            let guard_id = graph.add_node_with_presets(
                 NodeKind::GuardHit,
                 format!("guard: {guard_name}"),
                 decision.reason.lines().nth(1).unwrap_or("destructive effect guard").trim().to_string(),
                 setting_hint.clone(),
+                guard_presets,
             );
             graph.add_edge(active_parent_id, guard_id, "triggers_guard");
             evaluation_leaf_ids.push(guard_id);
-        } else if decision.reason.contains("path outside every allowed area") {
+        } else if decision.reason.contains("path outside every allowed area")
+            || decision.reason.contains("vouch stopped on: write scope")
+        {
             let path_val = decision
                 .reason
                 .lines()
                 .nth(1)
                 .map(|s| s.trim().to_string())
                 .unwrap_or_else(|| "<external-path>".to_string());
-            let path_id = graph.add_node(
+            let path_presets = super::engine::extract_write_scope_presets_from_cmd(
+                &decision.cmd,
+                &decision.reason,
+                &path_val,
+            );
+            let path_id = graph.add_node_with_presets(
                 NodeKind::PathCheck,
                 format!("unpermitted write path: {path_val}"),
                 "Write target falls outside workspace and write.allow_paths".to_string(),
                 setting_hint.clone().or_else(|| Some(format!("write.allow_paths = [\"{path_val}\"]"))),
+                path_presets,
             );
             graph.add_edge(active_parent_id, path_id, "checks_path");
             evaluation_leaf_ids.push(path_id);
@@ -622,11 +738,17 @@ impl PolicyGraph {
                 for path_val in extra_write_paths {
                     let expected_label = format!("unpermitted write path: {path_val}");
                     if !graph.nodes.iter().any(|n| n.label == expected_label) {
-                        let path_id = graph.add_node(
+                        let path_presets = super::engine::extract_write_scope_presets_from_cmd(
+                            &decision.cmd,
+                            &decision.reason,
+                            &path_val,
+                        );
+                        let path_id = graph.add_node_with_presets(
                             NodeKind::PathCheck,
                             expected_label,
                             "Write target falls outside workspace and write.allow_paths".to_string(),
                             Some(format!("write.allow_paths = [\"{path_val}\"]")),
+                            path_presets,
                         );
                         graph.add_edge(active_parent_id, path_id, "checks_path");
                         evaluation_leaf_ids.push(path_id);
@@ -668,6 +790,7 @@ impl PolicyGraph {
         builder_presets: Vec<BuilderPreset>,
     ) -> usize {
         let id = self.nodes.len();
+        let preset_armed = kind != NodeKind::GuardHit && !builder_presets.is_empty();
         self.nodes.push(GraphNode {
             id,
             kind,
@@ -677,6 +800,7 @@ impl PolicyGraph {
             collapsed: false,
             builder_presets,
             active_preset_idx: 0,
+            preset_armed,
         });
         id
     }
@@ -759,13 +883,13 @@ impl PolicyGraph {
         let Some(node) = self.nodes.get_mut(node_id) else {
             return Err("No policy graph node selected.".to_string());
         };
-        if node.kind == NodeKind::GuardHit {
+        if node.kind == NodeKind::GuardHit && node.builder_presets.is_empty() {
             return Err(
                 "Guard rules describe operator effects and have no rule-builder presets."
                     .to_string(),
             );
         }
-        if node.builder_presets.len() <= 1 {
+        if node.kind != NodeKind::GuardHit && node.builder_presets.len() <= 1 {
             return Err("Selected node has no alternate rule-builder presets to cycle.".to_string());
         }
         let total = node.builder_presets.len();
@@ -806,13 +930,13 @@ impl PolicyGraph {
         }
     }
 
-    /// Toggle whether the currently selected `[RULE]` or `[PATH]` node is staged for cumulative simulation.
+    /// Toggle whether the currently selected `[RULE]`, `[PATH]`, or armed place-scoped `[GUARD]` node is staged for cumulative simulation.
     /// Returns `Ok(true)` if newly staged, `Ok(false)` if unstaged, or `Err(reason)` if the node cannot be staged.
     pub fn toggle_stage_selected(&mut self) -> Result<bool, String> {
         let Some(node) = self.selected_node().cloned() else {
             return Err("No policy graph node selected.".to_string());
         };
-        if node.kind == NodeKind::GuardHit {
+        if node.kind == NodeKind::GuardHit && node.active_preset().is_none() {
             return Err(
                 "Guard rules describe operator effects and cannot be simulated as allow-list amendments."
                     .to_string(),
@@ -909,6 +1033,12 @@ impl PolicyGraph {
                         sel.active_preset_idx + 1,
                         sel.builder_presets.len(),
                         preset.short_label()
+                    ));
+                } else if let Some(first) = sel.builder_presets.first() {
+                    out.push_str(&format!(
+                        "Builder: [unarmed/{}] {} (press [b] to arm place-scoped preset)\n",
+                        sel.builder_presets.len(),
+                        first.short_label()
                     ));
                 }
             }

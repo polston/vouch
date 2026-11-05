@@ -260,3 +260,150 @@ fn transitive_import_resolver_follows_worker_thread_files_and_vm_capabilities() 
     assert_eq!(report.resolved_files.len(), 2);
     assert!(report.unresolved_imports.is_empty());
 }
+
+#[test]
+fn python_importlib_and_dunder_import_resolve_static_and_relative_modules() {
+    use vouch::capability::TransitiveImportResolver;
+
+    let tmp_dir = std::env::temp_dir().join(format!("vouch_py_dyn_import_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(tmp_dir.join("pkg")).expect("create pkg dir");
+    std::fs::create_dir_all(tmp_dir.join("scripts")).expect("create scripts dir");
+
+    std::fs::write(tmp_dir.join("pkg/__init__.py"), "").expect("write init");
+    std::fs::write(
+        tmp_dir.join("pkg/net.py"),
+        "import socket\ndef connect():\n    return socket.socket()\n",
+    )
+    .expect("write pkg/net.py");
+    std::fs::write(
+        tmp_dir.join("pkg/sub.py"),
+        "import shutil\ndef clean():\n    shutil.rmtree('/tmp/work')\n",
+    )
+    .expect("write pkg/sub.py");
+    std::fs::write(
+        tmp_dir.join("pkg/worker.py"),
+        "import multiprocessing\n",
+    )
+    .expect("write pkg/worker.py");
+    std::fs::write(
+        tmp_dir.join("scripts/task.py"),
+        "import urllib.request\n",
+    )
+    .expect("write scripts/task.py");
+
+    let resolver = TransitiveImportResolver::new(&tmp_dir);
+
+    // 1. Static importlib.import_module("pkg.net") and __import__("pkg.net")
+    let r_importlib = resolver.resolve_python(
+        "import importlib\nm = importlib.import_module('pkg.net')\n",
+        None,
+    );
+    assert!(
+        r_importlib.capabilities.network,
+        "importlib.import_module('pkg.net') must resolve pkg/net.py and propagate network=true: {:?}",
+        r_importlib
+    );
+    assert!(!r_importlib.capabilities.dynamic_eval);
+    assert_eq!(r_importlib.resolved_files.len(), 1);
+
+    let r_dunder = resolver.resolve_python(
+        "m = __import__('pkg.net')\n",
+        None,
+    );
+    assert!(
+        r_dunder.capabilities.network,
+        "__import__('pkg.net') must resolve pkg/net.py and propagate network=true: {:?}",
+        r_dunder
+    );
+    assert!(!r_dunder.capabilities.dynamic_eval);
+
+    // 2. Relative importlib.import_module(".sub", package="pkg")
+    let r_rel = resolver.resolve_python(
+        "from importlib import import_module\nmod = import_module('.sub', package='pkg')\n",
+        None,
+    );
+    assert!(
+        r_rel.capabilities.external_paths,
+        "import_module('.sub', package='pkg') must resolve pkg/sub.py and propagate external_paths=true: {:?}",
+        r_rel
+    );
+    assert!(!r_rel.capabilities.dynamic_eval);
+    assert_eq!(r_rel.resolved_files.len(), 1);
+
+    // 3. runpy.run_module("pkg.worker") and runpy.run_path("./scripts/task.py")
+    let r_run_mod = resolver.resolve_python(
+        "import runpy\nrunpy.run_module('pkg.worker')\n",
+        None,
+    );
+    assert!(
+        r_run_mod.capabilities.daemon,
+        "runpy.run_module('pkg.worker') must resolve pkg/worker.py and propagate daemon=true: {:?}",
+        r_run_mod
+    );
+    assert!(!r_run_mod.capabilities.dynamic_eval);
+
+    let r_run_path = resolver.resolve_python(
+        "from runpy import run_path\nrun_path('./scripts/task.py')\n",
+        None,
+    );
+    assert!(
+        r_run_path.capabilities.network,
+        "run_path('./scripts/task.py') must resolve scripts/task.py and propagate network=true: {:?}",
+        r_run_path
+    );
+    assert!(!r_run_path.capabilities.dynamic_eval);
+
+    // 4. Dynamic / computed arguments set dynamic_eval = true, record unresolved_imports, and emit unmodeled_import in python::parse
+    let dyn_importlib_src = "import importlib, sys\nuser_mod = sys.argv[1]\nimportlib.import_module(user_mod)\n";
+    let r_dyn_importlib = resolver.resolve_python(dyn_importlib_src, None);
+    assert!(
+        r_dyn_importlib.capabilities.dynamic_eval,
+        "Dynamic importlib.import_module(user_mod) must set dynamic_eval=true: {:?}",
+        r_dyn_importlib
+    );
+    assert!(
+        r_dyn_importlib
+            .unresolved_imports
+            .iter()
+            .any(|u| u == "dynamic_import: importlib.import_module"),
+        "Dynamic importlib.import_module must record unresolved dynamic_import: {:?}",
+        r_dyn_importlib.unresolved_imports
+    );
+    let scan_dyn_importlib = vouch::python::parse(dyn_importlib_src).expect("parse dyn_importlib");
+    assert!(
+        scan_dyn_importlib
+            .constructs
+            .iter()
+            .any(|c| c == "unmodeled_import"),
+        "python::parse must emit unmodeled_import for dynamic importlib.import_module: {:?}",
+        scan_dyn_importlib.constructs
+    );
+
+    let dyn_run_path_src = "import runpy, os\ndynamic_path = os.getenv('TASK_SCRIPT')\nrunpy.run_path(dynamic_path)\n";
+    let r_dyn_run_path = resolver.resolve_python(dyn_run_path_src, None);
+    assert!(
+        r_dyn_run_path.capabilities.dynamic_eval,
+        "Dynamic runpy.run_path(dynamic_path) must set dynamic_eval=true: {:?}",
+        r_dyn_run_path
+    );
+    assert!(
+        r_dyn_run_path
+            .unresolved_imports
+            .iter()
+            .any(|u| u == "dynamic_import: runpy.run_path"),
+        "Dynamic runpy.run_path must record unresolved dynamic_import: {:?}",
+        r_dyn_run_path.unresolved_imports
+    );
+    let scan_dyn_run_path = vouch::python::parse(dyn_run_path_src).expect("parse dyn_run_path");
+    assert!(
+        scan_dyn_run_path
+            .constructs
+            .iter()
+            .any(|c| c == "unmodeled_import"),
+        "python::parse must emit unmodeled_import for dynamic runpy.run_path: {:?}",
+        scan_dyn_run_path.constructs
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}

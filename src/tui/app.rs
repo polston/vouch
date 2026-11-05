@@ -277,19 +277,19 @@ impl TuiApp {
                     self.stage_and_simulate_visualizer_node();
                 }
             }
-            TerminalEvent::Key(KeyCode::Char('b')) | TerminalEvent::Key(KeyCode::Char('e')) => {
-                if self.active_tab == ViewTab::Visualizer {
-                    match self.policy_graph.cycle_selected_builder_preset() {
-                        Ok(msg) => {
-                            self.status_message = msg;
-                            if self.policy_graph.simulation.is_some() {
-                                self.policy_graph.simulation = None;
-                                self.simulate_selected_visualizer_node();
-                            }
+            TerminalEvent::Key(KeyCode::Char('b')) | TerminalEvent::Key(KeyCode::Char('e'))
+                if self.active_tab == ViewTab::Visualizer =>
+            {
+                match self.policy_graph.cycle_selected_builder_preset() {
+                    Ok(msg) => {
+                        self.status_message = msg;
+                        if self.policy_graph.simulation.is_some() {
+                            self.policy_graph.simulation = None;
+                            self.simulate_selected_visualizer_node();
                         }
-                        Err(err) => {
-                            self.status_message = format!("✗ {err}");
-                        }
+                    }
+                    Err(err) => {
+                        self.status_message = format!("✗ {err}");
                     }
                 }
             }
@@ -338,7 +338,7 @@ impl TuiApp {
             self.status_message = "No policy graph node selected.".to_string();
             return;
         };
-        if node.kind == super::graph::NodeKind::GuardHit {
+        if node.kind == super::graph::NodeKind::GuardHit && node.active_preset().is_none() {
             self.policy_graph.simulation = None;
             self.status_message = "✗ Refused simulation: Guard rules describe operator effects and cannot be simulated as allow-list amendments.".to_string();
             return;

@@ -608,6 +608,12 @@ pub struct CgroupsConfig {
     /// CPU bandwidth period in microseconds (`cpu.max` second token in cgroups v2; defaults to 100000 when `cpu_max_quota_us` is set).
     #[serde(default)]
     pub cpu_max_period_us: Option<u64>,
+    /// Proportional CPU scheduling weight in `[1, 10000]` (`cpu.weight` in cgroups v2; default kernel weight is `100`).
+    #[serde(default)]
+    pub cpu_weight: Option<u32>,
+    /// Whether the worker cgroup is scheduled with `SCHED_IDLE` semantics (`cpu.idle` in cgroups v2; `true` writes `"1"`, `false` writes `"0"`).
+    #[serde(default)]
+    pub cpu_idle: Option<bool>,
     /// Block device I/O bandwidth and IOPS limits (`io.max` lines in cgroups v2, e.g. `"259:0 rbps=104857600 wbps=52428800"`).
     #[serde(default)]
     pub io_max: Vec<String>,
@@ -1173,6 +1179,15 @@ fn validate(cfg: &Config) -> Result<(), String> {
     }
     if cfg.sandbox.cgroups.cpu_max_period_us == Some(0) {
         return Err("[sandbox.cgroups] cpu_max_period_us must be greater than 0".into());
+    }
+    if let Some(w) = cfg.sandbox.cgroups.cpu_weight {
+        if !(crate::runtime::sandbox::MIN_CPU_WEIGHT..=crate::runtime::sandbox::MAX_CPU_WEIGHT)
+            .contains(&w)
+        {
+            return Err(format!(
+                "[sandbox.cgroups] cpu_weight ({w}) must be in the range 1..=10000"
+            ));
+        }
     }
     for rule in &cfg.sandbox.cgroups.io_max {
         crate::runtime::sandbox::CgroupIoMaxRule::parse(rule)

@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.66.0 (2026-11-05)
+
+
+### Features
+
+* **Add cryptographic field redaction (--redact-fields) and zero-knowledge BLAKE3 field commitment verification (--prove-field) to vouch doctor audit bundles**
+  - **Problem & Explanation:** Incident-response exports via vouch doctor --export-bundle previously included plaintext command, working-directory, and environment fields inside the zstd-compressed audit archive. Passing --redact-fields <cmd,cwd,env,...> now strips the selected plaintext fields while embedding per-record BLAKE3 salted field commitment digests and a bundle-level commitment Merkle root in the Ed25519-signed manifest, and vouch doctor --verify-bundle <path> --prove-field <seq>:<field>=<candidate> verifies candidate plaintext values against the signed bundle offline.
+  - **Example Scenario:** Verified through automated test suite and regression coverage.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: unmodeled or unhandled. After: evaluated and enforced according to updated specification.
+* **Add interactive TUI rule builder and candidate synthesis for per-program [[write.scope]] rules and place-scoped [[run.guards]] overrides**
+  - **Problem & Explanation:** In the interactive TUI (vouch tui), write-scope and guard prompts previously offered only flat path additions or global guard edits. Pressing b or e on a write.scope node or guard node in the Policy Visualizer now cycles and stages structured [[write.scope]] rules (ProgramProject, ProgramCustom, ProjectDefault) and place-scoped [[run.guards]] overrides (PlaceScopedCwd, GlobalGuard), while the Candidate Suggestions engine synthesizes these scoped rules directly from live journal ask events.
+  - **Example Scenario:** Verified through automated test suite and regression coverage.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: unmodeled or unhandled. After: evaluated and enforced according to updated specification.
+* **Add Linux cgroups v2 CPU weight (cpu.weight), idle scheduling (cpu.idle), and peak memory telemetry (memory.peak and memory.swap.peak) to [run.sandbox.cgroups]**
+  - **Problem & Explanation:** On Linux hosts with cgroups v2 sandboxing enabled, [run.sandbox.cgroups] now supports cpu_weight (1..=10000) and cpu_idle (true/false) to provision cpu.weight and cpu.idle in ephemeral child scopes, and CgroupScope samples memory.peak and memory.swap.peak high-water marks prior to scope teardown.
+  - **Example Scenario:** Verified through automated test suite and regression coverage.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: unmodeled or unhandled. After: evaluated and enforced according to updated specification.
+* **Propagate transitive capabilities across Python importlib.import_module, __import__, runpy.run_module, and runpy.run_path calls and flag dynamic module targets**
+  - **Problem & Explanation:** Propagate transitive capabilities across Python importlib.import_module, __import__, runpy.run_module, and runpy.run_path calls and flag dynamic module targets.
+  - **Example Scenario:** Verified through automated test suite and regression coverage.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: unmodeled or unhandled. After: evaluated and enforced according to updated specification.
+* **Track PowerShell [Environment]::SetEnvironmentVariable and GetEnvironmentVariable taint and model $ExecutionContext.InvokeCommand reflective script-block execution**
+  - **Problem & Explanation:** The PowerShell pipeline control-flow graph now unifies [Environment]::SetEnvironmentVariable and [Environment]::GetEnvironmentVariable (as well as [System.Environment] qualifiers and ExpandEnvironmentVariables) with the $env:<NAME> taint lattice, and models $ExecutionContext.InvokeCommand.InvokeScript, NewScriptBlock, ExpandString, and [ScriptBlock]::Create(...).Invoke() as reflective execution sinks.
+  - **Example Scenario:** Verified through automated test suite and regression coverage.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: unmodeled or unhandled. After: evaluated and enforced according to updated specification.
+
 ## 0.65.0 (2026-11-05)
 
 

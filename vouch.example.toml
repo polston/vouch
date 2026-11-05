@@ -563,5 +563,7 @@ paths = [
 # pids_max = 128
 # cpu_max_quota_us = 50000
 # cpu_max_period_us = 100000
+# cpu_weight = 100
+# cpu_idle = false
 # io_max = ["259:0 rbps=104857600 wbps=52428800 wiops=5000"]
 # psi_stall_warn_pct = 25.0

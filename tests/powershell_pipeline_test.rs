@@ -1292,3 +1292,128 @@ fn powershell_set_variable_get_variable_and_clear_variable_reflection_taint() {
         cfg.synthesized_commands[5].args
     );
 }
+
+#[test]
+fn powershell_dotnet_environment_variable_unification_and_execution_context_reflection_taint() {
+    use vouch::powershell_pipeline::{PsControlFlowGraph, VariableOrigin};
+
+    // 1. `[Environment]::SetEnvironmentVariable` and `[System.Environment]::GetEnvironmentVariable`
+    // unify with `$env:<NAME>`, propagate taint, resolve literals, and clear on `$null`.
+    let script_env = "{
+        $tainted = Read-Host
+        [Environment]::SetEnvironmentVariable('DEPLOY_TARGET', $tainted)
+        Remove-Item $env:DEPLOY_TARGET
+
+        $fetched = [System.Environment]::GetEnvironmentVariable('DEPLOY_TARGET')
+        Remove-Item $fetched
+
+        [Environment]::SetEnvironmentVariable('DEPLOY_TARGET', $null)
+        Remove-Item $env:DEPLOY_TARGET
+
+        [System.Environment]::SetEnvironmentVariable('SAFE_CMD', 'Remove-Item')
+        $cmdName = [Environment]::GetEnvironmentVariable('SAFE_CMD')
+        & $cmdName (Read-Host)
+
+        $expanded = [Environment]::ExpandEnvironmentVariables('%UNSET_DYN_VAR%/bin')
+        Remove-Item $expanded
+    }";
+    let cfg_env = PsControlFlowGraph::build(script_env);
+    assert_eq!(
+        cfg_env.synthesized_commands.len(),
+        5,
+        "expected 5 synthesized commands from [Environment] taint unification: {:?}",
+        cfg_env.synthesized_commands
+    );
+    // [0]: Remove-Item $env:DEPLOY_TARGET -> tainted via SetEnvironmentVariable('DEPLOY_TARGET', $tainted)
+    assert!(
+        cfg_env.synthesized_commands[0]
+            .args
+            .contains(&"untrusted_input".to_string()),
+        "$env:DEPLOY_TARGET must reflect taint set by [Environment]::SetEnvironmentVariable: {:?}",
+        cfg_env.synthesized_commands[0].args
+    );
+    // [1]: Remove-Item $fetched -> tainted via GetEnvironmentVariable('DEPLOY_TARGET')
+    assert!(
+        cfg_env.synthesized_commands[1]
+            .args
+            .contains(&"untrusted_input".to_string()),
+        "[System.Environment]::GetEnvironmentVariable('DEPLOY_TARGET') must propagate taint: {:?}",
+        cfg_env.synthesized_commands[1].args
+    );
+    // [2]: Remove-Item $env:DEPLOY_TARGET after SetEnvironmentVariable('DEPLOY_TARGET', $null) -> cleared!
+    assert!(
+        !cfg_env.synthesized_commands[2]
+            .args
+            .contains(&"untrusted_input".to_string()),
+        "[Environment]::SetEnvironmentVariable('DEPLOY_TARGET', $null) must clear taint: {:?}",
+        cfg_env.synthesized_commands[2].args
+    );
+    assert_eq!(
+        cfg_env.taint_table.get("$env:SAFE_CMD"),
+        Some(&VariableOrigin::Literal("Remove-Item".to_string()))
+    );
+    // [3]: & $cmdName (Read-Host) -> resolved to Remove-Item with tainted arg
+    assert_eq!(cfg_env.synthesized_commands[3].head, "Remove-Item");
+    assert!(
+        cfg_env.synthesized_commands[3]
+            .args
+            .contains(&"untrusted_input".to_string()),
+        "& $cmdName (Read-Host) must resolve literal 'Remove-Item' via GetEnvironmentVariable: {:?}",
+        cfg_env.synthesized_commands[3].args
+    );
+    // [4]: ExpandEnvironmentVariables('%UNSET_DYN_VAR%/bin') -> tainted environment expansion
+    assert!(
+        cfg_env.synthesized_commands[4]
+            .args
+            .contains(&"untrusted_input".to_string()),
+        "[Environment]::ExpandEnvironmentVariables('%UNSET_DYN_VAR%/bin') must propagate taint: {:?}",
+        cfg_env.synthesized_commands[4].args
+    );
+
+    // 2. `$ExecutionContext.InvokeCommand.{InvokeScript,NewScriptBlock,ExpandString}` and `[ScriptBlock]::Create`
+    let script_exec_ctx = "{
+        $userCode = Read-Host
+        $ExecutionContext.InvokeCommand.InvokeScript($userCode)
+
+        $sb = $ExecutionContext.InvokeCommand.NewScriptBlock($userCode)
+        & $sb
+
+        $sb2 = [ScriptBlock]::Create($userCode)
+        $sb2.Invoke()
+
+        ([System.Management.Automation.ScriptBlock]::Create($userCode)).InvokeReturnAsIs()
+
+        $expandedPath = $ExecutionContext.InvokeCommand.ExpandString(\"$userCode/sub\")
+        Remove-Item $expandedPath
+    }";
+    let cfg_exec = PsControlFlowGraph::build(script_exec_ctx);
+    assert_eq!(
+        cfg_exec.synthesized_commands.len(),
+        5,
+        "expected 4 Invoke-Expression commands and 1 Remove-Item command from ExecutionContext/ScriptBlock reflection: {:?}",
+        cfg_exec.synthesized_commands
+    );
+    for idx in 0..4 {
+        assert_eq!(
+            cfg_exec.synthesized_commands[idx].head,
+            "Invoke-Expression",
+            "command at index {idx} must be Invoke-Expression: {:?}",
+            cfg_exec.synthesized_commands[idx]
+        );
+        assert!(
+            cfg_exec.synthesized_commands[idx]
+                .args
+                .contains(&"untrusted_input".to_string()),
+            "reflective execution sink at index {idx} must carry untrusted_input: {:?}",
+            cfg_exec.synthesized_commands[idx].args
+        );
+    }
+    assert_eq!(cfg_exec.synthesized_commands[4].head, "Remove-Item");
+    assert!(
+        cfg_exec.synthesized_commands[4]
+            .args
+            .contains(&"untrusted_input".to_string()),
+        "$ExecutionContext.InvokeCommand.ExpandString with tainted $userCode must taint Remove-Item: {:?}",
+        cfg_exec.synthesized_commands[4].args
+    );
+}

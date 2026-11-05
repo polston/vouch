@@ -2184,7 +2184,7 @@ match = ["vouch"]
 subcommands = ["explain", "why", "doctor", "review", "import", "install", "schema", "trust", "model", "uninstall"]
 standalone_flags = ["--help", "--version"]
 value_options = ["--accept", "--host", "--shell", "--state-dir", "--subcommand", "--value-flag", "--write-flag", "--standalone-flag", "--exact-args", "--snippet", "--snippet-from", "--write-path", "--rule", "--auto", "--export-bundle", "--verify-bundle", "--since", "--session", "--from", "--to", "--merge-bundles", "--output", "-o"]
-no_value_options = ["--help", "--version", "--write", "--print", "--shadow", "--whole-server", "--all-subcommands", "--hook", "--hook-batch", "--evaluates-input", "--cwd-from-call", "--update", "--changes-dir"]
+no_value_options = ["--help", "--version", "--write", "--print", "--shadow", "--whole-server", "--all-subcommands", "--hook", "--hook-batch", "--evaluates-input", "--cwd-from-call", "--update", "--changes-dir", "--redact-fields"]
 case_sensitive_flags = true
 
 [[program.rule]]

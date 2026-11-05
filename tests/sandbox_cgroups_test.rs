@@ -2,14 +2,15 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use vouch::config::{self, SeccompProfile};
 use vouch::runtime::{
-    parse_psi_resource, CgroupCpuStat, CgroupIoMaxRule, CgroupMemoryEvents, CgroupPidsEvents,
-    CgroupPsiTelemetry, CgroupSwapEvents, CgroupV2Manager, LandlockRulesetPlan, LandlockVerdict,
-    LoopbackInterfaceSpec, NamespaceSpec, RlimitResource, RlimitRule, RlimitSet,
+    parse_psi_resource, CgroupCpuStat, CgroupIoMaxRule, CgroupMemoryEvents, CgroupMemoryTelemetry,
+    CgroupPidsEvents, CgroupPsiTelemetry, CgroupSwapEvents, CgroupV2Manager, LandlockRulesetPlan,
+    LandlockVerdict, LoopbackInterfaceSpec, NamespaceSpec, RlimitResource, RlimitRule, RlimitSet,
     SandboxExecutionPlan, SeccompFilterProgram, AUDIT_ARCH_AARCH64, AUDIT_ARCH_X86_64,
     CLONE_NEWNET, CLONE_NEWNS, CLONE_NEWPID, CLONE_NEWUSER, DEFAULT_CPU_MAX_PERIOD_US,
-    LANDLOCK_ACCESS_FS_EXECUTE, LANDLOCK_ACCESS_FS_MAKE_REG, LANDLOCK_ACCESS_FS_READ_FILE,
-    LANDLOCK_ACCESS_FS_REMOVE_FILE, LANDLOCK_ACCESS_FS_TRUNCATE, LANDLOCK_ACCESS_FS_WRITE_FILE,
-    SECCOMP_RET_ALLOW, SECCOMP_RET_ERRNO_EPERM, SECCOMP_RET_KILL_PROCESS,
+    DEFAULT_CPU_WEIGHT, LANDLOCK_ACCESS_FS_EXECUTE, LANDLOCK_ACCESS_FS_MAKE_REG,
+    LANDLOCK_ACCESS_FS_READ_FILE, LANDLOCK_ACCESS_FS_REMOVE_FILE, LANDLOCK_ACCESS_FS_TRUNCATE,
+    LANDLOCK_ACCESS_FS_WRITE_FILE, MAX_CPU_WEIGHT, MIN_CPU_WEIGHT, SECCOMP_RET_ALLOW,
+    SECCOMP_RET_ERRNO_EPERM, SECCOMP_RET_KILL_PROCESS,
 };
 
 fn unique_cgroup_root(tag: &str) -> PathBuf {
@@ -749,6 +750,123 @@ memory_swap_max_bytes = 268435456
         )
         .is_err()
     );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn cgroup_v2_provisions_cpu_weight_and_cpu_idle_and_samples_peak_memory_telemetry() {
+    let root = unique_cgroup_root("cpu_weight_idle_peak");
+    std::fs::write(root.join("cgroup.controllers"), "cpu io memory pids\n").unwrap();
+    let manager = CgroupV2Manager::new(&root);
+
+    assert_eq!(MIN_CPU_WEIGHT, 1);
+    assert_eq!(MAX_CPU_WEIGHT, 10_000);
+    assert_eq!(DEFAULT_CPU_WEIGHT, 100);
+
+    // 1. Provision cpu_weight = 250 and cpu_idle = true
+    let toml_weight_idle = r#"
+[sandbox.cgroups]
+cpu_weight = 250
+cpu_idle = true
+"#;
+    let cfg = config::load(toml_weight_idle).expect("load cpu_weight and cpu_idle config");
+    assert_eq!(cfg.sandbox.cgroups.cpu_weight, Some(250));
+    assert_eq!(cfg.sandbox.cgroups.cpu_idle, Some(true));
+
+    let (plan, scope_opt) =
+        SandboxExecutionPlan::prepare(&manager, "worker-weight-idle", &cfg.sandbox)
+            .expect("prepare");
+    let scope = scope_opt.expect("scope provisioned for cpu_weight and cpu_idle");
+    assert_eq!(plan.cpu_weight, Some(250));
+    assert_eq!(plan.cpu_idle, Some(true));
+    assert_eq!(scope.cpu_weight, Some(250));
+    assert_eq!(scope.cpu_idle, Some(true));
+
+    let weight_file = std::fs::read_to_string(scope.dir.join("cpu.weight")).unwrap();
+    assert_eq!(weight_file.trim(), "250");
+    assert_eq!(scope.read_cpu_weight(), Some(250));
+
+    let idle_file = std::fs::read_to_string(scope.dir.join("cpu.idle")).unwrap();
+    assert_eq!(idle_file.trim(), "1");
+    assert_eq!(scope.read_cpu_idle(), Some(true));
+
+    // 2. Simulate kernel reporting memory.current, memory.peak, memory.swap.current, and memory.swap.peak
+    std::fs::write(scope.dir.join("memory.current"), "268435456\n").unwrap();
+    std::fs::write(scope.dir.join("memory.peak"), "536870912\n").unwrap();
+    std::fs::write(scope.dir.join("memory.swap.current"), "16777216\n").unwrap();
+    std::fs::write(scope.dir.join("memory.swap.peak"), "67108864\n").unwrap();
+    std::fs::write(
+        scope.dir.join("memory.events"),
+        "low 0\nhigh 4\nmax 1\noom 0\noom_kill 0\noom_group_kill 0\n",
+    )
+    .unwrap();
+    std::fs::write(
+        scope.dir.join("memory.swap.events"),
+        "high 2\nmax 1\nfail 0\n",
+    )
+    .unwrap();
+
+    assert_eq!(scope.read_memory_peak(), Some(536_870_912));
+    assert_eq!(scope.read_memory_swap_peak(), Some(67_108_864));
+
+    let telemetry: CgroupMemoryTelemetry = scope.sample_memory_telemetry();
+    assert_eq!(telemetry.current_bytes, Some(268_435_456));
+    assert_eq!(telemetry.peak_bytes, Some(536_870_912));
+    assert_eq!(telemetry.swap_current_bytes, Some(16_777_216));
+    assert_eq!(telemetry.swap_peak_bytes, Some(67_108_864));
+    assert_eq!(telemetry.events.high, 4);
+    assert_eq!(telemetry.events.max, 1);
+    assert_eq!(telemetry.swap_events.high, 2);
+    assert_eq!(telemetry.swap_events.max, 1);
+
+    // Teardown cleans up cpu.weight, cpu.idle, memory.peak, memory.swap.peak and removes the directory
+    scope
+        .teardown()
+        .expect("teardown scope with cpu.weight, cpu.idle, and peak files");
+    assert!(!scope.dir.exists());
+
+    // 3. Provision cpu_weight = 1 (min), cpu_weight = 10000 (max), and cpu_idle = false
+    let cfg_min = config::load("[sandbox.cgroups]\ncpu_weight = 1\ncpu_idle = false\n").unwrap();
+    let (_, scope_min_opt) =
+        SandboxExecutionPlan::prepare(&manager, "worker-min-weight", &cfg_min.sandbox).unwrap();
+    let scope_min = scope_min_opt.unwrap();
+    assert_eq!(scope_min.read_cpu_weight(), Some(1));
+    assert_eq!(scope_min.read_cpu_idle(), Some(false));
+    assert_eq!(
+        std::fs::read_to_string(scope_min.dir.join("cpu.idle"))
+            .unwrap()
+            .trim(),
+        "0"
+    );
+    scope_min.teardown().unwrap();
+
+    let cfg_max = config::load("[sandbox.cgroups]\ncpu_weight = 10000\n").unwrap();
+    let (_, scope_max_opt) =
+        SandboxExecutionPlan::prepare(&manager, "worker-max-weight", &cfg_max.sandbox).unwrap();
+    let scope_max = scope_max_opt.unwrap();
+    assert_eq!(scope_max.read_cpu_weight(), Some(10_000));
+    assert_eq!(scope_max.read_cpu_idle(), None);
+    scope_max.teardown().unwrap();
+
+    // 4. Reject out-of-range cpu_weight (0 or > 10000) at both config load and provision_scope
+    let err_zero = config::load("[sandbox.cgroups]\ncpu_weight = 0\n").unwrap_err();
+    assert!(
+        err_zero.contains("cpu_weight (0) must be in the range 1..=10000"),
+        "unexpected error: {err_zero}"
+    );
+    let err_over = config::load("[sandbox.cgroups]\ncpu_weight = 10001\n").unwrap_err();
+    assert!(
+        err_over.contains("cpu_weight (10001) must be in the range 1..=10000"),
+        "unexpected error: {err_over}"
+    );
+
+    let mut invalid_cgroups = vouch::config::CgroupsConfig::default();
+    invalid_cgroups.cpu_weight = Some(0);
+    let io_err = manager
+        .provision_scope("worker-invalid-weight", &invalid_cgroups)
+        .unwrap_err();
+    assert_eq!(io_err.kind(), std::io::ErrorKind::InvalidInput);
 
     let _ = std::fs::remove_dir_all(&root);
 }

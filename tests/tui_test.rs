@@ -1354,3 +1354,269 @@ fn tui_rule_builder_refuses_guarded_tool_rule() {
     assert!(sel.to_review_candidate(&guarded_tool_decision.cmd).is_err());
     assert!(graph.cycle_selected_builder_preset().is_err());
 }
+
+#[test]
+fn tui_rule_builder_write_scope_presets_simulation_apply_and_undo() {
+    let tag = format!("tui_test_write_scope_{}_{}", std::process::id(), line!());
+    let tmp_path = std::env::temp_dir().join(tag);
+    let _ = std::fs::remove_dir_all(&tmp_path);
+    let home = tmp_path.to_str().unwrap();
+    let config_dir = tmp_path.join(".config").join("vouch");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let config_file = config_dir.join("config.toml");
+    let initial_cfg = "version = 1\n[write]\nallow_paths = [\"/tmp/**\"]\n";
+    std::fs::write(&config_file, initial_cfg).unwrap();
+
+    // Two ASK decisions writing under /scratch: one via `git init /scratch/repo-a`, one via `touch /scratch/other.txt`
+    let records = vec![
+        Record {
+            id: "ws1".into(),
+            ts: "2026-10-30T12:00:00Z".into(),
+            cmd: "git init /scratch/repo-a".into(),
+            verdict: "ask".into(),
+            reason: "vouch stopped on: path outside every allowed area\n  /scratch/repo-a\n  to allow this permanently: write.allow_paths = [\"/scratch/repo-a\"]".into(),
+            mode: "live".into(),
+            outcome: Outcome::Executed,
+            session: "sess-ws".into(),
+            lang: "bash".into(),
+            cwd: "/home/dev".into(),
+            tool: "bash".into(),
+            permission_mode: "".into(),
+            measurement: false,
+            host: "claude".into(),
+            count: 1,
+        },
+        Record {
+            id: "ws2".into(),
+            ts: "2026-10-30T12:01:00Z".into(),
+            cmd: "touch /scratch/other.txt".into(),
+            verdict: "ask".into(),
+            reason: "vouch stopped on: path outside every allowed area\n  /scratch/other.txt\n  to allow this permanently: write.allow_paths = [\"/scratch/other.txt\"]".into(),
+            mode: "live".into(),
+            outcome: Outcome::Denied,
+            session: "sess-ws".into(),
+            lang: "bash".into(),
+            cwd: "/home/dev".into(),
+            tool: "bash".into(),
+            permission_mode: "".into(),
+            measurement: false,
+            host: "claude".into(),
+            count: 1,
+        },
+    ];
+
+    let engine = TuiEngine::from_records(home, &records);
+    assert!(
+        engine
+            .candidates
+            .iter()
+            .any(|c| c.section == "write.scope" && c.name.contains("git init -> /scratch/**")),
+        "Expected synthesized write.scope candidate for executed git init, got: {:?}",
+        engine.candidates
+    );
+
+    let mut app = TuiApp::new(engine);
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('v')));
+    // Switch to Decision 1 (ws1: "git init /scratch/repo-a")
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('l')));
+    assert_eq!(app.visualizer_decision_idx, 1);
+
+    // Select [PATH] node ("unpermitted write path: /scratch/repo-a")
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('j')));
+    let sel = app.policy_graph.selected_node().expect("selected path node");
+    assert_eq!(sel.kind, vouch::tui::NodeKind::PathCheck);
+    assert_eq!(sel.builder_presets.len(), 3);
+    assert!(sel
+        .active_preset()
+        .unwrap()
+        .short_label()
+        .contains("[write] allow_paths = [\"/scratch/repo-a\"]"));
+
+    // Cycle with 'b' to Preset 2/3: [[write.scope]] programs = ["git init"] only_under = ["/scratch/**"]
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('b')));
+    let sel_ws = app.policy_graph.selected_node().unwrap();
+    assert!(
+        sel_ws
+            .active_preset()
+            .unwrap()
+            .short_label()
+            .contains("[[write.scope]] programs = [\"git init\"] only_under = [\"/scratch/**\"]"),
+        "got label: {}",
+        sel_ws.active_preset().unwrap().short_label()
+    );
+
+    // Simulate with 'd': only `git init /scratch/repo-a` flips to ALLOW; `touch /scratch/other.txt` stays ASK!
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('d')));
+    let sim = app.policy_graph.simulation.as_ref().expect("simulation present");
+    assert_eq!(sim.before_verdict, "ASK");
+    assert_eq!(sim.after_verdict, "ALLOW");
+    assert_eq!(sim.session_ask_total, 2);
+    assert_eq!(sim.session_flipped_to_allow, 1);
+
+    // Cycle with 'b' to Preset 3/3: [[write.scope]] programs = ["git"] only_under = ["/scratch/**"]
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('b')));
+    let sel_git = app.policy_graph.selected_node().unwrap();
+    assert!(sel_git
+        .active_preset()
+        .unwrap()
+        .short_label()
+        .contains("[[write.scope]] programs = [\"git\"] only_under = [\"/scratch/**\"]"));
+
+    // Cycle back to Preset 2/3 (["git init"])
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('b'))); // 1/3 allow_paths
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('b'))); // 2/3 ["git init"]
+
+    // Preview unified diff ('P')
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('P')));
+    let diff_frame = app.render();
+    assert!(diff_frame.contains("[[write.scope]]"));
+    assert!(diff_frame.contains("programs = [\"git init\"]"));
+    assert!(diff_frame.contains("only_under = [\"/scratch/**\"]"));
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('P')));
+
+    // Apply with 'a' and verify config.toml validates with load + validate_scopes
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('a')));
+    assert!(
+        app.status_message.contains("[[write.scope]]"),
+        "got status: {}",
+        app.status_message
+    );
+    let updated_cfg_text = std::fs::read_to_string(&config_file).unwrap();
+    assert!(updated_cfg_text.contains("[[write.scope]]"));
+    assert!(updated_cfg_text.contains("programs = [\"git init\"]"));
+    assert!(updated_cfg_text.contains("only_under = [\"/scratch/**\"]"));
+    let parsed_cfg = vouch::config::load(&updated_cfg_text).expect("config loads");
+    vouch::config::validate_scopes(&parsed_cfg, vouch::guards::in_effect())
+        .expect("write.scope validates against knowledge");
+
+    // Undo with 'u' and verify exact rollback
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('u')));
+    assert_eq!(std::fs::read_to_string(&config_file).unwrap(), initial_cfg);
+
+    let _ = std::fs::remove_dir_all(&tmp_path);
+}
+
+#[test]
+fn tui_rule_builder_place_scoped_guard_override_simulation_staging_apply_and_undo() {
+    let tag = format!("tui_test_place_guard_{}_{}", std::process::id(), line!());
+    let tmp_path = std::env::temp_dir().join(tag);
+    let _ = std::fs::remove_dir_all(&tmp_path);
+    let home = tmp_path.to_str().unwrap();
+    let config_dir = tmp_path.join(".config").join("vouch");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let config_file = config_dir.join("config.toml");
+    let initial_cfg = "version = 1\n[write]\nallow_paths = [\"/workspace/**\"]\n";
+    std::fs::write(&config_file, initial_cfg).unwrap();
+
+    // Two delete_recursive guard hits in different working directories
+    let records = vec![
+        Record {
+            id: "pg1".into(),
+            ts: "2026-10-30T12:10:00Z".into(),
+            cmd: "rm -rf ./dist".into(),
+            verdict: "ask".into(),
+            reason: "vouch stopped on: delete_recursive (guard)\n  what that means: recursively deletes directory trees".into(),
+            mode: "live".into(),
+            outcome: Outcome::Executed,
+            session: "sess-pg".into(),
+            lang: "bash".into(),
+            cwd: "/workspace/app-build".into(),
+            tool: "bash".into(),
+            permission_mode: "".into(),
+            measurement: false,
+            host: "claude".into(),
+            count: 1,
+        },
+        Record {
+            id: "pg2".into(),
+            ts: "2026-10-30T12:11:00Z".into(),
+            cmd: "rm -rf ./dist".into(),
+            verdict: "ask".into(),
+            reason: "vouch stopped on: delete_recursive (guard)\n  what that means: recursively deletes directory trees".into(),
+            mode: "live".into(),
+            outcome: Outcome::Denied,
+            session: "sess-pg".into(),
+            lang: "bash".into(),
+            cwd: "/workspace/other-repo".into(),
+            tool: "bash".into(),
+            permission_mode: "".into(),
+            measurement: false,
+            host: "claude".into(),
+            count: 1,
+        },
+    ];
+
+    let engine = TuiEngine::from_records(home, &records);
+    assert!(
+        engine
+            .candidates
+            .iter()
+            .any(|c| c.section == "run.guards"
+                && c.name.contains("delete_recursive under /workspace/app-build/**")),
+        "Expected synthesized run.guards candidate for executed guard hit, got: {:?}",
+        engine.candidates
+    );
+
+    let mut app = TuiApp::new(engine);
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('v')));
+    // Switch to Decision 1 (pg1 in /workspace/app-build)
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('l')));
+    assert_eq!(app.visualizer_decision_idx, 1);
+
+    // Select [GUARD] guard: delete_recursive
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('j')));
+    let sel_unarmed = app.policy_graph.selected_node().expect("selected guard node");
+    assert_eq!(sel_unarmed.kind, vouch::tui::NodeKind::GuardHit);
+    assert!(sel_unarmed.active_preset().is_none());
+
+    // Before arming with 'b', simulation ('d') and direct apply ('a') must be refused
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('d')));
+    assert!(app.status_message.contains("Guard rules describe operator effects"));
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('a')));
+    assert!(app.status_message.contains("Refused: this is a guard"));
+
+    // Press 'b' to arm Preset [1/2]: [[run.guards]] under = ["/workspace/app-build/**"] delete_recursive = "allow"
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('b')));
+    assert!(
+        app.status_message
+            .contains("Rule Builder preset [1/2]: [[run.guards]] under = [\"/workspace/app-build/**\"] delete_recursive = \"allow\""),
+        "got status: {}",
+        app.status_message
+    );
+
+    // Now simulate with 'd': pg1 (/workspace/app-build) flips ASK -> ALLOW, while pg2 (/workspace/other-repo) stays ASK!
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('d')));
+    let sim = app.policy_graph.simulation.as_ref().expect("simulation present");
+    assert_eq!(sim.before_verdict, "ASK");
+    assert_eq!(sim.after_verdict, "ALLOW");
+    assert_eq!(sim.session_ask_total, 2);
+    assert_eq!(
+        sim.session_flipped_to_allow, 1,
+        "Place-scoped [[run.guards]] must only flip the matching directory's guard hit to ALLOW"
+    );
+
+    // Stage with 'D' and preview unified diff ('P')
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('D')));
+    assert_eq!(app.policy_graph.staged_node_ids.len(), 1);
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('P')));
+    let diff_frame = app.render();
+    assert!(diff_frame.contains("[[run.guards]]"));
+    assert!(diff_frame.contains("under = [\"/workspace/app-build/**\"]"));
+    assert!(diff_frame.contains("delete_recursive = \"allow\""));
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('P')));
+
+    // Apply with 'a' and verify config.toml contains [[run.guards]] and loads cleanly
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('a')));
+    assert!(app.status_message.contains("[[run.guards]]"), "got: {}", app.status_message);
+    let updated_cfg_text = std::fs::read_to_string(&config_file).unwrap();
+    assert!(updated_cfg_text.contains("[[run.guards]]"));
+    assert!(updated_cfg_text.contains("under = [\"/workspace/app-build/**\"]"));
+    assert!(updated_cfg_text.contains("delete_recursive = \"allow\""));
+    vouch::config::load(&updated_cfg_text).expect("config with [[run.guards]] loads cleanly");
+
+    // Undo with 'u' and verify exact rollback
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('u')));
+    assert_eq!(std::fs::read_to_string(&config_file).unwrap(), initial_cfg);
+
+    let _ = std::fs::remove_dir_all(&tmp_path);
+}

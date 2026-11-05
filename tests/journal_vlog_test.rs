@@ -4,13 +4,15 @@ use vouch::config::{self, JournalFormat};
 use vouch::journal::{self, JournalPolicy, OutcomeRecord, Record};
 use vouch::journal_vlog::{
     append_vlog, compact_vlog, compute_bundle_seal_sha256, compute_bundle_seal_sha256_with_extra,
-    encode_record_payload, export_vlog_bundle, export_vlog_bundle_since, export_vlog_slice_bundle,
+    compute_redacted_field_commitment, encode_record_payload, export_vlog_bundle,
+    export_vlog_bundle_since, export_vlog_redacted_bundle, export_vlog_slice_bundle,
     merge_vlog_bundles, parse_timestamp_arg, read_records_from_vlog_bundle, read_vidx_entries,
-    read_vlog_checkpoints, vchk_path, verify_vlog_bundle, verify_vlog_bundle_chain,
-    verify_vlog_integrity, vidx_path, write_all_vlog, VlogBundleHeader, VlogHeader, VlogIndexEntry,
-    VlogReader, VlogSliceFilter, VlogTamperKind, VBUNDLE_DELTA_VERSION, VBUNDLE_HEADER_LEN,
-    VBUNDLE_SLICE_VERSION, VBUNDLE_VERSION, VCHK_ENTRY_LEN, VLOG_FRAME_HEADER_LEN, VLOG_HEADER_LEN,
-    VLOG_INDEX_ENTRY_LEN, VLOG_MAGIC,
+    read_vlog_checkpoints, vchk_path, verify_redacted_field_claim, verify_vlog_bundle,
+    verify_vlog_bundle_chain, verify_vlog_integrity, vidx_path, write_all_vlog, VlogBundleHeader,
+    VlogHeader, VlogIndexEntry, VlogReader, VlogSliceFilter, VlogTamperKind, VBUNDLE_DELTA_VERSION,
+    VBUNDLE_HEADER_LEN, VBUNDLE_REDACTED_VERSION, VBUNDLE_REDACTION_PROOF_LEN,
+    VBUNDLE_SLICE_HEADER_LEN, VBUNDLE_SLICE_VERSION, VBUNDLE_VERSION, VCHK_ENTRY_LEN,
+    VLOG_FRAME_HEADER_LEN, VLOG_HEADER_LEN, VLOG_INDEX_ENTRY_LEN, VLOG_MAGIC,
 };
 use vouch::journal_wal::crc32;
 use vouch::outcome::Outcome;
@@ -1322,6 +1324,176 @@ fn vbundle_slice_export_by_session_and_time_window_verifies_offline_and_detects_
     assert!(matches!(
         tampered_rep.tamper_finding,
         Some(VlogTamperKind::ChainLinkBroken { seq_idx: 3, .. })
+    ));
+
+    let _ = std::fs::remove_dir_all(&archive_dir);
+}
+
+#[test]
+fn vbundle_redacted_export_strips_plaintext_verifies_offline_and_proves_field_commitments() {
+    let state_dir = unique_test_dir("vbundle_redacted_state");
+    let archive_dir = unique_test_dir("vbundle_redacted_archive");
+    let full_redacted_path = archive_dir.join("full_redacted.vbundle");
+    let slice_redacted_path = archive_dir.join("slice_redacted.vbundle");
+
+    let sensitive_cmd_0 = "curl -H 'Authorization: Bearer SECRET_MARKER_ALPHA_991' https://internal.example.test/api";
+    let sensitive_cmd_1 = "psql --host db.example.test --dbname prod --command 'SELECT SECRET_MARKER_BETA_772'";
+    let sensitive_cmd_2 = "aws s3 cp /tmp/SECRET_MARKER_GAMMA_553.pem s3://vault-bucket/";
+    let sensitive_cwd = "C:/Users/dev/confidential_workspace_marker_884";
+
+    let records = [
+        (0, "sess_red_1", "2026-11-04T21:00:00Z", "ask", sensitive_cmd_0),
+        (1, "sess_red_2", "2026-11-04T21:01:00Z", "deny", sensitive_cmd_1),
+        (2, "sess_red_1", "2026-11-04T21:02:00Z", "allow", sensitive_cmd_2),
+    ];
+
+    for (idx, sess, ts_str, verdict, cmd) in records {
+        let mut r = sample_record(idx, 0, verdict, cmd);
+        r.session = sess.to_string();
+        r.ts = ts_str.to_string();
+        r.cwd = sensitive_cwd.to_string();
+        r.reason = "vouch stopped on: external command".to_string();
+        append_vlog(&state_dir, &r).unwrap();
+    }
+
+    // 1. Export full redacted bundle via library
+    let empty_filter = VlogSliceFilter::default();
+    let rep_full = export_vlog_redacted_bundle(&state_dir, &full_redacted_path, &empty_filter)
+        .expect("export full redacted bundle");
+    assert!(rep_full.valid);
+    assert_eq!(rep_full.verified_records, 3);
+
+    // Inspect raw bytes of full_redacted.vbundle to ensure zero plaintext leakage
+    let raw_bytes = std::fs::read(&full_redacted_path).unwrap();
+    let raw_lossy = String::from_utf8_lossy(&raw_bytes);
+    assert!(
+        !raw_lossy.contains("SECRET_MARKER_ALPHA_991")
+            && !raw_lossy.contains("SECRET_MARKER_BETA_772")
+            && !raw_lossy.contains("SECRET_MARKER_GAMMA_553")
+            && !raw_lossy.contains("confidential_workspace_marker_884"),
+        "redacted .vbundle must not contain any plaintext command or cwd markers"
+    );
+
+    let hdr = VlogBundleHeader::from_bytes(&raw_bytes).unwrap();
+    assert_eq!(hdr.version, VBUNDLE_REDACTED_VERSION);
+    let red_meta = hdr.parse_redacted_header(&raw_bytes).unwrap().unwrap();
+    assert_eq!(red_meta.source_record_count, 3);
+    assert_eq!(red_meta.frame_proofs.len(), 3);
+
+    // 2. Export session-filtered redacted bundle via CLI (`--export-bundle ... --session sess_red_1 --redact-fields`)
+    let exe = vouch_exe();
+    let cli_export = std::process::Command::new(&exe)
+        .env("VOUCH_STATE_DIR", &state_dir)
+        .args([
+            "doctor",
+            "--export-bundle",
+            slice_redacted_path.to_str().unwrap(),
+            "--session",
+            "sess_red_1",
+            "--redact-fields",
+        ])
+        .output()
+        .expect("cli redacted slice export");
+    assert!(
+        cli_export.status.success(),
+        "cli redacted export failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&cli_export.stdout),
+        String::from_utf8_lossy(&cli_export.stderr)
+    );
+
+    // Remove state_dir and verify both redacted bundles completely offline!
+    std::fs::remove_dir_all(&state_dir).unwrap();
+
+    let off_full = verify_vlog_bundle(&full_redacted_path).expect("verify full redacted offline");
+    assert!(off_full.valid);
+    assert_eq!(off_full.verified_records, 3);
+
+    let cli_verify = std::process::Command::new(&exe)
+        .env("VOUCH_STATE_DIR", &state_dir)
+        .args([
+            "doctor",
+            "--verify-bundle",
+            slice_redacted_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("cli redacted slice verify");
+    assert!(
+        cli_verify.status.success(),
+        "cli redacted verify failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&cli_verify.stdout),
+        String::from_utf8_lossy(&cli_verify.stderr)
+    );
+    let cli_verify_stdout = String::from_utf8_lossy(&cli_verify.stdout);
+    assert!(cli_verify_stdout.contains("bundle integrity verified: 2 records"));
+
+    // 3. Decode records from redacted bundle and verify field-level commitment claims
+    let decoded_recs = read_records_from_vlog_bundle(&full_redacted_path).unwrap();
+    assert_eq!(decoded_recs.len(), 3);
+    for (idx, rec) in decoded_recs.iter().enumerate() {
+        assert!(rec.cmd.starts_with("sha256:") && rec.cmd.len() == 71);
+        assert!(rec.cwd.starts_with("sha256:") && rec.cwd.len() == 71);
+        // Structural fields remain intact
+        assert_eq!(rec.id, format!("toolu_{idx:05}"));
+    }
+
+    let proof_0 = &red_meta.frame_proofs[0];
+    assert!(verify_redacted_field_claim(
+        proof_0.orig_chain_tag,
+        proof_0.orig_seq_idx,
+        "cmd",
+        sensitive_cmd_0,
+        &decoded_recs[0].cmd
+    ));
+    assert!(!verify_redacted_field_claim(
+        proof_0.orig_chain_tag,
+        proof_0.orig_seq_idx,
+        "cmd",
+        "wrong command guess",
+        &decoded_recs[0].cmd
+    ));
+    assert!(verify_redacted_field_claim(
+        proof_0.orig_chain_tag,
+        proof_0.orig_seq_idx,
+        "cwd",
+        sensitive_cwd,
+        &decoded_recs[0].cwd
+    ));
+    assert_eq!(
+        compute_redacted_field_commitment(proof_0.orig_chain_tag, proof_0.orig_seq_idx, "cmd", sensitive_cmd_0),
+        decoded_recs[0].cmd
+    );
+
+    // 4. Tamper test: corrupt a proof_tag in VlogRedactedHeader and re-seal the outer bundle SHA-256
+    let mut tampered = raw_bytes.clone();
+    // Flip a bit in frame_proofs[1].proof_tag (offset: VBUNDLE_HEADER_LEN + VBUNDLE_SLICE_HEADER_LEN + 1 * 96 + 88)
+    let proof_tag_offset =
+        VBUNDLE_HEADER_LEN + VBUNDLE_SLICE_HEADER_LEN + VBUNDLE_REDACTION_PROOF_LEN + 88;
+    tampered[proof_tag_offset] ^= 0x01;
+    let mut prefix = [0u8; 64];
+    prefix.copy_from_slice(&tampered[0..64]);
+    let vlog_start = hdr.vlog_offset as usize;
+    let vlog_end = vlog_start + hdr.vlog_len as usize;
+    let vidx_start = hdr.vidx_offset as usize;
+    let vidx_end = vidx_start + hdr.vidx_len as usize;
+    let forged_seal = compute_bundle_seal_sha256_with_extra(
+        &prefix,
+        &tampered[VBUNDLE_HEADER_LEN..vlog_start],
+        &tampered[vlog_start..vlog_end],
+        &tampered[vidx_start..vidx_end],
+        &[],
+    );
+    tampered[64..96].copy_from_slice(&forged_seal);
+    let tampered_path = archive_dir.join("tampered_redacted.vbundle");
+    std::fs::write(&tampered_path, &tampered).unwrap();
+
+    let tampered_rep = verify_vlog_bundle(&tampered_path).expect("verify tampered redacted bundle");
+    assert!(
+        !tampered_rep.valid,
+        "tampered redaction proof tag must fail verification"
+    );
+    assert!(matches!(
+        tampered_rep.tamper_finding,
+        Some(VlogTamperKind::ChainLinkBroken { seq_idx: 1, .. })
     ));
 
     let _ = std::fs::remove_dir_all(&archive_dir);

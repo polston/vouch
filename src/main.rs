@@ -1428,14 +1428,15 @@ fn main() {
         if let Some(pos) = args.iter().position(|a| a == "--export-bundle") {
             let Some(bundle_arg) = args.get(pos + 1) else {
                 eprintln!(
-                    "usage: vouch doctor --export-bundle <bundle.vbundle> [--since <parent.vbundle>] [--session <id>] [--from <timestamp>] [--to <timestamp>]"
+                    "usage: vouch doctor --export-bundle <bundle.vbundle> [--since <parent.vbundle>] [--session <id>] [--from <timestamp>] [--to <timestamp>] [--redact-fields]"
                 );
                 std::process::exit(2);
             };
+            let redact_fields = args.iter().any(|a| a == "--redact-fields");
             let since_path = if let Some(spos) = args.iter().position(|a| a == "--since") {
                 let Some(sarg) = args.get(spos + 1) else {
                     eprintln!(
-                        "usage: vouch doctor --export-bundle <bundle.vbundle> [--since <parent.vbundle>] [--session <id>] [--from <timestamp>] [--to <timestamp>]"
+                        "usage: vouch doctor --export-bundle <bundle.vbundle> [--since <parent.vbundle>] [--session <id>] [--from <timestamp>] [--to <timestamp>] [--redact-fields]"
                     );
                     std::process::exit(2);
                 };
@@ -1498,16 +1499,18 @@ fn main() {
                 from_ts_secs: from_epoch_secs,
                 to_ts_secs: to_epoch_secs,
             };
-            if since_path.is_some() && filter.is_active() {
+            if since_path.is_some() && (filter.is_active() || redact_fields) {
                 eprintln!(
-                    "cannot combine --since delta export with --session / --from / --to slice filters"
+                    "cannot combine --since delta export with --session / --from / --to / --redact-fields"
                 );
                 std::process::exit(2);
             }
 
             let bundle_path = std::path::Path::new(bundle_arg);
             let dir = journal::state_dir();
-            let result = if filter.is_active() {
+            let result = if redact_fields {
+                vouch::journal_vlog::export_vlog_redacted_bundle(&dir, bundle_path, &filter)
+            } else if filter.is_active() {
                 vouch::journal_vlog::export_vlog_slice_bundle(&dir, bundle_path, &filter)
             } else {
                 vouch::journal_vlog::export_vlog_bundle_since(

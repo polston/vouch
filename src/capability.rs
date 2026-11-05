@@ -5,7 +5,7 @@
 //! trees (e.g. bash scripts invoking python snippets that launch subprocesses or container CLIs).
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Strongly typed bitset representing process capabilities.
@@ -1444,6 +1444,13 @@ impl TransitiveImportResolver {
         report.capabilities.union(ast_caps);
 
         for spec in imports {
+            if let Some(ref dyn_src) = spec.dynamic_source {
+                report.capabilities.dynamic_eval = true;
+                report
+                    .unresolved_imports
+                    .push(format!("dynamic_import: {dyn_src}"));
+                continue;
+            }
             if let Some(ref mod_name) = spec.module {
                 let first_seg = mod_name.split('.').next().unwrap_or(mod_name.as_str());
                 let norm_first = WorkspaceManifestIndex::normalize_py_name(first_seg);
@@ -1451,13 +1458,17 @@ impl TransitiveImportResolver {
                     .capabilities
                     .union(classify_python_dependency_capabilities(&norm_first));
             }
-            let candidates = resolve_python_import_candidates_with_pep723(
-                &spec,
-                current_file,
-                &self.workspace_root,
-                &self.manifest_index,
-                &pep723,
-            );
+            let candidates = if let Some(ref path_target) = spec.path_target {
+                resolve_python_run_path_candidates(path_target, current_file, &self.workspace_root)
+            } else {
+                resolve_python_import_candidates_with_pep723(
+                    &spec,
+                    current_file,
+                    &self.workspace_root,
+                    &self.manifest_index,
+                    &pep723,
+                )
+            };
             let mut resolved_path = None;
             let mut escaped_candidate = None;
             for cand in &candidates {
@@ -1502,6 +1513,8 @@ impl TransitiveImportResolver {
                 }
             } else if let Some(escaped) = escaped_candidate {
                 report.unresolved_imports.push(format!("escaped: {}", escaped.display()));
+            } else if let Some(ref path_target) = spec.path_target {
+                report.unresolved_imports.push(format!("run_path: {path_target}"));
             } else if spec.level > 0 {
                 // Relative import failed to resolve on disk
                 let mod_desc = spec.module.as_deref().unwrap_or("<current>");
@@ -1656,6 +1669,80 @@ struct PythonImportSpecifier {
     level: u32,
     module: Option<String>,
     imported_names: Vec<String>,
+    path_target: Option<String>,
+    dynamic_source: Option<String>,
+}
+
+/// Extract AST-level Python capabilities including dynamic import and module execution calls.
+pub fn extract_python_ast_capabilities(src: &str) -> CapabilitySet {
+    match collect_python_imports(src) {
+        Ok((imports, mut caps)) => {
+            for spec in imports {
+                if let Some(ref mod_name) = spec.module {
+                    let first_seg = mod_name.split('.').next().unwrap_or(mod_name.as_str());
+                    let norm = WorkspaceManifestIndex::normalize_py_name(first_seg);
+                    caps.union(classify_python_dependency_capabilities(&norm));
+                }
+            }
+            caps
+        }
+        Err(_) => CapabilitySet::EMPTY,
+    }
+}
+
+fn check_python_builtin_module_capabilities(
+    mod_name: &str,
+    imported_names: &[String],
+    caps: &mut CapabilitySet,
+) {
+    let top = mod_name.split('.').next().unwrap_or(mod_name);
+    match top {
+        "socket" | "http" | "urllib" | "requests" | "httpx" | "aiohttp" | "ftplib" | "asyncio" => {
+            caps.network = true;
+        }
+        "multiprocessing" | "pty" | "daemon" => {
+            caps.daemon = true;
+        }
+        "shutil" | "tempfile" => {
+            caps.external_paths = true;
+        }
+        _ => {}
+    }
+    let norm = WorkspaceManifestIndex::normalize_py_name(top);
+    caps.union(classify_python_dependency_capabilities(&norm));
+    if mod_name == "os" {
+        for name in imported_names {
+            if matches!(
+                name.as_str(),
+                "system" | "popen" | "spawnl" | "spawnlp" | "spawnv" | "spawnvp"
+            ) {
+                caps.daemon = true;
+            }
+        }
+    } else if mod_name == "subprocess" {
+        for name in imported_names {
+            if name == "Popen" {
+                caps.daemon = true;
+            }
+        }
+    }
+}
+
+fn resolve_relative_python_module(level: u32, rest: &str, package: &str) -> Option<String> {
+    if level == 0 {
+        return Some(rest.to_string());
+    }
+    let segs: Vec<&str> = package.split('.').filter(|s| !s.is_empty()).collect();
+    if segs.len() < level as usize {
+        return None;
+    }
+    let keep = segs.len() - (level as usize - 1);
+    let base = segs[..keep].join(".");
+    if rest.is_empty() {
+        Some(base)
+    } else {
+        Some(format!("{base}.{rest}"))
+    }
 }
 
 fn collect_python_imports(src: &str) -> Result<(Vec<PythonImportSpecifier>, CapabilitySet), String> {
@@ -1668,9 +1755,99 @@ fn collect_python_imports(src: &str) -> Result<(Vec<PythonImportSpecifier>, Capa
         Err(e) => return Err(format!("parse_error: {e}")),
     };
 
+    fn eval_static_str(
+        expr: &ast::Expr,
+        string_vars: &HashMap<String, Option<String>>,
+    ) -> Option<String> {
+        match expr {
+            ast::Expr::StringLiteral(s) => Some(s.value.to_str().to_string()),
+            ast::Expr::Name(n) => string_vars.get(n.id.as_str()).and_then(|v| v.clone()),
+            ast::Expr::BinOp(bin) if matches!(bin.op, ast::Operator::Add) => {
+                let left = eval_static_str(&bin.left, string_vars)?;
+                let right = eval_static_str(&bin.right, string_vars)?;
+                Some(format!("{left}{right}"))
+            }
+            ast::Expr::FString(fstr) => {
+                let mut out = String::new();
+                for part in fstr.value.iter() {
+                    match part {
+                        ast::FStringPart::Literal(lit) => out.push_str(lit),
+                        ast::FStringPart::FString(inner) => {
+                            for elem in &inner.elements {
+                                match elem {
+                                    ast::InterpolatedStringElement::Literal(lit) => {
+                                        out.push_str(&lit.value);
+                                    }
+                                    ast::InterpolatedStringElement::Interpolation(interp) => {
+                                        let val = eval_static_str(&interp.expression, string_vars)?;
+                                        out.push_str(&val);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Some(out)
+            }
+            _ => None,
+        }
+    }
+
+    fn eval_static_u32(expr: &ast::Expr) -> Option<u32> {
+        if let ast::Expr::NumberLiteral(num) = expr {
+            if let ast::Number::Int(int_val) = &num.value {
+                return int_val.to_string().parse::<u32>().ok();
+            }
+        }
+        None
+    }
+
+    fn extract_dotted_expr(expr: &ast::Expr) -> Option<String> {
+        match expr {
+            ast::Expr::Name(n) => Some(n.id.to_string()),
+            ast::Expr::Attribute(attr) => {
+                let prefix = extract_dotted_expr(&attr.value)?;
+                Some(format!("{prefix}.{}", attr.attr))
+            }
+            _ => None,
+        }
+    }
+
+    fn resolve_call_head(
+        func: &ast::Expr,
+        import_aliases: &HashMap<String, String>,
+    ) -> Option<String> {
+        let raw = extract_dotted_expr(func)?;
+        if let Some((root, rest)) = raw.split_once('.') {
+            if let Some(mapped) = import_aliases.get(root) {
+                return Some(format!("{mapped}.{rest}"));
+            }
+            Some(raw)
+        } else {
+            Some(import_aliases.get(&raw).cloned().unwrap_or(raw))
+        }
+    }
+
+    fn extract_call_arg<'a>(
+        call: &'a ast::ExprCall,
+        pos: usize,
+        kw_name: &str,
+    ) -> Option<&'a ast::Expr> {
+        if let Some(arg) = call.arguments.args.get(pos) {
+            return Some(arg);
+        }
+        call.arguments
+            .keywords
+            .iter()
+            .find(|k| k.arg.as_deref() == Some(kw_name))
+            .map(|k| &k.value)
+    }
+
     struct ImportVisitor {
         imports: Vec<PythonImportSpecifier>,
         caps: CapabilitySet,
+        import_aliases: HashMap<String, String>,
+        string_vars: HashMap<String, Option<String>>,
     }
 
     impl<'a> PyVisitor<'a> for ImportVisitor {
@@ -1678,22 +1855,90 @@ fn collect_python_imports(src: &str) -> Result<(Vec<PythonImportSpecifier>, Capa
             match stmt {
                 ast::Stmt::Import(import_stmt) => {
                     for alias in &import_stmt.names {
+                        let bound = alias.asname.as_ref().unwrap_or(&alias.name).to_string();
+                        self.import_aliases.insert(bound, alias.name.to_string());
+                        check_python_builtin_module_capabilities(
+                            alias.name.as_str(),
+                            &[],
+                            &mut self.caps,
+                        );
                         self.imports.push(PythonImportSpecifier {
                             level: 0,
                             module: Some(alias.name.to_string()),
                             imported_names: Vec::new(),
+                            path_target: None,
+                            dynamic_source: None,
                         });
                     }
                 }
                 ast::Stmt::ImportFrom(from_stmt) => {
                     let level = from_stmt.level;
                     let module = from_stmt.module.as_ref().map(|m| m.to_string());
-                    let imported_names = from_stmt.names.iter().map(|a| a.name.to_string()).collect();
+                    let imported_names: Vec<String> =
+                        from_stmt.names.iter().map(|a| a.name.to_string()).collect();
+                    if level == 0 {
+                        if let Some(ref mod_name) = module {
+                            for alias in &from_stmt.names {
+                                let bound =
+                                    alias.asname.as_ref().unwrap_or(&alias.name).to_string();
+                                self.import_aliases
+                                    .insert(bound, format!("{mod_name}.{}", alias.name));
+                            }
+                            check_python_builtin_module_capabilities(
+                                mod_name.as_str(),
+                                &imported_names,
+                                &mut self.caps,
+                            );
+                        }
+                    }
                     self.imports.push(PythonImportSpecifier {
                         level,
                         module,
                         imported_names,
+                        path_target: None,
+                        dynamic_source: None,
                     });
+                }
+                ast::Stmt::Assign(assign) => {
+                    self.visit_expr(&assign.value);
+                    let val = eval_static_str(&assign.value, &self.string_vars);
+                    for target in &assign.targets {
+                        if let ast::Expr::Name(name) = target {
+                            self.string_vars.insert(name.id.to_string(), val.clone());
+                        }
+                    }
+                    return;
+                }
+                ast::Stmt::AnnAssign(assign) => {
+                    if let Some(ref value) = assign.value {
+                        self.visit_expr(value);
+                        let val = eval_static_str(value, &self.string_vars);
+                        if let ast::Expr::Name(name) = assign.target.as_ref() {
+                            self.string_vars.insert(name.id.to_string(), val);
+                        }
+                    } else if let ast::Expr::Name(name) = assign.target.as_ref() {
+                        self.string_vars.insert(name.id.to_string(), None);
+                    }
+                    return;
+                }
+                ast::Stmt::AugAssign(assign) => {
+                    self.visit_expr(&assign.target);
+                    self.visit_expr(&assign.value);
+                    if let ast::Expr::Name(name) = assign.target.as_ref() {
+                        if matches!(assign.op, ast::Operator::Add) {
+                            let next = match (
+                                self.string_vars.get(name.id.as_str()).and_then(|v| v.clone()),
+                                eval_static_str(&assign.value, &self.string_vars),
+                            ) {
+                                (Some(a), Some(b)) => Some(format!("{a}{b}")),
+                                _ => None,
+                            };
+                            self.string_vars.insert(name.id.to_string(), next);
+                        } else {
+                            self.string_vars.insert(name.id.to_string(), None);
+                        }
+                    }
+                    return;
                 }
                 _ => {}
             }
@@ -1702,9 +1947,227 @@ fn collect_python_imports(src: &str) -> Result<(Vec<PythonImportSpecifier>, Capa
 
         fn visit_expr(&mut self, expr: &'a ast::Expr) {
             if let ast::Expr::Call(call) = expr {
-                if let ast::Expr::Name(name) = call.func.as_ref() {
-                    if matches!(name.id.as_str(), "eval" | "exec" | "compile") {
-                        self.caps.dynamic_eval = true;
+                if let Some(head) = resolve_call_head(&call.func, &self.import_aliases) {
+                    match head.as_str() {
+                        "eval" | "exec" | "compile" | "builtins.eval" | "builtins.exec"
+                        | "builtins.compile" => {
+                            self.caps.dynamic_eval = true;
+                        }
+                        "importlib.import_module" => {
+                            let name_expr = extract_call_arg(call, 0, "name");
+                            let pkg_expr = extract_call_arg(call, 1, "package");
+                            match name_expr.and_then(|e| eval_static_str(e, &self.string_vars)) {
+                                Some(raw_mod) if !raw_mod.is_empty() => {
+                                    let dots =
+                                        raw_mod.chars().take_while(|&c| c == '.').count() as u32;
+                                    let rest = &raw_mod[dots as usize..];
+                                    if dots > 0 {
+                                        if let Some(p_expr) = pkg_expr {
+                                            if let Some(pkg_str) =
+                                                eval_static_str(p_expr, &self.string_vars)
+                                            {
+                                                if let Some(resolved_mod) =
+                                                    resolve_relative_python_module(
+                                                        dots, rest, &pkg_str,
+                                                    )
+                                                {
+                                                    check_python_builtin_module_capabilities(
+                                                        &resolved_mod,
+                                                        &[],
+                                                        &mut self.caps,
+                                                    );
+                                                    self.imports.push(PythonImportSpecifier {
+                                                        level: 0,
+                                                        module: Some(resolved_mod),
+                                                        imported_names: Vec::new(),
+                                                        path_target: None,
+                                                        dynamic_source: None,
+                                                    });
+                                                } else {
+                                                    self.imports.push(PythonImportSpecifier {
+                                                        level: dots,
+                                                        module: (!rest.is_empty())
+                                                            .then(|| rest.to_string()),
+                                                        imported_names: Vec::new(),
+                                                        path_target: None,
+                                                        dynamic_source: None,
+                                                    });
+                                                }
+                                            } else {
+                                                self.caps.dynamic_eval = true;
+                                                self.imports.push(PythonImportSpecifier {
+                                                    level: 0,
+                                                    module: None,
+                                                    imported_names: Vec::new(),
+                                                    path_target: None,
+                                                    dynamic_source: Some(
+                                                        "importlib.import_module".to_string(),
+                                                    ),
+                                                });
+                                            }
+                                        } else {
+                                            self.imports.push(PythonImportSpecifier {
+                                                level: dots,
+                                                module: (!rest.is_empty())
+                                                    .then(|| rest.to_string()),
+                                                imported_names: Vec::new(),
+                                                path_target: None,
+                                                dynamic_source: None,
+                                            });
+                                        }
+                                    } else {
+                                        check_python_builtin_module_capabilities(
+                                            &raw_mod,
+                                            &[],
+                                            &mut self.caps,
+                                        );
+                                        self.imports.push(PythonImportSpecifier {
+                                            level: 0,
+                                            module: Some(raw_mod),
+                                            imported_names: Vec::new(),
+                                            path_target: None,
+                                            dynamic_source: None,
+                                        });
+                                    }
+                                }
+                                _ => {
+                                    self.caps.dynamic_eval = true;
+                                    self.imports.push(PythonImportSpecifier {
+                                        level: 0,
+                                        module: None,
+                                        imported_names: Vec::new(),
+                                        path_target: None,
+                                        dynamic_source: Some(
+                                            "importlib.import_module".to_string(),
+                                        ),
+                                    });
+                                }
+                            }
+                        }
+                        "__import__" | "builtins.__import__" => {
+                            let name_expr = extract_call_arg(call, 0, "name");
+                            let fromlist_expr = extract_call_arg(call, 3, "fromlist");
+                            let level_expr = extract_call_arg(call, 4, "level");
+                            let level_opt = match level_expr {
+                                Some(e) => eval_static_u32(e),
+                                None => Some(0),
+                            };
+                            let mut imported_names = Vec::new();
+                            if let Some(fl) = fromlist_expr {
+                                let elts: Option<&[ast::Expr]> = match fl {
+                                    ast::Expr::Tuple(t) => Some(&t.elts),
+                                    ast::Expr::List(l) => Some(&l.elts),
+                                    _ => None,
+                                };
+                                if let Some(items) = elts {
+                                    for item in items {
+                                        if let Some(s) = eval_static_str(item, &self.string_vars) {
+                                            imported_names.push(s);
+                                        }
+                                    }
+                                }
+                            }
+                            match (
+                                name_expr.and_then(|e| eval_static_str(e, &self.string_vars)),
+                                level_opt,
+                            ) {
+                                (Some(raw_mod), Some(level))
+                                    if !raw_mod.is_empty() || level > 0 =>
+                                {
+                                    let dots =
+                                        raw_mod.chars().take_while(|&c| c == '.').count() as u32;
+                                    let eff_level = if level > 0 { level } else { dots };
+                                    let rest = if dots > 0 {
+                                        &raw_mod[dots as usize..]
+                                    } else {
+                                        raw_mod.as_str()
+                                    };
+                                    if eff_level == 0 {
+                                        check_python_builtin_module_capabilities(
+                                            rest,
+                                            &imported_names,
+                                            &mut self.caps,
+                                        );
+                                    }
+                                    self.imports.push(PythonImportSpecifier {
+                                        level: eff_level,
+                                        module: (!rest.is_empty()).then(|| rest.to_string()),
+                                        imported_names,
+                                        path_target: None,
+                                        dynamic_source: None,
+                                    });
+                                }
+                                _ => {
+                                    self.caps.dynamic_eval = true;
+                                    self.imports.push(PythonImportSpecifier {
+                                        level: 0,
+                                        module: None,
+                                        imported_names: Vec::new(),
+                                        path_target: None,
+                                        dynamic_source: Some("__import__".to_string()),
+                                    });
+                                }
+                            }
+                        }
+                        "runpy.run_module" => {
+                            let mod_expr = extract_call_arg(call, 0, "mod_name");
+                            match mod_expr.and_then(|e| eval_static_str(e, &self.string_vars)) {
+                                Some(raw_mod) if !raw_mod.is_empty() => {
+                                    let dots =
+                                        raw_mod.chars().take_while(|&c| c == '.').count() as u32;
+                                    let rest = &raw_mod[dots as usize..];
+                                    if dots == 0 {
+                                        check_python_builtin_module_capabilities(
+                                            &raw_mod,
+                                            &[],
+                                            &mut self.caps,
+                                        );
+                                    }
+                                    self.imports.push(PythonImportSpecifier {
+                                        level: dots,
+                                        module: (!rest.is_empty()).then(|| rest.to_string()),
+                                        imported_names: Vec::new(),
+                                        path_target: None,
+                                        dynamic_source: None,
+                                    });
+                                }
+                                _ => {
+                                    self.caps.dynamic_eval = true;
+                                    self.imports.push(PythonImportSpecifier {
+                                        level: 0,
+                                        module: None,
+                                        imported_names: Vec::new(),
+                                        path_target: None,
+                                        dynamic_source: Some("runpy.run_module".to_string()),
+                                    });
+                                }
+                            }
+                        }
+                        "runpy.run_path" => {
+                            let path_expr = extract_call_arg(call, 0, "path_name");
+                            match path_expr.and_then(|e| eval_static_str(e, &self.string_vars)) {
+                                Some(raw_path) if !raw_path.is_empty() => {
+                                    self.imports.push(PythonImportSpecifier {
+                                        level: 0,
+                                        module: None,
+                                        imported_names: Vec::new(),
+                                        path_target: Some(raw_path),
+                                        dynamic_source: None,
+                                    });
+                                }
+                                _ => {
+                                    self.caps.dynamic_eval = true;
+                                    self.imports.push(PythonImportSpecifier {
+                                        level: 0,
+                                        module: None,
+                                        imported_names: Vec::new(),
+                                        path_target: None,
+                                        dynamic_source: Some("runpy.run_path".to_string()),
+                                    });
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -1715,6 +2178,8 @@ fn collect_python_imports(src: &str) -> Result<(Vec<PythonImportSpecifier>, Capa
     let mut visitor = ImportVisitor {
         imports: Vec::new(),
         caps: CapabilitySet::EMPTY,
+        import_aliases: HashMap::new(),
+        string_vars: HashMap::new(),
     };
     for stmt in &parsed.body {
         visitor.visit_stmt(stmt);
@@ -2045,6 +2510,31 @@ fn resolve_python_import_candidates_with_pep723(
     candidates
 }
 
+fn resolve_python_run_path_candidates(
+    path_target: &str,
+    current_file: Option<&Path>,
+    workspace_root: &Path,
+) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    let trimmed = path_target.trim();
+    if trimmed.is_empty() {
+        return candidates;
+    }
+    let current_dir = current_file.and_then(|p| p.parent()).unwrap_or(workspace_root);
+    let raw_path = Path::new(trimmed);
+    if raw_path.is_absolute() {
+        candidates.push(raw_path.to_path_buf());
+        candidates.push(raw_path.join("__main__.py"));
+    } else {
+        for base in &[current_dir, workspace_root] {
+            let joined = base.join(trimmed);
+            candidates.push(joined.clone());
+            candidates.push(joined.join("__main__.py"));
+        }
+    }
+    candidates
+}
+
 fn resolve_python_import_candidates(
     spec: &PythonImportSpecifier,
     current_file: Option<&Path>,
@@ -2068,12 +2558,13 @@ fn resolve_python_import_candidates(
         if valid {
             if let Some(ref mod_name) = spec.module {
                 let rel_path = mod_name.replace('.', "/");
-                candidates.push(base_dir.join(format!("{}.py", rel_path)));
-                candidates.push(base_dir.join(&rel_path).join("__init__.py"));
                 for name in &spec.imported_names {
                     candidates.push(base_dir.join(&rel_path).join(format!("{}.py", name)));
                     candidates.push(base_dir.join(&rel_path).join(name).join("__init__.py"));
                 }
+                candidates.push(base_dir.join(format!("{}.py", rel_path)));
+                candidates.push(base_dir.join(&rel_path).join("__main__.py"));
+                candidates.push(base_dir.join(&rel_path).join("__init__.py"));
             } else {
                 for name in &spec.imported_names {
                     candidates.push(base_dir.join(format!("{}.py", name)));
@@ -2084,12 +2575,13 @@ fn resolve_python_import_candidates(
     } else if let Some(ref mod_name) = spec.module {
         let rel_path = mod_name.replace('.', "/");
         for base in &[current_dir, workspace_root] {
-            candidates.push(base.join(format!("{}.py", rel_path)));
-            candidates.push(base.join(&rel_path).join("__init__.py"));
             for name in &spec.imported_names {
                 candidates.push(base.join(&rel_path).join(format!("{}.py", name)));
                 candidates.push(base.join(&rel_path).join(name).join("__init__.py"));
             }
+            candidates.push(base.join(format!("{}.py", rel_path)));
+            candidates.push(base.join(&rel_path).join("__main__.py"));
+            candidates.push(base.join(&rel_path).join("__init__.py"));
         }
 
         // Consult WorkspaceManifestIndex for src-layout / editable / workspace packages
@@ -2105,20 +2597,22 @@ fn resolve_python_import_candidates(
         {
             match rest_opt {
                 None => {
-                    candidates.push(pkg_dir.with_extension("py"));
-                    candidates.push(pkg_dir.join("__init__.py"));
                     for name in &spec.imported_names {
                         candidates.push(pkg_dir.join(format!("{}.py", name)));
                         candidates.push(pkg_dir.join(name).join("__init__.py"));
                     }
+                    candidates.push(pkg_dir.with_extension("py"));
+                    candidates.push(pkg_dir.join("__main__.py"));
+                    candidates.push(pkg_dir.join("__init__.py"));
                 }
                 Some(rest_rel) => {
-                    candidates.push(pkg_dir.join(format!("{}.py", rest_rel)));
-                    candidates.push(pkg_dir.join(&rest_rel).join("__init__.py"));
                     for name in &spec.imported_names {
                         candidates.push(pkg_dir.join(&rest_rel).join(format!("{}.py", name)));
                         candidates.push(pkg_dir.join(&rest_rel).join(name).join("__init__.py"));
                     }
+                    candidates.push(pkg_dir.join(format!("{}.py", rest_rel)));
+                    candidates.push(pkg_dir.join(&rest_rel).join("__main__.py"));
+                    candidates.push(pkg_dir.join(&rest_rel).join("__init__.py"));
                 }
             }
         }

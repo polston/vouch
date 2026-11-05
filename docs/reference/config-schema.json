@@ -115,6 +115,14 @@
       "description": "The `[sandbox.cgroups]` table: Linux cgroups v2 memory, process count, CPU bandwidth, and block I/O limits for worker processes.",
       "type": "object",
       "properties": {
+        "cpu_idle": {
+          "description": "Whether the worker cgroup is scheduled with `SCHED_IDLE` semantics (`cpu.idle` in cgroups v2; `true` writes `\"1\"`, `false` writes `\"0\"`).",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
         "cpu_max_period_us": {
           "description": "CPU bandwidth period in microseconds (`cpu.max` second token in cgroups v2; defaults to 100000 when `cpu_max_quota_us` is set).",
           "type": [
@@ -132,6 +140,16 @@
             "null"
           ],
           "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
+        "cpu_weight": {
+          "description": "Proportional CPU scheduling weight in `[1, 10000]` (`cpu.weight` in cgroups v2; default kernel weight is `100`).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
           "default": null,
           "minimum": 0
         },

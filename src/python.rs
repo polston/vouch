@@ -1731,6 +1731,116 @@ impl Walk {
         if let Some(references) = self.out.indexed_values.last_mut() {
             *references = indexed_values;
         }
+        self.check_dynamic_import_call(&head, node);
+    }
+
+    fn extract_call_arg(
+        &self,
+        node: &ast::ExprCall,
+        pos: usize,
+        kw_name: &str,
+    ) -> Option<ArgumentValue> {
+        if let Some(arg) = node.arguments.args.get(pos) {
+            return Some(argument_value(arg, &self.assigned));
+        }
+        node.arguments
+            .keywords
+            .iter()
+            .find(|k| k.arg.as_deref() == Some(kw_name))
+            .map(|k| argument_value(&k.value, &self.assigned))
+    }
+
+    fn check_dynamic_import_call(&mut self, head: &str, node: &ast::ExprCall) {
+        match head {
+            "importlib.import_module" | "__import__" | "builtins.__import__" => {
+                let Some(val) = self.extract_call_arg(node, 0, "name") else {
+                    self.out.note_with_detail("unmodeled_import", head);
+                    return;
+                };
+                if !val.readable || val.text.contains('$') || val.text.is_empty() {
+                    self.out.note_with_detail("unmodeled_import", head);
+                    return;
+                }
+                if val.text.starts_with('.') {
+                    let dots = val.text.chars().take_while(|&c| c == '.').count();
+                    if head == "importlib.import_module" {
+                        if let Some(pkg_val) = self.extract_call_arg(node, 1, "package") {
+                            if !pkg_val.readable || pkg_val.text.contains('$') || pkg_val.text.is_empty() {
+                                self.out.note_with_detail("unmodeled_import", head);
+                                return;
+                            }
+                            let segs: Vec<&str> =
+                                pkg_val.text.split('.').filter(|s| !s.is_empty()).collect();
+                            if segs.len() >= dots {
+                                let base_root = segs[0];
+                                if self.scope_depth == 0 && !is_known_inert_module(base_root) {
+                                    self.out.note_with_detail("unmodeled_import", base_root);
+                                }
+                            } else if self.scope_depth == 0 {
+                                self.out.note_with_detail("unmodeled_import", "relative_import");
+                            }
+                        } else if self.scope_depth == 0 {
+                            self.out.note_with_detail("unmodeled_import", "relative_import");
+                        }
+                    } else if self.scope_depth == 0 {
+                        self.out.note_with_detail("unmodeled_import", "relative_import");
+                    }
+                    return;
+                }
+                if head.ends_with("__import__") {
+                    if let Some(lvl_val) = self.extract_call_arg(node, 4, "level") {
+                        if !lvl_val.readable || lvl_val.text.contains('$') {
+                            self.out.note_with_detail("unmodeled_import", head);
+                            return;
+                        }
+                        if lvl_val.text != "0" {
+                            if self.scope_depth == 0 {
+                                self.out.note_with_detail("unmodeled_import", "relative_import");
+                            }
+                            return;
+                        }
+                    }
+                }
+                if self.scope_depth == 0 {
+                    let root = val.text.split('.').next().unwrap_or(&val.text);
+                    if !is_known_inert_module(root) {
+                        self.out.note_with_detail("unmodeled_import", root);
+                    }
+                }
+            }
+            "runpy.run_module" => {
+                let Some(val) = self.extract_call_arg(node, 0, "mod_name") else {
+                    self.out.note_with_detail("unmodeled_import", head);
+                    return;
+                };
+                if !val.readable || val.text.contains('$') || val.text.is_empty() {
+                    self.out.note_with_detail("unmodeled_import", head);
+                    return;
+                }
+                if val.text.starts_with('.') {
+                    if self.scope_depth == 0 {
+                        self.out.note_with_detail("unmodeled_import", "relative_import");
+                    }
+                } else if self.scope_depth == 0 {
+                    let root = val.text.split('.').next().unwrap_or(&val.text);
+                    if !is_known_inert_module(root) {
+                        self.out.note_with_detail("unmodeled_import", root);
+                    }
+                }
+            }
+            "runpy.run_path" => {
+                let Some(val) = self.extract_call_arg(node, 0, "path_name") else {
+                    self.out.note_with_detail("unmodeled_import", head);
+                    return;
+                };
+                if !val.readable || val.text.contains('$') || val.text.is_empty() {
+                    self.out.note_with_detail("unmodeled_import", head);
+                } else if self.scope_depth == 0 {
+                    self.out.note_with_detail("unmodeled_import", &val.text);
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -2090,6 +2200,7 @@ pub fn extract_capabilities(src: &str) -> crate::capability::CapabilitySet {
         }
     }
 
+    caps.union(crate::capability::extract_python_ast_capabilities(src));
     caps
 }
 

@@ -415,6 +415,17 @@ impl CgroupSwapEvents {
     }
 }
 
+/// Consolidated memory and swap watermark telemetry snapshot for a cgroup v2 worker scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CgroupMemoryTelemetry {
+    pub current_bytes: Option<u64>,
+    pub peak_bytes: Option<u64>,
+    pub swap_current_bytes: Option<u64>,
+    pub swap_peak_bytes: Option<u64>,
+    pub events: CgroupMemoryEvents,
+    pub swap_events: CgroupSwapEvents,
+}
+
 /// Parsed statistics from a cgroup v2 `pids.events` control file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CgroupPidsEvents {
@@ -443,6 +454,9 @@ impl CgroupPidsEvents {
 }
 
 pub const DEFAULT_CPU_MAX_PERIOD_US: u64 = 100_000;
+pub const MIN_CPU_WEIGHT: u32 = 1;
+pub const MAX_CPU_WEIGHT: u32 = 10_000;
+pub const DEFAULT_CPU_WEIGHT: u32 = 100;
 
 /// Parsed statistics from a cgroup v2 `cpu.stat` control file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -937,6 +951,22 @@ impl CgroupV2Manager {
             write_control_file(&dir.join("cpu.max"), &format!("max {DEFAULT_CPU_MAX_PERIOD_US}"))?;
         }
 
+        if let Some(weight) = cfg.cpu_weight {
+            if !(MIN_CPU_WEIGHT..=MAX_CPU_WEIGHT).contains(&weight) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "[sandbox.cgroups] cpu_weight ({weight}) must be in the range {MIN_CPU_WEIGHT}..={MAX_CPU_WEIGHT}"
+                    ),
+                ));
+            }
+            write_control_file(&dir.join("cpu.weight"), &weight.to_string())?;
+        }
+
+        if let Some(idle) = cfg.cpu_idle {
+            write_control_file(&dir.join("cpu.idle"), if idle { "1" } else { "0" })?;
+        }
+
         let mut io_max_rules = Vec::with_capacity(cfg.io_max.len());
         for raw_rule in &cfg.io_max {
             let rule = CgroupIoMaxRule::parse(raw_rule)
@@ -960,6 +990,8 @@ impl CgroupV2Manager {
             pids_max: effective_pids_max,
             cpu_max_quota_us: effective_cpu_quota,
             cpu_max_period_us: effective_cpu_period,
+            cpu_weight: cfg.cpu_weight,
+            cpu_idle: cfg.cpu_idle,
             io_max_rules,
         })
     }
@@ -987,6 +1019,8 @@ pub struct CgroupScope {
     pub pids_max: Option<u64>,
     pub cpu_max_quota_us: Option<u64>,
     pub cpu_max_period_us: Option<u64>,
+    pub cpu_weight: Option<u32>,
+    pub cpu_idle: Option<bool>,
     pub io_max_rules: Vec<CgroupIoMaxRule>,
 }
 
@@ -1020,6 +1054,12 @@ impl CgroupScope {
         text.trim().parse::<u64>().ok()
     }
 
+    /// Read peak memory watermark in bytes from `memory.peak`.
+    pub fn read_memory_peak(&self) -> Option<u64> {
+        let text = std::fs::read_to_string(self.dir.join("memory.peak")).ok()?;
+        text.trim().parse::<u64>().ok()
+    }
+
     /// Read the configured hard memory ceiling in bytes from `memory.max` (`None` if `"max"` or absent).
     pub fn read_memory_max(&self) -> Option<u64> {
         let text = std::fs::read_to_string(self.dir.join("memory.max")).ok()?;
@@ -1045,6 +1085,12 @@ impl CgroupScope {
     /// Read current swap memory usage in bytes from `memory.swap.current`.
     pub fn read_current_swap_bytes(&self) -> Option<u64> {
         let text = std::fs::read_to_string(self.dir.join("memory.swap.current")).ok()?;
+        text.trim().parse::<u64>().ok()
+    }
+
+    /// Read peak swap memory watermark in bytes from `memory.swap.peak`.
+    pub fn read_memory_swap_peak(&self) -> Option<u64> {
+        let text = std::fs::read_to_string(self.dir.join("memory.swap.peak")).ok()?;
         text.trim().parse::<u64>().ok()
     }
 
@@ -1085,6 +1131,19 @@ impl CgroupScope {
         CgroupMemoryEvents::parse(&text)
     }
 
+    /// Sample consolidated memory and swap watermark telemetry (`memory.current`, `memory.peak`,
+    /// `memory.swap.current`, `memory.swap.peak`, `memory.events`, and `memory.swap.events`).
+    pub fn sample_memory_telemetry(&self) -> CgroupMemoryTelemetry {
+        CgroupMemoryTelemetry {
+            current_bytes: self.read_current_memory_bytes(),
+            peak_bytes: self.read_memory_peak(),
+            swap_current_bytes: self.read_current_swap_bytes(),
+            swap_peak_bytes: self.read_memory_swap_peak(),
+            events: self.read_memory_events(),
+            swap_events: self.read_swap_events(),
+        }
+    }
+
     /// Read current process/thread count from `pids.current`.
     pub fn read_current_pids(&self) -> Option<u64> {
         let text = std::fs::read_to_string(self.dir.join("pids.current")).ok()?;
@@ -1105,6 +1164,22 @@ impl CgroupScope {
             return CgroupCpuStat::default();
         };
         CgroupCpuStat::parse(&text)
+    }
+
+    /// Read the configured proportional CPU scheduling weight from `cpu.weight` (`1..=10000`).
+    pub fn read_cpu_weight(&self) -> Option<u32> {
+        let text = std::fs::read_to_string(self.dir.join("cpu.weight")).ok()?;
+        text.trim().parse::<u32>().ok()
+    }
+
+    /// Read `cpu.idle` (`Some(true)` for `"1"`, `Some(false)` for `"0"`, `None` otherwise).
+    pub fn read_cpu_idle(&self) -> Option<bool> {
+        let text = std::fs::read_to_string(self.dir.join("cpu.idle")).ok()?;
+        match text.trim() {
+            "1" => Some(true),
+            "0" => Some(false),
+            _ => None,
+        }
     }
 
     /// Read and parse `io.max` device throttling rules currently written in this scope.
@@ -1147,15 +1222,19 @@ impl CgroupScope {
                 "memory.high",
                 "memory.swap.max",
                 "memory.swap.current",
+                "memory.swap.peak",
                 "memory.swap.events",
                 "memory.oom.group",
                 "memory.current",
+                "memory.peak",
                 "memory.events",
                 "memory.pressure",
                 "pids.max",
                 "pids.current",
                 "pids.events",
                 "cpu.max",
+                "cpu.weight",
+                "cpu.idle",
                 "cpu.stat",
                 "cpu.pressure",
                 "io.max",
@@ -1336,6 +1415,8 @@ pub struct SandboxExecutionPlan {
     pub pids_max: Option<u64>,
     pub cpu_max_quota_us: Option<u64>,
     pub cpu_max_period_us: Option<u64>,
+    pub cpu_weight: Option<u32>,
+    pub cpu_idle: Option<bool>,
     pub io_max_rules: Vec<CgroupIoMaxRule>,
     pub psi_stall_warn_pct: Option<f64>,
     pub rlimits: RlimitSet,
@@ -1381,6 +1462,8 @@ impl SandboxExecutionPlan {
             pids_max: cfg.cgroups.pids_max.or(cfg.max_pids),
             cpu_max_quota_us: cfg.cgroups.cpu_max_quota_us,
             cpu_max_period_us: cfg.cgroups.cpu_max_period_us,
+            cpu_weight: cfg.cgroups.cpu_weight,
+            cpu_idle: cfg.cgroups.cpu_idle,
             io_max: cfg.cgroups.io_max.clone(),
             psi_stall_warn_pct: cfg.cgroups.psi_stall_warn_pct,
         };
@@ -1391,6 +1474,8 @@ impl SandboxExecutionPlan {
             || effective_cgroups.pids_max.is_some()
             || effective_cgroups.cpu_max_quota_us.is_some()
             || effective_cgroups.cpu_max_period_us.is_some()
+            || effective_cgroups.cpu_weight.is_some()
+            || effective_cgroups.cpu_idle.is_some()
             || !effective_cgroups.io_max.is_empty()
             || effective_cgroups.psi_stall_warn_pct.is_some();
 
@@ -1428,6 +1513,8 @@ impl SandboxExecutionPlan {
             pids_max: scope.as_ref().and_then(|s| s.pids_max),
             cpu_max_quota_us: scope.as_ref().and_then(|s| s.cpu_max_quota_us),
             cpu_max_period_us: scope.as_ref().and_then(|s| s.cpu_max_period_us),
+            cpu_weight: scope.as_ref().and_then(|s| s.cpu_weight),
+            cpu_idle: scope.as_ref().and_then(|s| s.cpu_idle),
             io_max_rules: scope
                 .as_ref()
                 .map(|s| s.io_max_rules.clone())

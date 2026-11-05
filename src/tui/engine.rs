@@ -259,6 +259,14 @@ impl TuiEngine {
                 }
                 current_content = doc.to_string();
                 summaries.push(format!("[write] allow_paths += {:?}", path_to_add));
+            } else if cand.section == "write.scope" {
+                let (updated, sum) = apply_write_scope_candidate_to_toml(&current_content, cand)?;
+                current_content = updated;
+                summaries.push(sum);
+            } else if cand.section == "run.guards" {
+                let (updated, sum) = apply_place_guard_candidate_to_toml(&current_content, cand)?;
+                current_content = updated;
+                summaries.push(sum);
             } else if cand.section.ends_with(".script_constructs") {
                 let (updated, sum) = apply_script_construct_candidate_to_toml(&current_content, cand)?;
                 current_content = updated;
@@ -279,6 +287,9 @@ impl TuiEngine {
                 summaries.push(format!("[{}] {} = \"allow\"", cand.section, cand.name));
             }
         }
+
+        let validated_cfg = crate::config::load(&current_content)?;
+        crate::config::validate_scopes(&validated_cfg, crate::guards::in_effect())?;
 
         Ok((
             current_content,
@@ -479,7 +490,10 @@ impl TuiEngine {
         if cand.section == "write.allow_paths" {
             let path_to_add = cand.name.strip_prefix("path: ").unwrap_or(&cand.name);
             Ok(format!("Added {:?} to write.allow_paths in config.toml", path_to_add))
-        } else if cand.section.ends_with(".script_constructs") {
+        } else if cand.section == "write.scope"
+            || cand.section == "run.guards"
+            || cand.section.ends_with(".script_constructs")
+        {
             Ok(format!("Added {summary} to config.toml"))
         } else {
             Ok(format!("Added [{}] {} = \"allow\" to config.toml", cand.section, cand.name))
@@ -1025,28 +1039,272 @@ pub(crate) fn format_tool_action_proposed_toml(
     format!("[[tool]]\nmatch = [{tool_name:?}]\nsource = {src:?}\naction = {action:?}\n")
 }
 
-fn synthesize_granular_candidates(records: &[Record]) -> Vec<ReviewCandidate> {
+pub(crate) fn format_write_scope_proposed_toml(
+    programs: &[String],
+    only_under: &[String],
+) -> String {
+    let progs_fmt = programs
+        .iter()
+        .map(|p| format!("{p:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let under_fmt = only_under
+        .iter()
+        .map(|u| format!("{u:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[[write.scope]]\nprograms = [{progs_fmt}]\nonly_under = [{under_fmt}]\n")
+}
+
+pub(crate) fn format_place_guard_proposed_toml(
+    under: &[String],
+    guard: &str,
+    action: &str,
+) -> String {
+    let under_fmt = under
+        .iter()
+        .map(|u| format!("{u:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[[run.guards]]\nunder = [{under_fmt}]\n{guard} = {action:?}\n")
+}
+
+pub(crate) fn derive_write_scope_glob(raw_path: &str) -> String {
+    let clean = raw_path.trim().replace('\\', "/");
+    if clean.ends_with("/**") {
+        return clean;
+    }
+    let trimmed = clean.trim_end_matches('/');
+    if let Some((parent, _leaf)) = trimmed.rsplit_once('/') {
+        if !parent.is_empty() && parent != "/" && !parent.ends_with(':') {
+            return format!("{parent}/**");
+        }
+    }
+    format!("{trimmed}/**")
+}
+
+pub(crate) fn extract_write_scope_programs_from_cmd(cmd_src: &str) -> Vec<String> {
+    let Ok(scan) = crate::shell::parse(cmd_src) else {
+        return Vec::new();
+    };
+    let kb = crate::guards::in_effect();
+    let mut fork = crate::guards::ForkCursor::new(&[]);
+    let expanded = crate::guards::expand_wrappers_forking(
+        kb,
+        &scan.commands,
+        &scan.heredocs,
+        &scan.input_source,
+        &scan.args_complete,
+        &[],
+        "bash",
+        &|_| 4,
+        &mut fork,
+    );
+
     let mut out = Vec::new();
-    let mut exact_counts: std::collections::HashMap<
-        (String, Vec<String>),
-        (usize, usize, usize, std::collections::HashSet<String>, String),
-    > = std::collections::HashMap::new();
+    for occ in &expanded.occurrences {
+        let c = &occ.cmd;
+        if c.head.is_empty() {
+            continue;
+        }
+        let clang = if occ.lang.is_empty() {
+            "bash"
+        } else {
+            occ.lang.as_str()
+        };
+        let wt = crate::guards::written_paths_in(kb, c, clang);
+        if wt.paths.is_empty() && !wt.run_dir_dest {
+            continue;
+        }
+        let head = crate::guards::base_name(&c.head);
+        if head.is_empty() || head.starts_with("python:") {
+            continue;
+        }
+        let has_value_options = kb.program.iter().any(|p| {
+            !p.value_options.is_empty()
+                && p.match_names.iter().any(|n| n.to_ascii_lowercase() == head)
+        });
+        if has_value_options {
+            if let crate::guards::VerbWord::Word(sub) = crate::guards::verb_of_in(kb, c, clang) {
+                let then_word = crate::guards::then_of_in(kb, c, clang);
+                let mut matched_three_word = false;
+                let mut matched_two_word = false;
+                for p in &kb.program {
+                    if !p.match_names.iter().any(|n| n.to_ascii_lowercase() == head) {
+                        continue;
+                    }
+                    for sw in &p.sub_write {
+                        if sw.subcommand.eq_ignore_ascii_case(&sub) {
+                            matched_two_word = true;
+                            if !sw.then.is_empty() {
+                                if let crate::guards::SecondWord::Word(ref got_then) = then_word {
+                                    if sw.then.eq_ignore_ascii_case(got_then) {
+                                        let entry3 = format!("{head} {sub} {got_then}");
+                                        if !out.contains(&entry3) {
+                                            out.push(entry3);
+                                        }
+                                        matched_three_word = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if p.subcommands
+                        .as_ref()
+                        .is_some_and(|subs| subs.iter().any(|s| s.eq_ignore_ascii_case(&sub)))
+                        || p.subcommand_options
+                            .iter()
+                            .any(|so| so.subcommands.iter().any(|s| s.eq_ignore_ascii_case(&sub)))
+                    {
+                        matched_two_word = true;
+                    }
+                }
+                if (matched_two_word || matched_three_word) && !sub.starts_with('-') && !sub.contains('/') {
+                    let entry2 = format!("{head} {sub}");
+                    if !out.contains(&entry2) {
+                        out.push(entry2);
+                    }
+                }
+            }
+        }
+        if !out.contains(&head) {
+            out.push(head);
+        }
+    }
+    out
+}
+
+pub(crate) fn extract_write_scope_presets_from_cmd(
+    cmd_src: &str,
+    reason: &str,
+    path_val: &str,
+) -> Vec<super::graph::BuilderPreset> {
+    let mut presets = Vec::new();
+    let is_scope_stop = reason.contains("vouch stopped on: write scope");
+    let scope_glob = derive_write_scope_glob(path_val);
+    let prog_entries = extract_write_scope_programs_from_cmd(cmd_src);
+
+    if !is_scope_stop {
+        presets.push(super::graph::BuilderPreset::AllowPath {
+            path: path_val.to_string(),
+        });
+    }
+    for prog_entry in prog_entries {
+        presets.push(super::graph::BuilderPreset::WriteScope {
+            programs: vec![prog_entry],
+            only_under: vec![scope_glob.clone()],
+        });
+    }
+    if is_scope_stop {
+        presets.push(super::graph::BuilderPreset::AllowPath {
+            path: path_val.to_string(),
+        });
+    }
+    presets
+}
+
+pub(crate) fn extract_place_guard_presets_from_decision(
+    cwd: &str,
+    reason: &str,
+    guard_name: &str,
+) -> Vec<super::graph::BuilderPreset> {
+    if extract_tool_name_from_reason(reason).is_some()
+        || reason.contains("tool rule (")
+        || cwd.trim().is_empty()
+    {
+        return Vec::new();
+    }
+    let known_list = crate::guards::known_guards();
+    let is_known = known_list.iter().any(|k| k == guard_name)
+        || crate::guards::KNOWN_GUARDS.contains(&guard_name);
+    if !is_known {
+        return Vec::new();
+    }
+    let cwd_clean = cwd.trim().replace('\\', "/");
+    let cwd_stem = cwd_clean.trim_end_matches('/');
+    if cwd_stem.is_empty() {
+        return Vec::new();
+    }
+    vec![
+        super::graph::BuilderPreset::PlaceScopedGuard {
+            under: vec![format!("{cwd_stem}/**")],
+            guard: guard_name.to_string(),
+            action: "allow".to_string(),
+        },
+        super::graph::BuilderPreset::PlaceScopedGuard {
+            under: vec![cwd_stem.to_string()],
+            guard: guard_name.to_string(),
+            action: "allow".to_string(),
+        },
+    ]
+}
+
+fn synthesize_granular_candidates(records: &[Record]) -> Vec<ReviewCandidate> {
+    type SuggestionTally = (usize, usize, usize, std::collections::HashSet<String>, String);
+    let mut out = Vec::new();
+    let mut exact_counts: std::collections::HashMap<(String, Vec<String>), SuggestionTally> =
+        std::collections::HashMap::new();
     let mut script_counts: std::collections::HashMap<
         (String, String, String, String),
-        (usize, usize, usize, std::collections::HashSet<String>, String),
+        SuggestionTally,
     > = std::collections::HashMap::new();
     let mut tool_rule_counts: std::collections::HashMap<
         (String, String, String),
-        (usize, usize, usize, std::collections::HashSet<String>, String),
+        SuggestionTally,
     > = std::collections::HashMap::new();
-    let mut tool_action_counts: std::collections::HashMap<
-        String,
-        (usize, usize, usize, std::collections::HashSet<String>, String),
-    > = std::collections::HashMap::new();
+    let mut tool_action_counts: std::collections::HashMap<String, SuggestionTally> =
+        std::collections::HashMap::new();
+    let mut write_scope_counts: std::collections::HashMap<(String, String), SuggestionTally> =
+        std::collections::HashMap::new();
+    let mut place_guard_counts: std::collections::HashMap<(String, String), SuggestionTally> =
+        std::collections::HashMap::new();
 
     for r in records {
         if r.verdict != "ask" || r.mode != "live" || r.measurement {
             continue;
+        }
+        if r.reason.contains("path outside every allowed area")
+            || r.reason.contains("vouch stopped on: write scope")
+        {
+            if let Some(path) = extract_unpermitted_path(&r.reason) {
+                let scope_glob = derive_write_scope_glob(&path);
+                if let Some(first_prog) = extract_write_scope_programs_from_cmd(&r.cmd).into_iter().next() {
+                    let entry = write_scope_counts
+                        .entry((first_prog, scope_glob))
+                        .or_insert_with(|| (0, 0, 0, std::collections::HashSet::new(), r.cmd.clone()));
+                    match r.outcome {
+                        Outcome::Executed => entry.0 += 1,
+                        Outcome::Denied => entry.1 += 1,
+                        _ => entry.2 += 1,
+                    }
+                    entry.3.insert(r.session.clone());
+                }
+            }
+        }
+        if let Some(first_line) = r.reason.lines().next() {
+            if let Some(guard_name) = first_line
+                .trim()
+                .strip_prefix("vouch stopped on:")
+                .and_then(|s| s.trim().strip_suffix("(guard)"))
+                .map(|s| s.trim())
+            {
+                let presets = extract_place_guard_presets_from_decision(&r.cwd, &r.reason, guard_name);
+                if let Some(super::graph::BuilderPreset::PlaceScopedGuard { under, guard, .. }) =
+                    presets.into_iter().next()
+                {
+                    if let Some(under_glob) = under.into_iter().next() {
+                        let entry = place_guard_counts
+                            .entry((guard, under_glob))
+                            .or_insert_with(|| (0, 0, 0, std::collections::HashSet::new(), r.cmd.clone()));
+                        match r.outcome {
+                            Outcome::Executed => entry.0 += 1,
+                            Outcome::Denied => entry.1 += 1,
+                            _ => entry.2 += 1,
+                        }
+                        entry.3.insert(r.session.clone());
+                    }
+                }
+            }
         }
         if let Some((tool_name, field_val)) = extract_tool_presets_from_decision(&r.cmd, &r.reason) {
             if let Some((field, val)) = field_val {
@@ -1188,7 +1446,229 @@ fn synthesize_granular_candidates(records: &[Record]) -> Vec<ReviewCandidate> {
         }
     }
 
+    for ((prog_entry, scope_glob), (app, den, unk, sess, example)) in write_scope_counts {
+        if app > 0 {
+            let programs = vec![prog_entry.clone()];
+            let only_under = vec![scope_glob.clone()];
+            out.push(ReviewCandidate {
+                name: format!("write.scope: {prog_entry} -> {scope_glob}"),
+                section: "write.scope".to_string(),
+                target_file: TargetFile::Config,
+                proposed_toml: format_write_scope_proposed_toml(&programs, &only_under),
+                approved: app,
+                denied: den,
+                unknown: unk,
+                sessions: sess.len().max(1),
+                proposable: true,
+                blocked_reason: None,
+                example_cmd: example,
+            });
+        }
+    }
+
+    for ((guard_name, under_glob), (app, den, unk, sess, example)) in place_guard_counts {
+        if app > 0 {
+            let under = vec![under_glob.clone()];
+            out.push(ReviewCandidate {
+                name: format!("run.guards: {guard_name} under {under_glob}"),
+                section: "run.guards".to_string(),
+                target_file: TargetFile::Config,
+                proposed_toml: format_place_guard_proposed_toml(&under, &guard_name, "allow"),
+                approved: app,
+                denied: den,
+                unknown: unk,
+                sessions: sess.len().max(1),
+                proposable: true,
+                blocked_reason: None,
+                example_cmd: example,
+            });
+        }
+    }
+
     out
+}
+
+fn apply_write_scope_candidate_to_toml(
+    current_content: &str,
+    cand: &ReviewCandidate,
+) -> Result<(String, String), String> {
+    let mut doc: toml_edit::DocumentMut = current_content
+        .parse()
+        .map_err(|e| format!("Invalid TOML: {e}"))?;
+    let prop_doc: toml_edit::DocumentMut = cand
+        .proposed_toml
+        .parse()
+        .map_err(|e| format!("Invalid proposed write.scope TOML: {e}"))?;
+
+    let prop_aot = prop_doc
+        .get("write")
+        .and_then(|w| w.get("scope"))
+        .and_then(|s| s.as_array_of_tables())
+        .and_then(|aot| aot.iter().next())
+        .ok_or_else(|| "Proposed TOML missing [[write.scope]] table".to_string())?;
+
+    let prop_progs: Vec<String> = prop_aot
+        .get("programs")
+        .and_then(|p| p.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let prop_under: Vec<String> = prop_aot
+        .get("only_under")
+        .and_then(|p| p.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if prop_progs.is_empty() || prop_under.is_empty() {
+        return Err("Proposed [[write.scope]] requires non-empty programs and only_under".to_string());
+    }
+
+    let write_item = doc
+        .entry("write")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let write_table = write_item
+        .as_table_like_mut()
+        .ok_or_else(|| "write is not a table".to_string())?;
+    let scope_item = write_table
+        .entry("scope")
+        .or_insert(toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
+    let aot = scope_item
+        .as_array_of_tables_mut()
+        .ok_or_else(|| "write.scope is not an array of tables".to_string())?;
+
+    let fold_prog = |s: &str| {
+        s.split_whitespace()
+            .map(str::to_lowercase)
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let prop_progs_folded: Vec<String> = prop_progs.iter().map(|p| fold_prog(p)).collect();
+
+    let mut merged = false;
+    for existing in aot.iter_mut() {
+        let existing_progs_folded: Vec<String> = existing
+            .get("programs")
+            .and_then(|p| p.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(fold_prog))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if existing_progs_folded == prop_progs_folded {
+            let under_item = existing.entry("only_under").or_insert(toml_edit::Item::Value(
+                toml_edit::Value::Array(toml_edit::Array::new()),
+            ));
+            if let Some(arr) = under_item.as_array_mut() {
+                for u in &prop_under {
+                    if !arr.iter().any(|v| v.as_str() == Some(u.as_str())) {
+                        arr.push(u.as_str());
+                    }
+                }
+                merged = true;
+                break;
+            }
+        }
+    }
+    if !merged {
+        aot.push(prop_aot.clone());
+    }
+
+    let summary = format!(
+        "[[write.scope]] programs = {prop_progs:?} only_under = {prop_under:?}"
+    );
+    Ok((doc.to_string(), summary))
+}
+
+fn apply_place_guard_candidate_to_toml(
+    current_content: &str,
+    cand: &ReviewCandidate,
+) -> Result<(String, String), String> {
+    let mut doc: toml_edit::DocumentMut = current_content
+        .parse()
+        .map_err(|e| format!("Invalid TOML: {e}"))?;
+    let prop_doc: toml_edit::DocumentMut = cand
+        .proposed_toml
+        .parse()
+        .map_err(|e| format!("Invalid proposed run.guards TOML: {e}"))?;
+
+    let prop_aot = prop_doc
+        .get("run")
+        .and_then(|r| r.get("guards"))
+        .and_then(|g| g.as_array_of_tables())
+        .and_then(|aot| aot.iter().next())
+        .ok_or_else(|| "Proposed TOML missing [[run.guards]] table".to_string())?;
+
+    let prop_under: Vec<String> = prop_aot
+        .get("under")
+        .and_then(|u| u.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut guard_key = String::new();
+    let mut action_val = "allow".to_string();
+    for (k, v) in prop_aot.iter() {
+        if k != "under" {
+            guard_key = k.to_string();
+            if let Some(s) = v.as_str() {
+                action_val = s.to_string();
+            }
+            break;
+        }
+    }
+    if prop_under.is_empty() || guard_key.is_empty() {
+        return Err("Proposed [[run.guards]] requires non-empty under and guard action".to_string());
+    }
+
+    let run_item = doc
+        .entry("run")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let run_table = run_item
+        .as_table_like_mut()
+        .ok_or_else(|| "run is not a table".to_string())?;
+    let guards_item = run_table
+        .entry("guards")
+        .or_insert(toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
+    let aot = guards_item
+        .as_array_of_tables_mut()
+        .ok_or_else(|| "run.guards is not an array of tables".to_string())?;
+
+    let mut merged = false;
+    for existing in aot.iter_mut() {
+        let existing_under: Vec<String> = existing
+            .get("under")
+            .and_then(|u| u.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if existing_under == prop_under {
+            existing.insert(&guard_key, toml_edit::value(action_val.as_str()));
+            merged = true;
+            break;
+        }
+    }
+    if !merged {
+        aot.push(prop_aot.clone());
+    }
+
+    let summary = format!(
+        "[[run.guards]] under = {prop_under:?} {guard_key} = {action_val:?}"
+    );
+    Ok((doc.to_string(), summary))
 }
 
 fn apply_script_construct_candidate_to_toml(

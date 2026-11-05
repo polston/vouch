@@ -717,7 +717,11 @@ impl VariableTaintTable {
     /// mutations isolated.
     pub fn propagate_cross_scope_from(&mut self, callee: &VariableTaintTable) {
         for (k, v) in &callee.variables {
-            if k.starts_with("$script:") || k.starts_with("$global:") || k.starts_with("$this.") {
+            if k.starts_with("$script:")
+                || k.starts_with("$global:")
+                || k.starts_with("$env:")
+                || k.starts_with("$this.")
+            {
                 self.variables.insert(k.clone(), v.clone());
             }
         }
@@ -744,7 +748,11 @@ impl VariableTaintTable {
     pub fn is_tainted_or_dynamic(&self, name: &str) -> bool {
         let key = Self::normalize_key(name);
         if key.starts_with("$env:") || key.starts_with("$using:env:") {
-            return true;
+            match self.get(name) {
+                Some(VariableOrigin::Literal(_)) => return false,
+                Some(VariableOrigin::CmdletResult { .. }) => return false,
+                _ => return true,
+            }
         }
         if let Some(target_var) = self.get_ref_target(name) {
             if matches!(
@@ -838,6 +846,7 @@ pub struct PsControlFlowGraph {
     pub edges: Vec<CfgEdge>,
     pub functions: FunctionSummaryTable,
     pub synthesized_commands: Vec<Cmd>,
+    pub taint_table: VariableTaintTable,
     active_loop_jump: Option<String>,
 }
 
@@ -853,6 +862,7 @@ impl PsControlFlowGraph {
         let entry_id = cfg.new_block("entry", true);
         let tokens = strip_outer_braces(PsLexer::tokenize(script));
         cfg.walk_tokens(&tokens, entry_id, true, taint_table, 0);
+        cfg.taint_table = taint_table.clone();
         cfg
     }
 
@@ -3304,6 +3314,9 @@ fn analyze_statement(stmt: &[PsToken], taint_table: &mut VariableTaintTable, out
         }
     }
 
+    // 1e. `[Environment]::SetEnvironmentVariable(<name>, <value> [, <target>])` / `[System.Environment]::SetEnvironmentVariable(...)`
+    handle_dotnet_set_environment_variable(stmt, taint_table);
+
     // 2. Foreach loops: foreach ($var in $collection_or_cmd) { <body> }
     if let Some(PsToken::Identifier(head)) = stmt.first() {
         if head.eq_ignore_ascii_case("foreach") {
@@ -3398,6 +3411,142 @@ fn analyze_statement(stmt: &[PsToken], taint_table: &mut VariableTaintTable, out
                         args,
                         ..Default::default()
                     });
+                } else if m == "invokescript" && var_name.eq_ignore_ascii_case("$executioncontext") {
+                    if let Some((call_args, _)) = extract_delimited_group(stmt, i + 1, true) {
+                        let arg_groups = split_comma_separated_tokens(&call_args);
+                        let (cmd_str, is_tainted) = if let Some(first_grp) = arg_groups.first() {
+                            let orig = classify_rhs_origin(first_grp, taint_table);
+                            let tainted = matches!(
+                                orig,
+                                VariableOrigin::DynamicInput { .. }
+                                    | VariableOrigin::TaintedExpression
+                                    | VariableOrigin::Environment(_)
+                            );
+                            let rendered = match orig {
+                                VariableOrigin::Literal(lit)
+                                    if !lit.is_empty() && lit != "value" =>
+                                {
+                                    lit
+                                }
+                                _ => tokens_to_arg_string(first_grp),
+                            };
+                            (rendered, tainted)
+                        } else {
+                            ("$ExecutionContext.InvokeCommand.InvokeScript".to_string(), true)
+                        };
+                        let mut args = vec!["-Command".to_string(), cmd_str];
+                        if is_tainted {
+                            args.push("untrusted_input".to_string());
+                        }
+                        out.push(Cmd {
+                            head: "Invoke-Expression".to_string(),
+                            args,
+                            ..Default::default()
+                        });
+                    }
+                } else if m == "invoke" || m == "invokereturnasis" {
+                    // Check if receiver is a scriptblock variable (`[ScriptBlock]::Create(...)` / `NewScriptBlock(...)`)
+                    // or inline `([ScriptBlock]::Create(...)).Invoke(...)`
+                    let mut inline_sb: Option<(String, bool)> = None;
+                    if i >= 2 && stmt.get(i - 1) == Some(&PsToken::CloseParen) {
+                        // Look for matching OpenParen before `CloseParen`
+                        let mut depth = 0i32;
+                        let mut open_idx = None;
+                        for k in (0..i).rev() {
+                            if stmt[k] == PsToken::CloseParen {
+                                depth += 1;
+                            } else if stmt[k] == PsToken::OpenParen {
+                                depth -= 1;
+                                if depth == 0 {
+                                    open_idx = Some(k);
+                                    break;
+                                }
+                            }
+                        }
+                        if let Some(oi) = open_idx {
+                            let receiver_slice = &stmt[oi..i];
+                            if let Some(sb_orig) =
+                                resolve_dotnet_env_or_scriptblock_rhs(receiver_slice, taint_table)
+                            {
+                                let tainted = matches!(
+                                    sb_orig,
+                                    VariableOrigin::DynamicInput { .. }
+                                        | VariableOrigin::TaintedExpression
+                                        | VariableOrigin::Environment(_)
+                                );
+                                let rendered = match sb_orig {
+                                    VariableOrigin::Literal(lit)
+                                        if !lit.is_empty() && lit != "value" =>
+                                    {
+                                        lit
+                                    }
+                                    _ => tokens_to_arg_string(receiver_slice),
+                                };
+                                inline_sb = Some((rendered, tainted));
+                            }
+                        }
+                    }
+
+                    let is_sb_instance = taint_table
+                        .get_class_instance(&var_name)
+                        .is_some_and(|cls| cls == "scriptblock" || cls == "system.management.automation.scriptblock");
+
+                    if let Some((rendered, mut is_tainted)) = inline_sb {
+                        if let Some((call_args, _)) = extract_delimited_group(stmt, i + 1, true) {
+                            for grp in split_comma_separated_tokens(&call_args) {
+                                let arg_orig = classify_rhs_origin(&grp, taint_table);
+                                if matches!(
+                                    arg_orig,
+                                    VariableOrigin::DynamicInput { .. }
+                                        | VariableOrigin::TaintedExpression
+                                        | VariableOrigin::Environment(_)
+                                ) {
+                                    is_tainted = true;
+                                }
+                            }
+                        }
+                        let mut args = vec!["-Command".to_string(), rendered];
+                        if is_tainted {
+                            args.push("untrusted_input".to_string());
+                        }
+                        out.push(Cmd {
+                            head: "Invoke-Expression".to_string(),
+                            args,
+                            ..Default::default()
+                        });
+                    } else if is_sb_instance {
+                        let mut is_tainted = taint_table.is_tainted_or_dynamic(&var_name);
+                        let rendered = match taint_table.get(&var_name) {
+                            Some(VariableOrigin::Literal(lit))
+                                if !lit.is_empty() && lit != "value" =>
+                            {
+                                lit.clone()
+                            }
+                            _ => var_name.clone(),
+                        };
+                        if let Some((call_args, _)) = extract_delimited_group(stmt, i + 1, true) {
+                            for grp in split_comma_separated_tokens(&call_args) {
+                                let arg_orig = classify_rhs_origin(&grp, taint_table);
+                                if matches!(
+                                    arg_orig,
+                                    VariableOrigin::DynamicInput { .. }
+                                        | VariableOrigin::TaintedExpression
+                                        | VariableOrigin::Environment(_)
+                                ) {
+                                    is_tainted = true;
+                                }
+                            }
+                        }
+                        let mut args = vec!["-Command".to_string(), rendered];
+                        if is_tainted {
+                            args.push("untrusted_input".to_string());
+                        }
+                        out.push(Cmd {
+                            head: "Invoke-Expression".to_string(),
+                            args,
+                            ..Default::default()
+                        });
+                    }
                 }
             }
         }
@@ -3415,10 +3564,24 @@ fn analyze_statement(stmt: &[PsToken], taint_table: &mut VariableTaintTable, out
                             } else {
                                 (v.clone(), 2usize)
                             };
+                        let is_sb_var = taint_table
+                            .get_class_instance(v)
+                            .is_some_and(|cls| {
+                                cls == "scriptblock"
+                                    || cls == "system.management.automation.scriptblock"
+                            });
                         if let Some(VariableOrigin::Literal(lit)) =
                             taint_table.get(&lookup_key).cloned()
                         {
                             if !lit.is_empty() && lit != "value" {
+                                if is_sb_var {
+                                    let inner_tokens = strip_outer_braces(PsLexer::tokenize(&lit));
+                                    let mut sub_cfg = PsControlFlowGraph::default();
+                                    let entry_id = sub_cfg.new_block("call_scriptblock_var", true);
+                                    sub_cfg.walk_tokens(&inner_tokens, entry_id, true, taint_table, 0);
+                                    out.extend(sub_cfg.synthesized_commands);
+                                    return;
+                                }
                                 let mut synthetic_stmt = vec![PsToken::Identifier(lit)];
                                 synthetic_stmt
                                     .extend_from_slice(stmt.get(rest_start..).unwrap_or(&[]));
@@ -3463,8 +3626,25 @@ fn analyze_statement(stmt: &[PsToken], taint_table: &mut VariableTaintTable, out
                             }
                             let target_slice = &stmt[1..after_paren];
                             let target_orig = classify_rhs_origin(target_slice, taint_table);
+                            let is_sb_expr = is_scriptblock_factory_tokens(target_slice);
                             if let VariableOrigin::Literal(ref lit) = target_orig {
                                 if !lit.is_empty() && lit != "value" {
+                                    if is_sb_expr {
+                                        let inner_tokens =
+                                            strip_outer_braces(PsLexer::tokenize(lit));
+                                        let mut sub_cfg = PsControlFlowGraph::default();
+                                        let entry_id =
+                                            sub_cfg.new_block("call_scriptblock_expr", true);
+                                        sub_cfg.walk_tokens(
+                                            &inner_tokens,
+                                            entry_id,
+                                            true,
+                                            taint_table,
+                                            0,
+                                        );
+                                        out.extend(sub_cfg.synthesized_commands);
+                                        return;
+                                    }
                                     let mut synthetic_stmt = vec![PsToken::Identifier(lit.clone())];
                                     synthetic_stmt
                                         .extend_from_slice(stmt.get(after_paren..).unwrap_or(&[]));
@@ -4017,6 +4197,12 @@ fn classify_rhs_origin(rhs: &[PsToken], taint_table: &VariableTaintTable) -> Var
         return gv_orig;
     }
 
+    // Check for `[Environment]::GetEnvironmentVariable(...)` / `[Environment]::ExpandEnvironmentVariables(...)`
+    // and `$ExecutionContext.InvokeCommand.ExpandString(...)` / `NewScriptBlock(...)` / `[ScriptBlock]::Create(...)`
+    if let Some(dotnet_orig) = resolve_dotnet_env_or_scriptblock_rhs(rhs, taint_table) {
+        return dotnet_orig;
+    }
+
     // Check if right-hand side is a command invocation
     if let Some(PsToken::Identifier(cmd)) = meaningful.first() {
         let cmd_lower = cmd.to_lowercase();
@@ -4053,6 +4239,14 @@ fn classify_rhs_origin(rhs: &[PsToken], taint_table: &VariableTaintTable) -> Var
             }
             let norm_v = VariableTaintTable::normalize_key(v);
             if norm_v.starts_with("$env:") || norm_v.starts_with("$using:env:") {
+                let env_lookup = if let Some(rest) = norm_v.strip_prefix("$using:env:") {
+                    format!("$env:{rest}")
+                } else {
+                    norm_v.clone()
+                };
+                if let Some(orig) = taint_table.get(&env_lookup) {
+                    return orig.clone();
+                }
                 return VariableOrigin::Environment((*v).clone());
             } else if taint_table.is_tainted_or_dynamic(v) {
                 return VariableOrigin::TaintedExpression;
@@ -4343,7 +4537,240 @@ fn resolve_get_variable_tokens(
     }
 }
 
+fn match_dotnet_type_static_call(tokens: &[PsToken], idx: usize) -> Option<(String, String, Vec<PsToken>, usize)> {
+    // Match `[` + `Type` (possibly `System` `.` `Environment` or `System.Environment` or `Environment` or `ScriptBlock`) + `]` + `::Method` + `(` ... `)`
+    if tokens.get(idx) != Some(&PsToken::Other("[".to_string())) {
+        return None;
+    }
+    let mut j = idx + 1;
+    let mut type_parts = String::new();
+    while j < tokens.len() {
+        match &tokens[j] {
+            PsToken::Other(close_br) if close_br == "]" => {
+                j += 1;
+                break;
+            }
+            PsToken::Identifier(s) | PsToken::MemberAccess(s) | PsToken::Other(s) => {
+                type_parts.push_str(s);
+                j += 1;
+            }
+            _ => return None,
+        }
+    }
+    if type_parts.is_empty() || j >= tokens.len() {
+        return None;
+    }
+    // Skip any leading `:` tokens (`::` is lexed as `Other(":")` + `Other(":")` + `Identifier("Method")`)
+    while j < tokens.len() {
+        if let PsToken::Other(op) = &tokens[j] {
+            if op.chars().all(|c| c == ':' || c == '.') {
+                j += 1;
+                continue;
+            }
+        }
+        break;
+    }
+    let method_raw = match tokens.get(j)? {
+        PsToken::Identifier(m) | PsToken::MemberAccess(m) | PsToken::Other(m) => m.clone(),
+        _ => return None,
+    };
+    let method_name = method_raw.trim_start_matches(':').trim_start_matches('.').to_string();
+    if method_name.is_empty() {
+        return None;
+    }
+    let (call_args, after_paren) = extract_delimited_group(tokens, j + 1, true)?;
+    Some((type_parts, method_name, call_args, after_paren))
+}
+
+fn is_environment_type_name(type_name: &str) -> bool {
+    let lower = type_name.trim().to_ascii_lowercase();
+    matches!(lower.as_str(), "environment" | "system.environment")
+}
+
+fn is_scriptblock_type_name(type_name: &str) -> bool {
+    let lower = type_name.trim().to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "scriptblock" | "system.management.automation.scriptblock"
+    )
+}
+
+fn is_scriptblock_factory_tokens(rhs: &[PsToken]) -> bool {
+    for i in 0..rhs.len() {
+        if let Some((type_name, method_name, _, _)) = match_dotnet_type_static_call(rhs, i) {
+            if is_scriptblock_type_name(&type_name) && method_name.eq_ignore_ascii_case("create") {
+                return true;
+            }
+        }
+        if let (
+            Some(PsToken::Variable(v)),
+            Some(PsToken::MemberAccess(m1)),
+            Some(PsToken::MemberAccess(m2)),
+            Some(PsToken::OpenParen),
+        ) = (rhs.get(i), rhs.get(i + 1), rhs.get(i + 2), rhs.get(i + 3))
+        {
+            if v.eq_ignore_ascii_case("$executioncontext")
+                && m1.trim_start_matches('.').eq_ignore_ascii_case("invokecommand")
+                && m2.trim_start_matches('.').eq_ignore_ascii_case("newscriptblock")
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn handle_dotnet_set_environment_variable(stmt: &[PsToken], taint_table: &mut VariableTaintTable) {
+    for i in 0..stmt.len() {
+        let Some((type_name, method_name, call_args, _)) = match_dotnet_type_static_call(stmt, i)
+        else {
+            continue;
+        };
+        if !is_environment_type_name(&type_name)
+            || !method_name.eq_ignore_ascii_case("setenvironmentvariable")
+        {
+            continue;
+        }
+        let arg_groups = split_comma_separated_tokens(&call_args);
+        if arg_groups.is_empty() {
+            continue;
+        }
+        let Some(Ok(env_var_name)) = resolve_reflection_name_tokens(&arg_groups[0], taint_table)
+        else {
+            continue;
+        };
+        let env_key = format!("$env:{}", env_var_name.trim_start_matches("env:"));
+        if let Some(val_grp) = arg_groups.get(1) {
+            if val_grp.len() == 1
+                && matches!(&val_grp[0], PsToken::Variable(v) if v.eq_ignore_ascii_case("$null"))
+            {
+                taint_table.clear_variable(&env_key);
+            } else {
+                let val_orig = classify_rhs_origin(val_grp, taint_table);
+                taint_table.set(&env_key, val_orig);
+            }
+        } else {
+            taint_table.clear_variable(&env_key);
+        }
+    }
+}
+
+fn expand_ps_string_tokens_taint(
+    arg_tokens: &[PsToken],
+    taint_table: &VariableTaintTable,
+) -> VariableOrigin {
+    let base_orig = classify_rhs_origin(arg_tokens, taint_table);
+    if !matches!(base_orig, VariableOrigin::Literal(_)) {
+        return base_orig;
+    }
+    if let VariableOrigin::Literal(ref lit) = base_orig {
+        // Inspect string for embedded `$var` or `%ENV%` references
+        let inner_tokens = PsLexer::tokenize(lit);
+        for tok in &inner_tokens {
+            if let PsToken::Variable(v) = tok {
+                if taint_table.is_tainted_or_dynamic(v) {
+                    return VariableOrigin::TaintedExpression;
+                }
+            }
+        }
+        // Check `%VAR%` Windows environment expansion markers
+        let parts: Vec<&str> = lit.split('%').collect();
+        if parts.len() >= 3 {
+            for idx in (1..parts.len() - 1).step_by(2) {
+                let candidate = parts[idx].trim();
+                if !candidate.is_empty()
+                    && candidate
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                {
+                    let env_key = format!("$env:{candidate}");
+                    if taint_table.is_tainted_or_dynamic(&env_key) {
+                        return VariableOrigin::Environment(env_key);
+                    }
+                }
+            }
+        }
+    }
+    base_orig
+}
+
+fn resolve_dotnet_env_or_scriptblock_rhs(
+    rhs: &[PsToken],
+    taint_table: &VariableTaintTable,
+) -> Option<VariableOrigin> {
+    for i in 0..rhs.len() {
+        if let Some((type_name, method_name, call_args, _)) = match_dotnet_type_static_call(rhs, i)
+        {
+            if is_environment_type_name(&type_name) {
+                let m_lower = method_name.to_ascii_lowercase();
+                if m_lower == "getenvironmentvariable" {
+                    let arg_groups = split_comma_separated_tokens(&call_args);
+                    let Some(first_grp) = arg_groups.first() else {
+                        return Some(VariableOrigin::Environment("$env:*".to_string()));
+                    };
+                    match resolve_reflection_name_tokens(first_grp, taint_table)? {
+                        Ok(env_name) => {
+                            let env_key = format!("$env:{}", env_name.trim_start_matches("env:"));
+                            if let Some(orig) = taint_table.get(&env_key) {
+                                return Some(orig.clone());
+                            }
+                            return Some(VariableOrigin::Environment(env_key));
+                        }
+                        Err(taint_orig) => return Some(taint_orig),
+                    }
+                } else if m_lower == "expandenvironmentvariables" {
+                    let arg_groups = split_comma_separated_tokens(&call_args);
+                    if let Some(first_grp) = arg_groups.first() {
+                        return Some(expand_ps_string_tokens_taint(first_grp, taint_table));
+                    }
+                    return Some(VariableOrigin::TaintedExpression);
+                }
+            } else if is_scriptblock_type_name(&type_name)
+                && method_name.eq_ignore_ascii_case("create")
+            {
+                let arg_groups = split_comma_separated_tokens(&call_args);
+                if let Some(first_grp) = arg_groups.first() {
+                    return Some(expand_ps_string_tokens_taint(first_grp, taint_table));
+                }
+                return Some(VariableOrigin::TaintedExpression);
+            }
+        }
+
+        // Check `$ExecutionContext.InvokeCommand.<Method>(...)`
+        if let (
+            Some(PsToken::Variable(v)),
+            Some(PsToken::MemberAccess(m1)),
+            Some(PsToken::MemberAccess(m2)),
+            Some(PsToken::OpenParen),
+        ) = (rhs.get(i), rhs.get(i + 1), rhs.get(i + 2), rhs.get(i + 3))
+        {
+            if v.eq_ignore_ascii_case("$executioncontext")
+                && m1.trim_start_matches('.').eq_ignore_ascii_case("invokecommand")
+            {
+                let m2_lower = m2.trim_start_matches('.').to_ascii_lowercase();
+                if matches!(
+                    m2_lower.as_str(),
+                    "expandstring" | "newscriptblock" | "invokescript"
+                ) {
+                    if let Some((call_args, _)) = extract_delimited_group(rhs, i + 3, true) {
+                        let arg_groups = split_comma_separated_tokens(&call_args);
+                        if let Some(first_grp) = arg_groups.first() {
+                            return Some(expand_ps_string_tokens_taint(first_grp, taint_table));
+                        }
+                    }
+                    return Some(VariableOrigin::TaintedExpression);
+                }
+            }
+        }
+    }
+    None
+}
+
 fn extract_class_instantiation_name(rhs: &[PsToken]) -> Option<String> {
+    // 0. `$ExecutionContext.InvokeCommand.NewScriptBlock(...)` or `[ScriptBlock]::Create(...)`
+    if is_scriptblock_factory_tokens(rhs) {
+        return Some("scriptblock".to_string());
+    }
     // 1. `[ClassName]::new(...)`
     for i in 0..rhs.len() {
         if let (
@@ -4812,7 +5239,19 @@ pub fn is_pure_predicate_block(script: &str) -> bool {
             if let Some(next) = meaningful.get(i + 1) {
                 if matches!(next, PsToken::OpenParen) {
                     let m = member.trim_start_matches('.').to_lowercase();
-                    if matches!(m.as_str(), "kill" | "delete" | "remove" | "terminate" | "dispose") {
+                    if matches!(
+                        m.as_str(),
+                        "kill"
+                            | "delete"
+                            | "remove"
+                            | "terminate"
+                            | "dispose"
+                            | "invokescript"
+                            | "newscriptblock"
+                            | "invoke"
+                            | "invokereturnasis"
+                            | "setenvironmentvariable"
+                    ) {
                         return false;
                     }
                 }
@@ -4831,6 +5270,9 @@ pub fn is_pure_predicate_block(script: &str) -> bool {
                 || id_lower.starts_with("clear-")
                 || id_lower.starts_with("restart-")
                 || id_lower.starts_with("kill-")
+                || id_lower.contains("setenvironmentvariable")
+                || id_lower.contains("invokescript")
+                || id_lower.contains("scriptblock")
                 || matches!(id_lower.as_str(), "rm" | "del" | "erase" | "spps" | "kill")
             {
                 return false;
