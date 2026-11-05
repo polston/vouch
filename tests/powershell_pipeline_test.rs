@@ -1128,3 +1128,167 @@ fn powershell_using_scope_braced_qualifiers_and_parallel_job_taint_propagation()
         cfg_jobs.synthesized_commands[2].args
     );
 }
+
+#[test]
+fn powershell_ref_parameter_writeback_and_aliased_value_mutation_taint_propagation() {
+    use vouch::powershell_pipeline::PsControlFlowGraph;
+
+    // 1. Inter-procedural `[ref]` parameter mutation writes taint back to caller variable
+    //    and aliased `$r = [ref]$target; $r.Value = ...` and `([ref]$inline).Value = ...` propagate taint
+    let script_ref = "{
+        function Set-Payload([ref]$out) {
+            $out.Value = Read-Host
+        }
+        $cmd = 'safe_default'
+        Set-Payload ([ref]$cmd)
+        Remove-Item $cmd
+        & $cmd
+
+        $target = 'safe_path'
+        $r = [ref]$target
+        $r.Value = Get-Content C:/Users/dev/paths.txt
+        Remove-Item $target
+        Remove-Item $r.Value
+
+        $inlineTarget = 'safe_inline'
+        ([ref]$inlineTarget).Value = Read-Host
+        Remove-Item $inlineTarget
+    }";
+    let cfg_ref = PsControlFlowGraph::build(script_ref);
+    assert_eq!(
+        cfg_ref.synthesized_commands.len(),
+        5,
+        "expected 5 synthesized commands from [ref] mutations: {:?}",
+        cfg_ref.synthesized_commands
+    );
+    assert_eq!(cfg_ref.synthesized_commands[0].head, "Remove-Item");
+    assert!(
+        cfg_ref.synthesized_commands[0]
+            .args
+            .contains(&"untrusted_input".to_string()),
+        "caller $cmd mutated via Set-Payload ([ref]$cmd) must be tainted: {:?}",
+        cfg_ref.synthesized_commands[0].args
+    );
+    assert_eq!(cfg_ref.synthesized_commands[1].head, "Invoke-Expression");
+    assert!(
+        cfg_ref.synthesized_commands[1]
+            .args
+            .contains(&"untrusted_input".to_string()),
+        "& $cmd after [ref] taint write-back must synthesize tainted Invoke-Expression: {:?}",
+        cfg_ref.synthesized_commands[1].args
+    );
+    for idx in 2..=4 {
+        assert_eq!(cfg_ref.synthesized_commands[idx].head, "Remove-Item");
+        assert!(
+            cfg_ref.synthesized_commands[idx]
+                .args
+                .contains(&"-Recurse".to_string())
+                && cfg_ref.synthesized_commands[idx]
+                    .args
+                    .contains(&"untrusted_input".to_string()),
+            "synthesized Remove-Item at index {idx} must carry -Recurse and untrusted_input: {:?}",
+            cfg_ref.synthesized_commands[idx].args
+        );
+    }
+
+    // 2. Literal resolution through `[ref]` write-back into dynamic call `& $c` and `& $r.Value`
+    let script_ref_lit = "{
+        function Resolve-Cmd([ref]$fnRef) {
+            $fnRef.Value = 'Remove-Item'
+        }
+        $c = ''
+        Resolve-Cmd [ref]$c
+        & $c (Read-Host)
+    }";
+    let cfg_lit = PsControlFlowGraph::build(script_ref_lit);
+    assert_eq!(cfg_lit.synthesized_commands.len(), 1);
+    assert_eq!(cfg_lit.synthesized_commands[0].head, "Remove-Item");
+    assert!(
+        cfg_lit.synthesized_commands[0]
+            .args
+            .contains(&"untrusted_input".to_string()),
+        "literal 'Remove-Item' written back via [ref] parameter must resolve `& $c (Read-Host)`: {:?}",
+        cfg_lit.synthesized_commands[0].args
+    );
+}
+
+#[test]
+fn powershell_set_variable_get_variable_and_clear_variable_reflection_taint() {
+    use vouch::powershell_pipeline::PsControlFlowGraph;
+
+    // 1. `Set-Variable` / `sv` / `New-Variable` and `Get-Variable` / `gv` (with `-ValueOnly` and `.Value`)
+    let script_reflection = "{
+        Set-Variable -Name secretPath -Value (Read-Host)
+        $extracted = Get-Variable -Name secretPath -ValueOnly
+        Remove-Item $extracted
+        Remove-Item (Get-Variable secretPath).Value
+
+        sv dynCmd 'Remove-Item'
+        & (gv dynCmd -ValueOnly) (Read-Host)
+
+        Read-Host | Set-Variable -Name pipedPath
+        Remove-Item $pipedPath
+        Clear-Variable -Name pipedPath
+        Remove-Item $pipedPath
+
+        $dynVarName = Read-Host
+        $fromDynName = Get-Variable -Name $dynVarName -ValueOnly
+        Remove-Item $fromDynName
+    }";
+    let cfg = PsControlFlowGraph::build(script_reflection);
+    assert_eq!(
+        cfg.synthesized_commands.len(),
+        6,
+        "expected 6 synthesized Remove-Item commands: {:?}",
+        cfg.synthesized_commands
+    );
+    // [0]: Remove-Item $extracted -> tainted
+    assert!(
+        cfg.synthesized_commands[0]
+            .args
+            .contains(&"untrusted_input".to_string()),
+        "Get-Variable -Name secretPath -ValueOnly must propagate taint from Set-Variable: {:?}",
+        cfg.synthesized_commands[0].args
+    );
+    // [1]: Remove-Item (Get-Variable secretPath).Value -> tainted
+    assert!(
+        cfg.synthesized_commands[1]
+            .args
+            .contains(&"untrusted_input".to_string()),
+        "(Get-Variable secretPath).Value must propagate taint: {:?}",
+        cfg.synthesized_commands[1].args
+    );
+    // [2]: & (gv dynCmd -ValueOnly) (Read-Host) -> resolved to Remove-Item with tainted arg
+    assert_eq!(cfg.synthesized_commands[2].head, "Remove-Item");
+    assert!(
+        cfg.synthesized_commands[2]
+            .args
+            .contains(&"untrusted_input".to_string()),
+        "& (gv dynCmd -ValueOnly) (Read-Host) must resolve to Remove-Item with untrusted_input: {:?}",
+        cfg.synthesized_commands[2].args
+    );
+    // [3]: Read-Host | Set-Variable -Name pipedPath; Remove-Item $pipedPath -> tainted
+    assert!(
+        cfg.synthesized_commands[3]
+            .args
+            .contains(&"untrusted_input".to_string()),
+        "pipeline input into Set-Variable must taint $pipedPath: {:?}",
+        cfg.synthesized_commands[3].args
+    );
+    // [4]: Clear-Variable -Name pipedPath; Remove-Item $pipedPath -> taint cleared!
+    assert!(
+        !cfg.synthesized_commands[4]
+            .args
+            .contains(&"untrusted_input".to_string()),
+        "Clear-Variable -Name pipedPath must clear taint on $pipedPath: {:?}",
+        cfg.synthesized_commands[4].args
+    );
+    // [5]: Get-Variable -Name $dynVarName -> tainted when -Name is dynamic
+    assert!(
+        cfg.synthesized_commands[5]
+            .args
+            .contains(&"untrusted_input".to_string()),
+        "Get-Variable with dynamic -Name must be marked tainted: {:?}",
+        cfg.synthesized_commands[5].args
+    );
+}

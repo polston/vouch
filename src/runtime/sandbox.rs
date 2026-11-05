@@ -371,6 +371,48 @@ impl CgroupMemoryEvents {
     pub fn has_oom_group_kill(&self) -> bool {
         self.oom_group_kill > 0
     }
+
+    /// Returns true if the kernel throttled processes due to exceeding `memory.high` (`high > 0`).
+    pub fn has_memory_high_throttled(&self) -> bool {
+        self.high > 0
+    }
+}
+
+/// Parsed statistics from a cgroup v2 `memory.swap.events` control file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CgroupSwapEvents {
+    pub high: u64,
+    pub max: u64,
+    pub fail: u64,
+}
+
+impl CgroupSwapEvents {
+    pub fn parse(text: &str) -> Self {
+        let mut events = Self::default();
+        for line in text.lines() {
+            let mut parts = line.split_whitespace();
+            let Some(key) = parts.next() else { continue };
+            let Some(val_str) = parts.next() else { continue };
+            let Ok(val) = val_str.parse::<u64>() else { continue };
+            match key {
+                "high" => events.high = val,
+                "max" => events.max = val,
+                "fail" => events.fail = val,
+                _ => {}
+            }
+        }
+        events
+    }
+
+    /// Returns true if the cgroup's swap usage hit the `memory.swap.max` ceiling (`max > 0`).
+    pub fn has_swap_max_reached(&self) -> bool {
+        self.max > 0
+    }
+
+    /// Returns true if swap allocation failed (`fail > 0`).
+    pub fn has_swap_fail(&self) -> bool {
+        self.fail > 0
+    }
 }
 
 /// Parsed statistics from a cgroup v2 `pids.events` control file.
@@ -840,15 +882,15 @@ impl CgroupV2Manager {
         let dir = self.worker_cgroup_dir(scope_id);
         create_dir_all(&dir)?;
 
-        if let Some(max_mb) = cfg.max_memory_mb {
-            let max_bytes = max_mb.saturating_mul(1024 * 1024);
+        let effective_max_bytes = cfg.effective_memory_max_bytes();
+        if let Some(max_bytes) = effective_max_bytes {
             write_control_file(&dir.join("memory.max"), &max_bytes.to_string())?;
         } else {
             write_control_file(&dir.join("memory.max"), "max")?;
         }
 
-        if let Some(high_mb) = cfg.high_memory_mb {
-            let high_bytes = high_mb.saturating_mul(1024 * 1024);
+        let effective_high_bytes = cfg.effective_memory_high_bytes();
+        if let Some(high_bytes) = effective_high_bytes {
             write_control_file(&dir.join("memory.high"), &high_bytes.to_string())?;
         } else {
             write_control_file(&dir.join("memory.high"), "max")?;
@@ -911,8 +953,8 @@ impl CgroupV2Manager {
 
         Ok(CgroupScope {
             dir,
-            max_memory_bytes: cfg.max_memory_mb.map(|mb| mb.saturating_mul(1024 * 1024)),
-            high_memory_bytes: cfg.high_memory_mb.map(|mb| mb.saturating_mul(1024 * 1024)),
+            max_memory_bytes: effective_max_bytes,
+            high_memory_bytes: effective_high_bytes,
             memory_swap_max_bytes: cfg.memory_swap_max_bytes,
             memory_oom_group: cfg.memory_oom_group,
             pids_max: effective_pids_max,
@@ -978,6 +1020,28 @@ impl CgroupScope {
         text.trim().parse::<u64>().ok()
     }
 
+    /// Read the configured hard memory ceiling in bytes from `memory.max` (`None` if `"max"` or absent).
+    pub fn read_memory_max(&self) -> Option<u64> {
+        let text = std::fs::read_to_string(self.dir.join("memory.max")).ok()?;
+        let trimmed = text.trim();
+        if trimmed == "max" {
+            None
+        } else {
+            trimmed.parse::<u64>().ok()
+        }
+    }
+
+    /// Read the configured memory throttle high-water mark in bytes from `memory.high` (`None` if `"max"` or absent).
+    pub fn read_memory_high(&self) -> Option<u64> {
+        let text = std::fs::read_to_string(self.dir.join("memory.high")).ok()?;
+        let trimmed = text.trim();
+        if trimmed == "max" {
+            None
+        } else {
+            trimmed.parse::<u64>().ok()
+        }
+    }
+
     /// Read current swap memory usage in bytes from `memory.swap.current`.
     pub fn read_current_swap_bytes(&self) -> Option<u64> {
         let text = std::fs::read_to_string(self.dir.join("memory.swap.current")).ok()?;
@@ -993,6 +1057,14 @@ impl CgroupScope {
         } else {
             trimmed.parse::<u64>().ok()
         }
+    }
+
+    /// Read and parse `memory.swap.events` (including `high`, `max`, and `fail` swap event counters).
+    pub fn read_swap_events(&self) -> CgroupSwapEvents {
+        let Ok(text) = std::fs::read_to_string(self.dir.join("memory.swap.events")) else {
+            return CgroupSwapEvents::default();
+        };
+        CgroupSwapEvents::parse(&text)
     }
 
     /// Read `memory.oom.group` (`Some(true)` for `"1"`, `Some(false)` for `"0"`, `None` otherwise).
@@ -1075,6 +1147,7 @@ impl CgroupScope {
                 "memory.high",
                 "memory.swap.max",
                 "memory.swap.current",
+                "memory.swap.events",
                 "memory.oom.group",
                 "memory.current",
                 "memory.events",
@@ -1300,7 +1373,9 @@ impl SandboxExecutionPlan {
 
         let effective_cgroups = CgroupsConfig {
             max_memory_mb: cfg.cgroups.max_memory_mb,
+            memory_max_bytes: cfg.cgroups.memory_max_bytes,
             high_memory_mb: cfg.cgroups.high_memory_mb,
+            memory_high_bytes: cfg.cgroups.memory_high_bytes,
             memory_swap_max_bytes: cfg.cgroups.memory_swap_max_bytes,
             memory_oom_group: cfg.cgroups.memory_oom_group,
             pids_max: cfg.cgroups.pids_max.or(cfg.max_pids),
@@ -1309,8 +1384,8 @@ impl SandboxExecutionPlan {
             io_max: cfg.cgroups.io_max.clone(),
             psi_stall_warn_pct: cfg.cgroups.psi_stall_warn_pct,
         };
-        let has_cgroup_limits = effective_cgroups.max_memory_mb.is_some()
-            || effective_cgroups.high_memory_mb.is_some()
+        let has_cgroup_limits = effective_cgroups.effective_memory_max_bytes().is_some()
+            || effective_cgroups.effective_memory_high_bytes().is_some()
             || effective_cgroups.memory_swap_max_bytes.is_some()
             || effective_cgroups.memory_oom_group.is_some()
             || effective_cgroups.pids_max.is_some()

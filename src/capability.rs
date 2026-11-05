@@ -2154,6 +2154,7 @@ fn collect_javascript_imports(src: &str) -> Result<Vec<String>, String> {
         modules: std::collections::HashMap<String, String>,
         bindings: std::collections::HashMap<String, String>,
         require_aliases: HashSet<String>,
+        local_classes: HashSet<String>,
         _phantom: std::marker::PhantomData<&'a ()>,
     }
 
@@ -2194,6 +2195,102 @@ fn collect_javascript_imports(src: &str) -> Result<Vec<String>, String> {
                     self.bindings.get(id.name.as_str()).cloned()
                 }
                 _ => None,
+            }
+        }
+
+        fn extract_worker_spec(&self, expr: &oxc_ast::ast::Expression<'a>) -> Option<String> {
+            if let Some(spec) = self.extract_static_spec(expr) {
+                return Some(spec);
+            }
+            if let oxc_ast::ast::Expression::NewExpression(new_expr) = Self::unwrap_parens(expr) {
+                let is_url_ctor = match Self::unwrap_parens(&new_expr.callee) {
+                    oxc_ast::ast::Expression::Identifier(id) => id.name == "URL",
+                    oxc_ast::ast::Expression::StaticMemberExpression(m) => m.property.name == "URL",
+                    _ => false,
+                };
+                if is_url_ctor {
+                    if let Some(first_arg) =
+                        new_expr.arguments.first().and_then(|a| a.as_expression())
+                    {
+                        return self.extract_static_spec(first_arg);
+                    }
+                }
+            }
+            None
+        }
+
+        fn worker_options_has_eval_true(
+            &self,
+            arg: Option<&oxc_ast::ast::Argument<'a>>,
+        ) -> bool {
+            let Some(expr) = arg.and_then(|a| a.as_expression()) else {
+                return false;
+            };
+            let oxc_ast::ast::Expression::ObjectExpression(obj) = Self::unwrap_parens(expr) else {
+                return false;
+            };
+            for prop in &obj.properties {
+                if let oxc_ast::ast::ObjectPropertyKind::ObjectProperty(kv) = prop {
+                    let is_eval_key = match &kv.key {
+                        oxc_ast::ast::PropertyKey::StaticIdentifier(id) => id.name == "eval",
+                        oxc_ast::ast::PropertyKey::StringLiteral(s) => s.value == "eval",
+                        _ => false,
+                    };
+                    if is_eval_key {
+                        match Self::unwrap_parens(&kv.value) {
+                            oxc_ast::ast::Expression::BooleanLiteral(b) if b.value => return true,
+                            oxc_ast::ast::Expression::Identifier(id) => {
+                                if self
+                                    .bindings
+                                    .get(id.name.as_str())
+                                    .is_some_and(|v| v == "true")
+                                {
+                                    return true;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            false
+        }
+
+        fn is_worker_ctor(&self, callee: &oxc_ast::ast::Expression<'a>) -> bool {
+            match Self::unwrap_parens(callee) {
+                oxc_ast::ast::Expression::Identifier(id) => {
+                    (id.name == "Worker" && !self.local_classes.contains("Worker"))
+                        || self
+                            .modules
+                            .get(id.name.as_str())
+                            .is_some_and(|m| m == "worker_threads.Worker")
+                }
+                oxc_ast::ast::Expression::StaticMemberExpression(m) => {
+                    if m.property.name != "Worker" {
+                        return false;
+                    }
+                    match Self::unwrap_parens(&m.object) {
+                        oxc_ast::ast::Expression::Identifier(id) => self
+                            .modules
+                            .get(id.name.as_str())
+                            .is_some_and(|mod_name| mod_name == "worker_threads"),
+                        oxc_ast::ast::Expression::CallExpression(inner) => {
+                            if self.is_require_like_callee(&inner.callee) {
+                                if let Some(arg) =
+                                    inner.arguments.first().and_then(|a| a.as_expression())
+                                {
+                                    if let Some(spec) = self.extract_static_spec(arg) {
+                                        return spec.strip_prefix("node:").unwrap_or(&spec)
+                                            == "worker_threads";
+                                    }
+                                }
+                            }
+                            false
+                        }
+                        _ => false,
+                    }
+                }
+                _ => false,
             }
         }
 
@@ -2253,6 +2350,13 @@ fn collect_javascript_imports(src: &str) -> Result<Vec<String>, String> {
     }
 
     impl<'a> Visit<'a> for JsImportVisitor<'a> {
+        fn visit_class(&mut self, class: &oxc_ast::ast::Class<'a>) {
+            if let Some(id) = &class.id {
+                self.local_classes.insert(id.name.to_string());
+            }
+            walk::walk_class(self, class);
+        }
+
         fn visit_import_declaration(&mut self, decl: &oxc_ast::ast::ImportDeclaration<'a>) {
             let raw_mod = decl.source.value.to_string();
             let norm_mod = raw_mod.strip_prefix("node:").unwrap_or(&raw_mod).to_string();
@@ -2363,6 +2467,20 @@ fn collect_javascript_imports(src: &str) -> Result<Vec<String>, String> {
             }
             walk::walk_call_expression(self, expr);
         }
+
+        fn visit_new_expression(&mut self, expr: &oxc_ast::ast::NewExpression<'a>) {
+            if self.is_worker_ctor(&expr.callee)
+                && !expr.arguments.is_empty()
+                && !self.worker_options_has_eval_true(expr.arguments.get(1))
+            {
+                if let Some(first_arg) = expr.arguments.first().and_then(|a| a.as_expression()) {
+                    if let Some(spec) = self.extract_worker_spec(first_arg) {
+                        self.imports.push(spec);
+                    }
+                }
+            }
+            walk::walk_new_expression(self, expr);
+        }
     }
 
     let mut require_aliases = HashSet::new();
@@ -2372,6 +2490,7 @@ fn collect_javascript_imports(src: &str) -> Result<Vec<String>, String> {
         modules: std::collections::HashMap::new(),
         bindings: std::collections::HashMap::new(),
         require_aliases,
+        local_classes: HashSet::new(),
         _phantom: std::marker::PhantomData,
     };
     visitor.visit_program(&ret.program);

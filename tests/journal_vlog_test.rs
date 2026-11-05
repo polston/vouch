@@ -3,13 +3,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use vouch::config::{self, JournalFormat};
 use vouch::journal::{self, JournalPolicy, OutcomeRecord, Record};
 use vouch::journal_vlog::{
-    append_vlog, compact_vlog, compute_bundle_seal_sha256, encode_record_payload,
-    export_vlog_bundle, export_vlog_bundle_since, merge_vlog_bundles,
-    read_records_from_vlog_bundle, read_vidx_entries, read_vlog_checkpoints, vchk_path,
-    verify_vlog_bundle, verify_vlog_bundle_chain, verify_vlog_integrity, vidx_path, write_all_vlog,
-    VlogBundleHeader, VlogHeader, VlogIndexEntry, VlogReader, VlogTamperKind,
-    VBUNDLE_DELTA_VERSION, VBUNDLE_HEADER_LEN, VBUNDLE_VERSION, VCHK_ENTRY_LEN,
-    VLOG_FRAME_HEADER_LEN, VLOG_HEADER_LEN, VLOG_INDEX_ENTRY_LEN, VLOG_MAGIC,
+    append_vlog, compact_vlog, compute_bundle_seal_sha256, compute_bundle_seal_sha256_with_extra,
+    encode_record_payload, export_vlog_bundle, export_vlog_bundle_since, export_vlog_slice_bundle,
+    merge_vlog_bundles, parse_timestamp_arg, read_records_from_vlog_bundle, read_vidx_entries,
+    read_vlog_checkpoints, vchk_path, verify_vlog_bundle, verify_vlog_bundle_chain,
+    verify_vlog_integrity, vidx_path, write_all_vlog, VlogBundleHeader, VlogHeader, VlogIndexEntry,
+    VlogReader, VlogSliceFilter, VlogTamperKind, VBUNDLE_DELTA_VERSION, VBUNDLE_HEADER_LEN,
+    VBUNDLE_SLICE_VERSION, VBUNDLE_VERSION, VCHK_ENTRY_LEN, VLOG_FRAME_HEADER_LEN, VLOG_HEADER_LEN,
+    VLOG_INDEX_ENTRY_LEN, VLOG_MAGIC,
 };
 use vouch::journal_wal::crc32;
 use vouch::outcome::Outcome;
@@ -1166,6 +1167,162 @@ fn vbundle_offline_merge_compacts_genesis_and_delta_chain_into_standalone_bundle
     assert!(cli_merge_stdout.contains("merged 3 cryptographic audit bundles into"));
     assert!(cli_merge_stdout.contains("10 records, 1 compaction checkpoints"));
     assert!(verify_vlog_bundle(&cli_merged_path).unwrap().valid);
+
+    let _ = std::fs::remove_dir_all(&archive_dir);
+}
+
+#[test]
+fn vbundle_slice_export_by_session_and_time_window_verifies_offline_and_detects_tampering() {
+    let state_dir = unique_test_dir("vbundle_slice_state");
+    let archive_dir = unique_test_dir("vbundle_slice_archive");
+    let session_slice_path = archive_dir.join("session_b.vbundle");
+    let time_slice_path = archive_dir.join("time_window.vbundle");
+    let combined_slice_path = archive_dir.join("combined.vbundle");
+
+    // Append interleaved records across 3 sessions ("sess_alpha", "sess_beta", "sess_gamma")
+    // using ISO 8601 timestamps and Unix epoch timestamps.
+    // 2026-11-04T20:00:00Z = 1793822400
+    let base_ts = parse_timestamp_arg("2026-11-04T20:00:00Z").expect("parse base ISO timestamp");
+    assert_eq!(base_ts, 1_793_822_400);
+
+    let schedule = [
+        (0, "sess_alpha", "2026-11-04T20:00:00Z", "allow", "git status"),
+        (1, "sess_beta", "2026-11-04T20:01:00Z", "allow", "cargo check"),
+        (2, "sess_alpha", "2026-11-04T20:02:00Z", "ask", "touch /tmp/a"),
+        (3, "sess_beta", "2026-11-04T20:03:00Z", "allow", "cargo test"),
+        (4, "sess_gamma", "2026-11-04T20:04:00Z", "deny", "rm -rf /tmp/g"),
+        (5, "sess_beta", "2026-11-04T20:05:00Z", "ask", "touch /tmp/b"),
+        (6, "sess_alpha", "2026-11-04T20:06:00Z", "allow", "git diff"),
+    ];
+
+    for (idx, sess, ts_str, verdict, cmd) in schedule {
+        let mut r = sample_record(idx, 0, verdict, cmd);
+        r.session = sess.to_string();
+        r.ts = ts_str.to_string();
+        append_vlog(&state_dir, &r).unwrap();
+    }
+
+    // 1. Export non-contiguous session slice for "sess_beta" (sequences 1, 3, 5)
+    let sess_filter = VlogSliceFilter {
+        session: Some("sess_beta".to_string()),
+        from_ts_secs: None,
+        to_ts_secs: None,
+    };
+    let sess_rep = export_vlog_slice_bundle(&state_dir, &session_slice_path, &sess_filter)
+        .expect("export sess_beta slice");
+    assert!(sess_rep.valid);
+    assert_eq!(sess_rep.verified_records, 3);
+
+    // Check v3 header and VlogSliceHeader provenance
+    let sess_bytes = std::fs::read(&session_slice_path).unwrap();
+    let sess_hdr = VlogBundleHeader::from_bytes(&sess_bytes).unwrap();
+    assert_eq!(sess_hdr.version, VBUNDLE_SLICE_VERSION);
+    let slice_meta = sess_hdr.parse_slice_header(&sess_bytes).unwrap().unwrap();
+    assert_eq!(slice_meta.source_record_count, 7);
+    assert_eq!(slice_meta.slice_start_seq, 1);
+    assert_eq!(slice_meta.slice_end_seq, 5);
+    assert_eq!(slice_meta.frame_provenance.len(), 3);
+    assert_eq!(slice_meta.frame_provenance[0].0, 1);
+    assert_eq!(slice_meta.frame_provenance[1].0, 3);
+    assert_eq!(slice_meta.frame_provenance[2].0, 5);
+
+    // 2. Export time-window slice [20:02:00Z .. 20:04:00Z] (sequences 2, 3, 4)
+    let time_filter = VlogSliceFilter {
+        session: None,
+        from_ts_secs: Some(parse_timestamp_arg("2026-11-04T20:02:00Z").unwrap()),
+        to_ts_secs: Some(parse_timestamp_arg("2026-11-04T20:04:00Z").unwrap()),
+    };
+    let time_rep = export_vlog_slice_bundle(&state_dir, &time_slice_path, &time_filter)
+        .expect("export time window slice");
+    assert!(time_rep.valid);
+    assert_eq!(time_rep.verified_records, 3);
+
+    // 3. Export via CLI combining --session sess_beta --from 2026-11-04T20:02:00Z --to 2026-11-04T20:05:00Z (sequences 3, 5)
+    let exe = vouch_exe();
+    let cli_export = std::process::Command::new(&exe)
+        .env("VOUCH_STATE_DIR", &state_dir)
+        .args([
+            "doctor",
+            "--export-bundle",
+            combined_slice_path.to_str().unwrap(),
+            "--session",
+            "sess_beta",
+            "--from",
+            "2026-11-04T20:02:00Z",
+            "--to",
+            "2026-11-04T20:05:00Z",
+        ])
+        .output()
+        .expect("cli slice export");
+    assert!(
+        cli_export.status.success(),
+        "cli slice export failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&cli_export.stdout),
+        String::from_utf8_lossy(&cli_export.stderr)
+    );
+
+    // Remove state_dir and verify all 3 slice bundles completely offline!
+    std::fs::remove_dir_all(&state_dir).unwrap();
+
+    let off_sess = verify_vlog_bundle(&session_slice_path).expect("verify session slice offline");
+    assert!(off_sess.valid);
+    assert_eq!(off_sess.verified_records, 3);
+    let sess_recs = read_records_from_vlog_bundle(&session_slice_path).unwrap();
+    assert_eq!(sess_recs.len(), 3);
+    assert_eq!(sess_recs[0].cmd, "cargo check");
+    assert_eq!(sess_recs[1].cmd, "cargo test");
+    assert_eq!(sess_recs[2].cmd, "touch /tmp/b");
+
+    let off_time = verify_vlog_bundle(&time_slice_path).expect("verify time slice offline");
+    assert!(off_time.valid);
+    assert_eq!(off_time.verified_records, 3);
+
+    let cli_verify = std::process::Command::new(&exe)
+        .env("VOUCH_STATE_DIR", &state_dir)
+        .args([
+            "doctor",
+            "--verify-bundle",
+            combined_slice_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("cli slice verify");
+    assert!(
+        cli_verify.status.success(),
+        "cli slice verify failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&cli_verify.stdout),
+        String::from_utf8_lossy(&cli_verify.stderr)
+    );
+    let cli_verify_stdout = String::from_utf8_lossy(&cli_verify.stdout);
+    assert!(cli_verify_stdout.contains("bundle integrity verified: 2 records"));
+
+    // 4. Tamper test: modify a frame's provenance prev_chain_tag inside VlogSliceHeader and re-seal the outer bundle SHA-256
+    let mut tampered = sess_bytes.clone();
+    // Flip a bit in frame_provenance[1].prev_chain_tag (offset: VBUNDLE_HEADER_LEN + 128 + 16 + 8)
+    let prov_tag_offset = VBUNDLE_HEADER_LEN + 128 + 16 + 8;
+    tampered[prov_tag_offset] ^= 0x01;
+    let mut prefix = [0u8; 64];
+    prefix.copy_from_slice(&tampered[0..64]);
+    let vlog_start = sess_hdr.vlog_offset as usize;
+    let vlog_end = vlog_start + sess_hdr.vlog_len as usize;
+    let vidx_start = sess_hdr.vidx_offset as usize;
+    let vidx_end = vidx_start + sess_hdr.vidx_len as usize;
+    let forged_seal = compute_bundle_seal_sha256_with_extra(
+        &prefix,
+        &tampered[VBUNDLE_HEADER_LEN..vlog_start],
+        &tampered[vlog_start..vlog_end],
+        &tampered[vidx_start..vidx_end],
+        &[],
+    );
+    tampered[64..96].copy_from_slice(&forged_seal);
+    let tampered_path = archive_dir.join("tampered_slice.vbundle");
+    std::fs::write(&tampered_path, &tampered).unwrap();
+
+    let tampered_rep = verify_vlog_bundle(&tampered_path).expect("verify tampered slice");
+    assert!(!tampered_rep.valid, "tampered slice provenance must fail chain link check");
+    assert!(matches!(
+        tampered_rep.tamper_finding,
+        Some(VlogTamperKind::ChainLinkBroken { seq_idx: 3, .. })
+    ));
 
     let _ = std::fs::remove_dir_all(&archive_dir);
 }

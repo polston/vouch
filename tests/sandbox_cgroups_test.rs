@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use vouch::config::{self, SeccompProfile};
 use vouch::runtime::{
     parse_psi_resource, CgroupCpuStat, CgroupIoMaxRule, CgroupMemoryEvents, CgroupPidsEvents,
-    CgroupPsiTelemetry, CgroupV2Manager, LandlockRulesetPlan, LandlockVerdict,
+    CgroupPsiTelemetry, CgroupSwapEvents, CgroupV2Manager, LandlockRulesetPlan, LandlockVerdict,
     LoopbackInterfaceSpec, NamespaceSpec, RlimitResource, RlimitRule, RlimitSet,
     SandboxExecutionPlan, SeccompFilterProgram, AUDIT_ARCH_AARCH64, AUDIT_ARCH_X86_64,
     CLONE_NEWNET, CLONE_NEWNS, CLONE_NEWPID, CLONE_NEWUSER, DEFAULT_CPU_MAX_PERIOD_US,
@@ -674,6 +674,81 @@ max_memory_mb = 256
     assert_eq!(scope3.read_memory_swap_max(), None);
     assert_eq!(scope3.read_memory_oom_group(), None);
     scope3.teardown().expect("teardown scope3");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn cgroup_v2_memory_high_bytes_throttle_and_swap_events_telemetry() {
+    let root = unique_cgroup_root("memory_high_and_swap_events");
+    std::fs::write(root.join("cgroup.controllers"), "cpu io memory pids\n").unwrap();
+    let manager = CgroupV2Manager::new(&root);
+
+    // 1. Exact byte limits `memory_high_bytes` and `memory_max_bytes` take precedence over `*_mb`
+    let toml_bytes = r#"
+[sandbox.cgroups]
+max_memory_mb = 2048
+memory_max_bytes = 1073741824
+high_memory_mb = 1024
+memory_high_bytes = 805306368
+memory_swap_max_bytes = 268435456
+"#;
+    let cfg = config::load(toml_bytes).expect("load exact byte memory limits");
+    assert_eq!(
+        cfg.sandbox.cgroups.effective_memory_max_bytes(),
+        Some(1_073_741_824)
+    );
+    assert_eq!(
+        cfg.sandbox.cgroups.effective_memory_high_bytes(),
+        Some(805_306_368)
+    );
+
+    let (plan, scope_opt) =
+        SandboxExecutionPlan::prepare(&manager, "worker-high-swap", &cfg.sandbox).expect("prepare");
+    let scope = scope_opt.expect("scope provisioned");
+    assert_eq!(plan.max_memory_bytes, Some(1_073_741_824));
+    assert_eq!(plan.high_memory_bytes, Some(805_306_368));
+    assert_eq!(scope.read_memory_max(), Some(1_073_741_824));
+    assert_eq!(scope.read_memory_high(), Some(805_306_368));
+    assert_eq!(scope.read_memory_swap_max(), Some(268_435_456));
+
+    // 2. Simulate kernel reporting memory.events (`high` throttle) and memory.swap.events (`high`, `max`, `fail`)
+    std::fs::write(
+        scope.dir.join("memory.events"),
+        "low 0\nhigh 14\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\n",
+    )
+    .unwrap();
+    let mem_events = scope.read_memory_events();
+    assert_eq!(mem_events.high, 14);
+    assert!(mem_events.has_memory_high_throttled());
+    assert!(!mem_events.has_oom_kill());
+
+    std::fs::write(scope.dir.join("memory.swap.current"), "134217728\n").unwrap();
+    std::fs::write(
+        scope.dir.join("memory.swap.events"),
+        "high 5\nmax 2\nfail 1\n",
+    )
+    .unwrap();
+    assert_eq!(scope.read_current_swap_bytes(), Some(134_217_728));
+    let swap_events: CgroupSwapEvents = scope.read_swap_events();
+    assert_eq!(swap_events.high, 5);
+    assert_eq!(swap_events.max, 2);
+    assert_eq!(swap_events.fail, 1);
+    assert!(swap_events.has_swap_max_reached());
+    assert!(swap_events.has_swap_fail());
+
+    scope.teardown().expect("teardown scope with memory.swap.events");
+    assert!(!scope.dir.exists());
+
+    // 3. Validate config rejections: 0-byte limits or memory.high > memory.max
+    assert!(config::load("[sandbox.cgroups]\nmemory_max_bytes = 0\n").is_err());
+    assert!(config::load("[sandbox.cgroups]\nmemory_high_bytes = 0\n").is_err());
+    assert!(
+        config::load(
+            "[sandbox.cgroups]\nmemory_max_bytes = 536870912\nmemory_high_bytes = 1073741824\n"
+        )
+        .is_err()
+    );
 
     let _ = std::fs::remove_dir_all(&root);
 }

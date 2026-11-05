@@ -392,7 +392,27 @@ fn decide_declared(
         }
     }
 
+    let mut exact_allowed_fields = std::collections::HashSet::new();
     for rule in &entry.rule {
+        if rule.action == Action::Allow {
+            if let (Some(exact), Some(val_str)) =
+                (&rule.when_exact, extract_field_str(&fields, &rule.field))
+            {
+                if val_str == *exact {
+                    exact_allowed_fields.insert(rule.field.as_str());
+                }
+            }
+        }
+    }
+
+    for rule in &entry.rule {
+        if rule.action == Action::Ask
+            && rule.guard.is_none()
+            && rule.when_exact.is_none()
+            && exact_allowed_fields.contains(rule.field.as_str())
+        {
+            continue;
+        }
         if let Some(val_str) = extract_field_str(&fields, &rule.field) {
             let mut matches = false;
             if let Some(exact) = &rule.when_exact {
@@ -462,7 +482,16 @@ fn decide_declared(
     }
 
     if worst.is_none() && !entry.rule.is_empty() {
-        worst = Some(Decision::Allow(format!("allowed by tool rule policy for {tool}")));
+        let has_only_allow_rules = entry.rule.iter().all(|r| r.action == Action::Allow);
+        if has_only_allow_rules {
+            let first_field = &entry.rule[0].field;
+            worst = Some(Decision::Ask(format!(
+                "vouch stopped on: tool rule\n  tool: {tool}\n  field: {first_field}\n  value did not match allow rule{}",
+                blanket(tool)
+            )));
+        } else {
+            worst = Some(Decision::Allow(format!("allowed by tool rule policy for {tool}")));
+        }
     }
 
     // Ask is the empty fold's identity (spec §Schema rule 5): a declaration

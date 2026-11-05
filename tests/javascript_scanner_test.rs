@@ -344,3 +344,66 @@ fn modern_js_nullish_coalescing_and_top_level_return_allows() {
         other => panic!("expected Allow for nullish coalescing, got: {other:?}"),
     }
 }
+
+#[test]
+fn js_vm_and_worker_eval_halt_on_dynamic_call_or_destructive_inner_command() {
+    let cfg = realistic_config_with_construct("javascript", "dynamic_call", Action::Ask);
+
+    // 1. `vm.runInNewContext` with dynamic code halts on `dynamic_call`
+    let d_vm = decide_command_at(
+        &cfg,
+        "bash",
+        r#"node -e "const vm = require('node:vm'); vm.runInNewContext(process.env.PAYLOAD);""#,
+        Some(HOME),
+        None,
+        Some("C:/scratch"),
+    );
+    match d_vm {
+        Decision::Ask(reason) => {
+            assert!(
+                reason.contains("dynamic_call") || reason.contains("vm.runInNewContext"),
+                "expected Ask for vm.runInNewContext, got: {reason}"
+            );
+        }
+        other => panic!("expected Ask on vm.runInNewContext, got: {other:?}"),
+    }
+
+    // 2. `vm.runInNewContext` with static string containing `child_process.execSync('rm -rf /')` halts on `delete_recursive`
+    let cfg_default = realistic_config();
+    let d_vm_inner = decide_command_at(
+        &cfg_default,
+        "bash",
+        r#"node -e "const vm = require('node:vm'); vm.runInNewContext(\"require('child_process').execSync('rm -rf /')\");""#,
+        Some(HOME),
+        None,
+        Some("C:/scratch"),
+    );
+    match d_vm_inner {
+        Decision::Ask(reason) => {
+            assert!(
+                reason.contains("delete_recursive"),
+                "expected delete_recursive guard from inner vm code, got: {reason}"
+            );
+        }
+        other => panic!("expected Ask(delete_recursive) for inner vm execSync, got: {other:?}"),
+    }
+
+    // 3. `new Worker(code, { eval: true })` halts on `dynamic_call`
+    let d_worker_eval = decide_command_at(
+        &cfg,
+        "bash",
+        r#"node -e "const { Worker } = require('node:worker_threads'); new Worker('console.log(1)', { eval: true });""#,
+        Some(HOME),
+        None,
+        Some("C:/scratch"),
+    );
+    match d_worker_eval {
+        Decision::Ask(reason) => {
+            assert!(
+                reason.contains("dynamic_call") || reason.contains("worker_threads.Worker"),
+                "expected Ask for Worker eval: true, got: {reason}"
+            );
+        }
+        other => panic!("expected Ask on Worker eval: true, got: {other:?}"),
+    }
+}

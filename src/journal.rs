@@ -124,6 +124,13 @@ pub fn record_from_host(host: Host, input: &HookInput, d: &Decision, mode: &str)
         .clone()
         .or_else(|| input.tool_input.file_path.clone())
         .or_else(|| input.tool_input.url.clone())
+        .or_else(|| {
+            if input.tool_input.extra.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&input.tool_input.extra).ok()
+            }
+        })
         .unwrap_or_default();
     Record {
         id: input.tool_use_id.clone(),

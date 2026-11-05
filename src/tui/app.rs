@@ -277,7 +277,7 @@ impl TuiApp {
                     self.stage_and_simulate_visualizer_node();
                 }
             }
-            TerminalEvent::Key(KeyCode::Char('b')) => {
+            TerminalEvent::Key(KeyCode::Char('b')) | TerminalEvent::Key(KeyCode::Char('e')) => {
                 if self.active_tab == ViewTab::Visualizer {
                     match self.policy_graph.cycle_selected_builder_preset() {
                         Ok(msg) => {

@@ -584,9 +584,15 @@ pub struct CgroupsConfig {
     /// Hard memory limit in megabytes (`memory.max` in cgroups v2).
     #[serde(default)]
     pub max_memory_mb: Option<u64>,
+    /// Hard memory limit in bytes (`memory.max` in cgroups v2; takes precedence over `max_memory_mb`).
+    #[serde(default)]
+    pub memory_max_bytes: Option<u64>,
     /// Throttle memory high-water mark in megabytes (`memory.high` in cgroups v2).
     #[serde(default)]
     pub high_memory_mb: Option<u64>,
+    /// Throttle memory high-water mark in bytes (`memory.high` in cgroups v2; takes precedence over `high_memory_mb`).
+    #[serde(default)]
+    pub memory_high_bytes: Option<u64>,
     /// Swap memory ceiling in bytes (`memory.swap.max` in cgroups v2; `0` disables swap entirely for the worker scope).
     #[serde(default)]
     pub memory_swap_max_bytes: Option<u64>,
@@ -610,6 +616,20 @@ pub struct CgroupsConfig {
     /// warnings are triggered.
     #[serde(default)]
     pub psi_stall_warn_pct: Option<f64>,
+}
+
+impl CgroupsConfig {
+    /// Effective `memory.max` ceiling in bytes (`memory_max_bytes` takes precedence over `max_memory_mb * 1024 * 1024`).
+    pub fn effective_memory_max_bytes(&self) -> Option<u64> {
+        self.memory_max_bytes
+            .or_else(|| self.max_memory_mb.map(|mb| mb.saturating_mul(1024 * 1024)))
+    }
+
+    /// Effective `memory.high` throttle watermark in bytes (`memory_high_bytes` takes precedence over `high_memory_mb * 1024 * 1024`).
+    pub fn effective_memory_high_bytes(&self) -> Option<u64> {
+        self.memory_high_bytes
+            .or_else(|| self.high_memory_mb.map(|mb| mb.saturating_mul(1024 * 1024)))
+    }
 }
 
 /// Seccomp-BPF syscall filter profile under `[sandbox]`.
@@ -1126,6 +1146,26 @@ fn validate(cfg: &Config) -> Result<(), String> {
             return Err("[shadow] stand_down is armed but no modes are named — list the \
                         modes that stand vouch down, or set stand_down = \"off\""
                 .into());
+        }
+    }
+    if cfg.sandbox.cgroups.effective_memory_max_bytes() == Some(0) {
+        return Err(
+            "[sandbox.cgroups] memory_max_bytes / max_memory_mb must be greater than 0".into(),
+        );
+    }
+    if cfg.sandbox.cgroups.effective_memory_high_bytes() == Some(0) {
+        return Err(
+            "[sandbox.cgroups] memory_high_bytes / high_memory_mb must be greater than 0".into(),
+        );
+    }
+    if let (Some(high), Some(max)) = (
+        cfg.sandbox.cgroups.effective_memory_high_bytes(),
+        cfg.sandbox.cgroups.effective_memory_max_bytes(),
+    ) {
+        if high > max {
+            return Err(format!(
+                "[sandbox.cgroups] memory.high ({high} bytes) cannot exceed memory.max ({max} bytes)"
+            ));
         }
     }
     if cfg.sandbox.cgroups.cpu_max_quota_us == Some(0) {

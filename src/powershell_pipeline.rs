@@ -440,6 +440,8 @@ pub struct VariableTaintTable {
     default_param_values: std::collections::HashMap<String, (String, String, String, VariableOrigin)>,
     /// Variable-to-class-type bindings (`$var` -> `"ClassName"` lowercased) for instance method dispatch.
     class_instances: std::collections::HashMap<String, String>,
+    /// `[ref]` alias bindings (`$r` -> normalized target variable key `$target`).
+    ref_targets: std::collections::HashMap<String, String>,
 }
 
 impl Default for VariableTaintTable {
@@ -455,6 +457,7 @@ impl VariableTaintTable {
             splat_args: std::collections::HashMap::new(),
             default_param_values: std::collections::HashMap::new(),
             class_instances: std::collections::HashMap::new(),
+            ref_targets: std::collections::HashMap::new(),
         };
         table.set("$_", VariableOrigin::PipelineItem);
         table.set("$PSItem", VariableOrigin::PipelineItem);
@@ -617,8 +620,73 @@ impl VariableTaintTable {
         None
     }
 
+    pub fn set_ref_target(&mut self, ref_var: &str, target_var: &str) {
+        let ref_key = Self::normalize_key(ref_var);
+        let target_key = Self::normalize_key(target_var);
+        if ref_key != target_key {
+            self.ref_targets.insert(ref_key, target_key);
+        }
+    }
+
+    pub fn get_ref_target(&self, ref_var: &str) -> Option<String> {
+        let mut current = Self::normalize_key(ref_var);
+        let mut resolved: Option<String> = None;
+        for _ in 0..4 {
+            let next_opt = self.ref_targets.get(&current).cloned().or_else(|| {
+                if let Some(bare) = current.strip_prefix("$using:") {
+                    self.ref_targets
+                        .get(&format!("${bare}"))
+                        .or_else(|| self.ref_targets.get(&format!("$script:{bare}")))
+                        .or_else(|| self.ref_targets.get(&format!("$global:{bare}")))
+                        .cloned()
+                } else if !current.contains(':') && current.starts_with('$') {
+                    let bare = &current[1..];
+                    self.ref_targets
+                        .get(&format!("$script:{bare}"))
+                        .or_else(|| self.ref_targets.get(&format!("$global:{bare}")))
+                        .cloned()
+                } else {
+                    None
+                }
+            });
+            match next_opt {
+                Some(next) if next != current => {
+                    resolved = Some(next.clone());
+                    current = next;
+                }
+                _ => break,
+            }
+        }
+        resolved
+    }
+
+    pub fn clear_variable(&mut self, name: &str) {
+        let key = Self::normalize_key(name);
+        self.variables
+            .insert(key.clone(), VariableOrigin::Literal(String::new()));
+        self.variables.remove(&format!("{key}.value"));
+        self.splat_args.remove(&key);
+        self.ref_targets.remove(&key);
+    }
+
     pub fn get(&self, name: &str) -> Option<&VariableOrigin> {
         let key = Self::normalize_key(name);
+        if let Some(base_var) = key.strip_suffix(".value") {
+            if let Some(target_var) = self.get_ref_target(base_var) {
+                if let Some(orig) = self.variables.get(&target_var) {
+                    return Some(orig);
+                }
+                if !target_var.contains(':') && target_var.starts_with('$') {
+                    let bare = &target_var[1..];
+                    if let Some(orig) = self.variables.get(&format!("$script:{bare}")) {
+                        return Some(orig);
+                    }
+                    if let Some(orig) = self.variables.get(&format!("$global:{bare}")) {
+                        return Some(orig);
+                    }
+                }
+            }
+        }
         if let Some(orig) = self.variables.get(&key) {
             return Some(orig);
         }
@@ -666,12 +734,27 @@ impl VariableTaintTable {
                 self.class_instances.insert(k.clone(), v.clone());
             }
         }
+        for (k, v) in &callee.ref_targets {
+            if k.starts_with("$script:") || k.starts_with("$global:") {
+                self.ref_targets.insert(k.clone(), v.clone());
+            }
+        }
     }
 
     pub fn is_tainted_or_dynamic(&self, name: &str) -> bool {
         let key = Self::normalize_key(name);
         if key.starts_with("$env:") || key.starts_with("$using:env:") {
             return true;
+        }
+        if let Some(target_var) = self.get_ref_target(name) {
+            if matches!(
+                self.get(&target_var),
+                Some(VariableOrigin::DynamicInput { .. })
+                    | Some(VariableOrigin::TaintedExpression)
+                    | Some(VariableOrigin::Environment(_))
+            ) {
+                return true;
+            }
         }
         match self.get(name) {
             Some(VariableOrigin::DynamicInput { .. })
@@ -1641,8 +1724,6 @@ impl PsControlFlowGraph {
         taint_table: &mut VariableTaintTable,
         call_depth: usize,
     ) {
-        analyze_statement(stmt, taint_table, &mut self.synthesized_commands);
-
         // Check if statement invokes a locally declared function, dynamic call (`& $fn`), or class instance method
         if call_depth < MAX_INTERPROCEDURAL_CALL_DEPTH {
             // 1. Direct or dynamic function call
@@ -1666,23 +1747,13 @@ impl PsControlFlowGraph {
             if let Some((head, rest_tokens)) = resolved_call {
                 if let Some(func) = self.functions.get(&head).cloned() {
                     let mut callee_taint = taint_table.clone();
-                    // Bind positional arguments to declared function parameters
-                    let arg_tokens: Vec<&PsToken> = rest_tokens
-                        .iter()
-                        .filter(|t| {
-                            !matches!(
-                                t,
-                                PsToken::OpenParen | PsToken::CloseParen | PsToken::Newline
-                            )
-                        })
-                        .collect();
-                    for (param_idx, param_name) in func.params.iter().enumerate() {
-                        if let Some(arg_tok) = arg_tokens.get(param_idx) {
-                            let single = [(*arg_tok).clone()];
-                            let orig = classify_rhs_origin(&single, taint_table);
-                            callee_taint.set(param_name, orig);
-                        }
-                    }
+                    let arg_groups = extract_call_argument_groups(&func.params, rest_tokens);
+                    let ref_writebacks = bind_call_params_with_ref_tracking(
+                        &func.params,
+                        &arg_groups,
+                        taint_table,
+                        &mut callee_taint,
+                    );
                     let call_block = self.new_block(format!("call_{}", func.name), true);
                     self.walk_tokens(
                         &func.body_tokens,
@@ -1692,8 +1763,15 @@ impl PsControlFlowGraph {
                         call_depth + 1,
                     );
                     taint_table.propagate_cross_scope_from(&callee_taint);
+                    propagate_ref_writebacks(&ref_writebacks, &callee_taint, taint_table);
+                    return;
                 }
             }
+        }
+
+        analyze_statement(stmt, taint_table, &mut self.synthesized_commands);
+
+        if call_depth < MAX_INTERPROCEDURAL_CALL_DEPTH {
 
             // 2. Class instance method invocations: `$instance.Method($arg1, $arg2)`
             let mut idx = 0;
@@ -1732,12 +1810,12 @@ impl PsControlFlowGraph {
 
                             // Split comma-separated argument expressions inside `(...)`
                             let arg_exprs = split_comma_separated_tokens(&call_args);
-                            for (param_idx, param_name) in method_func.params.iter().enumerate() {
-                                if let Some(arg_slice) = arg_exprs.get(param_idx) {
-                                    let orig = classify_rhs_origin(arg_slice, taint_table);
-                                    callee_taint.set(param_name, orig);
-                                }
-                            }
+                            let ref_writebacks = bind_call_params_with_ref_tracking(
+                                &method_func.params,
+                                &arg_exprs,
+                                taint_table,
+                                &mut callee_taint,
+                            );
 
                             let call_block =
                                 self.new_block(format!("method_{}", method_func.name), true);
@@ -1749,6 +1827,7 @@ impl PsControlFlowGraph {
                                 call_depth + 1,
                             );
                             taint_table.propagate_cross_scope_from(&callee_taint);
+                            propagate_ref_writebacks(&ref_writebacks, &callee_taint, taint_table);
 
                             // Copy any `$this.<prop>` mutations back onto `$inst_var.<prop>`
                             let this_updates: Vec<(String, VariableOrigin)> = taint_table
@@ -2234,6 +2313,257 @@ impl VariableTaintTable {
         }
         for (k, v) in &other.class_instances {
             self.class_instances.insert(k.clone(), v.clone());
+        }
+        for (k, v) in &other.ref_targets {
+            self.ref_targets.insert(k.clone(), v.clone());
+        }
+    }
+}
+
+fn is_ref_type_name(name: &str) -> bool {
+    let lower = name.trim().to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "ref" | "psreference" | "system.management.automation.psreference"
+    )
+}
+
+fn extract_ref_cast_target(tokens: &[PsToken]) -> Option<String> {
+    let filtered: Vec<&PsToken> = tokens
+        .iter()
+        .filter(|t| !matches!(t, PsToken::OpenParen | PsToken::CloseParen | PsToken::Newline))
+        .collect();
+    if filtered.len() == 4 {
+        if let (
+            PsToken::Other(open_br),
+            PsToken::Identifier(type_id),
+            PsToken::Other(close_br),
+            PsToken::Variable(var),
+        ) = (filtered[0], filtered[1], filtered[2], filtered[3])
+        {
+            if open_br == "[" && close_br == "]" && is_ref_type_name(type_id) {
+                return Some(var.clone());
+            }
+        }
+    }
+    None
+}
+
+fn extract_inline_ref_value_target(tokens: &[PsToken]) -> Option<String> {
+    let filtered: Vec<&PsToken> = tokens
+        .iter()
+        .filter(|t| !matches!(t, PsToken::OpenParen | PsToken::CloseParen | PsToken::Newline))
+        .collect();
+    if filtered.len() == 5 {
+        if let (
+            PsToken::Other(open_br),
+            PsToken::Identifier(type_id),
+            PsToken::Other(close_br),
+            PsToken::Variable(var),
+            PsToken::MemberAccess(member),
+        ) = (filtered[0], filtered[1], filtered[2], filtered[3], filtered[4])
+        {
+            if open_br == "["
+                && close_br == "]"
+                && is_ref_type_name(type_id)
+                && member.trim_start_matches('.').eq_ignore_ascii_case("value")
+            {
+                return Some(var.clone());
+            }
+        }
+    }
+    None
+}
+
+fn extract_call_argument_groups(params: &[String], rest_tokens: &[PsToken]) -> Vec<Vec<PsToken>> {
+    let mut positional_groups: Vec<Vec<PsToken>> = Vec::new();
+    let mut named_groups: std::collections::HashMap<String, Vec<PsToken>> =
+        std::collections::HashMap::new();
+
+    let mut i = 0;
+    while i < rest_tokens.len() {
+        if matches!(rest_tokens[i], PsToken::Newline) {
+            i += 1;
+            continue;
+        }
+        // Check for `-ParamName <arg>`
+        if let PsToken::Other(flag) | PsToken::Identifier(flag) = &rest_tokens[i] {
+            if let Some(flag_bare) = flag.strip_prefix('-') {
+                let param_key = format!("${}", flag_bare.to_ascii_lowercase());
+                if params
+                    .iter()
+                    .any(|p| VariableTaintTable::normalize_key(p) == param_key)
+                {
+                    i += 1;
+                    while i < rest_tokens.len() && matches!(rest_tokens[i], PsToken::Newline) {
+                        i += 1;
+                    }
+                    if let Some((grp, next_i)) = extract_single_call_arg(rest_tokens, i) {
+                        named_groups.insert(param_key, grp);
+                        i = next_i;
+                        continue;
+                    }
+                }
+            }
+        }
+        if let Some((grp, next_i)) = extract_single_call_arg(rest_tokens, i) {
+            // If this is a parenthesized comma-separated tuple `Foo($a, $b)` at position 0, expand it
+            if positional_groups.is_empty()
+                && matches!(rest_tokens.get(i), Some(PsToken::OpenParen))
+                && grp.iter().any(|t| matches!(t, PsToken::Other(op) if op == ","))
+            {
+                for part in split_comma_separated_tokens(&grp) {
+                    if !part.is_empty() {
+                        positional_groups.push(part);
+                    }
+                }
+            } else if !grp.is_empty() {
+                positional_groups.push(grp);
+            }
+            i = next_i;
+        } else {
+            i += 1;
+        }
+    }
+
+    if named_groups.is_empty() {
+        return positional_groups;
+    }
+
+    let mut result = Vec::with_capacity(params.len());
+    let mut pos_iter = positional_groups.into_iter();
+    for p in params {
+        let p_norm = VariableTaintTable::normalize_key(p);
+        if let Some(named) = named_groups.remove(&p_norm) {
+            result.push(named);
+        } else if let Some(pos) = pos_iter.next() {
+            result.push(pos);
+        } else {
+            result.push(Vec::new());
+        }
+    }
+    result
+}
+
+fn extract_single_call_arg(tokens: &[PsToken], idx: usize) -> Option<(Vec<PsToken>, usize)> {
+    if idx >= tokens.len() {
+        return None;
+    }
+    // 1. Parenthesized expression `([ref]$x)` or `(Read-Host)` (plus optional trailing `.Value`)
+    if tokens[idx] == PsToken::OpenParen {
+        let (mut inner, mut after_paren) = extract_delimited_group(tokens, idx, true)?;
+        if let Some(PsToken::MemberAccess(m)) = tokens.get(after_paren) {
+            let mut wrapped = vec![PsToken::OpenParen];
+            wrapped.append(&mut inner);
+            wrapped.push(PsToken::CloseParen);
+            wrapped.push(PsToken::MemberAccess(m.clone()));
+            after_paren += 1;
+            return Some((wrapped, after_paren));
+        }
+        return Some((inner, after_paren));
+    }
+    // 2. Unparenthesized `[ref]$x`
+    if let (
+        Some(PsToken::Other(open_br)),
+        Some(PsToken::Identifier(type_id)),
+        Some(PsToken::Other(close_br)),
+        Some(PsToken::Variable(var)),
+    ) = (
+        tokens.get(idx),
+        tokens.get(idx + 1),
+        tokens.get(idx + 2),
+        tokens.get(idx + 3),
+    ) {
+        if open_br == "[" && close_br == "]" && is_ref_type_name(type_id) {
+            return Some((
+                vec![
+                    PsToken::Other("[".to_string()),
+                    PsToken::Identifier(type_id.clone()),
+                    PsToken::Other("]".to_string()),
+                    PsToken::Variable(var.clone()),
+                ],
+                idx + 4,
+            ));
+        }
+    }
+    // 3. `$var.Prop`
+    if let (Some(PsToken::Variable(v)), Some(PsToken::MemberAccess(m))) =
+        (tokens.get(idx), tokens.get(idx + 1))
+    {
+        return Some((
+            vec![PsToken::Variable(v.clone()), PsToken::MemberAccess(m.clone())],
+            idx + 2,
+        ));
+    }
+    // 4. Single token
+    Some((vec![tokens[idx].clone()], idx + 1))
+}
+
+fn bind_call_params_with_ref_tracking(
+    params: &[String],
+    arg_groups: &[Vec<PsToken>],
+    caller_taint: &VariableTaintTable,
+    callee_taint: &mut VariableTaintTable,
+) -> Vec<(String, String)> {
+    let mut ref_writebacks = Vec::new();
+    for (param_idx, param_name) in params.iter().enumerate() {
+        let Some(arg_slice) = arg_groups.get(param_idx) else {
+            continue;
+        };
+        if arg_slice.is_empty() {
+            continue;
+        }
+        if let Some(ref_var) = extract_ref_cast_target(arg_slice) {
+            let effective_caller = caller_taint.get_ref_target(&ref_var).unwrap_or(ref_var);
+            callee_taint.set_ref_target(param_name, &effective_caller);
+            if let Some(existing) = caller_taint.get(&effective_caller).cloned() {
+                callee_taint.set(param_name, existing.clone());
+                callee_taint.set(&format!("{param_name}.Value"), existing);
+            }
+            ref_writebacks.push((param_name.clone(), effective_caller));
+        } else if arg_slice.len() == 1 {
+            if let PsToken::Variable(arg_var) = &arg_slice[0] {
+                if let Some(effective_caller) = caller_taint.get_ref_target(arg_var) {
+                    callee_taint.set_ref_target(param_name, &effective_caller);
+                    if let Some(existing) = caller_taint.get(&effective_caller).cloned() {
+                        callee_taint.set(&format!("{param_name}.Value"), existing);
+                    }
+                    ref_writebacks.push((param_name.clone(), effective_caller));
+                }
+            }
+            let orig = classify_rhs_origin(arg_slice, caller_taint);
+            callee_taint.set(param_name, orig);
+        } else {
+            let orig = classify_rhs_origin(arg_slice, caller_taint);
+            callee_taint.set(param_name, orig);
+        }
+    }
+    ref_writebacks
+}
+
+fn propagate_ref_writebacks(
+    ref_writebacks: &[(String, String)],
+    callee_taint: &VariableTaintTable,
+    caller_taint: &mut VariableTaintTable,
+) {
+    for (param_name, caller_var) in ref_writebacks {
+        let param_val_key = VariableTaintTable::normalize_key(&format!("{param_name}.Value"));
+        let caller_key = VariableTaintTable::normalize_key(caller_var);
+        let updated_orig = callee_taint
+            .variables
+            .get(&param_val_key)
+            .or_else(|| callee_taint.variables.get(&caller_key))
+            .cloned();
+        if let Some(orig) = updated_orig {
+            caller_taint.set(caller_var, orig);
+        }
+        let updated_splat = callee_taint
+            .splat_args
+            .get(&param_val_key)
+            .or_else(|| callee_taint.splat_args.get(&caller_key))
+            .cloned();
+        if let Some(splat) = updated_splat {
+            caller_taint.set_splat_args(caller_var, splat);
         }
     }
 }
@@ -2827,10 +3157,24 @@ fn analyze_statement(stmt: &[PsToken], taint_table: &mut VariableTaintTable, out
             if walked_scriptblock {
                 return;
             }
+        } else if matches!(
+            head_lower.as_str(),
+            "set-variable"
+                | "sv"
+                | "set"
+                | "new-variable"
+                | "nv"
+                | "clear-variable"
+                | "clv"
+                | "remove-variable"
+                | "rv"
+        ) {
+            handle_variable_reflection_cmdlet(stmt, taint_table);
+            return;
         }
     }
 
-    // 1. Variable, property (`$this.Prop` / `$obj.Prop`), and `$PSDefaultParameterValues` assignments
+    // 1. Variable, property (`$this.Prop` / `$obj.Prop` / `$r.Value`), and `$PSDefaultParameterValues` assignments
     for (idx, tok) in stmt.iter().enumerate() {
         if let PsToken::Other(op) = tok {
             if (op == "=" || op == "+=") && idx > 0 {
@@ -2845,7 +3189,20 @@ fn analyze_statement(stmt: &[PsToken], taint_table: &mut VariableTaintTable, out
                     if let Some(cls) = extract_class_instantiation_name(rhs) {
                         taint_table.set_class_instance(var, &cls);
                     }
-                    taint_table.set(var, origin.clone());
+                    if let Some(ref_target) = extract_ref_cast_target(rhs) {
+                        let effective_target = taint_table
+                            .get_ref_target(&ref_target)
+                            .unwrap_or(ref_target);
+                        taint_table.set_ref_target(var, &effective_target);
+                        if let Some(existing) = taint_table.get(&effective_target).cloned() {
+                            taint_table.set(var, existing.clone());
+                            taint_table.set(&format!("{var}.Value"), existing);
+                        } else {
+                            taint_table.set(var, origin.clone());
+                        }
+                    } else {
+                        taint_table.set(var, origin.clone());
+                    }
                     let splat_args = extract_splat_args_from_rhs(rhs, taint_table);
                     if !splat_args.is_empty() {
                         if op == "+=" {
@@ -2858,7 +3215,7 @@ fn analyze_statement(stmt: &[PsToken], taint_table: &mut VariableTaintTable, out
                         }
                     }
                 }
-                // 1b. Instance property assignment: `$this.Prop = <expr>` or `$obj.Prop = <expr>`
+                // 1b. Instance property or `[ref]` `.Value` assignment: `$this.Prop = <expr>`, `$obj.Prop = <expr>`, `$r.Value = <expr>`
                 else if idx >= 2 {
                     if let (PsToken::Variable(var), PsToken::MemberAccess(member)) =
                         (&stmt[idx - 2], &stmt[idx - 1])
@@ -2867,7 +3224,25 @@ fn analyze_statement(stmt: &[PsToken], taint_table: &mut VariableTaintTable, out
                         taint_table.set(&prop_key, origin.clone());
                         let splat_args = extract_splat_args_from_rhs(rhs, taint_table);
                         if !splat_args.is_empty() {
-                            taint_table.set_splat_args(&prop_key, splat_args);
+                            taint_table.set_splat_args(&prop_key, splat_args.clone());
+                        }
+                        if member.trim_start_matches('.').eq_ignore_ascii_case("value") {
+                            taint_table.set(var, origin.clone());
+                            if let Some(target_var) = taint_table.get_ref_target(var) {
+                                taint_table.set(&target_var, origin.clone());
+                                if !splat_args.is_empty() {
+                                    taint_table.set_splat_args(&target_var, splat_args);
+                                }
+                            }
+                        }
+                    } else if let Some(target_var) = extract_inline_ref_value_target(&stmt[..idx]) {
+                        let effective_target = taint_table
+                            .get_ref_target(&target_var)
+                            .unwrap_or(target_var);
+                        taint_table.set(&effective_target, origin.clone());
+                        let splat_args = extract_splat_args_from_rhs(rhs, taint_table);
+                        if !splat_args.is_empty() {
+                            taint_table.set_splat_args(&effective_target, splat_args);
                         }
                     }
                 }
@@ -3034,18 +3409,28 @@ fn analyze_statement(stmt: &[PsToken], taint_table: &mut VariableTaintTable, out
             if let Some(target_tok) = stmt.get(1) {
                 match target_tok {
                     PsToken::Variable(v) => {
-                        if let Some(VariableOrigin::Literal(lit)) = taint_table.get(v).cloned() {
+                        let (lookup_key, rest_start) =
+                            if let Some(PsToken::MemberAccess(m)) = stmt.get(2) {
+                                (format!("{v}{m}"), 3usize)
+                            } else {
+                                (v.clone(), 2usize)
+                            };
+                        if let Some(VariableOrigin::Literal(lit)) =
+                            taint_table.get(&lookup_key).cloned()
+                        {
                             if !lit.is_empty() && lit != "value" {
                                 let mut synthetic_stmt = vec![PsToken::Identifier(lit)];
-                                synthetic_stmt.extend_from_slice(stmt.get(2..).unwrap_or(&[]));
+                                synthetic_stmt
+                                    .extend_from_slice(stmt.get(rest_start..).unwrap_or(&[]));
                                 analyze_statement(&synthetic_stmt, taint_table, out);
                                 return;
                             }
                         }
                         // Unresolved or tainted dynamic call/dot-source target -> synthesize Invoke-Expression
-                        let mut args = vec!["-Command".to_string(), v.clone()];
-                        let mut has_taint = taint_table.is_tainted_or_dynamic(v);
-                        for tok in stmt.iter().skip(2) {
+                        let mut args = vec!["-Command".to_string(), lookup_key.clone()];
+                        let mut has_taint = taint_table.is_tainted_or_dynamic(&lookup_key)
+                            || taint_table.is_tainted_or_dynamic(v);
+                        for tok in stmt.iter().skip(rest_start) {
                             match tok {
                                 PsToken::Variable(arg_v) => {
                                     args.push(arg_v.clone());
@@ -3068,6 +3453,59 @@ fn analyze_statement(stmt: &[PsToken], taint_table: &mut VariableTaintTable, out
                             ..Default::default()
                         });
                         return;
+                    }
+                    PsToken::OpenParen => {
+                        if let Some((_inner, mut after_paren)) =
+                            extract_delimited_group(stmt, 1, true)
+                        {
+                            if matches!(stmt.get(after_paren), Some(PsToken::MemberAccess(_))) {
+                                after_paren += 1;
+                            }
+                            let target_slice = &stmt[1..after_paren];
+                            let target_orig = classify_rhs_origin(target_slice, taint_table);
+                            if let VariableOrigin::Literal(ref lit) = target_orig {
+                                if !lit.is_empty() && lit != "value" {
+                                    let mut synthetic_stmt = vec![PsToken::Identifier(lit.clone())];
+                                    synthetic_stmt
+                                        .extend_from_slice(stmt.get(after_paren..).unwrap_or(&[]));
+                                    analyze_statement(&synthetic_stmt, taint_table, out);
+                                    return;
+                                }
+                            }
+                            let mut args = vec![
+                                "-Command".to_string(),
+                                tokens_to_arg_string(target_slice),
+                            ];
+                            let mut has_taint = matches!(
+                                target_orig,
+                                VariableOrigin::DynamicInput { .. }
+                                    | VariableOrigin::TaintedExpression
+                                    | VariableOrigin::Environment(_)
+                            );
+                            for tok in stmt.iter().skip(after_paren) {
+                                match tok {
+                                    PsToken::Variable(arg_v) => {
+                                        args.push(arg_v.clone());
+                                        if taint_table.is_tainted_or_dynamic(arg_v) {
+                                            has_taint = true;
+                                        }
+                                    }
+                                    PsToken::StringLiteral(s)
+                                    | PsToken::Identifier(s)
+                                    | PsToken::Other(s) => args.push(s.clone()),
+                                    _ => {}
+                                }
+                            }
+                            if has_taint {
+                                args.push("untrusted_input".to_string());
+                            }
+                            out.push(Cmd {
+                                head: "Invoke-Expression".to_string(),
+                                args,
+                                ..Default::default()
+                            });
+                            return;
+                        }
                     }
                     PsToken::StringLiteral(s) | PsToken::Identifier(s) => {
                         let mut synthetic_stmt = vec![PsToken::Identifier(s.clone())];
@@ -3127,6 +3565,38 @@ fn analyze_statement(stmt: &[PsToken], taint_table: &mut VariableTaintTable, out
                 let mut idx = 1;
                 while idx < stmt.len() {
                     match &stmt[idx] {
+                        PsToken::OpenParen => {
+                            if let Some((_inner, mut after_paren)) =
+                                extract_delimited_group(stmt, idx, true)
+                            {
+                                if matches!(stmt.get(after_paren), Some(PsToken::MemberAccess(_))) {
+                                    after_paren += 1;
+                                }
+                                let sub_slice = &stmt[idx..after_paren];
+                                let sub_orig = classify_rhs_origin(sub_slice, taint_table);
+                                match sub_orig {
+                                    VariableOrigin::Literal(lit)
+                                        if !lit.is_empty() && lit != "value" =>
+                                    {
+                                        args.push(lit);
+                                    }
+                                    VariableOrigin::DynamicInput { .. }
+                                    | VariableOrigin::TaintedExpression
+                                    | VariableOrigin::Environment(_) => {
+                                        args.push(tokens_to_arg_string(sub_slice));
+                                        has_untrusted_var = true;
+                                        if !args.iter().any(|a| a == "untrusted_input") {
+                                            args.push("untrusted_input".to_string());
+                                        }
+                                    }
+                                    _ => {
+                                        args.push(tokens_to_arg_string(sub_slice));
+                                    }
+                                }
+                                idx = after_paren;
+                                continue;
+                            }
+                        }
                         PsToken::Variable(v) => {
                             let has_member =
                                 matches!(stmt.get(idx + 1), Some(PsToken::MemberAccess(_)));
@@ -3524,6 +3994,29 @@ fn classify_rhs_origin(rhs: &[PsToken], taint_table: &VariableTaintTable) -> Var
         return VariableOrigin::Literal(String::new());
     }
 
+    // Check for `[ref]$target` or `([ref]$target).Value`
+    if let Some(ref_target) = extract_ref_cast_target(rhs) {
+        let effective = taint_table.get_ref_target(&ref_target).unwrap_or(ref_target);
+        return taint_table
+            .get(&effective)
+            .cloned()
+            .unwrap_or_else(|| VariableOrigin::Literal("ref".to_string()));
+    }
+    if let Some(inline_ref_val) = extract_inline_ref_value_target(rhs) {
+        let effective = taint_table
+            .get_ref_target(&inline_ref_val)
+            .unwrap_or(inline_ref_val);
+        return taint_table
+            .get(&effective)
+            .cloned()
+            .unwrap_or_else(|| VariableOrigin::Literal("value".to_string()));
+    }
+
+    // Check for `Get-Variable` / `gv` reflection cmdlet
+    if let Some(gv_orig) = resolve_get_variable_tokens(rhs, taint_table) {
+        return gv_orig;
+    }
+
     // Check if right-hand side is a command invocation
     if let Some(PsToken::Identifier(cmd)) = meaningful.first() {
         let cmd_lower = cmd.to_lowercase();
@@ -3582,6 +4075,272 @@ fn classify_rhs_origin(rhs: &[PsToken], taint_table: &VariableTaintTable) -> Var
     }
 
     VariableOrigin::Literal("value".to_string())
+}
+
+fn format_scoped_variable_name(raw_name: &str, scope: Option<&str>) -> String {
+    let bare = raw_name.trim().trim_start_matches('$');
+    if bare.contains(':') {
+        return format!("${bare}");
+    }
+    match scope.map(|s| s.trim().to_ascii_lowercase()) {
+        Some(ref s) if s == "global" => format!("$global:{bare}"),
+        Some(ref s) if s == "script" => format!("$script:{bare}"),
+        _ => format!("${bare}"),
+    }
+}
+
+fn resolve_reflection_name_tokens(
+    name_tokens: &[PsToken],
+    taint_table: &VariableTaintTable,
+) -> Option<Result<String, VariableOrigin>> {
+    let filtered: Vec<&PsToken> = name_tokens
+        .iter()
+        .filter(|t| !matches!(t, PsToken::OpenParen | PsToken::CloseParen | PsToken::Newline))
+        .collect();
+    let first = filtered.first()?;
+    match first {
+        PsToken::Identifier(s) | PsToken::StringLiteral(s) | PsToken::Other(s) => {
+            let trimmed = s.trim().trim_start_matches('$');
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(Ok(trimmed.to_string()))
+            }
+        }
+        PsToken::Variable(v) => {
+            if let Some(VariableOrigin::Literal(lit)) = taint_table.get(v) {
+                if !lit.is_empty() && lit != "value" {
+                    return Some(Ok(lit.trim().trim_start_matches('$').to_string()));
+                }
+            }
+            Some(Err(VariableOrigin::TaintedExpression))
+        }
+        _ => None,
+    }
+}
+
+fn handle_variable_reflection_cmdlet(stmt: &[PsToken], taint_table: &mut VariableTaintTable) {
+    let Some(PsToken::Identifier(head)) = stmt.first() else {
+        return;
+    };
+    let head_lower = head.to_ascii_lowercase();
+    let is_clear_or_remove = matches!(
+        head_lower.as_str(),
+        "clear-variable" | "clv" | "remove-variable" | "rv"
+    );
+
+    let args = &stmt[1..];
+    let mut name_tokens: Option<Vec<PsToken>> = None;
+    let mut val_tokens: Option<Vec<PsToken>> = None;
+    let mut scope_str: Option<String> = None;
+    let mut positional: Vec<Vec<PsToken>> = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if matches!(args[i], PsToken::Newline) {
+            i += 1;
+            continue;
+        }
+        if let PsToken::Other(flag) | PsToken::Identifier(flag) = &args[i] {
+            if flag.starts_with('-') {
+                let fl = flag.to_ascii_lowercase();
+                if matches!(fl.as_str(), "-name" | "-n") {
+                    i += 1;
+                    if let Some((grp, next_i)) = extract_single_call_arg(args, i) {
+                        name_tokens = Some(grp);
+                        i = next_i;
+                        continue;
+                    }
+                } else if matches!(fl.as_str(), "-value" | "-val" | "-v") && !is_clear_or_remove {
+                    i += 1;
+                    if let Some((grp, next_i)) = extract_single_call_arg(args, i) {
+                        val_tokens = Some(grp);
+                        i = next_i;
+                        continue;
+                    }
+                } else if matches!(fl.as_str(), "-scope" | "-s") {
+                    i += 1;
+                    if let Some((grp, next_i)) = extract_single_call_arg(args, i) {
+                        if let Some(
+                            PsToken::Identifier(sc)
+                            | PsToken::StringLiteral(sc)
+                            | PsToken::Other(sc),
+                        ) = grp.first()
+                        {
+                            scope_str = Some(sc.clone());
+                        }
+                        i = next_i;
+                        continue;
+                    }
+                } else if matches!(
+                    fl.as_str(),
+                    "-option" | "-opt" | "-description" | "-desc" | "-visibility" | "-vis"
+                ) {
+                    i += 1;
+                    if let Some((_, next_i)) = extract_single_call_arg(args, i) {
+                        i = next_i;
+                        continue;
+                    }
+                } else {
+                    // Switch flags like -Force, -PassThru, -WhatIf, -Confirm
+                    i += 1;
+                    continue;
+                }
+            }
+        }
+        if let Some((grp, next_i)) = extract_single_call_arg(args, i) {
+            positional.push(grp);
+            i = next_i;
+        } else {
+            i += 1;
+        }
+    }
+
+    let mut pos_iter = positional.into_iter();
+    if name_tokens.is_none() {
+        name_tokens = pos_iter.next();
+    }
+    if !is_clear_or_remove && val_tokens.is_none() {
+        val_tokens = pos_iter.next();
+    }
+
+    let Some(name_grp) = name_tokens else {
+        return;
+    };
+    let Some(Ok(bare_name)) = resolve_reflection_name_tokens(&name_grp, taint_table) else {
+        return;
+    };
+    let scoped_var = format_scoped_variable_name(&bare_name, scope_str.as_deref());
+
+    if is_clear_or_remove {
+        taint_table.clear_variable(&scoped_var);
+        if scope_str.is_some() {
+            taint_table.clear_variable(&format!("${bare_name}"));
+        }
+        return;
+    }
+
+    let val_origin = if let Some(v_grp) = val_tokens {
+        if let Some(ref_target) = extract_ref_cast_target(&v_grp) {
+            let effective_target = taint_table.get_ref_target(&ref_target).unwrap_or(ref_target);
+            taint_table.set_ref_target(&scoped_var, &effective_target);
+            taint_table
+                .get(&effective_target)
+                .cloned()
+                .unwrap_or_else(|| VariableOrigin::Literal("ref".to_string()))
+        } else {
+            let splat_args = extract_splat_args_from_rhs(&v_grp, taint_table);
+            if !splat_args.is_empty() {
+                taint_table.set_splat_args(&scoped_var, splat_args);
+            }
+            classify_rhs_origin(&v_grp, taint_table)
+        }
+    } else if let Some(pipe_orig) = taint_table.get("$_").cloned() {
+        if !matches!(pipe_orig, VariableOrigin::PipelineItem) {
+            pipe_orig
+        } else {
+            VariableOrigin::Literal(String::new())
+        }
+    } else {
+        VariableOrigin::Literal(String::new())
+    };
+
+    taint_table.set(&scoped_var, val_origin.clone());
+    if let Some(ref_target) = taint_table.get_ref_target(&scoped_var) {
+        taint_table.set(&ref_target, val_origin);
+    }
+}
+
+fn resolve_get_variable_tokens(
+    rhs: &[PsToken],
+    taint_table: &VariableTaintTable,
+) -> Option<VariableOrigin> {
+    let mut trimmed = rhs;
+    // Strip trailing `.Value` if present on `(Get-Variable x).Value`
+    if let Some(PsToken::MemberAccess(m)) = trimmed.last() {
+        if m.trim_start_matches('.').eq_ignore_ascii_case("value") {
+            trimmed = &trimmed[..trimmed.len() - 1];
+        }
+    }
+    let filtered: Vec<PsToken> = trimmed
+        .iter()
+        .filter(|t| !matches!(t, PsToken::OpenParen | PsToken::CloseParen | PsToken::Newline))
+        .cloned()
+        .collect();
+    let PsToken::Identifier(cmd) = filtered.first()? else {
+        return None;
+    };
+    if !cmd.eq_ignore_ascii_case("get-variable") && !cmd.eq_ignore_ascii_case("gv") {
+        return None;
+    }
+
+    let args = &filtered[1..];
+    let mut name_tokens: Option<Vec<PsToken>> = None;
+    let mut scope_str: Option<String> = None;
+    let mut positional: Vec<Vec<PsToken>> = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if let PsToken::Other(flag) | PsToken::Identifier(flag) = &args[i] {
+            if flag.starts_with('-') {
+                let fl = flag.to_ascii_lowercase();
+                if matches!(fl.as_str(), "-name" | "-n") {
+                    if let Some(tok) = args.get(i + 1) {
+                        name_tokens = Some(vec![tok.clone()]);
+                        i += 2;
+                        continue;
+                    }
+                } else if matches!(fl.as_str(), "-scope" | "-s") {
+                    if let Some(
+                        PsToken::Identifier(sc)
+                        | PsToken::StringLiteral(sc)
+                        | PsToken::Other(sc),
+                    ) = args.get(i + 1)
+                    {
+                        scope_str = Some(sc.clone());
+                        i += 2;
+                        continue;
+                    }
+                } else if matches!(fl.as_str(), "-include" | "-exclude") {
+                    i += 2;
+                    continue;
+                } else {
+                    // -ValueOnly / -v
+                    i += 1;
+                    continue;
+                }
+            }
+        }
+        positional.push(vec![args[i].clone()]);
+        i += 1;
+    }
+
+    if name_tokens.is_none() {
+        name_tokens = positional.into_iter().next();
+    }
+    let Some(name_grp) = name_tokens else {
+        return Some(VariableOrigin::DynamicInput {
+            source: "Get-Variable".into(),
+        });
+    };
+    match resolve_reflection_name_tokens(&name_grp, taint_table)? {
+        Ok(bare_name) => {
+            if bare_name.contains('*') || bare_name.contains('?') {
+                return Some(VariableOrigin::DynamicInput {
+                    source: "Get-Variable".into(),
+                });
+            }
+            let scoped_var = format_scoped_variable_name(&bare_name, scope_str.as_deref());
+            if let Some(orig) = taint_table.get(&scoped_var) {
+                Some(orig.clone())
+            } else {
+                Some(VariableOrigin::DynamicInput {
+                    source: "Get-Variable".into(),
+                })
+            }
+        }
+        Err(taint_orig) => Some(taint_orig),
+    }
 }
 
 fn extract_class_instantiation_name(rhs: &[PsToken]) -> Option<String> {

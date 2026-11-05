@@ -1190,3 +1190,167 @@ fn tui_rule_builder_script_constructs_sha256_pin_simulation_apply_and_undo() {
 
     let _ = std::fs::remove_dir_all(&tmp_path);
 }
+
+#[test]
+fn tui_rule_builder_tool_rule_and_tool_action_presets_simulation_apply_and_undo() {
+    let tag = format!("tui_test_tool_builder_{}_{}", std::process::id(), line!());
+    let tmp_path = std::env::temp_dir().join(tag);
+    let _ = std::fs::remove_dir_all(&tmp_path);
+    let home = tmp_path.to_str().unwrap();
+    let config_dir = tmp_path.join(".config").join("vouch");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let config_file = config_dir.join("config.toml");
+    let my_kb_file = config_dir.join("my-knowledge.toml");
+    let initial_cfg = "version = 1\n";
+    let initial_kb = "# operator knowledge\n";
+    std::fs::write(&config_file, initial_cfg).unwrap();
+    std::fs::write(&my_kb_file, initial_kb).unwrap();
+
+    // Two tool ask records for mcp__github__search_code with different query field values
+    let records = vec![
+        Record {
+            id: "t1".into(),
+            ts: "2026-10-30T11:00:00Z".into(),
+            cmd: r#"{"q":"org:acme is:open"}"#.into(),
+            verdict: "ask".into(),
+            reason: "vouch stopped on: tool rule\n  tool: mcp__github__search_code\n  field: q\n  value matched rule predicate\n  to allow this tool from now on: tools.allow = [\"mcp__github__search_code\"]".into(),
+            mode: "live".into(),
+            outcome: Outcome::Executed,
+            session: "sess-tool".into(),
+            lang: "".into(),
+            cwd: "/home/dev".into(),
+            tool: "mcp__github__search_code".into(),
+            permission_mode: "".into(),
+            measurement: false,
+            host: "claude".into(),
+            count: 1,
+        },
+        Record {
+            id: "t2".into(),
+            ts: "2026-10-30T11:01:00Z".into(),
+            cmd: r#"{"q":"org:other secret"}"#.into(),
+            verdict: "ask".into(),
+            reason: "vouch stopped on: unmodeled_tool\n  tool: mcp__github__search_code\n  vouch has no description of this tool\n  to allow this tool from now on: tools.allow = [\"mcp__github__search_code\"]".into(),
+            mode: "live".into(),
+            outcome: Outcome::Denied,
+            session: "sess-tool".into(),
+            lang: "".into(),
+            cwd: "/home/dev".into(),
+            tool: "mcp__github__search_code".into(),
+            permission_mode: "".into(),
+            measurement: false,
+            host: "claude".into(),
+            count: 1,
+        },
+    ];
+
+    let engine = TuiEngine::from_records(home, &records);
+    // Both tool.rule (least-privilege) and tool.action candidates should be synthesized for executed tool asks
+    assert!(
+        engine.candidates.iter().any(|c| c.section == "tool.rule"),
+        "Expected tool.rule candidate in engine.candidates"
+    );
+    assert!(
+        engine.candidates.iter().any(|c| c.section == "tool.action"),
+        "Expected tool.action candidate in engine.candidates"
+    );
+
+    let mut app = TuiApp::new(engine);
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('v')));
+    // Switch to Decision 1 (t1: {"q":"org:acme is:open"})
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('l')));
+    assert_eq!(app.visualizer_decision_idx, 1);
+
+    // Select [RULE] policy gate: tool rule
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('j')));
+    let sel = app.policy_graph.selected_node().expect("selected rule node");
+    assert_eq!(sel.builder_presets.len(), 2);
+    // Least-privilege [[tool.rule]] must be preset 0 (default)
+    assert!(
+        sel.active_preset()
+            .unwrap()
+            .short_label()
+            .contains("[[tool.rule]] mcp__github__search_code.q == \"org:acme is:open\""),
+        "got label: {}",
+        sel.active_preset().unwrap().short_label()
+    );
+
+    // Simulate with 'd' (Preset 1/2: [[tool.rule]] when_exact = "org:acme is:open")
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('d')));
+    let sim_narrow = app.policy_graph.simulation.as_ref().expect("simulation present");
+    assert_eq!(sim_narrow.before_verdict, "ASK");
+    assert_eq!(sim_narrow.after_verdict, "ALLOW");
+    assert_eq!(sim_narrow.session_ask_total, 2);
+    assert_eq!(
+        sim_narrow.session_flipped_to_allow, 1,
+        "Field-scoped [[tool.rule]] must only flip the matching query to ALLOW"
+    );
+
+    // Cycle preset using 'e' to Preset 2/2: [[tool]] action = "allow"
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('e')));
+    let sel_after_e = app.policy_graph.selected_node().unwrap();
+    assert!(sel_after_e
+        .active_preset()
+        .unwrap()
+        .short_label()
+        .contains("[[tool]] match = [\"mcp__github__search_code\"] action = \"allow\""));
+    let sim_broad = app.policy_graph.simulation.as_ref().expect("broad simulation");
+    assert_eq!(sim_broad.after_verdict, "ALLOW");
+    assert_eq!(
+        sim_broad.session_flipped_to_allow, 2,
+        "Whole-tool [[tool]] action = allow must flip both tool calls in session to ALLOW"
+    );
+
+    // Cycle back using 'b' to Preset 1/2: [[tool.rule]]
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('b')));
+    let sim_narrow_again = app.policy_graph.simulation.as_ref().unwrap();
+    assert_eq!(sim_narrow_again.session_flipped_to_allow, 1);
+
+    // Apply Preset 1/2 ([[tool.rule]]) with 'a' and verify my-knowledge.toml is written & valid
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('a')));
+    assert!(app.status_message.contains("my-knowledge.toml"));
+    let updated_kb = std::fs::read_to_string(&my_kb_file).unwrap();
+    assert!(updated_kb.contains("match = [\"mcp__github__search_code\"]"));
+    assert!(updated_kb.contains("[[tool.rule]]"));
+    assert!(updated_kb.contains("field = \"q\""));
+    assert!(updated_kb.contains("when_exact = \"org:acme is:open\""));
+    assert!(updated_kb.contains("action = \"allow\""));
+    vouch::knowledge::validate_text(&updated_kb).expect("written my-knowledge.toml must validate");
+
+    // Undo with 'u' and verify exact rollback
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('u')));
+    assert_eq!(std::fs::read_to_string(&my_kb_file).unwrap(), initial_kb);
+
+    let _ = std::fs::remove_dir_all(&tmp_path);
+}
+
+#[test]
+fn tui_rule_builder_refuses_guarded_tool_rule() {
+    use vouch::tui::{DecisionItem, NodeKind, PolicyGraph};
+
+    let guarded_tool_decision = DecisionItem {
+        timestamp: "2026-10-30T11:05:00Z".into(),
+        cmd: r#"{"query":"DROP TABLE users;"}"#.into(),
+        verdict: "ask".into(),
+        reason: "vouch stopped on: tool rule (delete_recursive)\n  tool: mcp__postgres__execute_query\n  field: query\n  value matched rule predicate".into(),
+        outcome: "Denied".into(),
+        session: "sess-guard-tool".into(),
+        cwd: "/home/dev".into(),
+    };
+
+    let mut graph = PolicyGraph::from_decision(&guarded_tool_decision);
+    assert!(
+        graph
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::GuardHit && n.label == "guard: delete_recursive"),
+        "Guarded tool rule must produce a GuardHit node, got: {:?}",
+        graph.nodes
+    );
+    // Select the GuardHit node and verify preset cycling and candidate synthesis are refused
+    graph.move_selection_down();
+    let sel = graph.selected_node().unwrap();
+    assert_eq!(sel.kind, NodeKind::GuardHit);
+    assert!(sel.to_review_candidate(&guarded_tool_decision.cmd).is_err());
+    assert!(graph.cycle_selected_builder_preset().is_err());
+}

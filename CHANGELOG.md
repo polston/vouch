@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.65.0 (2026-11-05)
+
+
+### Features
+
+* **Enforce byte-exact memory.high throttling and inspect memory.swap.current and memory.swap.events telemetry in Linux cgroups v2 sandboxes**
+  - **Problem & Explanation:** Support byte-exact memory high-watermark throttling and memory swap current and swap event telemetry in Linux cgroups v2 sandboxes.
+  - **Example Scenario:** Verified through automated test suite and regression coverage.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: unmodeled or unhandled. After: evaluated and enforced according to updated specification.
+* **Export and verify session-scoped and time-windowed cryptographic audit bundle slices in vouch doctor**
+  - **Problem & Explanation:** Add session-scoped and time-windowed cryptographic audit bundle slice export and offline boundary verification to vouch doctor.
+  - **Example Scenario:** Verified through automated test suite and regression coverage.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: unmodeled or unhandled. After: evaluated and enforced according to updated specification.
+* **Propagate taint across PowerShell reference parameter mutations and Set-Variable, Get-Variable, New-Variable, and Clear-Variable reflection cmdlets**
+  - **Problem & Explanation:** Propagate taint across PowerShell reference parameter write-backs, aliased reference mutations, and variable reflection cmdlets.
+  - **Example Scenario:** Verified through automated test suite and regression coverage.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: unmodeled or unhandled. After: evaluated and enforced according to updated specification.
+* **Synthesize and stage whole-tool and field-scoped tool rules in the interactive TUI RuleBuilder and Policy Visualizer**
+  - **Problem & Explanation:** Extend the interactive TUI RuleBuilder and Policy Visualizer to synthesize and stage whole-tool action rules and field-scoped tool rules into my-knowledge.toml from recorded non-Bash tool prompt evidence.
+  - **Example Scenario:** Verified through automated test suite and regression coverage.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: unmodeled or unhandled. After: evaluated and enforced according to updated specification.
+* **Track Node.js vm dynamic compilation and Worker thread instantiation taint and transitive capabilities in JavaScript and TypeScript analysis**
+  - **Problem & Explanation:** Track Node.js vm dynamic compilation and Worker thread instantiation taint and transitive file capabilities across the JavaScript and TypeScript AST scanner and import resolver.
+  - **Example Scenario:** Verified through automated test suite and regression coverage.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: unmodeled or unhandled. After: evaluated and enforced according to updated specification.
+
 ## 0.64.0 (2026-10-30)
 
 

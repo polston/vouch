@@ -2182,7 +2182,17 @@ fn overlay_tool(base: &mut Tool, mine: &Tool) {
         base.cwd_from_call = mine.cwd_from_call;
     }
     if !mine.rule.is_empty() {
+        let replaced: HashSet<(String, Option<String>, Option<String>)> = mine
+            .rule
+            .iter()
+            .map(|r| (r.field.clone(), r.when_exact.clone(), r.when_pattern.clone()))
+            .collect();
+        base.rule
+            .retain(|r| !replaced.contains(&(r.field.clone(), r.when_exact.clone(), r.when_pattern.clone())));
         base.rule.extend(mine.rule.clone());
+    } else if mine.action == Some(crate::config::Action::Allow) {
+        base.rule
+            .retain(|r| !(r.action == crate::config::Action::Ask && r.guard.is_none()));
     }
     // `server` is identity, not a claim to lay — `overlay_all` only ever
     // calls `lay` on two entries `same_name` already agreed are the SAME

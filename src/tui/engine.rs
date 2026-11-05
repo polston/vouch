@@ -305,7 +305,11 @@ impl TuiEngine {
             if cand.target_file != TargetFile::MyKnowledge {
                 continue;
             }
-            let (updated, sum) = apply_exact_args_candidate_to_my_knowledge_toml(&current_content, cand)?;
+            let (updated, sum) = if cand.section == "tool.rule" || cand.section == "tool.action" {
+                apply_tool_candidate_to_my_knowledge_toml(&current_content, cand)?
+            } else {
+                apply_exact_args_candidate_to_my_knowledge_toml(&current_content, cand)?
+            };
             current_content = updated;
             summaries.push(sum);
         }
@@ -378,15 +382,8 @@ impl TuiEngine {
 
         let amendment_summary = summary_parts.join(" + ");
 
-        let simulated_decision = crate::engine::decide_command_at_with_knowledge(
-            &cfg,
-            "bash",
-            &decision.cmd,
-            Some(&self.home),
-            Some(&decision.cwd),
-            Some(&decision.cwd),
-            merged_kb_opt.as_ref(),
-        );
+        let simulated_decision =
+            self.simulate_single_decision(&cfg, merged_kb_opt.as_ref(), decision);
         let (after_verdict, after_reason) = match simulated_decision {
             crate::protocol::Decision::Allow(r) => ("ALLOW".to_string(), r),
             crate::protocol::Decision::Ask(r) => ("ASK".to_string(), r),
@@ -399,15 +396,7 @@ impl TuiEngine {
         for d in &self.decisions {
             if d.verdict.eq_ignore_ascii_case("ask") {
                 session_ask_total += 1;
-                let sim_d = crate::engine::decide_command_at_with_knowledge(
-                    &cfg,
-                    "bash",
-                    &d.cmd,
-                    Some(&self.home),
-                    Some(&d.cwd),
-                    Some(&d.cwd),
-                    merged_kb_opt.as_ref(),
-                );
+                let sim_d = self.simulate_single_decision(&cfg, merged_kb_opt.as_ref(), d);
                 if matches!(sim_d, crate::protocol::Decision::Allow(_)) {
                     session_flipped_to_allow += 1;
                 }
@@ -426,6 +415,28 @@ impl TuiEngine {
             session_ask_total,
             session_flipped_to_allow,
         })
+    }
+
+    fn simulate_single_decision(
+        &self,
+        cfg: &crate::config::Config,
+        kb_opt: Option<&crate::guards::Knowledge>,
+        d: &DecisionItem,
+    ) -> crate::protocol::Decision {
+        if let Some(tool_name) = extract_tool_name_from_reason(&d.reason) {
+            let kb = kb_opt.unwrap_or_else(|| crate::guards::in_effect());
+            let hook_input = build_hook_input_for_tool_decision(&tool_name, d);
+            return crate::route::decide(cfg, kb, &self.home, &hook_input).decision;
+        }
+        crate::engine::decide_command_at_with_knowledge(
+            cfg,
+            "bash",
+            &d.cmd,
+            Some(&self.home),
+            Some(&d.cwd),
+            Some(&d.cwd),
+            kb_opt,
+        )
     }
 
     /// Applies an approved candidate rule to configuration files and pushes a rollback snapshot onto `undo_stack`.
@@ -799,6 +810,162 @@ pub(crate) fn extract_script_construct_from_cmd(
     None
 }
 
+pub(crate) fn extract_tool_name_from_reason(reason: &str) -> Option<String> {
+    let first_line = reason.lines().next()?.trim();
+    if !first_line.starts_with("vouch stopped on: unmodeled_tool")
+        && !first_line.starts_with("vouch stopped on: tool rule")
+        && !first_line.starts_with("vouch denied: tool rule")
+    {
+        return None;
+    }
+    for line in reason.lines() {
+        if let Some(rest) = line.trim().strip_prefix("tool:") {
+            let name = rest.trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn extract_tool_field_from_reason(reason: &str) -> Option<String> {
+    for line in reason.lines() {
+        if let Some(rest) = line.trim().strip_prefix("field:") {
+            let f = rest.trim();
+            if !f.is_empty() {
+                return Some(f.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn extract_json_field_scalar(val: &serde_json::Value, path: &str) -> Option<String> {
+    let mut current = val;
+    for part in path.split('.') {
+        match current {
+            serde_json::Value::Object(map) => {
+                current = map.get(part)?;
+            }
+            serde_json::Value::Array(arr) => {
+                let idx: usize = part.parse().ok()?;
+                current = arr.get(idx)?;
+            }
+            _ => return None,
+        }
+    }
+    match current {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+pub(crate) fn extract_tool_presets_from_decision(
+    cmd: &str,
+    reason: &str,
+) -> Option<(String, Option<(String, String)>)> {
+    let first_line = reason.lines().next()?.trim();
+    if first_line.starts_with("vouch stopped on: tool rule (") && first_line.ends_with(')') {
+        return None;
+    }
+    let tool_name = extract_tool_name_from_reason(reason)?;
+    let reason_field = extract_tool_field_from_reason(reason);
+
+    let field_val = if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(cmd) {
+        if let Some(ref f) = reason_field {
+            extract_json_field_scalar(&json_val, f).map(|v| (f.clone(), v))
+        } else if let serde_json::Value::Object(map) = &json_val {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            keys.into_iter().find_map(|k| {
+                extract_json_field_scalar(&json_val, k)
+                    .filter(|v| !v.is_empty())
+                    .map(|v| (k.clone(), v))
+            })
+        } else {
+            None
+        }
+    } else if let Some(f) = reason_field {
+        let trimmed = cmd.trim();
+        if !trimmed.is_empty() {
+            Some((f, trimmed.to_string()))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Some((tool_name, field_val))
+}
+
+fn insert_dotted_field(
+    map: &mut serde_json::Map<String, serde_json::Value>,
+    path: &str,
+    val: String,
+) {
+    let parts: Vec<&str> = path.split('.').collect();
+    if parts.len() <= 1 {
+        map.insert(path.to_string(), serde_json::Value::String(val));
+        return;
+    }
+    let mut root = serde_json::Value::String(val);
+    for &part in parts.iter().rev().take(parts.len() - 1) {
+        if let Ok(idx) = part.parse::<usize>() {
+            let mut arr = vec![serde_json::Value::Null; idx + 1];
+            arr[idx] = root;
+            root = serde_json::Value::Array(arr);
+        } else {
+            let mut inner = serde_json::Map::new();
+            inner.insert(part.to_string(), root);
+            root = serde_json::Value::Object(inner);
+        }
+    }
+    map.insert(parts[0].to_string(), root);
+}
+
+fn build_hook_input_for_tool_decision(
+    tool_name: &str,
+    d: &DecisionItem,
+) -> crate::protocol::HookInput {
+    let mut tool_input = crate::protocol::ToolInput::default();
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(&d.cmd) {
+        if let Some(serde_json::Value::String(c)) = map.get("command") {
+            tool_input.command = Some(c.clone());
+        }
+        if let Some(serde_json::Value::String(fp)) = map.get("file_path") {
+            tool_input.file_path = Some(fp.clone());
+        }
+        if let Some(serde_json::Value::String(u)) = map.get("url") {
+            tool_input.url = Some(u.clone());
+        }
+        tool_input.extra = map;
+    } else if let Some(field) = extract_tool_field_from_reason(&d.reason) {
+        if !d.cmd.trim().is_empty() {
+            let val = d.cmd.trim().to_string();
+            match field.as_str() {
+                "command" => tool_input.command = Some(val),
+                "file_path" => tool_input.file_path = Some(val),
+                "url" => tool_input.url = Some(val),
+                _ => insert_dotted_field(&mut tool_input.extra, &field, val),
+            }
+        }
+    }
+    crate::protocol::HookInput {
+        session_id: d.session.clone(),
+        cwd: d.cwd.clone(),
+        hook_event_name: "PreToolUse".to_string(),
+        tool_name: tool_name.to_string(),
+        tool_use_id: String::new(),
+        tool_input,
+        permission_mode: String::new(),
+        ..Default::default()
+    }
+}
+
 pub(crate) fn format_exact_args_proposed_toml(prog: &str, args: &[String]) -> String {
     let args_formatted = args
         .iter()
@@ -821,6 +988,43 @@ pub(crate) fn format_script_construct_proposed_toml(
     )
 }
 
+pub(crate) fn format_tool_rule_proposed_toml(
+    tool_name: &str,
+    field: &str,
+    when_exact: Option<&str>,
+    when_pattern: Option<&str>,
+    action: &str,
+    reason: &str,
+) -> String {
+    let mut out = format!(
+        "[[tool]]\nmatch = [{tool_name:?}]\nsource = \"TUI interactive rule builder\"\n\n[[tool.rule]]\nfield = {field:?}\n"
+    );
+    if let Some(exact) = when_exact {
+        out.push_str(&format!("when_exact = {exact:?}\n"));
+    }
+    if let Some(pat) = when_pattern {
+        out.push_str(&format!("when_pattern = {pat:?}\n"));
+    }
+    out.push_str(&format!("action = {action:?}\n"));
+    if !reason.trim().is_empty() {
+        out.push_str(&format!("reason = {reason:?}\n"));
+    }
+    out
+}
+
+pub(crate) fn format_tool_action_proposed_toml(
+    tool_name: &str,
+    action: &str,
+    source: &str,
+) -> String {
+    let src = if source.trim().is_empty() {
+        "TUI interactive rule builder"
+    } else {
+        source
+    };
+    format!("[[tool]]\nmatch = [{tool_name:?}]\nsource = {src:?}\naction = {action:?}\n")
+}
+
 fn synthesize_granular_candidates(records: &[Record]) -> Vec<ReviewCandidate> {
     let mut out = Vec::new();
     let mut exact_counts: std::collections::HashMap<
@@ -831,9 +1035,40 @@ fn synthesize_granular_candidates(records: &[Record]) -> Vec<ReviewCandidate> {
         (String, String, String, String),
         (usize, usize, usize, std::collections::HashSet<String>, String),
     > = std::collections::HashMap::new();
+    let mut tool_rule_counts: std::collections::HashMap<
+        (String, String, String),
+        (usize, usize, usize, std::collections::HashSet<String>, String),
+    > = std::collections::HashMap::new();
+    let mut tool_action_counts: std::collections::HashMap<
+        String,
+        (usize, usize, usize, std::collections::HashSet<String>, String),
+    > = std::collections::HashMap::new();
 
     for r in records {
         if r.verdict != "ask" || r.mode != "live" || r.measurement {
+            continue;
+        }
+        if let Some((tool_name, field_val)) = extract_tool_presets_from_decision(&r.cmd, &r.reason) {
+            if let Some((field, val)) = field_val {
+                let entry = tool_rule_counts
+                    .entry((tool_name.clone(), field, val))
+                    .or_insert_with(|| (0, 0, 0, std::collections::HashSet::new(), r.cmd.clone()));
+                match r.outcome {
+                    Outcome::Executed => entry.0 += 1,
+                    Outcome::Denied => entry.1 += 1,
+                    _ => entry.2 += 1,
+                }
+                entry.3.insert(r.session.clone());
+            }
+            let act_entry = tool_action_counts
+                .entry(tool_name)
+                .or_insert_with(|| (0, 0, 0, std::collections::HashSet::new(), r.cmd.clone()));
+            match r.outcome {
+                Outcome::Executed => act_entry.0 += 1,
+                Outcome::Denied => act_entry.1 += 1,
+                _ => act_entry.2 += 1,
+            }
+            act_entry.3.insert(r.session.clone());
             continue;
         }
         if let Some((prog, args)) = extract_unmodeled_exact_args_from_cmd(&r.cmd, &r.reason) {
@@ -894,6 +1129,53 @@ fn synthesize_granular_candidates(records: &[Record]) -> Vec<ReviewCandidate> {
                 target_file: TargetFile::Config,
                 proposed_toml: format_script_construct_proposed_toml(
                     &lang, &construct, &path, &sha,
+                ),
+                approved: app,
+                denied: den,
+                unknown: unk,
+                sessions: sess.len().max(1),
+                proposable: true,
+                blocked_reason: None,
+                example_cmd: example,
+            });
+        }
+    }
+
+    for ((tool_name, field, val), (app, den, unk, sess, example)) in tool_rule_counts {
+        if app > 0 {
+            out.push(ReviewCandidate {
+                name: format!("tool.rule: {tool_name} ({field} == {val:?})"),
+                section: "tool.rule".to_string(),
+                target_file: TargetFile::MyKnowledge,
+                proposed_toml: format_tool_rule_proposed_toml(
+                    &tool_name,
+                    &field,
+                    Some(&val),
+                    None,
+                    "allow",
+                    "TUI interactive rule builder",
+                ),
+                approved: app,
+                denied: den,
+                unknown: unk,
+                sessions: sess.len().max(1),
+                proposable: true,
+                blocked_reason: None,
+                example_cmd: example,
+            });
+        }
+    }
+
+    for (tool_name, (app, den, unk, sess, example)) in tool_action_counts {
+        if app > 0 {
+            out.push(ReviewCandidate {
+                name: format!("tool: {tool_name} (allow)"),
+                section: "tool.action".to_string(),
+                target_file: TargetFile::MyKnowledge,
+                proposed_toml: format_tool_action_proposed_toml(
+                    &tool_name,
+                    "allow",
+                    "TUI interactive rule builder",
                 ),
                 approved: app,
                 denied: den,
@@ -1073,6 +1355,173 @@ fn apply_exact_args_candidate_to_my_knowledge_toml(
     let summary = format!(
         "[[program]] match = [{prog_name:?}] exact_args += [{}]",
         new_vec_val.to_string().trim()
+    );
+    Ok((doc.to_string(), summary))
+}
+
+fn apply_tool_candidate_to_my_knowledge_toml(
+    current_content: &str,
+    cand: &ReviewCandidate,
+) -> Result<(String, String), String> {
+    let mut doc: toml_edit::DocumentMut = current_content
+        .parse()
+        .map_err(|e| format!("Invalid my-knowledge.toml: {e}"))?;
+    let prop_doc: toml_edit::DocumentMut = cand
+        .proposed_toml
+        .parse()
+        .map_err(|e| format!("Invalid proposed tool TOML: {e}"))?;
+
+    let prop_table = prop_doc
+        .get("tool")
+        .and_then(|p| p.as_array_of_tables())
+        .and_then(|aot| aot.iter().next())
+        .ok_or_else(|| "Proposed TOML missing [[tool]] table".to_string())?;
+
+    let tool_name = prop_table
+        .get("match")
+        .and_then(|m| m.as_array())
+        .and_then(|a| a.get(0))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Proposed [[tool]] missing match name".to_string())?;
+
+    let tool_item = doc
+        .entry("tool")
+        .or_insert(toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
+    let aot = tool_item
+        .as_array_of_tables_mut()
+        .ok_or_else(|| "tool in my-knowledge.toml is not an array of tables".to_string())?;
+
+    if cand.section == "tool.action" {
+        let action_val = prop_table
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("allow");
+        let source_val = prop_table
+            .get("source")
+            .and_then(|v| v.as_str())
+            .unwrap_or("TUI interactive rule builder");
+
+        let mut merged = false;
+        for existing in aot.iter_mut() {
+            let matches_tool = existing
+                .get("match")
+                .and_then(|m| m.as_array())
+                .is_some_and(|a| {
+                    a.len() == 1
+                        && a.get(0)
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|s| s == tool_name)
+                });
+            if matches_tool {
+                existing.insert("action", toml_edit::value(action_val));
+                if existing.get("source").is_none() {
+                    existing.insert("source", toml_edit::value(source_val));
+                }
+                if action_val == "allow" {
+                    if let Some(rule_aot) = existing
+                        .get_mut("rule")
+                        .and_then(|r| r.as_array_of_tables_mut())
+                    {
+                        let mut kept = toml_edit::ArrayOfTables::new();
+                        for r in rule_aot.iter() {
+                            let is_non_guard_ask = r
+                                .get("action")
+                                .and_then(|a| a.as_str())
+                                .is_some_and(|a| a == "ask")
+                                && r.get("guard").is_none();
+                            if !is_non_guard_ask {
+                                kept.push(r.clone());
+                            }
+                        }
+                        if kept.is_empty() {
+                            existing.remove("rule");
+                        } else {
+                            *rule_aot = kept;
+                        }
+                    }
+                }
+                merged = true;
+                break;
+            }
+        }
+        if !merged {
+            aot.push(prop_table.clone());
+        }
+        let summary = format!("[[tool]] match = [{tool_name:?}] action = {action_val:?}");
+        return Ok((doc.to_string(), summary));
+    }
+
+    let prop_rule = prop_table
+        .get("rule")
+        .and_then(|r| r.as_array_of_tables())
+        .and_then(|raot| raot.iter().next())
+        .ok_or_else(|| "Proposed [[tool]] missing [[tool.rule]] table".to_string())?;
+
+    let field_name = prop_rule
+        .get("field")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let when_exact = prop_rule.get("when_exact").and_then(|v| v.as_str());
+    let when_pattern = prop_rule.get("when_pattern").and_then(|v| v.as_str());
+    let action_val = prop_rule
+        .get("action")
+        .and_then(|v| v.as_str())
+        .unwrap_or("allow");
+
+    let mut merged = false;
+    for existing in aot.iter_mut() {
+        let matches_tool = existing
+            .get("match")
+            .and_then(|m| m.as_array())
+            .is_some_and(|a| {
+                a.len() == 1
+                    && a.get(0)
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|s| s == tool_name)
+            });
+        if matches_tool {
+            let rule_item = existing
+                .entry("rule")
+                .or_insert(toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
+            let rule_aot = rule_item
+                .as_array_of_tables_mut()
+                .ok_or_else(|| "tool.rule in my-knowledge.toml is not an array of tables".to_string())?;
+
+            let mut rule_updated = false;
+            for r in rule_aot.iter_mut() {
+                let same_field = r.get("field").and_then(|v| v.as_str()) == Some(field_name);
+                let same_exact = r.get("when_exact").and_then(|v| v.as_str()) == when_exact;
+                let same_pat = r.get("when_pattern").and_then(|v| v.as_str()) == when_pattern;
+                if same_field && same_exact && same_pat {
+                    r.insert("action", toml_edit::value(action_val));
+                    if let Some(reason_v) = prop_rule.get("reason") {
+                        r.insert("reason", reason_v.clone());
+                    }
+                    rule_updated = true;
+                    break;
+                }
+            }
+            if !rule_updated {
+                rule_aot.push(prop_rule.clone());
+            }
+            merged = true;
+            break;
+        }
+    }
+
+    if !merged {
+        aot.push(prop_table.clone());
+    }
+
+    let pred_desc = if let Some(ex) = when_exact {
+        format!("{field_name} == {ex:?}")
+    } else if let Some(pat) = when_pattern {
+        format!("{field_name} ~= {pat:?}")
+    } else {
+        field_name.to_string()
+    };
+    let summary = format!(
+        "[[tool.rule]] {tool_name} ({pred_desc}) -> {action_val:?}"
     );
     Ok((doc.to_string(), summary))
 }

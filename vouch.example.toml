@@ -312,7 +312,7 @@ default = "allow"
 [lang.javascript.constructs]
 # A call no entry describes, e.g. javascript:frobnicate(...).
 unmodeled_command = "ask"
-# Dynamic evaluation via eval(...) or new Function(...).
+# Dynamic evaluation via eval(...), new Function(...), node:vm, or new Worker(..., { eval: true }).
 dynamic_call = "ask"
 # The snippet's parser could not read it at all.
 parse_failure = "ask"
@@ -556,6 +556,8 @@ paths = [
 # [sandbox.cgroups]
 # max_memory_mb = 2048
 # high_memory_mb = 1536
+# memory_max_bytes = 2147483648
+# memory_high_bytes = 1610612736
 # memory_swap_max_bytes = 0
 # memory_oom_group = true
 # pids_max = 128

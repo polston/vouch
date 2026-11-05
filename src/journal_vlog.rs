@@ -33,8 +33,10 @@ pub const VCHK_GENESIS_DIGEST: u64 = 0x564f_5543_485f_434b; // "VOUCH_CK"
 pub const VBUNDLE_MAGIC: [u8; 4] = *b"VBND";
 pub const VBUNDLE_VERSION: u32 = 1;
 pub const VBUNDLE_DELTA_VERSION: u32 = 2;
+pub const VBUNDLE_SLICE_VERSION: u32 = 3;
 pub const VBUNDLE_HEADER_LEN: usize = 96;
 pub const VBUNDLE_DELTA_ANCHOR_LEN: usize = 48;
+pub const VBUNDLE_SLICE_HEADER_LEN: usize = 128;
 pub const VBUNDLE_SEAL_SEED: [u8; 32] = *b"VOUCH_VBUNDLE_SEAL_SHA256_V00001";
 
 /// Compute a 64-bit rolling cryptographic hash chain tag over `(VLOG_GENESIS_SEED, prev_tag, seq_idx, payload)`.
@@ -386,7 +388,7 @@ impl VlogIndexEntry {
     pub const FLAG_MEASUREMENT: u16 = 1 << 0;
 
     pub fn from_record(rec: &Record, record_offset: u64, record_len: u32) -> Self {
-        let timestamp_secs = rec.ts.trim().parse::<u64>().unwrap_or(0);
+        let timestamp_secs = parse_timestamp_arg(&rec.ts).unwrap_or(0);
         let verdict_code = verdict_to_code(&rec.verdict);
         let outcome_code = outcome_to_code(rec.outcome);
         let mut flags = 0u16;
@@ -1931,6 +1933,624 @@ impl VlogDeltaAnchor {
     }
 }
 
+/// Parse a timestamp string as Unix epoch seconds (`u64`), accepting either raw integer seconds
+/// (`"1775952000"`) or ISO 8601 / RFC 3339 date/datetime strings (`"2026-04-12"`,
+/// `"2026-04-12T00:00:00Z"`, `"2026-04-12T02:00:00+02:00"`).
+pub fn parse_timestamp_arg(raw: &str) -> Result<u64, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("timestamp is empty".to_string());
+    }
+    if let Ok(secs) = trimmed.parse::<u64>() {
+        return Ok(secs);
+    }
+
+    let (date_part, time_part) = if let Some((d, t)) = trimmed.split_once(['T', 't', ' ']) {
+        (d, Some(t))
+    } else {
+        (trimmed, None)
+    };
+
+    let mut date_iter = date_part.split('-');
+    let year: i64 = date_iter
+        .next()
+        .and_then(|s| if s.len() == 4 { s.parse().ok() } else { None })
+        .ok_or_else(|| format!("invalid timestamp year in {trimmed:?}"))?;
+    let month: u32 = date_iter
+        .next()
+        .and_then(|s| if s.len() == 2 { s.parse().ok() } else { None })
+        .ok_or_else(|| format!("invalid timestamp month in {trimmed:?}"))?;
+    let day: u32 = date_iter
+        .next()
+        .and_then(|s| if s.len() == 2 { s.parse().ok() } else { None })
+        .ok_or_else(|| format!("invalid timestamp day in {trimmed:?}"))?;
+    if date_iter.next().is_some() {
+        return Err(format!("invalid date component in {trimmed:?}"));
+    }
+    if !(1..=12).contains(&month) {
+        return Err(format!("month out of range in {trimmed:?}"));
+    }
+    let is_leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if is_leap {
+                29
+            } else {
+                28
+            }
+        }
+        _ => unreachable!(),
+    };
+    if !(1..=max_day).contains(&day) {
+        return Err(format!("day out of range in {trimmed:?}"));
+    }
+
+    let mut hour: u32 = 0;
+    let mut minute: u32 = 0;
+    let mut second: u32 = 0;
+    let mut tz_offset_secs: i64 = 0;
+
+    if let Some(tp) = time_part {
+        let (hms_frac, tz_sign_and_rest) = if let Some(stripped) = tp.strip_suffix(['Z', 'z']) {
+            (stripped, None)
+        } else if let Some(pos) = tp.rfind(['+', '-']) {
+            (&tp[..pos], Some(&tp[pos..]))
+        } else {
+            (tp, None)
+        };
+
+        let (hms, _frac) = hms_frac.split_once('.').unwrap_or((hms_frac, ""));
+        let mut hms_iter = hms.split(':');
+        hour = hms_iter
+            .next()
+            .and_then(|s| if s.len() == 2 { s.parse().ok() } else { None })
+            .ok_or_else(|| format!("invalid hour in {trimmed:?}"))?;
+        minute = hms_iter
+            .next()
+            .and_then(|s| if s.len() == 2 { s.parse().ok() } else { None })
+            .ok_or_else(|| format!("invalid minute in {trimmed:?}"))?;
+        second = hms_iter
+            .next()
+            .and_then(|s| if s.len() == 2 { s.parse().ok() } else { None })
+            .unwrap_or(0);
+        if hms_iter.next().is_some() || hour > 23 || minute > 59 || second > 60 {
+            return Err(format!("invalid time-of-day in {trimmed:?}"));
+        }
+
+        if let Some(tz_str) = tz_sign_and_rest {
+            let sign: i64 = if tz_str.starts_with('-') { -1 } else { 1 };
+            let rest = &tz_str[1..];
+            let (tz_h_str, tz_m_str) = if let Some((h_s, m_s)) = rest.split_once(':') {
+                (h_s, m_s)
+            } else if rest.len() == 4 {
+                (&rest[0..2], &rest[2..4])
+            } else {
+                return Err(format!("invalid timezone offset in {trimmed:?}"));
+            };
+            let tz_h: i64 = tz_h_str
+                .parse()
+                .map_err(|_| format!("invalid timezone hour in {trimmed:?}"))?;
+            let tz_m: i64 = tz_m_str
+                .parse()
+                .map_err(|_| format!("invalid timezone minute in {trimmed:?}"))?;
+            if !(0..=23).contains(&tz_h) || !(0..=59).contains(&tz_m) {
+                return Err(format!("timezone offset out of range in {trimmed:?}"));
+            }
+            tz_offset_secs = sign * (tz_h * 3600 + tz_m * 60);
+        }
+    }
+
+    // Howard Hinnant civil-to-days algorithm since 1970-01-01
+    let y = year - if month <= 2 { 1 } else { 0 };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u64;
+    let m = month as u64;
+    let d = day as u64;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + (doe as i64) - 719_468;
+
+    let day_secs = (hour as i64) * 3600 + (minute as i64) * 60 + (second as i64);
+    let epoch = days * 86_400 + day_secs - tz_offset_secs;
+    if epoch < 0 {
+        return Err(format!("timestamp precedes Unix epoch (1970-01-01): {trimmed:?}"));
+    }
+    Ok(epoch as u64)
+}
+
+/// Filter specification for session-scoped and/or time-windowed `.vbundle` slice exports.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VlogSliceFilter {
+    pub session: Option<String>,
+    pub from_ts_secs: Option<u64>,
+    pub to_ts_secs: Option<u64>,
+}
+
+impl VlogSliceFilter {
+    pub fn is_active(&self) -> bool {
+        self.session.is_some() || self.from_ts_secs.is_some() || self.to_ts_secs.is_some()
+    }
+
+    pub fn matches_record(&self, rec: &Record) -> bool {
+        if let Some(ref want_sess) = self.session {
+            if &rec.session != want_sess {
+                return false;
+            }
+        }
+        if self.from_ts_secs.is_some() || self.to_ts_secs.is_some() {
+            let Ok(rec_ts) = parse_timestamp_arg(&rec.ts) else {
+                return false;
+            };
+            if let Some(from_ts) = self.from_ts_secs {
+                if rec_ts < from_ts {
+                    return false;
+                }
+            }
+            if let Some(to_ts) = self.to_ts_secs {
+                if rec_ts > to_ts {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+}
+
+/// Cryptographic provenance header and per-frame sequence/anchor table stored immediately after
+/// the 96-byte `VlogBundleHeader` (`bytes[96..vlog_offset]`) when `version == VBUNDLE_SLICE_VERSION` (`3`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VlogSliceHeader {
+    pub source_record_count: u64,
+    pub source_terminal_chain_tag: u64,
+    pub slice_start_seq: u64,
+    pub slice_end_seq: u64,
+    pub boundary_prev_tag: u64,
+    pub boundary_terminal_tag: u64,
+    pub from_ts_secs: u64,
+    pub to_ts_secs: u64,
+    pub session_filter: Option<String>,
+    /// Per-exported-frame `(orig_seq_idx, expected_prev_tag)` from the verified source `.vlog`.
+    pub frame_provenance: Vec<(u64, u64)>,
+}
+
+impl VlogSliceHeader {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
+        let mut out =
+            Vec::with_capacity(VBUNDLE_SLICE_HEADER_LEN + self.frame_provenance.len() * 16);
+        out.extend_from_slice(&self.source_record_count.to_le_bytes());
+        out.extend_from_slice(&self.source_terminal_chain_tag.to_le_bytes());
+        out.extend_from_slice(&self.slice_start_seq.to_le_bytes());
+        out.extend_from_slice(&self.slice_end_seq.to_le_bytes());
+        out.extend_from_slice(&self.boundary_prev_tag.to_le_bytes());
+        out.extend_from_slice(&self.boundary_terminal_tag.to_le_bytes());
+        out.extend_from_slice(&self.from_ts_secs.to_le_bytes());
+        out.extend_from_slice(&self.to_ts_secs.to_le_bytes());
+
+        let mut sess_slot = [0u8; 64];
+        if let Some(ref sess) = self.session_filter {
+            let sb = sess.as_bytes();
+            if sb.is_empty() || sb.len() > 63 {
+                return Err(format!(
+                    "session filter length ({}) must be between 1 and 63 bytes",
+                    sb.len()
+                ));
+            }
+            sess_slot[0] = sb.len() as u8;
+            sess_slot[1..1 + sb.len()].copy_from_slice(sb);
+        }
+        out.extend_from_slice(&sess_slot);
+
+        for &(orig_seq, prev_tag) in &self.frame_provenance {
+            out.extend_from_slice(&orig_seq.to_le_bytes());
+            out.extend_from_slice(&prev_tag.to_le_bytes());
+        }
+        Ok(out)
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.len() < VBUNDLE_SLICE_HEADER_LEN {
+            return Err(format!(
+                "vbundle slice header truncated: expected at least {VBUNDLE_SLICE_HEADER_LEN} bytes, got {}",
+                bytes.len()
+            ));
+        }
+        let rem = bytes.len() - VBUNDLE_SLICE_HEADER_LEN;
+        if rem % 16 != 0 {
+            return Err(format!(
+                "vbundle slice provenance table size ({rem}) is not a multiple of 16 bytes"
+            ));
+        }
+        let source_record_count = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+        let source_terminal_chain_tag = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+        let slice_start_seq = u64::from_le_bytes(bytes[16..24].try_into().unwrap());
+        let slice_end_seq = u64::from_le_bytes(bytes[24..32].try_into().unwrap());
+        let boundary_prev_tag = u64::from_le_bytes(bytes[32..40].try_into().unwrap());
+        let boundary_terminal_tag = u64::from_le_bytes(bytes[40..48].try_into().unwrap());
+        let from_ts_secs = u64::from_le_bytes(bytes[48..56].try_into().unwrap());
+        let to_ts_secs = u64::from_le_bytes(bytes[56..64].try_into().unwrap());
+
+        let sess_len = bytes[64] as usize;
+        if sess_len > 63 {
+            return Err(format!("invalid vbundle slice session length: {sess_len}"));
+        }
+        if bytes[65 + sess_len..128].iter().any(|&b| b != 0) {
+            return Err("non-zero padding in vbundle slice session slot".to_string());
+        }
+        let session_filter = if sess_len > 0 {
+            let s = std::str::from_utf8(&bytes[65..65 + sess_len])
+                .map_err(|_| "invalid UTF-8 in vbundle slice session filter".to_string())?;
+            Some(s.to_string())
+        } else {
+            None
+        };
+
+        let prov_count = rem / 16;
+        let mut frame_provenance = Vec::with_capacity(prov_count);
+        for i in 0..prov_count {
+            let base = VBUNDLE_SLICE_HEADER_LEN + i * 16;
+            let orig_seq = u64::from_le_bytes(bytes[base..base + 8].try_into().unwrap());
+            let prev_tag = u64::from_le_bytes(bytes[base + 8..base + 16].try_into().unwrap());
+            frame_provenance.push((orig_seq, prev_tag));
+        }
+
+        Ok(Self {
+            source_record_count,
+            source_terminal_chain_tag,
+            slice_start_seq,
+            slice_end_seq,
+            boundary_prev_tag,
+            boundary_terminal_tag,
+            from_ts_secs,
+            to_ts_secs,
+            session_filter,
+            frame_provenance,
+        })
+    }
+
+    pub fn to_filter(&self) -> VlogSliceFilter {
+        VlogSliceFilter {
+            session: self.session_filter.clone(),
+            from_ts_secs: if self.from_ts_secs > 0 {
+                Some(self.from_ts_secs)
+            } else {
+                None
+            },
+            to_ts_secs: if self.to_ts_secs < u64::MAX {
+                Some(self.to_ts_secs)
+            } else {
+                None
+            },
+        }
+    }
+}
+
+/// Verify `.vlog` frames and optional `.vidx` sidecar index inside a `VBUNDLE_SLICE_VERSION` (`3`)
+/// filtered slice bundle against its `VlogSliceHeader` and per-frame `(orig_seq_idx, expected_prev_tag)`
+/// provenance table.
+pub fn verify_vlog_slices_with_slice_header(
+    bytes: &[u8],
+    vidx_bytes: Option<&[u8]>,
+    slice_hdr: &VlogSliceHeader,
+) -> Result<VlogIntegrityReport, String> {
+    if slice_hdr.from_ts_secs > slice_hdr.to_ts_secs {
+        return Ok(VlogIntegrityReport {
+            valid: false,
+            verified_records: 0,
+            verified_checkpoints: 0,
+            terminal_chain_tag: slice_hdr.boundary_prev_tag,
+            tamper_finding: Some(VlogTamperKind::HeaderCorrupted {
+                detail: format!(
+                    "slice header from_ts_secs ({}) > to_ts_secs ({})",
+                    slice_hdr.from_ts_secs, slice_hdr.to_ts_secs
+                ),
+            }),
+        });
+    }
+
+    let header = match VlogHeader::from_bytes(bytes) {
+        Ok(h) => h,
+        Err(detail) => {
+            return Ok(VlogIntegrityReport {
+                valid: false,
+                verified_records: 0,
+                verified_checkpoints: 0,
+                terminal_chain_tag: slice_hdr.boundary_prev_tag,
+                tamper_finding: Some(VlogTamperKind::HeaderCorrupted { detail }),
+            });
+        }
+    };
+
+    let rec_count = header.record_count as usize;
+    if rec_count != slice_hdr.frame_provenance.len() {
+        return Ok(VlogIntegrityReport {
+            valid: false,
+            verified_records: 0,
+            verified_checkpoints: 0,
+            terminal_chain_tag: slice_hdr.boundary_prev_tag,
+            tamper_finding: Some(VlogTamperKind::HeaderCorrupted {
+                detail: format!(
+                    "slice vlog record_count ({rec_count}) != provenance table length ({})",
+                    slice_hdr.frame_provenance.len()
+                ),
+            }),
+        });
+    }
+
+    if rec_count == 0 {
+        if slice_hdr.slice_start_seq != 0
+            || slice_hdr.slice_end_seq != 0
+            || slice_hdr.boundary_terminal_tag != slice_hdr.boundary_prev_tag
+        {
+            return Ok(VlogIntegrityReport {
+                valid: false,
+                verified_records: 0,
+                verified_checkpoints: 0,
+                terminal_chain_tag: slice_hdr.boundary_prev_tag,
+                tamper_finding: Some(VlogTamperKind::HeaderCorrupted {
+                    detail: "empty slice bundle has inconsistent boundary metadata".to_string(),
+                }),
+            });
+        }
+    } else {
+        let first_prov = slice_hdr.frame_provenance[0];
+        let last_prov = slice_hdr.frame_provenance[rec_count - 1];
+        if first_prov.0 != slice_hdr.slice_start_seq
+            || first_prov.1 != slice_hdr.boundary_prev_tag
+            || last_prov.0 != slice_hdr.slice_end_seq
+            || slice_hdr.slice_end_seq >= slice_hdr.source_record_count
+            || (slice_hdr.slice_start_seq == 0 && slice_hdr.boundary_prev_tag != VLOG_GENESIS_TAG)
+        {
+            return Ok(VlogIntegrityReport {
+                valid: false,
+                verified_records: 0,
+                verified_checkpoints: 0,
+                terminal_chain_tag: slice_hdr.boundary_prev_tag,
+                tamper_finding: Some(VlogTamperKind::HeaderCorrupted {
+                    detail: "slice boundary anchor metadata does not match frame provenance table"
+                        .to_string(),
+                }),
+            });
+        }
+    }
+
+    let filter = slice_hdr.to_filter();
+    let idx_offset = header.index_offset as usize;
+    let expected_idx_bytes = rec_count.saturating_mul(VLOG_INDEX_ENTRY_LEN);
+
+    let mut offset = VLOG_HEADER_LEN;
+    let mut prev_actual_tag = slice_hdr.boundary_prev_tag;
+    let mut verified_records = 0u64;
+    let mut expected_bounds: Vec<(u64, u32)> = Vec::with_capacity(rec_count);
+
+    for (i, &(seq_idx, expected_prev_tag)) in slice_hdr.frame_provenance.iter().enumerate() {
+        if i > 0 {
+            let prev_seq_idx = slice_hdr.frame_provenance[i - 1].0;
+            if seq_idx <= prev_seq_idx || seq_idx >= slice_hdr.source_record_count {
+                return Ok(VlogIntegrityReport {
+                    valid: false,
+                    verified_records,
+                    verified_checkpoints: 0,
+                    terminal_chain_tag: prev_actual_tag,
+                    tamper_finding: Some(VlogTamperKind::HeaderCorrupted {
+                        detail: format!(
+                            "non-monotonic or out-of-range provenance seq_idx {seq_idx} after {prev_seq_idx}"
+                        ),
+                    }),
+                });
+            }
+            if seq_idx == prev_seq_idx + 1 && expected_prev_tag != prev_actual_tag {
+                return Ok(VlogIntegrityReport {
+                    valid: false,
+                    verified_records,
+                    verified_checkpoints: 0,
+                    terminal_chain_tag: prev_actual_tag,
+                    tamper_finding: Some(VlogTamperKind::ChainLinkBroken {
+                        seq_idx,
+                        offset: offset as u64,
+                        expected_tag: prev_actual_tag,
+                        actual_tag: expected_prev_tag,
+                    }),
+                });
+            }
+        }
+
+        if offset + VLOG_FRAME_HEADER_LEN > bytes.len() || offset + VLOG_FRAME_HEADER_LEN > idx_offset
+        {
+            return Ok(VlogIntegrityReport {
+                valid: false,
+                verified_records,
+                verified_checkpoints: 0,
+                terminal_chain_tag: prev_actual_tag,
+                tamper_finding: Some(VlogTamperKind::TruncatedFrame {
+                    seq_idx,
+                    offset: offset as u64,
+                }),
+            });
+        }
+
+        let len = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+        let expected_crc = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap());
+        let actual_tag = u64::from_le_bytes(bytes[offset + 8..offset + 16].try_into().unwrap());
+        let payload_start = offset + VLOG_FRAME_HEADER_LEN;
+        let payload_end = payload_start.saturating_add(len);
+
+        if payload_end > bytes.len() || payload_end > idx_offset {
+            return Ok(VlogIntegrityReport {
+                valid: false,
+                verified_records,
+                verified_checkpoints: 0,
+                terminal_chain_tag: prev_actual_tag,
+                tamper_finding: Some(VlogTamperKind::TruncatedFrame {
+                    seq_idx,
+                    offset: offset as u64,
+                }),
+            });
+        }
+
+        let payload = &bytes[payload_start..payload_end];
+        let actual_crc = crc32(payload);
+        if actual_crc != expected_crc {
+            return Ok(VlogIntegrityReport {
+                valid: false,
+                verified_records,
+                verified_checkpoints: 0,
+                terminal_chain_tag: prev_actual_tag,
+                tamper_finding: Some(VlogTamperKind::FrameCrcMismatch {
+                    seq_idx,
+                    offset: offset as u64,
+                }),
+            });
+        }
+
+        let Ok(rec) = decode_record_payload(payload) else {
+            return Ok(VlogIntegrityReport {
+                valid: false,
+                verified_records,
+                verified_checkpoints: 0,
+                terminal_chain_tag: prev_actual_tag,
+                tamper_finding: Some(VlogTamperKind::TruncatedFrame {
+                    seq_idx,
+                    offset: offset as u64,
+                }),
+            });
+        };
+
+        if !filter.matches_record(&rec) {
+            return Ok(VlogIntegrityReport {
+                valid: false,
+                verified_records,
+                verified_checkpoints: 0,
+                terminal_chain_tag: prev_actual_tag,
+                tamper_finding: Some(VlogTamperKind::HeaderCorrupted {
+                    detail: format!(
+                        "slice frame at seq_idx {seq_idx} does not satisfy slice filter predicates"
+                    ),
+                }),
+            });
+        }
+
+        let expected_tag = compute_frame_chain_tag(expected_prev_tag, seq_idx, payload);
+        if actual_tag != expected_tag {
+            return Ok(VlogIntegrityReport {
+                valid: false,
+                verified_records,
+                verified_checkpoints: 0,
+                terminal_chain_tag: prev_actual_tag,
+                tamper_finding: Some(VlogTamperKind::ChainLinkBroken {
+                    seq_idx,
+                    offset: offset as u64,
+                    expected_tag,
+                    actual_tag,
+                }),
+            });
+        }
+
+        let frame_total_len = (VLOG_FRAME_HEADER_LEN + len) as u32;
+        expected_bounds.push((offset as u64, frame_total_len));
+        prev_actual_tag = actual_tag;
+        verified_records += 1;
+        offset = payload_end;
+    }
+
+    if rec_count > 0 && prev_actual_tag != slice_hdr.boundary_terminal_tag {
+        return Ok(VlogIntegrityReport {
+            valid: false,
+            verified_records,
+            verified_checkpoints: 0,
+            terminal_chain_tag: prev_actual_tag,
+            tamper_finding: Some(VlogTamperKind::ChainLinkBroken {
+                seq_idx: slice_hdr.slice_end_seq,
+                offset: offset as u64,
+                expected_tag: slice_hdr.boundary_terminal_tag,
+                actual_tag: prev_actual_tag,
+            }),
+        });
+    }
+
+    if offset != idx_offset || idx_offset.saturating_add(expected_idx_bytes) != bytes.len() {
+        return Ok(VlogIntegrityReport {
+            valid: false,
+            verified_records,
+            verified_checkpoints: 0,
+            terminal_chain_tag: prev_actual_tag,
+            tamper_finding: Some(VlogTamperKind::HeaderCorrupted {
+                detail: "slice vlog frame/index boundary mismatch".to_string(),
+            }),
+        });
+    }
+
+    let mut footer_entries = Vec::with_capacity(rec_count);
+    for (i, &(exp_off, exp_len)) in expected_bounds.iter().enumerate() {
+        let entry_start = idx_offset + i * VLOG_INDEX_ENTRY_LEN;
+        let Some(entry) =
+            VlogIndexEntry::from_bytes(&bytes[entry_start..entry_start + VLOG_INDEX_ENTRY_LEN])
+        else {
+            return Ok(VlogIntegrityReport {
+                valid: false,
+                verified_records,
+                verified_checkpoints: 0,
+                terminal_chain_tag: prev_actual_tag,
+                tamper_finding: Some(VlogTamperKind::HeaderCorrupted {
+                    detail: format!("invalid slice footer index entry at {i}"),
+                }),
+            });
+        };
+        if entry.record_offset != exp_off || entry.record_len != exp_len {
+            return Ok(VlogIntegrityReport {
+                valid: false,
+                verified_records,
+                verified_checkpoints: 0,
+                terminal_chain_tag: prev_actual_tag,
+                tamper_finding: Some(VlogTamperKind::HeaderCorrupted {
+                    detail: format!(
+                        "slice footer index entry {i} offset/len ({}, {}) mismatches frame ({exp_off}, {exp_len})",
+                        entry.record_offset, entry.record_len
+                    ),
+                }),
+            });
+        }
+        footer_entries.push(entry);
+    }
+
+    if let Some(vidx_raw) = vidx_bytes {
+        match parse_vidx_bytes(vidx_raw) {
+            Ok((vidx_header, vidx_entries)) => {
+                if vidx_header != header || vidx_entries != footer_entries {
+                    return Ok(VlogIntegrityReport {
+                        valid: false,
+                        verified_records,
+                        verified_checkpoints: 0,
+                        terminal_chain_tag: prev_actual_tag,
+                        tamper_finding: Some(VlogTamperKind::SidecarIndexMismatch {
+                            detail: "slice sidecar index diverges from vlog footer index"
+                                .to_string(),
+                        }),
+                    });
+                }
+            }
+            Err(detail) => {
+                return Ok(VlogIntegrityReport {
+                    valid: false,
+                    verified_records,
+                    verified_checkpoints: 0,
+                    terminal_chain_tag: prev_actual_tag,
+                    tamper_finding: Some(VlogTamperKind::SidecarIndexMismatch { detail }),
+                });
+            }
+        }
+    }
+
+    Ok(VlogIntegrityReport {
+        valid: true,
+        verified_records,
+        verified_checkpoints: 0,
+        terminal_chain_tag: prev_actual_tag,
+        tamper_finding: None,
+    })
+}
+
 /// Compute the 256-bit SHA-256 cryptographic seal over the 64-byte bundle header prefix and all embedded sections.
 pub fn compute_bundle_seal_sha256(
     header_prefix_64: &[u8; 64],
@@ -1950,12 +2570,24 @@ pub fn compute_bundle_seal_sha256_with_anchor(
     vidx_bytes: &[u8],
     vchk_bytes: &[u8],
 ) -> [u8; 32] {
+    let anchor_bytes = delta_anchor.map(|a| a.to_bytes());
+    let extra = anchor_bytes.as_ref().map(|b| b.as_slice()).unwrap_or(&[]);
+    compute_bundle_seal_sha256_with_extra(header_prefix_64, extra, vlog_bytes, vidx_bytes, vchk_bytes)
+}
+
+/// Compute the 256-bit SHA-256 cryptographic seal over the 64-byte bundle header prefix, optional
+/// extra metadata bytes (`bytes[96..vlog_offset]`), and all embedded sections.
+pub fn compute_bundle_seal_sha256_with_extra(
+    header_prefix_64: &[u8; 64],
+    extra_meta_bytes: &[u8],
+    vlog_bytes: &[u8],
+    vidx_bytes: &[u8],
+    vchk_bytes: &[u8],
+) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(VBUNDLE_SEAL_SEED);
     hasher.update(header_prefix_64);
-    if let Some(anchor) = delta_anchor {
-        hasher.update(anchor.to_bytes());
-    }
+    hasher.update(extra_meta_bytes);
     hasher.update(vlog_bytes);
     hasher.update(vidx_bytes);
     hasher.update(vchk_bytes);
@@ -1982,14 +2614,23 @@ impl VlogBundleHeader {
         vidx_bytes: &[u8],
         vchk_bytes: &[u8],
     ) -> Self {
-        let (version, vlog_offset) = if delta_anchor.is_some() {
-            (
-                VBUNDLE_DELTA_VERSION,
-                (VBUNDLE_HEADER_LEN + VBUNDLE_DELTA_ANCHOR_LEN) as u64,
-            )
-        } else {
-            (VBUNDLE_VERSION, VBUNDLE_HEADER_LEN as u64)
+        let anchor_bytes = delta_anchor.map(|a| a.to_bytes());
+        let (version, extra) = match anchor_bytes {
+            Some(ref b) => (VBUNDLE_DELTA_VERSION, b.as_slice()),
+            None => (VBUNDLE_VERSION, &[][..]),
         };
+        Self::new_with_extra(version, exported_at_secs, extra, vlog_bytes, vidx_bytes, vchk_bytes)
+    }
+
+    pub fn new_with_extra(
+        version: u32,
+        exported_at_secs: u64,
+        extra_meta_bytes: &[u8],
+        vlog_bytes: &[u8],
+        vidx_bytes: &[u8],
+        vchk_bytes: &[u8],
+    ) -> Self {
+        let vlog_offset = (VBUNDLE_HEADER_LEN + extra_meta_bytes.len()) as u64;
         let vlog_len = vlog_bytes.len() as u64;
         let vidx_offset = vlog_offset.saturating_add(vlog_len);
         let vidx_len = vidx_bytes.len() as u64;
@@ -2008,9 +2649,9 @@ impl VlogBundleHeader {
             bundle_sha256: [0u8; 32],
         };
         let prefix = h.encode_prefix_64();
-        h.bundle_sha256 = compute_bundle_seal_sha256_with_anchor(
+        h.bundle_sha256 = compute_bundle_seal_sha256_with_extra(
             &prefix,
-            delta_anchor,
+            extra_meta_bytes,
             vlog_bytes,
             vidx_bytes,
             vchk_bytes,
@@ -2051,7 +2692,10 @@ impl VlogBundleHeader {
             return Err("invalid vbundle magic".to_string());
         }
         let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
-        if version != VBUNDLE_VERSION && version != VBUNDLE_DELTA_VERSION {
+        if version != VBUNDLE_VERSION
+            && version != VBUNDLE_DELTA_VERSION
+            && version != VBUNDLE_SLICE_VERSION
+        {
             return Err(format!("unsupported vbundle version: {version}"));
         }
         let exported_at_secs = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
@@ -2064,15 +2708,24 @@ impl VlogBundleHeader {
         let mut bundle_sha256 = [0u8; 32];
         bundle_sha256.copy_from_slice(&bytes[64..96]);
 
-        let expected_vlog_offset = if version == VBUNDLE_DELTA_VERSION {
-            (VBUNDLE_HEADER_LEN + VBUNDLE_DELTA_ANCHOR_LEN) as u64
+        if version == VBUNDLE_SLICE_VERSION {
+            let min_offset = (VBUNDLE_HEADER_LEN + VBUNDLE_SLICE_HEADER_LEN) as u64;
+            if vlog_offset < min_offset || (vlog_offset - min_offset) % 16 != 0 {
+                return Err(format!(
+                    "invalid vbundle slice vlog_offset: {vlog_offset} (min {min_offset}, aligned to 16)"
+                ));
+            }
         } else {
-            VBUNDLE_HEADER_LEN as u64
-        };
-        if vlog_offset != expected_vlog_offset {
-            return Err(format!(
-                "invalid vbundle vlog_offset: expected {expected_vlog_offset}, got {vlog_offset}"
-            ));
+            let expected_vlog_offset = if version == VBUNDLE_DELTA_VERSION {
+                (VBUNDLE_HEADER_LEN + VBUNDLE_DELTA_ANCHOR_LEN) as u64
+            } else {
+                VBUNDLE_HEADER_LEN as u64
+            };
+            if vlog_offset != expected_vlog_offset {
+                return Err(format!(
+                    "invalid vbundle vlog_offset: expected {expected_vlog_offset}, got {vlog_offset}"
+                ));
+            }
         }
         if vidx_offset != vlog_offset.saturating_add(vlog_len) {
             return Err(format!(
@@ -2116,6 +2769,17 @@ impl VlogBundleHeader {
             return Err("vbundle delta anchor out of bounds".to_string());
         }
         VlogDeltaAnchor::from_bytes(&bytes[VBUNDLE_HEADER_LEN..anchor_end]).map(Some)
+    }
+
+    pub fn parse_slice_header(&self, bytes: &[u8]) -> Result<Option<VlogSliceHeader>, String> {
+        if self.version != VBUNDLE_SLICE_VERSION {
+            return Ok(None);
+        }
+        let slice_end = self.vlog_offset as usize;
+        if bytes.len() < slice_end || slice_end < VBUNDLE_HEADER_LEN + VBUNDLE_SLICE_HEADER_LEN {
+            return Err("vbundle slice header out of bounds".to_string());
+        }
+        VlogSliceHeader::from_bytes(&bytes[VBUNDLE_HEADER_LEN..slice_end]).map(Some)
     }
 }
 
@@ -2170,6 +2834,24 @@ fn inspect_bundle_chain_state(
         }
     };
 
+    let slice_header = match header.parse_slice_header(&bytes) {
+        Ok(s) => s,
+        Err(detail) => {
+            return Ok((
+                header,
+                None,
+                0,
+                VlogIntegrityReport {
+                    valid: false,
+                    verified_records: 0,
+                    verified_checkpoints: 0,
+                    terminal_chain_tag: VLOG_GENESIS_TAG,
+                    tamper_finding: Some(VlogTamperKind::BundleSealCorrupted { detail }),
+                },
+            ));
+        }
+    };
+
     let vlog_start = header.vlog_offset as usize;
     let vlog_end = vlog_start + header.vlog_len as usize;
     let vidx_start = header.vidx_offset as usize;
@@ -2177,15 +2859,16 @@ fn inspect_bundle_chain_state(
     let vchk_start = header.vchk_offset as usize;
     let vchk_end = vchk_start + header.vchk_len as usize;
 
+    let extra_meta_slice = &bytes[VBUNDLE_HEADER_LEN..vlog_start];
     let vlog_slice = &bytes[vlog_start..vlog_end];
     let vidx_slice = &bytes[vidx_start..vidx_end];
     let vchk_slice = &bytes[vchk_start..vchk_end];
 
     let mut prefix = [0u8; 64];
     prefix.copy_from_slice(&bytes[0..64]);
-    let expected_seal = compute_bundle_seal_sha256_with_anchor(
+    let expected_seal = compute_bundle_seal_sha256_with_extra(
         &prefix,
-        delta_anchor.as_ref(),
+        extra_meta_slice,
         vlog_slice,
         vidx_slice,
         vchk_slice,
@@ -2217,6 +2900,16 @@ fn inspect_bundle_chain_state(
     } else {
         Some(vchk_slice)
     };
+    if let Some(ref s_hdr) = slice_header {
+        let report = verify_vlog_slices_with_slice_header(vlog_slice, vidx_opt, s_hdr)?;
+        let cumulative_end_seq = if report.verified_records > 0 {
+            s_hdr.slice_end_seq.saturating_add(1)
+        } else {
+            0
+        };
+        return Ok((header, None, cumulative_end_seq, report));
+    }
+
     let (base_seq, init_tag) = match delta_anchor {
         Some(ref a) => (a.base_seq_idx, a.parent_terminal_chain_tag),
         None => (0, VLOG_GENESIS_TAG),
@@ -2449,6 +3142,199 @@ pub fn export_vlog_bundle_since(
     Ok(export_report)
 }
 
+/// Package a session-scoped or time-window-scoped slice of `journal.vlog` from `dir` into a
+/// cryptographically sealed `VBUNDLE_SLICE_VERSION` (`3`) `.vbundle` file at `bundle_path`.
+///
+/// Refuses to export if the source `journal.vlog` fails integrity verification.
+pub fn export_vlog_slice_bundle(
+    dir: &Path,
+    bundle_path: &Path,
+    filter: &VlogSliceFilter,
+) -> Result<VlogIntegrityReport, String> {
+    let vlog_file = vlog_path(dir);
+    if !vlog_file.exists() {
+        return Err(format!(
+            "cannot export slice bundle: {} does not exist",
+            vlog_file.display()
+        ));
+    }
+    let full_vlog_bytes =
+        std::fs::read(&vlog_file).map_err(|e| format!("failed to read journal.vlog: {e}"))?;
+    let vidx_file = vidx_path(dir);
+    let full_vidx_bytes = if vidx_file.exists() {
+        std::fs::read(&vidx_file).map_err(|e| format!("failed to read journal.vidx: {e}"))?
+    } else {
+        Vec::new()
+    };
+    let vchk_file = vchk_path(dir);
+    let full_vchk_bytes = if vchk_file.exists() {
+        std::fs::read(&vchk_file).map_err(|e| format!("failed to read journal.vchk: {e}"))?
+    } else {
+        Vec::new()
+    };
+
+    let vidx_opt = if full_vidx_bytes.is_empty() {
+        None
+    } else {
+        Some(full_vidx_bytes.as_slice())
+    };
+    let vchk_opt = if full_vchk_bytes.is_empty() {
+        None
+    } else {
+        Some(full_vchk_bytes.as_slice())
+    };
+    let live_report = verify_vlog_slices(&full_vlog_bytes, vidx_opt, vchk_opt)?;
+    if !live_report.valid {
+        return Err(format!(
+            "refusing to export slice from corrupted journal.vlog: {:?}",
+            live_report.tamper_finding
+        ));
+    }
+
+    let full_header = VlogHeader::from_bytes(&full_vlog_bytes)?;
+    let idx_offset = full_header.index_offset as usize;
+    let total_recs = full_header.record_count as usize;
+
+    let mut pos = VLOG_HEADER_LEN;
+    let mut prev_tag = VLOG_GENESIS_TAG;
+    let mut slice_raw_frames: Vec<u8> = Vec::new();
+    let mut slice_idx_entries: Vec<VlogIndexEntry> = Vec::new();
+    let mut frame_provenance: Vec<(u64, u64)> = Vec::new();
+    let mut boundary_prev_tag = VLOG_GENESIS_TAG;
+    let mut boundary_terminal_tag = VLOG_GENESIS_TAG;
+
+    for seq_idx in 0..total_recs {
+        if pos + VLOG_FRAME_HEADER_LEN > idx_offset {
+            return Err("source journal.vlog frame header truncated during slice scan".to_string());
+        }
+        let payload_len =
+            u32::from_le_bytes(full_vlog_bytes[pos..pos + 4].try_into().unwrap()) as usize;
+        let frame_end = pos + VLOG_FRAME_HEADER_LEN + payload_len;
+        if frame_end > idx_offset {
+            return Err("source journal.vlog frame payload truncated during slice scan".to_string());
+        }
+        let actual_tag =
+            u64::from_le_bytes(full_vlog_bytes[pos + 8..pos + 16].try_into().unwrap());
+        let payload = &full_vlog_bytes[pos + VLOG_FRAME_HEADER_LEN..frame_end];
+        let rec = decode_record_payload(payload)
+            .map_err(|e| format!("failed to decode source frame {seq_idx}: {e}"))?;
+
+        if filter.matches_record(&rec) {
+            if frame_provenance.is_empty() {
+                boundary_prev_tag = prev_tag;
+            }
+            boundary_terminal_tag = actual_tag;
+            frame_provenance.push((seq_idx as u64, prev_tag));
+
+            let local_offset = (VLOG_HEADER_LEN + slice_raw_frames.len()) as u64;
+            let frame_total_len = (VLOG_FRAME_HEADER_LEN + payload_len) as u32;
+            slice_raw_frames.extend_from_slice(&full_vlog_bytes[pos..frame_end]);
+            slice_idx_entries.push(VlogIndexEntry::from_record(
+                &rec,
+                local_offset,
+                frame_total_len,
+            ));
+        }
+
+        prev_tag = actual_tag;
+        pos = frame_end;
+    }
+
+    let slice_count = slice_idx_entries.len() as u64;
+    let (slice_start_seq, slice_end_seq) = match (frame_provenance.first(), frame_provenance.last())
+    {
+        (Some(&(first_seq, _)), Some(&(last_seq, _))) => (first_seq, last_seq),
+        _ => (0, 0),
+    };
+
+    let slice_hdr = VlogSliceHeader {
+        source_record_count: live_report.verified_records,
+        source_terminal_chain_tag: live_report.terminal_chain_tag,
+        slice_start_seq,
+        slice_end_seq,
+        boundary_prev_tag,
+        boundary_terminal_tag,
+        from_ts_secs: filter.from_ts_secs.unwrap_or(0),
+        to_ts_secs: filter.to_ts_secs.unwrap_or(u64::MAX),
+        session_filter: filter.session.clone(),
+        frame_provenance,
+    };
+    let slice_hdr_bytes = slice_hdr.to_bytes()?;
+
+    let slice_index_offset = (VLOG_HEADER_LEN + slice_raw_frames.len()) as u64;
+    let slice_vlog_hdr = VlogHeader::new(slice_count, slice_index_offset);
+
+    let mut s_vlog = Vec::with_capacity(
+        VLOG_HEADER_LEN
+            + slice_raw_frames.len()
+            + (slice_count as usize) * VLOG_INDEX_ENTRY_LEN,
+    );
+    s_vlog.extend_from_slice(&slice_vlog_hdr.to_bytes());
+    s_vlog.extend_from_slice(&slice_raw_frames);
+    for e in &slice_idx_entries {
+        s_vlog.extend_from_slice(&e.to_bytes());
+    }
+
+    let mut s_vidx =
+        Vec::with_capacity(VLOG_HEADER_LEN + (slice_count as usize) * VLOG_INDEX_ENTRY_LEN);
+    s_vidx.extend_from_slice(&slice_vlog_hdr.to_bytes());
+    for e in &slice_idx_entries {
+        s_vidx.extend_from_slice(&e.to_bytes());
+    }
+
+    let slice_report =
+        verify_vlog_slices_with_slice_header(&s_vlog, Some(&s_vidx), &slice_hdr)?;
+    if !slice_report.valid {
+        return Err(format!(
+            "internal error verifying constructed slice bundle: {:?}",
+            slice_report.tamper_finding
+        ));
+    }
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let header = VlogBundleHeader::new_with_extra(
+        VBUNDLE_SLICE_VERSION,
+        now_secs,
+        &slice_hdr_bytes,
+        &s_vlog,
+        &s_vidx,
+        &[],
+    );
+
+    if let Some(parent) = bundle_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            create_dir_all(parent)
+                .map_err(|e| format!("failed to create slice bundle parent directory: {e}"))?;
+        }
+    }
+    let tmp_path = bundle_path.with_extension("vbundle.tmp");
+    {
+        let mut f = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp_path)
+            .map_err(|e| format!("failed to open temporary slice bundle file: {e}"))?;
+        f.write_all(&header.to_bytes())
+            .map_err(|e| format!("failed to write slice bundle header: {e}"))?;
+        f.write_all(&slice_hdr_bytes)
+            .map_err(|e| format!("failed to write slice metadata header: {e}"))?;
+        f.write_all(&s_vlog)
+            .map_err(|e| format!("failed to write slice bundle vlog section: {e}"))?;
+        f.write_all(&s_vidx)
+            .map_err(|e| format!("failed to write slice bundle vidx section: {e}"))?;
+        f.sync_all()
+            .map_err(|e| format!("failed to sync slice bundle file: {e}"))?;
+    }
+    std::fs::rename(&tmp_path, bundle_path)
+        .map_err(|e| format!("failed to finalize slice bundle file: {e}"))?;
+
+    Ok(slice_report)
+}
+
 /// Verify an exported `.vbundle` cryptographic audit bundle completely offline without
 /// requiring access to an active state directory.
 ///
@@ -2504,6 +3390,22 @@ pub fn verify_vlog_bundle_chain(bundle_paths: &[PathBuf]) -> Result<VlogIntegrit
                 verified_checkpoints: total_verified_checkpoints + rep.verified_checkpoints,
                 terminal_chain_tag: rep.terminal_chain_tag,
                 tamper_finding: rep.tamper_finding,
+            });
+        }
+
+        if hdr.version == VBUNDLE_SLICE_VERSION {
+            return Ok(VlogIntegrityReport {
+                valid: false,
+                verified_records: total_verified_records,
+                verified_checkpoints: total_verified_checkpoints,
+                terminal_chain_tag: prev_terminal_tag,
+                tamper_finding: Some(VlogTamperKind::DeltaParentMismatch {
+                    detail: format!(
+                        "bundle #{} ({}) is a filtered slice bundle (v3) and cannot participate in a multi-bundle delta chain",
+                        idx + 1,
+                        path.display()
+                    ),
+                }),
             });
         }
 

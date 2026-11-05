@@ -163,6 +163,26 @@
           "default": null,
           "minimum": 0
         },
+        "memory_high_bytes": {
+          "description": "Throttle memory high-water mark in bytes (`memory.high` in cgroups v2; takes precedence over `high_memory_mb`).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
+        "memory_max_bytes": {
+          "description": "Hard memory limit in bytes (`memory.max` in cgroups v2; takes precedence over `max_memory_mb`).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
         "memory_oom_group": {
           "description": "Whether to kill the entire cgroup process tree as a single unit on OOM (`memory.oom.group` in cgroups v2).",
           "type": [

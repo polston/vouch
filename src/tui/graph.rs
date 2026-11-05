@@ -44,6 +44,19 @@ pub enum BuilderPreset {
         canonical_path: String,
         sha256_hex: String,
     },
+    ToolRule {
+        tool_name: String,
+        field: String,
+        when_exact: Option<String>,
+        when_pattern: Option<String>,
+        action: String,
+        reason: String,
+    },
+    ToolAction {
+        tool_name: String,
+        action: String,
+        source: String,
+    },
     GlobalConstruct {
         section: String,
         key: String,
@@ -69,6 +82,27 @@ impl BuilderPreset {
             } => {
                 let short_sha: String = sha256_hex.chars().take(12).collect();
                 format!("[[lang.{lang}.script_constructs]] {construct} @ {canonical_path} (sha256:{short_sha}...)")
+            }
+            BuilderPreset::ToolRule {
+                tool_name,
+                field,
+                when_exact,
+                when_pattern,
+                action,
+                ..
+            } => {
+                if let Some(exact) = when_exact {
+                    format!("[[tool.rule]] {tool_name}.{field} == {exact:?} -> {action}")
+                } else if let Some(pat) = when_pattern {
+                    format!("[[tool.rule]] {tool_name}.{field} ~= {pat:?} -> {action}")
+                } else {
+                    format!("[[tool.rule]] {tool_name}.{field} -> {action}")
+                }
+            }
+            BuilderPreset::ToolAction {
+                tool_name, action, ..
+            } => {
+                format!("[[tool]] match = [{tool_name:?}] action = {action:?}")
             }
             BuilderPreset::GlobalConstruct { section, key } => {
                 format!("[{section}] {key} = \"allow\"")
@@ -124,6 +158,63 @@ impl BuilderPreset {
                     example_cmd: example_cmd.to_string(),
                 }
             }
+            BuilderPreset::ToolRule {
+                tool_name,
+                field,
+                when_exact,
+                when_pattern,
+                action,
+                reason,
+            } => {
+                let pred = if let Some(exact) = when_exact {
+                    format!("{field} == {exact:?}")
+                } else if let Some(pat) = when_pattern {
+                    format!("{field} ~= {pat:?}")
+                } else {
+                    field.clone()
+                };
+                ReviewCandidate {
+                    name: format!("tool.rule: {tool_name} ({pred})"),
+                    section: "tool.rule".to_string(),
+                    target_file: TargetFile::MyKnowledge,
+                    proposed_toml: super::engine::format_tool_rule_proposed_toml(
+                        tool_name,
+                        field,
+                        when_exact.as_deref(),
+                        when_pattern.as_deref(),
+                        action,
+                        reason,
+                    ),
+                    approved: 1,
+                    denied: 0,
+                    unknown: 0,
+                    sessions: 1,
+                    proposable: true,
+                    blocked_reason: None,
+                    example_cmd: example_cmd.to_string(),
+                }
+            }
+            BuilderPreset::ToolAction {
+                tool_name,
+                action,
+                source,
+            } => ReviewCandidate {
+                name: format!("tool: {tool_name} ({action})"),
+                section: "tool.action".to_string(),
+                target_file: TargetFile::MyKnowledge,
+                proposed_toml: super::engine::format_tool_action_proposed_toml(
+                    tool_name,
+                    action,
+                    source,
+                ),
+                approved: 1,
+                denied: 0,
+                unknown: 0,
+                sessions: 1,
+                proposable: true,
+                blocked_reason: None,
+                example_cmd: example_cmd.to_string(),
+            },
             BuilderPreset::GlobalConstruct { section, key } => ReviewCandidate {
                 name: key.clone(),
                 section: section.clone(),
@@ -314,28 +405,32 @@ impl PolicyGraph {
 
         let mut active_parent_id = root_id;
 
+        let is_tool_decision = super::engine::extract_tool_name_from_reason(&decision.reason).is_some();
+
         // 1. Parse shell structure to identify subcommands / wrappers if multiple or wrapped
-        if let Ok(scan) = crate::shell::parse(&decision.cmd) {
-            for (idx, cmd) in scan.commands.iter().enumerate() {
-                let base = crate::guards::base_name(&cmd.head);
-                let is_wrapper = matches!(
-                    base.as_str(),
-                    "bash" | "sh" | "zsh" | "env" | "sudo" | "xargs" | "nohup" | "timeout" | "python" | "python3" | "node" | "pwsh" | "powershell"
-                );
-                if is_wrapper || scan.commands.len() > 1 {
-                    let rendered = if cmd.args.is_empty() {
-                        cmd.head.clone()
-                    } else {
-                        format!("{} {}", cmd.head, cmd.args.join(" "))
-                    };
-                    let wrap_id = graph.add_node(
-                        NodeKind::WrapperExpansion,
-                        format!("stage #{}: {}", idx + 1, rendered),
-                        format!("head: {} ({} arg(s))", cmd.head, cmd.args.len()),
-                        None,
+        if !is_tool_decision {
+            if let Ok(scan) = crate::shell::parse(&decision.cmd) {
+                for (idx, cmd) in scan.commands.iter().enumerate() {
+                    let base = crate::guards::base_name(&cmd.head);
+                    let is_wrapper = matches!(
+                        base.as_str(),
+                        "bash" | "sh" | "zsh" | "env" | "sudo" | "xargs" | "nohup" | "timeout" | "python" | "python3" | "node" | "pwsh" | "powershell"
                     );
-                    graph.add_edge(active_parent_id, wrap_id, "expands_to");
-                    active_parent_id = wrap_id;
+                    if is_wrapper || scan.commands.len() > 1 {
+                        let rendered = if cmd.args.is_empty() {
+                            cmd.head.clone()
+                        } else {
+                            format!("{} {}", cmd.head, cmd.args.join(" "))
+                        };
+                        let wrap_id = graph.add_node(
+                            NodeKind::WrapperExpansion,
+                            format!("stage #{}: {}", idx + 1, rendered),
+                            format!("head: {} ({} arg(s))", cmd.head, cmd.args.len()),
+                            None,
+                        );
+                        graph.add_edge(active_parent_id, wrap_id, "expands_to");
+                        active_parent_id = wrap_id;
+                    }
                 }
             }
         }
@@ -402,7 +497,27 @@ impl PolicyGraph {
             evaluation_leaf_ids.push(path_id);
         } else if let Some(rule_name) = extract_stopped_rule(&decision.reason) {
             let mut presets = Vec::new();
-            if rule_name == "unmodeled_command" {
+            if rule_name == "unmodeled_tool" || rule_name == "tool rule" {
+                if let Some((tool_name, field_val)) =
+                    super::engine::extract_tool_presets_from_decision(&decision.cmd, &decision.reason)
+                {
+                    if let Some((field, val)) = field_val {
+                        presets.push(BuilderPreset::ToolRule {
+                            tool_name: tool_name.clone(),
+                            field,
+                            when_exact: Some(val),
+                            when_pattern: None,
+                            action: "allow".to_string(),
+                            reason: "TUI interactive rule builder".to_string(),
+                        });
+                    }
+                    presets.push(BuilderPreset::ToolAction {
+                        tool_name,
+                        action: "allow".to_string(),
+                        source: "TUI interactive rule builder".to_string(),
+                    });
+                }
+            } else if rule_name == "unmodeled_command" {
                 if let Some((prog, args)) =
                     super::engine::extract_unmodeled_exact_args_from_cmd(&decision.cmd, &decision.reason)
                 {
@@ -430,7 +545,11 @@ impl PolicyGraph {
                 if let Some((sec, key)) = parse_construct_setting_hint(hint) {
                     presets.push(BuilderPreset::GlobalConstruct { section: sec, key });
                 }
-            } else if !rule_name.is_empty() && !rule_name.ends_with("(guard)") {
+            } else if !rule_name.is_empty()
+                && !rule_name.ends_with("(guard)")
+                && rule_name != "unmodeled_tool"
+                && rule_name != "tool rule"
+            {
                 presets.push(BuilderPreset::GlobalConstruct {
                     section: "lang.bash.constructs".to_string(),
                     key: rule_name.clone(),
@@ -459,7 +578,8 @@ impl PolicyGraph {
 
         // 3b. If decision is ASK without a guard hit, also discover any additional construct gates
         // or unpermitted write paths in the command so multi-gate commands can be staged & simulated together.
-        if decision.verdict.eq_ignore_ascii_case("ask")
+        if !is_tool_decision
+            && decision.verdict.eq_ignore_ascii_case("ask")
             && extract_guard_hit(&decision.reason).is_none()
         {
             if let Ok(scan) = crate::shell::parse(&decision.cmd) {
@@ -823,6 +943,15 @@ fn extract_guard_hit(reason: &str) -> Option<String> {
         let trimmed = rest.trim();
         if let Some(guard_name) = trimmed.strip_suffix("(guard)") {
             return Some(guard_name.trim().to_string());
+        }
+        if let Some(guard_name) = trimmed
+            .strip_prefix("tool rule (")
+            .and_then(|s| s.strip_suffix(')'))
+        {
+            let g = guard_name.trim();
+            if !g.is_empty() {
+                return Some(g.to_string());
+            }
         }
     }
     None

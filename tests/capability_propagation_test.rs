@@ -216,3 +216,47 @@ fn protocol_demotion_permits_safe_offline_subprocesses() {
         "offline child command with zero capabilities in safe workspace should be eligible for demotion"
     );
 }
+
+#[test]
+fn transitive_import_resolver_follows_worker_thread_files_and_vm_capabilities() {
+    use vouch::capability::TransitiveImportResolver;
+
+    let tmp_dir = std::env::temp_dir().join(format!("vouch_worker_cap_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).expect("create_dir_all");
+    let worker_net = tmp_dir.join("worker_net.mjs");
+    let worker_fs = tmp_dir.join("worker_fs.mjs");
+    let entry_file = tmp_dir.join("index.mjs");
+
+    std::fs::write(&worker_net, "import https from 'node:https';\nhttps.get('https://example.com');\n")
+        .expect("write worker_net");
+    std::fs::write(&worker_fs, "import fs from 'node:fs';\nfs.writeFileSync('/tmp/out', '1');\n")
+        .expect("write worker_fs");
+    let entry_src = r#"
+        import { Worker } from 'node:worker_threads';
+        const w1 = new Worker('./worker_net.mjs');
+        const w2 = new Worker(new URL('./worker_fs.mjs', import.meta.url));
+    "#;
+    std::fs::write(&entry_file, entry_src).expect("write entry");
+
+    let resolver = TransitiveImportResolver::new(&tmp_dir);
+    let report = resolver.resolve_javascript(entry_src, Some(&entry_file));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    assert!(
+        report.capabilities.daemon,
+        "Worker instantiation must set daemon capability"
+    );
+    assert!(
+        report.capabilities.network,
+        "TransitiveImportResolver must follow ./worker_net.mjs and union network capability: {:?}",
+        report
+    );
+    assert!(
+        report.capabilities.external_paths,
+        "TransitiveImportResolver must follow new URL('./worker_fs.mjs', import.meta.url) and union external_paths capability: {:?}",
+        report
+    );
+    assert_eq!(report.resolved_files.len(), 2);
+    assert!(report.unresolved_imports.is_empty());
+}

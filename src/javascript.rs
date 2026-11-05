@@ -71,6 +71,7 @@ struct JsVisitor {
     modules: HashMap<String, String>,
     bindings: HashMap<String, String>,
     require_aliases: HashSet<String>,
+    local_classes: HashSet<String>,
     out: Scan,
     seq: u32,
 }
@@ -111,6 +112,77 @@ fn extract_static_specifier<'a>(
     }
 }
 
+fn extract_worker_specifier<'a>(
+    expr: &Expression<'a>,
+    bindings: &HashMap<String, String>,
+) -> Option<String> {
+    if let Some(spec) = extract_static_specifier(expr, bindings) {
+        return Some(spec);
+    }
+    if let Expression::NewExpression(new_expr) = unwrap_parens(expr) {
+        let is_url_ctor = match unwrap_parens(&new_expr.callee) {
+            Expression::Identifier(id) => id.name == "URL",
+            Expression::StaticMemberExpression(m) => m.property.name == "URL",
+            _ => false,
+        };
+        if is_url_ctor {
+            if let Some(first_arg) = new_expr.arguments.first().and_then(|a| a.as_expression()) {
+                return extract_static_specifier(first_arg, bindings);
+            }
+        }
+    }
+    None
+}
+
+fn worker_options_has_eval_true<'a>(
+    arg: Option<&Argument<'a>>,
+    bindings: &HashMap<String, String>,
+) -> bool {
+    let Some(expr) = arg.and_then(|a| a.as_expression()) else {
+        return false;
+    };
+    let Expression::ObjectExpression(obj) = unwrap_parens(expr) else {
+        return false;
+    };
+    for prop in &obj.properties {
+        if let ObjectPropertyKind::ObjectProperty(kv) = prop {
+            let is_eval_key = match &kv.key {
+                PropertyKey::StaticIdentifier(id) => id.name == "eval",
+                PropertyKey::StringLiteral(s) => s.value == "eval",
+                _ => false,
+            };
+            if is_eval_key {
+                match unwrap_parens(&kv.value) {
+                    Expression::BooleanLiteral(b) if b.value => return true,
+                    Expression::Identifier(id) => {
+                        if bindings
+                            .get(id.name.as_str())
+                            .is_some_and(|v| v == "true")
+                        {
+                            return true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    false
+}
+
+fn is_vm_dynamic_method(full_name: &str) -> bool {
+    matches!(
+        full_name,
+        "vm.runInNewContext"
+            | "vm.runInThisContext"
+            | "vm.runInContext"
+            | "vm.compileFunction"
+            | "vm.Script.runInNewContext"
+            | "vm.Script.runInThisContext"
+            | "vm.Script.runInContext"
+    )
+}
+
 fn unwrap_parens<'a, 'b>(mut expr: &'b Expression<'a>) -> &'b Expression<'a> {
     while let Expression::ParenthesizedExpression(p) = expr {
         expr = &p.expression;
@@ -126,8 +198,50 @@ impl JsVisitor {
             modules: HashMap::new(),
             bindings: HashMap::new(),
             require_aliases,
+            local_classes: HashSet::new(),
             out: Scan::default(),
             seq: 0,
+        }
+    }
+
+    fn resolve_canonical_callee_name<'a>(&self, callee: &Expression<'a>) -> String {
+        let callee_parts = self.extract_callee_parts(callee);
+        if callee_parts.is_empty() {
+            return String::new();
+        }
+        let first = &callee_parts[0];
+        let mut canonical_parts = Vec::new();
+        if let Some(target) = self.modules.get(first) {
+            for seg in target.split('.') {
+                canonical_parts.push(seg.to_string());
+            }
+            canonical_parts.extend(callee_parts[1..].iter().cloned());
+        } else {
+            canonical_parts = callee_parts;
+        }
+        canonical_parts.join(".")
+    }
+
+    fn merge_inline_code_scan(&mut self, code_str: &str) {
+        if let Ok(inner_scan) = parse(code_str) {
+            for c in inner_scan.constructs {
+                self.out.note(&c);
+            }
+            for cmd in inner_scan.commands {
+                self.out.push_cmd(
+                    cmd.head,
+                    cmd.args,
+                    Order::Seq(self.seq),
+                    crate::syntax::InputSource::Unknown,
+                    true,
+                    None,
+                    vec![],
+                    None,
+                    HashMap::new(),
+                    false,
+                );
+                self.seq += 1;
+            }
         }
     }
 
@@ -355,6 +469,13 @@ impl JsVisitor {
 }
 
 impl<'a> Visit<'a> for JsVisitor {
+    fn visit_class(&mut self, class: &Class<'a>) {
+        if let Some(id) = &class.id {
+            self.local_classes.insert(id.name.to_string());
+        }
+        walk::walk_class(self, class);
+    }
+
     fn visit_variable_declaration(&mut self, decl: &VariableDeclaration<'a>) {
         for declarator in &decl.declarations {
             if let Some(init) = &declarator.init {
@@ -362,6 +483,14 @@ impl<'a> Visit<'a> for JsVisitor {
                     if self.is_create_require_call(call) {
                         if let BindingPattern::BindingIdentifier(ident) = &declarator.id {
                             self.require_aliases.insert(ident.name.to_string());
+                        }
+                    }
+                } else if let Expression::NewExpression(new_expr) = unwrap_parens(init) {
+                    let ctor_name = self.resolve_canonical_callee_name(&new_expr.callee);
+                    if ctor_name == "vm.Script" {
+                        if let BindingPattern::BindingIdentifier(ident) = &declarator.id {
+                            self.modules
+                                .insert(ident.name.to_string(), "vm.Script".to_string());
                         }
                     }
                 }
@@ -430,12 +559,99 @@ impl<'a> Visit<'a> for JsVisitor {
     }
 
     fn visit_new_expression(&mut self, expr: &NewExpression<'a>) {
-        if let Expression::Identifier(id) = &expr.callee {
-            if id.name == "Function" {
+        let full_name = self.resolve_canonical_callee_name(&expr.callee);
+        if full_name == "Function" {
+            self.out.note("dynamic_call");
+            let args = self.extract_args(&expr.arguments);
+            self.out.push_cmd(
+                "javascript:Function".to_string(),
+                args,
+                Order::Seq(self.seq),
+                crate::syntax::InputSource::Unknown,
+                true,
+                None,
+                vec![],
+                None,
+                HashMap::new(),
+                false,
+            );
+            self.seq += 1;
+            if let Some(last_expr) = expr.arguments.last().and_then(|a| a.as_expression()) {
+                if let Some(code_str) = extract_static_specifier(last_expr, &self.bindings) {
+                    self.merge_inline_code_scan(&code_str);
+                }
+            }
+        } else if full_name == "vm.Script" {
+            self.out.note("dynamic_call");
+            let args = self.extract_args(&expr.arguments);
+            self.out.push_cmd(
+                "javascript:vm.Script".to_string(),
+                args,
+                Order::Seq(self.seq),
+                crate::syntax::InputSource::Unknown,
+                true,
+                None,
+                vec![],
+                None,
+                HashMap::new(),
+                false,
+            );
+            self.seq += 1;
+            if let Some(first_expr) = expr.arguments.first().and_then(|a| a.as_expression()) {
+                if let Some(code_str) = extract_static_specifier(first_expr, &self.bindings) {
+                    self.merge_inline_code_scan(&code_str);
+                }
+            }
+        } else if full_name == "worker_threads.Worker"
+            || (full_name == "Worker"
+                && !self.local_classes.contains("Worker")
+                && !expr.arguments.is_empty())
+        {
+            let is_eval = worker_options_has_eval_true(expr.arguments.get(1), &self.bindings);
+            let static_spec = expr
+                .arguments
+                .first()
+                .and_then(|a| a.as_expression())
+                .and_then(|e| extract_worker_specifier(e, &self.bindings));
+
+            if is_eval {
                 self.out.note("dynamic_call");
                 let args = self.extract_args(&expr.arguments);
                 self.out.push_cmd(
-                    "javascript:Function".to_string(),
+                    "javascript:worker_threads.Worker".to_string(),
+                    args,
+                    Order::Seq(self.seq),
+                    crate::syntax::InputSource::Unknown,
+                    true,
+                    None,
+                    vec![],
+                    None,
+                    HashMap::new(),
+                    false,
+                );
+                self.seq += 1;
+                if let Some(code_str) = static_spec {
+                    self.merge_inline_code_scan(&code_str);
+                }
+            } else if let Some(spec_str) = static_spec {
+                self.out.push_cmd(
+                    "javascript:worker_threads.Worker".to_string(),
+                    vec![spec_str],
+                    Order::Seq(self.seq),
+                    crate::syntax::InputSource::Unknown,
+                    true,
+                    None,
+                    vec![],
+                    None,
+                    HashMap::new(),
+                    false,
+                );
+                self.seq += 1;
+            } else {
+                self.out.note("dynamic_call");
+                let args = self.extract_args(&expr.arguments);
+                self.out.push_cmd(
+                    "javascript:worker_threads.Worker".to_string(),
                     args,
                     Order::Seq(self.seq),
                     crate::syntax::InputSource::Unknown,
@@ -547,6 +763,32 @@ impl<'a> Visit<'a> for JsVisitor {
                     false,
                 );
                 self.seq += 1;
+            } else if is_vm_dynamic_method(&full_name) {
+                self.out.note("dynamic_call");
+                let args = self.extract_args(&expr.arguments);
+                let head = format!("javascript:{full_name}");
+                self.out.push_cmd(
+                    head,
+                    args,
+                    Order::Seq(self.seq),
+                    crate::syntax::InputSource::Unknown,
+                    true,
+                    None,
+                    vec![],
+                    None,
+                    HashMap::new(),
+                    false,
+                );
+                self.seq += 1;
+                if !full_name.starts_with("vm.Script.") {
+                    if let Some(first_expr) = expr.arguments.first().and_then(|a| a.as_expression())
+                    {
+                        if let Some(code_str) = extract_static_specifier(first_expr, &self.bindings)
+                        {
+                            self.merge_inline_code_scan(&code_str);
+                        }
+                    }
+                }
             } else if matches!(
                 full_name.as_str(),
                 "child_process.spawn"
@@ -647,10 +889,51 @@ pub fn extract_capabilities(src: &str) -> crate::capability::CapabilitySet {
         modules: HashMap<String, String>,
         bindings: HashMap<String, String>,
         require_aliases: HashSet<String>,
+        local_classes: HashSet<String>,
         _phantom: std::marker::PhantomData<&'a ()>,
     }
 
     impl<'a> JsCapVisitor<'a> {
+        fn extract_callee_parts(&self, expr: &Expression<'a>) -> Vec<String> {
+            match unwrap_parens(expr) {
+                Expression::Identifier(id) => vec![id.name.to_string()],
+                Expression::StaticMemberExpression(m) => {
+                    let mut parts = self.extract_callee_parts(&m.object);
+                    parts.push(m.property.name.to_string());
+                    parts
+                }
+                Expression::CallExpression(c) => {
+                    if self.is_require_like_callee(&c.callee) {
+                        if let Some(arg) = c.arguments.first().and_then(|a| a.as_expression()) {
+                            if let Some(raw_spec) = extract_static_specifier(arg, &self.bindings) {
+                                return vec![normalize_js_mod_name(&raw_spec)];
+                            }
+                        }
+                    }
+                    vec!["$call_result".to_string()]
+                }
+                _ => vec!["$expr".to_string()],
+            }
+        }
+
+        fn resolve_canonical_callee_name(&self, callee: &Expression<'a>) -> String {
+            let parts = self.extract_callee_parts(callee);
+            if parts.is_empty() {
+                return String::new();
+            }
+            let first = &parts[0];
+            let mut canonical = Vec::new();
+            if let Some(target) = self.modules.get(first) {
+                for seg in target.split('.') {
+                    canonical.push(seg.to_string());
+                }
+                canonical.extend(parts[1..].iter().cloned());
+            } else {
+                canonical = parts;
+            }
+            canonical.join(".")
+        }
+
         fn is_create_require_call(&self, call: &CallExpression<'a>) -> bool {
             match unwrap_parens(&call.callee) {
                 Expression::Identifier(id) => {
@@ -702,6 +985,13 @@ pub fn extract_capabilities(src: &str) -> crate::capability::CapabilitySet {
     }
 
     impl<'a> Visit<'a> for JsCapVisitor<'a> {
+        fn visit_class(&mut self, class: &Class<'a>) {
+            if let Some(id) = &class.id {
+                self.local_classes.insert(id.name.to_string());
+            }
+            walk::walk_class(self, class);
+        }
+
         fn visit_import_declaration(&mut self, decl: &ImportDeclaration<'a>) {
             let mod_str = decl.source.value.as_str();
             check_js_mod(mod_str, self.caps);
@@ -774,6 +1064,13 @@ pub fn extract_capabilities(src: &str) -> crate::capability::CapabilitySet {
                                 }
                             }
                         }
+                    } else if let Expression::NewExpression(new_expr) = unwrapped {
+                        if self.resolve_canonical_callee_name(&new_expr.callee) == "vm.Script" {
+                            if let BindingPattern::BindingIdentifier(ident) = &declarator.id {
+                                self.modules
+                                    .insert(ident.name.to_string(), "vm.Script".to_string());
+                            }
+                        }
                     } else if let Some(lit) = extract_static_specifier(unwrapped, &self.bindings) {
                         if let BindingPattern::BindingIdentifier(ident) = &declarator.id {
                             self.bindings.insert(ident.name.to_string(), lit);
@@ -803,17 +1100,69 @@ pub fn extract_capabilities(src: &str) -> crate::capability::CapabilitySet {
                     Some(spec) => check_js_mod(&spec, self.caps),
                     None => self.caps.dynamic_eval = true,
                 }
-            } else if let Expression::Identifier(ident) = &expr.callee {
-                if ident.name == "eval" {
+            } else {
+                let full_name = self.resolve_canonical_callee_name(&expr.callee);
+                if full_name == "eval" {
                     self.caps.dynamic_eval = true;
+                    if let Some(first_expr) = expr.arguments.first().and_then(|a| a.as_expression())
+                    {
+                        if let Some(code_str) = extract_static_specifier(first_expr, &self.bindings)
+                        {
+                            self.caps.union(extract_capabilities(&code_str));
+                        }
+                    }
+                } else if is_vm_dynamic_method(&full_name) {
+                    self.caps.dynamic_eval = true;
+                    if !full_name.starts_with("vm.Script.") {
+                        if let Some(first_expr) =
+                            expr.arguments.first().and_then(|a| a.as_expression())
+                        {
+                            if let Some(code_str) =
+                                extract_static_specifier(first_expr, &self.bindings)
+                            {
+                                self.caps.union(extract_capabilities(&code_str));
+                            }
+                        }
+                    }
                 }
             }
             walk::walk_call_expression(self, expr);
         }
 
         fn visit_new_expression(&mut self, expr: &NewExpression<'a>) {
-            if let Expression::Identifier(ident) = &expr.callee {
-                if ident.name == "Function" {
+            let full_name = self.resolve_canonical_callee_name(&expr.callee);
+            if full_name == "Function" {
+                self.caps.dynamic_eval = true;
+                if let Some(last_expr) = expr.arguments.last().and_then(|a| a.as_expression()) {
+                    if let Some(code_str) = extract_static_specifier(last_expr, &self.bindings) {
+                        self.caps.union(extract_capabilities(&code_str));
+                    }
+                }
+            } else if full_name == "vm.Script" {
+                self.caps.dynamic_eval = true;
+                if let Some(first_expr) = expr.arguments.first().and_then(|a| a.as_expression()) {
+                    if let Some(code_str) = extract_static_specifier(first_expr, &self.bindings) {
+                        self.caps.union(extract_capabilities(&code_str));
+                    }
+                }
+            } else if full_name == "worker_threads.Worker"
+                || (full_name == "Worker"
+                    && !self.local_classes.contains("Worker")
+                    && !expr.arguments.is_empty())
+            {
+                self.caps.daemon = true;
+                let is_eval = worker_options_has_eval_true(expr.arguments.get(1), &self.bindings);
+                let static_spec = expr
+                    .arguments
+                    .first()
+                    .and_then(|a| a.as_expression())
+                    .and_then(|e| extract_worker_specifier(e, &self.bindings));
+                if is_eval {
+                    self.caps.dynamic_eval = true;
+                    if let Some(code_str) = static_spec {
+                        self.caps.union(extract_capabilities(&code_str));
+                    }
+                } else if static_spec.is_none() {
                     self.caps.dynamic_eval = true;
                 }
             }
@@ -828,6 +1177,7 @@ pub fn extract_capabilities(src: &str) -> crate::capability::CapabilitySet {
         modules: HashMap::new(),
         bindings: HashMap::new(),
         require_aliases,
+        local_classes: HashSet::new(),
         _phantom: std::marker::PhantomData,
     };
     visitor.visit_program(&ret.program);
@@ -1004,5 +1354,147 @@ mod tests {
                 .iter()
                 .any(|c| c.head == "javascript:require")
         );
+    }
+
+    #[test]
+    fn parses_vm_dynamic_compilation_and_worker_thread_instantiation() {
+        // 1. `vm.runInNewContext`, `vm.compileFunction`, and `new vm.Script` emit `dynamic_call`
+        //    and recursively extract inner commands and capabilities from static code strings.
+        let src_vm = r#"
+            import vm, { compileFunction, Script } from 'node:vm';
+            vm.runInNewContext("require('child_process').execSync('rm -rf /')", {});
+            compileFunction(process.env.UNTRUSTED_CODE);
+            const s = new Script("require('fs').writeFileSync('/etc/hosts', 'x')");
+            s.runInThisContext();
+        "#;
+        let scan_vm = parse(src_vm).unwrap();
+        assert!(
+            scan_vm.constructs.contains(&"dynamic_call".to_string()),
+            "vm compilation/execution must emit dynamic_call: {:?}",
+            scan_vm.constructs
+        );
+        assert!(
+            scan_vm
+                .commands
+                .iter()
+                .any(|c| c.head == "javascript:vm.runInNewContext")
+        );
+        assert!(
+            scan_vm
+                .commands
+                .iter()
+                .any(|c| c.head == "javascript:vm.compileFunction")
+        );
+        assert!(
+            scan_vm
+                .commands
+                .iter()
+                .any(|c| c.head == "javascript:vm.Script")
+        );
+        assert!(
+            scan_vm
+                .commands
+                .iter()
+                .any(|c| c.head == "javascript:vm.Script.runInThisContext")
+        );
+        assert!(
+            scan_vm
+                .commands
+                .iter()
+                .any(|c| c.head == "javascript:child_process.execSync"
+                    && c.args == vec!["rm -rf /"]),
+            "inner execSync inside vm.runInNewContext string literal must be extracted: {:?}",
+            scan_vm.commands
+        );
+        assert!(
+            scan_vm
+                .commands
+                .iter()
+                .any(|c| c.head == "javascript:fs.writeFileSync"),
+            "inner fs.writeFileSync inside new vm.Script string literal must be extracted: {:?}",
+            scan_vm.commands
+        );
+
+        let caps_vm = extract_capabilities(src_vm);
+        assert!(caps_vm.dynamic_eval);
+        assert!(
+            caps_vm.daemon,
+            "inner child_process inside vm string must set daemon capability"
+        );
+        assert!(
+            caps_vm.external_paths,
+            "inner fs inside vm.Script string must set external_paths capability"
+        );
+
+        // 2. `new Worker(code, { eval: true })` emits `dynamic_call`, sets `daemon` + `dynamic_eval`,
+        //    and extracts inner capabilities from static code strings.
+        let src_worker_eval = r#"
+            const { Worker } = require('node:worker_threads');
+            new Worker("require('net').connect(8080)", { eval: true });
+        "#;
+        let scan_worker_eval = parse(src_worker_eval).unwrap();
+        assert!(
+            scan_worker_eval
+                .constructs
+                .contains(&"dynamic_call".to_string()),
+            "new Worker(..., {{ eval: true }}) must emit dynamic_call"
+        );
+        assert!(
+            scan_worker_eval
+                .commands
+                .iter()
+                .any(|c| c.head == "javascript:worker_threads.Worker")
+        );
+        assert!(
+            scan_worker_eval
+                .commands
+                .iter()
+                .any(|c| c.head == "javascript:net.connect")
+        );
+        let caps_worker_eval = extract_capabilities(src_worker_eval);
+        assert!(caps_worker_eval.daemon);
+        assert!(caps_worker_eval.dynamic_eval);
+        assert!(
+            caps_worker_eval.network,
+            "inner net.connect inside Worker eval code must set network capability"
+        );
+
+        // 3. `new Worker('./worker.mjs')` and `new Worker(new URL('./worker.mjs', import.meta.url))`
+        //    resolve static specifier without false-positive `dynamic_call`.
+        let src_worker_static = r#"
+            import { Worker } from 'node:worker_threads';
+            new Worker('./worker_a.mjs');
+            new Worker(new URL('./worker_b.mjs', import.meta.url));
+        "#;
+        let scan_worker_static = parse(src_worker_static).unwrap();
+        assert!(
+            !scan_worker_static
+                .constructs
+                .contains(&"dynamic_call".to_string()),
+            "static Worker specifier must not emit dynamic_call: {:?}",
+            scan_worker_static.constructs
+        );
+        assert_eq!(scan_worker_static.commands.len(), 2);
+        assert_eq!(scan_worker_static.commands[0].args, vec!["./worker_a.mjs"]);
+        assert_eq!(scan_worker_static.commands[1].args, vec!["./worker_b.mjs"]);
+        let caps_worker_static = extract_capabilities(src_worker_static);
+        assert!(caps_worker_static.daemon);
+        assert!(!caps_worker_static.dynamic_eval);
+
+        // 4. Dynamic/tainted `new Worker(process.env.WORKER_SCRIPT)` emits `dynamic_call` and sets `dynamic_eval`.
+        let src_worker_dyn = r#"
+            import { Worker } from 'worker_threads';
+            new Worker(process.env.WORKER_SCRIPT);
+        "#;
+        let scan_worker_dyn = parse(src_worker_dyn).unwrap();
+        assert!(
+            scan_worker_dyn
+                .constructs
+                .contains(&"dynamic_call".to_string()),
+            "dynamic Worker specifier must emit dynamic_call"
+        );
+        let caps_worker_dyn = extract_capabilities(src_worker_dyn);
+        assert!(caps_worker_dyn.daemon);
+        assert!(caps_worker_dyn.dynamic_eval);
     }
 }

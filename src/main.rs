@@ -1427,25 +1427,96 @@ fn main() {
 
         if let Some(pos) = args.iter().position(|a| a == "--export-bundle") {
             let Some(bundle_arg) = args.get(pos + 1) else {
-                eprintln!("usage: vouch doctor --export-bundle <bundle.vbundle> [--since <parent.vbundle>]");
+                eprintln!(
+                    "usage: vouch doctor --export-bundle <bundle.vbundle> [--since <parent.vbundle>] [--session <id>] [--from <timestamp>] [--to <timestamp>]"
+                );
                 std::process::exit(2);
             };
             let since_path = if let Some(spos) = args.iter().position(|a| a == "--since") {
                 let Some(sarg) = args.get(spos + 1) else {
-                    eprintln!("usage: vouch doctor --export-bundle <bundle.vbundle> [--since <parent.vbundle>]");
+                    eprintln!(
+                        "usage: vouch doctor --export-bundle <bundle.vbundle> [--since <parent.vbundle>] [--session <id>] [--from <timestamp>] [--to <timestamp>]"
+                    );
                     std::process::exit(2);
                 };
                 Some(std::path::PathBuf::from(sarg))
             } else {
                 None
             };
+            let session_id = if let Some(spos) = args.iter().position(|a| a == "--session") {
+                let Some(sarg) = args.get(spos + 1) else {
+                    eprintln!("usage: vouch doctor --export-bundle <bundle.vbundle> --session <id>");
+                    std::process::exit(2);
+                };
+                Some(sarg.clone())
+            } else {
+                None
+            };
+            let from_epoch_secs = if let Some(fpos) = args.iter().position(|a| a == "--from") {
+                let Some(farg) = args.get(fpos + 1) else {
+                    eprintln!(
+                        "usage: vouch doctor --export-bundle <bundle.vbundle> --from <timestamp>"
+                    );
+                    std::process::exit(2);
+                };
+                match vouch::journal_vlog::parse_timestamp_arg(farg) {
+                    Ok(ts) => Some(ts),
+                    Err(err) => {
+                        eprintln!("invalid --from timestamp: {err}");
+                        std::process::exit(2);
+                    }
+                }
+            } else {
+                None
+            };
+            let to_epoch_secs = if let Some(tpos) = args.iter().position(|a| a == "--to") {
+                let Some(targ) = args.get(tpos + 1) else {
+                    eprintln!(
+                        "usage: vouch doctor --export-bundle <bundle.vbundle> --to <timestamp>"
+                    );
+                    std::process::exit(2);
+                };
+                match vouch::journal_vlog::parse_timestamp_arg(targ) {
+                    Ok(ts) => Some(ts),
+                    Err(err) => {
+                        eprintln!("invalid --to timestamp: {err}");
+                        std::process::exit(2);
+                    }
+                }
+            } else {
+                None
+            };
+            if let (Some(f), Some(t)) = (from_epoch_secs, to_epoch_secs) {
+                if f > t {
+                    eprintln!("invalid time window: --from ({f}) is greater than --to ({t})");
+                    std::process::exit(2);
+                }
+            }
+
+            let filter = vouch::journal_vlog::VlogSliceFilter {
+                session: session_id,
+                from_ts_secs: from_epoch_secs,
+                to_ts_secs: to_epoch_secs,
+            };
+            if since_path.is_some() && filter.is_active() {
+                eprintln!(
+                    "cannot combine --since delta export with --session / --from / --to slice filters"
+                );
+                std::process::exit(2);
+            }
+
             let bundle_path = std::path::Path::new(bundle_arg);
             let dir = journal::state_dir();
-            match vouch::journal_vlog::export_vlog_bundle_since(
-                &dir,
-                bundle_path,
-                since_path.as_deref(),
-            ) {
+            let result = if filter.is_active() {
+                vouch::journal_vlog::export_vlog_slice_bundle(&dir, bundle_path, &filter)
+            } else {
+                vouch::journal_vlog::export_vlog_bundle_since(
+                    &dir,
+                    bundle_path,
+                    since_path.as_deref(),
+                )
+            };
+            match result {
                 Ok(report) => {
                     println!(
                         "exported cryptographic audit bundle: {} (records: {}, compaction generations: {}, terminal tag: {:016x})",
