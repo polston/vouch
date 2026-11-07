@@ -5,13 +5,15 @@ use vouch::journal::{self, JournalPolicy, OutcomeRecord, Record};
 use vouch::journal_vlog::{
     append_vlog, compact_vlog, compute_bundle_seal_sha256, compute_bundle_seal_sha256_with_extra,
     compute_redacted_field_commitment, encode_record_payload, export_vlog_bundle,
-    export_vlog_bundle_since, export_vlog_redacted_bundle, export_vlog_slice_bundle,
-    merge_vlog_bundles, parse_timestamp_arg, read_records_from_vlog_bundle, read_vidx_entries,
-    read_vlog_checkpoints, vchk_path, verify_redacted_field_claim, verify_vlog_bundle,
-    verify_vlog_bundle_chain, verify_vlog_integrity, vidx_path, write_all_vlog, VlogBundleHeader,
-    VlogHeader, VlogIndexEntry, VlogReader, VlogSliceFilter, VlogTamperKind, VBUNDLE_DELTA_VERSION,
-    VBUNDLE_HEADER_LEN, VBUNDLE_REDACTED_VERSION, VBUNDLE_REDACTION_PROOF_LEN,
-    VBUNDLE_SLICE_HEADER_LEN, VBUNDLE_SLICE_VERSION, VBUNDLE_VERSION, VCHK_ENTRY_LEN,
+    export_vlog_bundle_since, export_vlog_disclosure, export_vlog_redacted_bundle,
+    export_vlog_slice_bundle, merge_vlog_bundles, parse_timestamp_arg, read_disclosed_records,
+    read_records_from_vlog_bundle, read_vidx_entries, read_vlog_checkpoints, vchk_path,
+    verify_redacted_field_claim, verify_vlog_bundle, verify_vlog_bundle_chain,
+    verify_vlog_disclosure, verify_vlog_integrity, vidx_path, write_all_vlog, VlogBundleHeader,
+    VlogDisclosureProof, VlogHeader, VlogIndexEntry, VlogReader, VlogSliceFilter, VlogTamperKind,
+    VBUNDLE_DELTA_VERSION, VBUNDLE_HEADER_LEN, VBUNDLE_REDACTED_VERSION,
+    VBUNDLE_REDACTION_PROOF_LEN, VBUNDLE_SLICE_HEADER_LEN, VBUNDLE_SLICE_VERSION, VBUNDLE_VERSION,
+    VCHK_ENTRY_LEN, VDISCLOSURE_HEADER_LEN, VDISCLOSURE_MAGIC, VDISCLOSURE_VERSION,
     VLOG_FRAME_HEADER_LEN, VLOG_HEADER_LEN, VLOG_INDEX_ENTRY_LEN, VLOG_MAGIC,
 };
 use vouch::journal_wal::crc32;
@@ -1494,6 +1496,157 @@ fn vbundle_redacted_export_strips_plaintext_verifies_offline_and_proves_field_co
     assert!(matches!(
         tampered_rep.tamper_finding,
         Some(VlogTamperKind::ChainLinkBroken { seq_idx: 1, .. })
+    ));
+
+    let _ = std::fs::remove_dir_all(&archive_dir);
+}
+
+#[test]
+fn vbundle_selective_disclosure_export_verify_and_tamper_detection_end_to_end() {
+    let state_dir = unique_test_dir("vbundle_disclosure_state");
+    let archive_dir = unique_test_dir("vbundle_disclosure_archive");
+    let redacted_bundle_path = archive_dir.join("full_redacted.vbundle");
+    let disclosure_seq_path = archive_dir.join("selective_seq.vdis");
+    let disclosure_cli_path = archive_dir.join("selective_cli.vdis");
+
+    let recs = [
+        (0, "sess_dis_1", "2026-11-01T10:00:00Z", "allow", "echo DISCLOSE_CMD_ZERO_111", "/workspace/dis_0"),
+        (1, "sess_dis_2", "2026-11-01T10:05:00Z", "ask", "echo DISCLOSE_CMD_ONE_222", "/workspace/dis_1"),
+        (2, "sess_dis_1", "2026-11-01T10:10:00Z", "allow", "echo DISCLOSE_CMD_TWO_333", "/workspace/dis_2"),
+        (3, "sess_dis_2", "2026-11-01T10:15:00Z", "deny", "echo DISCLOSE_CMD_THREE_444", "/workspace/dis_3"),
+    ];
+    for (idx, sess, ts_str, verdict, cmd, cwd) in recs {
+        let mut r = sample_record(idx, 0, verdict, cmd);
+        r.session = sess.to_string();
+        r.ts = ts_str.to_string();
+        r.cwd = cwd.to_string();
+        append_vlog(&state_dir, &r).unwrap();
+    }
+
+    // 1. Export full redacted v4 bundle
+    let empty_filter = VlogSliceFilter::default();
+    let red_rep = export_vlog_redacted_bundle(&state_dir, &redacted_bundle_path, &empty_filter)
+        .expect("export redacted v4 bundle");
+    assert!(red_rep.valid);
+    assert_eq!(red_rep.verified_records, 4);
+
+    // 2. Export selective disclosure proof for only sequence indices [1, 3] via library
+    let proof_seq = export_vlog_disclosure(
+        &state_dir,
+        &disclosure_seq_path,
+        &empty_filter,
+        &[1, 3],
+    )
+    .expect("export selective disclosure proof for seq [1, 3]");
+    assert_eq!(proof_seq.version, VDISCLOSURE_VERSION);
+    assert_eq!(proof_seq.entry_count, 2);
+    assert_eq!(proof_seq.source_record_count, 4);
+
+    // Ensure raw bytes of disclosure_seq_path do NOT contain undisguised plaintext from seq 0 or seq 2
+    let dis_raw = std::fs::read(&disclosure_seq_path).unwrap();
+    assert_eq!(&dis_raw[0..4], &VDISCLOSURE_MAGIC);
+    let dis_lossy = String::from_utf8_lossy(&dis_raw);
+    assert!(dis_lossy.contains("DISCLOSE_CMD_ONE_222"));
+    assert!(dis_lossy.contains("DISCLOSE_CMD_THREE_444"));
+    assert!(
+        !dis_lossy.contains("DISCLOSE_CMD_ZERO_111") && !dis_lossy.contains("DISCLOSE_CMD_TWO_333"),
+        "selective disclosure proof must not leak non-disclosed records"
+    );
+
+    // 3. Export selective disclosure proof via CLI (`vouch doctor --export-disclosure ... --session sess_dis_1 --seq 2`)
+    let exe = vouch_exe();
+    let cli_export = std::process::Command::new(&exe)
+        .env("VOUCH_STATE_DIR", &state_dir)
+        .args([
+            "doctor",
+            "--export-disclosure",
+            disclosure_cli_path.to_str().unwrap(),
+            "--session",
+            "sess_dis_1",
+            "--seq",
+            "2",
+        ])
+        .output()
+        .expect("cli export-disclosure");
+    assert!(
+        cli_export.status.success(),
+        "cli export-disclosure failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&cli_export.stdout),
+        String::from_utf8_lossy(&cli_export.stderr)
+    );
+    let cli_export_stdout = String::from_utf8_lossy(&cli_export.stdout);
+    assert!(cli_export_stdout.contains("exported selective disclosure proof:"));
+    assert!(cli_export_stdout.contains("disclosed records: 1, source records: 4"));
+
+    // 4. Delete state_dir completely and verify both selective disclosure proofs offline against redacted_bundle_path!
+    std::fs::remove_dir_all(&state_dir).unwrap();
+
+    let verify_rep = verify_vlog_disclosure(&redacted_bundle_path, &disclosure_seq_path)
+        .expect("offline verify_vlog_disclosure");
+    assert!(verify_rep.valid, "selective disclosure verification failed: {verify_rep:?}");
+    assert_eq!(verify_rep.verified_records, 2);
+
+    let disclosed_recs = read_disclosed_records(&redacted_bundle_path, &disclosure_seq_path)
+        .expect("read_disclosed_records");
+    assert_eq!(disclosed_recs.len(), 2);
+    assert_eq!(disclosed_recs[0].0, 1);
+    assert_eq!(disclosed_recs[0].1.cmd, "echo DISCLOSE_CMD_ONE_222");
+    assert_eq!(disclosed_recs[0].1.cwd, "/workspace/dis_1");
+    assert_eq!(disclosed_recs[1].0, 3);
+    assert_eq!(disclosed_recs[1].1.cmd, "echo DISCLOSE_CMD_THREE_444");
+    assert_eq!(disclosed_recs[1].1.cwd, "/workspace/dis_3");
+
+    // Verify CLI `--verify-bundle <redacted.vbundle> --verify-disclosure <selective_cli.vdis>` offline
+    let cli_verify = std::process::Command::new(&exe)
+        .env("VOUCH_STATE_DIR", &state_dir)
+        .args([
+            "doctor",
+            "--verify-bundle",
+            redacted_bundle_path.to_str().unwrap(),
+            "--verify-disclosure",
+            disclosure_cli_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("cli verify-disclosure");
+    assert!(
+        cli_verify.status.success(),
+        "cli verify-disclosure failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&cli_verify.stdout),
+        String::from_utf8_lossy(&cli_verify.stderr)
+    );
+    let cli_verify_stdout = String::from_utf8_lossy(&cli_verify.stdout);
+    assert!(cli_verify_stdout.contains("selective disclosure verified: 1 disclosed records matched redacted bundle commitments"));
+    assert!(cli_verify_stdout.contains("[seq=2] session=sess_dis_1 verdict=allow cwd=/workspace/dis_2 cmd=echo DISCLOSE_CMD_TWO_333"));
+
+    // 5. Tamper test A: Forge a modified command in a VlogDisclosureProof and recompute its outer seal & CRC
+    let mut forged_entry = proof_seq.entries[0].clone();
+    forged_entry.record.cmd = "echo FORGED_CMD_ONE_999".to_string();
+    let forged_proof = VlogDisclosureProof::new(
+        proof_seq.exported_at_secs,
+        proof_seq.source_record_count,
+        proof_seq.source_terminal_chain_tag,
+        vec![forged_entry],
+    );
+    let forged_path = archive_dir.join("forged_cmd.vdis");
+    std::fs::write(&forged_path, forged_proof.to_bytes()).unwrap();
+    let forged_rep = verify_vlog_disclosure(&redacted_bundle_path, &forged_path)
+        .expect("verify forged disclosure proof");
+    assert!(!forged_rep.valid, "forged cmd in disclosure proof must be rejected");
+    assert!(matches!(
+        forged_rep.tamper_finding,
+        Some(VlogTamperKind::ChainLinkBroken { seq_idx: 1, .. })
+    ));
+
+    // 6. Tamper test B: Corrupt outer seal of disclosure file
+    let mut bad_seal_bytes = dis_raw.clone();
+    bad_seal_bytes[VDISCLOSURE_HEADER_LEN - 1] ^= 0x55;
+    let bad_seal_path = archive_dir.join("bad_seal.vdis");
+    std::fs::write(&bad_seal_path, &bad_seal_bytes).unwrap();
+    let bad_seal_rep = verify_vlog_disclosure(&redacted_bundle_path, &bad_seal_path).unwrap();
+    assert!(!bad_seal_rep.valid);
+    assert!(matches!(
+        bad_seal_rep.tamper_finding,
+        Some(VlogTamperKind::BundleSealCorrupted { .. })
     ));
 
     let _ = std::fs::remove_dir_all(&archive_dir);

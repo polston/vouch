@@ -43,6 +43,11 @@ pub const VBUNDLE_SEAL_SEED: [u8; 32] = *b"VOUCH_VBUNDLE_SEAL_SHA256_V00001";
 pub const VLOG_REDACT_FIELD_SEED: [u8; 32] = *b"VOUCH_REDACT_FIELD_SHA256_V00001";
 pub const VLOG_REDACT_PROOF_SEED: [u8; 32] = *b"VOUCH_REDACT_PROOF_SHA256_V00001";
 
+pub const VDISCLOSURE_MAGIC: [u8; 4] = *b"VDIS";
+pub const VDISCLOSURE_VERSION: u32 = 1;
+pub const VDISCLOSURE_HEADER_LEN: usize = 80;
+pub const VDISCLOSURE_SEAL_SEED: [u8; 32] = *b"VOUCH_VDISCLOSURE_SEAL_SHA256_V1";
+
 fn hex_encode_32(bytes: &[u8; 32]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(64);
@@ -1699,6 +1704,10 @@ pub enum VlogTamperKind {
         detail: String,
     },
     DeltaParentMismatch {
+        detail: String,
+    },
+    DisclosureMismatch {
+        seq_idx: u64,
         detail: String,
     },
 }
@@ -4614,5 +4623,727 @@ pub fn read_records_from_vlog_bundle(bundle_path: &Path) -> Result<Vec<Record>, 
     let vlog_header = VlogHeader::from_bytes(vlog_slice)?;
     let (records, _, _) =
         scan_and_rebuild_index(vlog_slice, Some(vlog_header.index_offset as usize));
+    Ok(records)
+}
+
+/// Single selectively disclosed `Record` entry inside a `.vdis` selective disclosure proof (`M17.2`).
+#[derive(Debug, Clone)]
+pub struct VlogDisclosureEntry {
+    pub orig_seq_idx: u64,
+    pub expected_prev_tag: u64,
+    pub orig_chain_tag: u64,
+    pub record: Record,
+}
+
+/// Detached cryptographic selective disclosure proof (`.vdis`, `VDIS` magic, `M17.2`) that
+/// selectively opens `cmd` and `cwd` for a subset of records in a redacted (`v4`) `.vbundle`
+/// while keeping all non-disclosed frames in the redacted bundle confidential.
+#[derive(Debug, Clone)]
+pub struct VlogDisclosureProof {
+    pub version: u32,
+    pub exported_at_secs: u64,
+    pub source_record_count: u64,
+    pub source_terminal_chain_tag: u64,
+    pub entry_count: u64,
+    pub proof_sha256: [u8; 32],
+    pub entries: Vec<VlogDisclosureEntry>,
+}
+
+pub fn compute_disclosure_seal_sha256(
+    header_prefix_48: &[u8; 48],
+    entries_bytes: &[u8],
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(VDISCLOSURE_SEAL_SEED);
+    hasher.update(header_prefix_48);
+    hasher.update(entries_bytes);
+    let digest = hasher.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest[0..32]);
+    out
+}
+
+impl VlogDisclosureProof {
+    pub fn new(
+        exported_at_secs: u64,
+        source_record_count: u64,
+        source_terminal_chain_tag: u64,
+        entries: Vec<VlogDisclosureEntry>,
+    ) -> Self {
+        let mut proof = Self {
+            version: VDISCLOSURE_VERSION,
+            exported_at_secs,
+            source_record_count,
+            source_terminal_chain_tag,
+            entry_count: entries.len() as u64,
+            proof_sha256: [0u8; 32],
+            entries,
+        };
+        let entries_bytes = proof.encode_entries_bytes();
+        let prefix = proof.encode_prefix_48(entries_bytes.len() as u64);
+        proof.proof_sha256 = compute_disclosure_seal_sha256(&prefix, &entries_bytes);
+        proof
+    }
+
+    fn encode_entries_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(self.entries.len() * 256);
+        for entry in &self.entries {
+            let rec_payload = encode_record_payload(&entry.record);
+            let rec_len = rec_payload.len() as u32;
+            let rec_crc = crc32(&rec_payload);
+            buf.extend_from_slice(&entry.orig_seq_idx.to_le_bytes());
+            buf.extend_from_slice(&entry.expected_prev_tag.to_le_bytes());
+            buf.extend_from_slice(&entry.orig_chain_tag.to_le_bytes());
+            buf.extend_from_slice(&rec_len.to_le_bytes());
+            buf.extend_from_slice(&rec_crc.to_le_bytes());
+            buf.extend_from_slice(&rec_payload);
+        }
+        buf
+    }
+
+    pub fn encode_prefix_48(&self, payload_len: u64) -> [u8; 48] {
+        let mut buf = [0u8; 48];
+        buf[0..4].copy_from_slice(&VDISCLOSURE_MAGIC);
+        buf[4..8].copy_from_slice(&self.version.to_le_bytes());
+        buf[8..16].copy_from_slice(&self.exported_at_secs.to_le_bytes());
+        buf[16..24].copy_from_slice(&self.source_record_count.to_le_bytes());
+        buf[24..32].copy_from_slice(&self.source_terminal_chain_tag.to_le_bytes());
+        buf[32..40].copy_from_slice(&self.entry_count.to_le_bytes());
+        buf[40..48].copy_from_slice(&payload_len.to_le_bytes());
+        buf
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let entries_bytes = self.encode_entries_bytes();
+        let prefix = self.encode_prefix_48(entries_bytes.len() as u64);
+        let seal = compute_disclosure_seal_sha256(&prefix, &entries_bytes);
+        let mut out = Vec::with_capacity(VDISCLOSURE_HEADER_LEN + entries_bytes.len());
+        out.extend_from_slice(&prefix);
+        out.extend_from_slice(&seal);
+        out.extend_from_slice(&entries_bytes);
+        out
+    }
+}
+
+/// Export a selective disclosure proof (`.vdis`) from the live `journal.vlog` in `dir`
+/// for records matching `filter` and/or explicit 0-based `seq_indices`.
+///
+/// Refuses to export if the live `journal.vlog` fails cryptographic integrity verification
+/// or if any requested sequence index in `seq_indices` is out of bounds.
+pub fn export_vlog_disclosure(
+    dir: &Path,
+    disclosure_path: &Path,
+    filter: &VlogSliceFilter,
+    seq_indices: &[u64],
+) -> Result<VlogDisclosureProof, String> {
+    let vlog_file = vlog_path(dir);
+    if !vlog_file.exists() {
+        return Err(format!(
+            "cannot export disclosure proof: {} does not exist",
+            vlog_file.display()
+        ));
+    }
+    let full_vlog_bytes =
+        std::fs::read(&vlog_file).map_err(|e| format!("failed to read journal.vlog: {e}"))?;
+    let vidx_file = vidx_path(dir);
+    let full_vidx_bytes = if vidx_file.exists() {
+        std::fs::read(&vidx_file).map_err(|e| format!("failed to read journal.vidx: {e}"))?
+    } else {
+        Vec::new()
+    };
+    let vchk_file = vchk_path(dir);
+    let full_vchk_bytes = if vchk_file.exists() {
+        std::fs::read(&vchk_file).map_err(|e| format!("failed to read journal.vchk: {e}"))?
+    } else {
+        Vec::new()
+    };
+
+    let vidx_opt = if full_vidx_bytes.is_empty() {
+        None
+    } else {
+        Some(full_vidx_bytes.as_slice())
+    };
+    let vchk_opt = if full_vchk_bytes.is_empty() {
+        None
+    } else {
+        Some(full_vchk_bytes.as_slice())
+    };
+    let live_report = verify_vlog_slices(&full_vlog_bytes, vidx_opt, vchk_opt)?;
+    if !live_report.valid {
+        return Err(format!(
+            "refusing to export disclosure proof from corrupted journal.vlog: {:?}",
+            live_report.tamper_finding
+        ));
+    }
+
+    let full_header = VlogHeader::from_bytes(&full_vlog_bytes)?;
+    let idx_offset = full_header.index_offset as usize;
+    let total_recs = full_header.record_count;
+
+    for &want_seq in seq_indices {
+        if want_seq >= total_recs {
+            return Err(format!(
+                "requested --seq {want_seq} is out of bounds (journal has {total_recs} records)"
+            ));
+        }
+    }
+
+    let mut pos = VLOG_HEADER_LEN;
+    let mut prev_tag = VLOG_GENESIS_TAG;
+    let mut entries = Vec::new();
+
+    for seq_idx in 0..(total_recs as usize) {
+        if pos + VLOG_FRAME_HEADER_LEN > idx_offset {
+            return Err("source journal.vlog frame header truncated during disclosure export".to_string());
+        }
+        let payload_len =
+            u32::from_le_bytes(full_vlog_bytes[pos..pos + 4].try_into().unwrap()) as usize;
+        let frame_end = pos + VLOG_FRAME_HEADER_LEN + payload_len;
+        if frame_end > idx_offset {
+            return Err("source journal.vlog frame payload truncated during disclosure export".to_string());
+        }
+        let orig_chain_tag =
+            u64::from_le_bytes(full_vlog_bytes[pos + 8..pos + 16].try_into().unwrap());
+        let orig_payload = &full_vlog_bytes[pos + VLOG_FRAME_HEADER_LEN..frame_end];
+        let rec = decode_record_payload(orig_payload)
+            .map_err(|e| format!("failed to decode source frame {seq_idx}: {e}"))?;
+
+        let seq_matches = if seq_indices.is_empty() {
+            true
+        } else {
+            seq_indices.contains(&(seq_idx as u64))
+        };
+        let filter_matches = if filter.is_active() {
+            filter.matches_record(&rec)
+        } else {
+            true
+        };
+
+        if seq_matches && filter_matches {
+            entries.push(VlogDisclosureEntry {
+                orig_seq_idx: seq_idx as u64,
+                expected_prev_tag: prev_tag,
+                orig_chain_tag,
+                record: rec,
+            });
+        }
+
+        prev_tag = orig_chain_tag;
+        pos = frame_end;
+    }
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let proof = VlogDisclosureProof::new(
+        now_secs,
+        live_report.verified_records,
+        live_report.terminal_chain_tag,
+        entries,
+    );
+    let proof_bytes = proof.to_bytes();
+
+    if let Some(parent) = disclosure_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            create_dir_all(parent)
+                .map_err(|e| format!("failed to create disclosure parent directory: {e}"))?;
+        }
+    }
+    let tmp_path = disclosure_path.with_extension("vdis.tmp");
+    {
+        let mut f = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp_path)
+            .map_err(|e| format!("failed to open temporary disclosure file: {e}"))?;
+        f.write_all(&proof_bytes)
+            .map_err(|e| format!("failed to write disclosure proof: {e}"))?;
+        f.sync_all()
+            .map_err(|e| format!("failed to sync disclosure proof: {e}"))?;
+    }
+    std::fs::rename(&tmp_path, disclosure_path)
+        .map_err(|e| format!("failed to finalize disclosure proof: {e}"))?;
+
+    Ok(proof)
+}
+
+fn inspect_disclosure_proof(
+    redacted_bundle_path: &Path,
+    disclosure_path: &Path,
+) -> Result<(VlogIntegrityReport, Vec<(u64, Record)>), String> {
+    // 1. Verify the redacted bundle itself
+    let (_, _, _, bundle_report) = inspect_bundle_chain_state(redacted_bundle_path)?;
+    if !bundle_report.valid {
+        return Ok((bundle_report, Vec::new()));
+    }
+
+    let bundle_bytes = std::fs::read(redacted_bundle_path)
+        .map_err(|e| format!("failed to read redacted bundle: {e}"))?;
+    let bundle_hdr = VlogBundleHeader::from_bytes(&bundle_bytes)?;
+    if bundle_hdr.version != VBUNDLE_REDACTED_VERSION {
+        return Ok((
+            VlogIntegrityReport {
+                valid: false,
+                verified_records: 0,
+                verified_checkpoints: 0,
+                terminal_chain_tag: bundle_report.terminal_chain_tag,
+                tamper_finding: Some(VlogTamperKind::DisclosureMismatch {
+                    seq_idx: 0,
+                    detail: format!(
+                        "bundle {} is version {} (selective disclosure requires a redacted v4 bundle)",
+                        redacted_bundle_path.display(),
+                        bundle_hdr.version
+                    ),
+                }),
+            },
+            Vec::new(),
+        ));
+    }
+    let Some(redacted_hdr) = bundle_hdr.parse_redacted_header(&bundle_bytes)? else {
+        return Ok((
+            VlogIntegrityReport {
+                valid: false,
+                verified_records: 0,
+                verified_checkpoints: 0,
+                terminal_chain_tag: bundle_report.terminal_chain_tag,
+                tamper_finding: Some(VlogTamperKind::DisclosureMismatch {
+                    seq_idx: 0,
+                    detail: "missing redacted header in v4 bundle".to_string(),
+                }),
+            },
+            Vec::new(),
+        ));
+    };
+
+    let vlog_start = bundle_hdr.vlog_offset as usize;
+    let vlog_end = vlog_start + bundle_hdr.vlog_len as usize;
+    let redacted_vlog_slice = &bundle_bytes[vlog_start..vlog_end];
+    let redacted_reader =
+        VlogReader::from_buffer(MappedVlogBuffer::from_bytes(redacted_vlog_slice.to_vec()))?;
+
+    // 2. Read and validate the disclosure proof binary container
+    let dis_bytes = std::fs::read(disclosure_path)
+        .map_err(|e| format!("failed to read disclosure proof: {e}"))?;
+    if dis_bytes.len() < VDISCLOSURE_HEADER_LEN {
+        return Ok((
+            VlogIntegrityReport {
+                valid: false,
+                verified_records: 0,
+                verified_checkpoints: 0,
+                terminal_chain_tag: bundle_report.terminal_chain_tag,
+                tamper_finding: Some(VlogTamperKind::BundleSealCorrupted {
+                    detail: format!(
+                        "disclosure proof truncated: expected at least {VDISCLOSURE_HEADER_LEN} bytes, got {}",
+                        dis_bytes.len()
+                    ),
+                }),
+            },
+            Vec::new(),
+        ));
+    }
+    if dis_bytes[0..4] != VDISCLOSURE_MAGIC {
+        return Ok((
+            VlogIntegrityReport {
+                valid: false,
+                verified_records: 0,
+                verified_checkpoints: 0,
+                terminal_chain_tag: bundle_report.terminal_chain_tag,
+                tamper_finding: Some(VlogTamperKind::BundleSealCorrupted {
+                    detail: "invalid disclosure proof magic (expected VDIS)".to_string(),
+                }),
+            },
+            Vec::new(),
+        ));
+    }
+    let version = u32::from_le_bytes(dis_bytes[4..8].try_into().unwrap());
+    if version != VDISCLOSURE_VERSION {
+        return Ok((
+            VlogIntegrityReport {
+                valid: false,
+                verified_records: 0,
+                verified_checkpoints: 0,
+                terminal_chain_tag: bundle_report.terminal_chain_tag,
+                tamper_finding: Some(VlogTamperKind::BundleSealCorrupted {
+                    detail: format!("unsupported disclosure proof version: {version}"),
+                }),
+            },
+            Vec::new(),
+        ));
+    }
+    let source_record_count = u64::from_le_bytes(dis_bytes[16..24].try_into().unwrap());
+    let source_terminal_chain_tag = u64::from_le_bytes(dis_bytes[24..32].try_into().unwrap());
+    let entry_count = u64::from_le_bytes(dis_bytes[32..40].try_into().unwrap()) as usize;
+    let payload_len = u64::from_le_bytes(dis_bytes[40..48].try_into().unwrap()) as usize;
+    let mut expected_seal = [0u8; 32];
+    expected_seal.copy_from_slice(&dis_bytes[48..80]);
+
+    if VDISCLOSURE_HEADER_LEN.saturating_add(payload_len) != dis_bytes.len() {
+        return Ok((
+            VlogIntegrityReport {
+                valid: false,
+                verified_records: 0,
+                verified_checkpoints: 0,
+                terminal_chain_tag: bundle_report.terminal_chain_tag,
+                tamper_finding: Some(VlogTamperKind::BundleSealCorrupted {
+                    detail: format!(
+                        "disclosure proof size mismatch: header expects {} bytes, got {}",
+                        VDISCLOSURE_HEADER_LEN.saturating_add(payload_len),
+                        dis_bytes.len()
+                    ),
+                }),
+            },
+            Vec::new(),
+        ));
+    }
+
+    let mut prefix_48 = [0u8; 48];
+    prefix_48.copy_from_slice(&dis_bytes[0..48]);
+    let entries_slice = &dis_bytes[VDISCLOSURE_HEADER_LEN..];
+    let actual_seal = compute_disclosure_seal_sha256(&prefix_48, entries_slice);
+    if actual_seal != expected_seal {
+        return Ok((
+            VlogIntegrityReport {
+                valid: false,
+                verified_records: 0,
+                verified_checkpoints: 0,
+                terminal_chain_tag: bundle_report.terminal_chain_tag,
+                tamper_finding: Some(VlogTamperKind::BundleSealCorrupted {
+                    detail: "disclosure proof SHA-256 cryptographic seal mismatch".to_string(),
+                }),
+            },
+            Vec::new(),
+        ));
+    }
+
+    if source_record_count != redacted_hdr.source_record_count
+        || source_terminal_chain_tag != redacted_hdr.source_terminal_chain_tag
+    {
+        return Ok((
+            VlogIntegrityReport {
+                valid: false,
+                verified_records: 0,
+                verified_checkpoints: 0,
+                terminal_chain_tag: bundle_report.terminal_chain_tag,
+                tamper_finding: Some(VlogTamperKind::DisclosureMismatch {
+                    seq_idx: 0,
+                    detail: format!(
+                        "disclosure source lineage (records={}, terminal_tag={:016x}) does not match redacted bundle (records={}, terminal_tag={:016x})",
+                        source_record_count,
+                        source_terminal_chain_tag,
+                        redacted_hdr.source_record_count,
+                        redacted_hdr.source_terminal_chain_tag
+                    ),
+                }),
+            },
+            Vec::new(),
+        ));
+    }
+
+    let mut cursor = 0usize;
+    let mut verified_records = 0u64;
+    let mut prev_disclosed_seq: Option<u64> = None;
+    let mut disclosed_records = Vec::with_capacity(entry_count);
+
+    for _ in 0..entry_count {
+        let entry_offset = (VDISCLOSURE_HEADER_LEN + cursor) as u64;
+        if cursor + 32 > entries_slice.len() {
+            return Ok((
+                VlogIntegrityReport {
+                    valid: false,
+                    verified_records,
+                    verified_checkpoints: 0,
+                    terminal_chain_tag: bundle_report.terminal_chain_tag,
+                    tamper_finding: Some(VlogTamperKind::TruncatedFrame {
+                        seq_idx: verified_records,
+                        offset: entry_offset,
+                    }),
+                },
+                Vec::new(),
+            ));
+        }
+        let orig_seq_idx = u64::from_le_bytes(entries_slice[cursor..cursor + 8].try_into().unwrap());
+        let expected_prev_tag =
+            u64::from_le_bytes(entries_slice[cursor + 8..cursor + 16].try_into().unwrap());
+        let orig_chain_tag =
+            u64::from_le_bytes(entries_slice[cursor + 16..cursor + 24].try_into().unwrap());
+        let rec_len =
+            u32::from_le_bytes(entries_slice[cursor + 24..cursor + 28].try_into().unwrap()) as usize;
+        let expected_crc =
+            u32::from_le_bytes(entries_slice[cursor + 28..cursor + 32].try_into().unwrap());
+        let payload_start = cursor + 32;
+        let payload_end = payload_start.saturating_add(rec_len);
+        if payload_end > entries_slice.len() {
+            return Ok((
+                VlogIntegrityReport {
+                    valid: false,
+                    verified_records,
+                    verified_checkpoints: 0,
+                    terminal_chain_tag: bundle_report.terminal_chain_tag,
+                    tamper_finding: Some(VlogTamperKind::TruncatedFrame {
+                        seq_idx: orig_seq_idx,
+                        offset: entry_offset,
+                    }),
+                },
+                Vec::new(),
+            ));
+        }
+
+        if let Some(prev_seq) = prev_disclosed_seq {
+            if orig_seq_idx <= prev_seq {
+                return Ok((
+                    VlogIntegrityReport {
+                        valid: false,
+                        verified_records,
+                        verified_checkpoints: 0,
+                        terminal_chain_tag: bundle_report.terminal_chain_tag,
+                        tamper_finding: Some(VlogTamperKind::DisclosureMismatch {
+                            seq_idx: orig_seq_idx,
+                            detail: format!(
+                                "non-monotonic disclosed sequence index {orig_seq_idx} after {prev_seq}"
+                            ),
+                        }),
+                    },
+                    Vec::new(),
+                ));
+            }
+        }
+        prev_disclosed_seq = Some(orig_seq_idx);
+
+        let orig_payload = &entries_slice[payload_start..payload_end];
+        let actual_crc = crc32(orig_payload);
+        if actual_crc != expected_crc {
+            return Ok((
+                VlogIntegrityReport {
+                    valid: false,
+                    verified_records,
+                    verified_checkpoints: 0,
+                    terminal_chain_tag: bundle_report.terminal_chain_tag,
+                    tamper_finding: Some(VlogTamperKind::FrameCrcMismatch {
+                        seq_idx: orig_seq_idx,
+                        offset: entry_offset,
+                    }),
+                },
+                Vec::new(),
+            ));
+        }
+
+        let Ok(disclosed_rec) = decode_record_payload(orig_payload) else {
+            return Ok((
+                VlogIntegrityReport {
+                    valid: false,
+                    verified_records,
+                    verified_checkpoints: 0,
+                    terminal_chain_tag: bundle_report.terminal_chain_tag,
+                    tamper_finding: Some(VlogTamperKind::TruncatedFrame {
+                        seq_idx: orig_seq_idx,
+                        offset: entry_offset,
+                    }),
+                },
+                Vec::new(),
+            ));
+        };
+
+        // Verify original rolling chain tag over disclosed plaintext payload
+        let computed_orig_tag =
+            compute_frame_chain_tag(expected_prev_tag, orig_seq_idx, orig_payload);
+        if computed_orig_tag != orig_chain_tag {
+            return Ok((
+                VlogIntegrityReport {
+                    valid: false,
+                    verified_records,
+                    verified_checkpoints: 0,
+                    terminal_chain_tag: bundle_report.terminal_chain_tag,
+                    tamper_finding: Some(VlogTamperKind::ChainLinkBroken {
+                        seq_idx: orig_seq_idx,
+                        offset: entry_offset,
+                        expected_tag: orig_chain_tag,
+                        actual_tag: computed_orig_tag,
+                    }),
+                },
+                Vec::new(),
+            ));
+        }
+
+        // Locate corresponding frame in the redacted bundle's proof table
+        let Some((frame_idx, redaction_proof)) = redacted_hdr
+            .frame_proofs
+            .iter()
+            .enumerate()
+            .find(|(_, p)| p.orig_seq_idx == orig_seq_idx)
+        else {
+            return Ok((
+                VlogIntegrityReport {
+                    valid: false,
+                    verified_records,
+                    verified_checkpoints: 0,
+                    terminal_chain_tag: bundle_report.terminal_chain_tag,
+                    tamper_finding: Some(VlogTamperKind::DisclosureMismatch {
+                        seq_idx: orig_seq_idx,
+                        detail: format!(
+                            "disclosed sequence index {orig_seq_idx} is not present in redacted bundle"
+                        ),
+                    }),
+                },
+                Vec::new(),
+            ));
+        };
+
+        if redaction_proof.expected_prev_tag != expected_prev_tag
+            || redaction_proof.orig_chain_tag != orig_chain_tag
+        {
+            return Ok((
+                VlogIntegrityReport {
+                    valid: false,
+                    verified_records,
+                    verified_checkpoints: 0,
+                    terminal_chain_tag: bundle_report.terminal_chain_tag,
+                    tamper_finding: Some(VlogTamperKind::DisclosureMismatch {
+                        seq_idx: orig_seq_idx,
+                        detail: "disclosed chain tags do not match redacted frame proof".to_string(),
+                    }),
+                },
+                Vec::new(),
+            ));
+        }
+
+        let actual_orig_sha = sha256_bytes(orig_payload);
+        if actual_orig_sha != redaction_proof.orig_payload_sha256 {
+            return Ok((
+                VlogIntegrityReport {
+                    valid: false,
+                    verified_records,
+                    verified_checkpoints: 0,
+                    terminal_chain_tag: bundle_report.terminal_chain_tag,
+                    tamper_finding: Some(VlogTamperKind::DisclosureMismatch {
+                        seq_idx: orig_seq_idx,
+                        detail: "disclosed payload SHA-256 does not match redacted proof orig_payload_sha256".to_string(),
+                    }),
+                },
+                Vec::new(),
+            ));
+        }
+
+        // Cross-check the redacted Record inside the redacted bundle
+        let redacted_rec = redacted_reader.get_record(frame_idx)?;
+        if !verify_redacted_field_claim(
+            orig_chain_tag,
+            orig_seq_idx,
+            "cmd",
+            &disclosed_rec.cmd,
+            &redacted_rec.cmd,
+        ) {
+            return Ok((
+                VlogIntegrityReport {
+                    valid: false,
+                    verified_records,
+                    verified_checkpoints: 0,
+                    terminal_chain_tag: bundle_report.terminal_chain_tag,
+                    tamper_finding: Some(VlogTamperKind::DisclosureMismatch {
+                        seq_idx: orig_seq_idx,
+                        detail: "disclosed cmd plaintext does not match redacted bundle cmd commitment".to_string(),
+                    }),
+                },
+                Vec::new(),
+            ));
+        }
+        if !verify_redacted_field_claim(
+            orig_chain_tag,
+            orig_seq_idx,
+            "cwd",
+            &disclosed_rec.cwd,
+            &redacted_rec.cwd,
+        ) {
+            return Ok((
+                VlogIntegrityReport {
+                    valid: false,
+                    verified_records,
+                    verified_checkpoints: 0,
+                    terminal_chain_tag: bundle_report.terminal_chain_tag,
+                    tamper_finding: Some(VlogTamperKind::DisclosureMismatch {
+                        seq_idx: orig_seq_idx,
+                        detail: "disclosed cwd plaintext does not match redacted bundle cwd commitment".to_string(),
+                    }),
+                },
+                Vec::new(),
+            ));
+        }
+
+        // Verify full redacted projection matches redaction_proof.redacted_payload_sha256
+        let projected_redacted = redact_record_fields(&disclosed_rec, orig_chain_tag, orig_seq_idx);
+        let projected_bytes = encode_record_payload(&projected_redacted);
+        if sha256_bytes(&projected_bytes) != redaction_proof.redacted_payload_sha256 {
+            return Ok((
+                VlogIntegrityReport {
+                    valid: false,
+                    verified_records,
+                    verified_checkpoints: 0,
+                    terminal_chain_tag: bundle_report.terminal_chain_tag,
+                    tamper_finding: Some(VlogTamperKind::DisclosureMismatch {
+                        seq_idx: orig_seq_idx,
+                        detail: "redacted projection of disclosed record does not match redacted proof".to_string(),
+                    }),
+                },
+                Vec::new(),
+            ));
+        }
+
+        disclosed_records.push((orig_seq_idx, disclosed_rec));
+        verified_records += 1;
+        cursor = payload_end;
+    }
+
+    if cursor != entries_slice.len() {
+        return Ok((
+            VlogIntegrityReport {
+                valid: false,
+                verified_records,
+                verified_checkpoints: 0,
+                terminal_chain_tag: bundle_report.terminal_chain_tag,
+                tamper_finding: Some(VlogTamperKind::BundleSealCorrupted {
+                    detail: "trailing unparsed bytes in disclosure proof entries section"
+                        .to_string(),
+                }),
+            },
+            Vec::new(),
+        ));
+    }
+
+    Ok((
+        VlogIntegrityReport {
+            valid: true,
+            verified_records,
+            verified_checkpoints: bundle_report.verified_checkpoints,
+            terminal_chain_tag: bundle_report.terminal_chain_tag,
+            tamper_finding: None,
+        },
+        disclosed_records,
+    ))
+}
+
+/// Verify a selective disclosure proof (`.vdis`) offline against a redacted (`v4`) `.vbundle`
+/// without requiring access to the original unredacted `journal.vlog` or state directory.
+pub fn verify_vlog_disclosure(
+    redacted_bundle_path: &Path,
+    disclosure_path: &Path,
+) -> Result<VlogIntegrityReport, String> {
+    let (report, _) = inspect_disclosure_proof(redacted_bundle_path, disclosure_path)?;
+    Ok(report)
+}
+
+/// Verify a selective disclosure proof (`.vdis`) offline against a redacted (`v4`) `.vbundle`
+/// and return the cryptographically verified `(orig_seq_idx, Record)` plaintext pairs.
+pub fn read_disclosed_records(
+    redacted_bundle_path: &Path,
+    disclosure_path: &Path,
+) -> Result<Vec<(u64, Record)>, String> {
+    let (report, records) = inspect_disclosure_proof(redacted_bundle_path, disclosure_path)?;
+    if !report.valid {
+        return Err(format!(
+            "selective disclosure verification failed: {:?}",
+            report.tamper_finding
+        ));
+    }
     Ok(records)
 }

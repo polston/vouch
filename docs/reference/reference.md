@@ -49,7 +49,9 @@ The `[sandbox.cgroups]` table: Linux cgroups v2 memory, process count, CPU bandw
 | `cpu_max_quota_us` | integer (optional) | (unset) | CPU bandwidth quota in microseconds per period (`cpu.max` first token in cgroups v2). |
 | `cpu_weight` | integer (optional) | (unset) | Proportional CPU scheduling weight in `[1, 10000]` (`cpu.weight` in cgroups v2; default kernel weight is `100`). |
 | `high_memory_mb` | integer (optional) | (unset) | Throttle memory high-water mark in megabytes (`memory.high` in cgroups v2). |
+| `io_latency` | array of string | [] | Per-device block I/O latency QoS target rules (`io.latency` lines in cgroups v2, e.g. `"259:0 target=10000"`). |
 | `io_max` | array of string | [] | Block device I/O bandwidth and IOPS limits (`io.max` lines in cgroups v2, e.g. `"259:0 rbps=104857600 wbps=52428800"`). |
+| `io_weight` | integer (optional) | (unset) | Proportional block I/O weight in `[1, 10000]` (`io.weight` in cgroups v2; written as `"default <weight>"`, default kernel weight is `100`). |
 | `max_memory_mb` | integer (optional) | (unset) | Hard memory limit in megabytes (`memory.max` in cgroups v2). |
 | `memory_high_bytes` | integer (optional) | (unset) | Throttle memory high-water mark in bytes (`memory.high` in cgroups v2; takes precedence over `high_memory_mb`). |
 | `memory_max_bytes` | integer (optional) | (unset) | Hard memory limit in bytes (`memory.max` in cgroups v2; takes precedence over `max_memory_mb`). |

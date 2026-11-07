@@ -566,4 +566,6 @@ paths = [
 # cpu_weight = 100
 # cpu_idle = false
 # io_max = ["259:0 rbps=104857600 wbps=52428800 wiops=5000"]
+# io_weight = 100
+# io_latency = ["259:0 target=10000"]
 # psi_stall_warn_pct = 25.0

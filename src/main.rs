@@ -1386,6 +1386,180 @@ fn main() {
     // `vouch doctor` — what vouch could not read or describe. These are vouch's
     // own gaps, surfaced so they get fixed instead of silently becoming prompts.
     if args.first().map(String::as_str) == Some("doctor") {
+        if let Some(dpos) = args.iter().position(|a| a == "--verify-disclosure") {
+            let Some(dis_arg) = args.get(dpos + 1) else {
+                eprintln!(
+                    "usage: vouch doctor --verify-bundle <redacted.vbundle> --verify-disclosure <disclosure.vdis>"
+                );
+                std::process::exit(2);
+            };
+            let Some(bpos) = args.iter().position(|a| a == "--verify-bundle") else {
+                eprintln!(
+                    "usage: vouch doctor --verify-bundle <redacted.vbundle> --verify-disclosure <disclosure.vdis>"
+                );
+                std::process::exit(2);
+            };
+            let Some(bundle_arg) = args.get(bpos + 1) else {
+                eprintln!(
+                    "usage: vouch doctor --verify-bundle <redacted.vbundle> --verify-disclosure <disclosure.vdis>"
+                );
+                std::process::exit(2);
+            };
+            let bundle_path = std::path::Path::new(bundle_arg);
+            let dis_path = std::path::Path::new(dis_arg);
+            match vouch::journal_vlog::verify_vlog_disclosure(bundle_path, dis_path) {
+                Ok(report) if report.valid => {
+                    println!(
+                        "selective disclosure verified: {} disclosed records matched redacted bundle commitments (terminal tag: {:016x})",
+                        report.verified_records,
+                        report.terminal_chain_tag
+                    );
+                    if let Ok(records) =
+                        vouch::journal_vlog::read_disclosed_records(bundle_path, dis_path)
+                    {
+                        for (seq_idx, rec) in records {
+                            println!(
+                                "  [seq={seq_idx}] session={} verdict={} cwd={} cmd={}",
+                                rec.session, rec.verdict, rec.cwd, rec.cmd
+                            );
+                        }
+                    }
+                    std::process::exit(0);
+                }
+                Ok(report) => {
+                    println!(
+                        "selective disclosure verification FAILED (verified {} records, finding: {:?})",
+                        report.verified_records, report.tamper_finding
+                    );
+                    std::process::exit(1);
+                }
+                Err(err) => {
+                    eprintln!("selective disclosure verification ERROR: {err}");
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        if let Some(pos) = args.iter().position(|a| a == "--export-disclosure") {
+            let Some(dis_arg) = args.get(pos + 1) else {
+                eprintln!(
+                    "usage: vouch doctor --export-disclosure <disclosure.vdis> [--session <id>] [--from <timestamp>] [--to <timestamp>] [--seq <idx> ...]"
+                );
+                std::process::exit(2);
+            };
+            let session_id = if let Some(spos) = args.iter().position(|a| a == "--session") {
+                let Some(sarg) = args.get(spos + 1) else {
+                    eprintln!(
+                        "usage: vouch doctor --export-disclosure <disclosure.vdis> --session <id>"
+                    );
+                    std::process::exit(2);
+                };
+                Some(sarg.clone())
+            } else {
+                None
+            };
+            let from_epoch_secs = if let Some(fpos) = args.iter().position(|a| a == "--from") {
+                let Some(farg) = args.get(fpos + 1) else {
+                    eprintln!(
+                        "usage: vouch doctor --export-disclosure <disclosure.vdis> --from <timestamp>"
+                    );
+                    std::process::exit(2);
+                };
+                match vouch::journal_vlog::parse_timestamp_arg(farg) {
+                    Ok(ts) => Some(ts),
+                    Err(err) => {
+                        eprintln!("invalid --from timestamp: {err}");
+                        std::process::exit(2);
+                    }
+                }
+            } else {
+                None
+            };
+            let to_epoch_secs = if let Some(tpos) = args.iter().position(|a| a == "--to") {
+                let Some(targ) = args.get(tpos + 1) else {
+                    eprintln!(
+                        "usage: vouch doctor --export-disclosure <disclosure.vdis> --to <timestamp>"
+                    );
+                    std::process::exit(2);
+                };
+                match vouch::journal_vlog::parse_timestamp_arg(targ) {
+                    Ok(ts) => Some(ts),
+                    Err(err) => {
+                        eprintln!("invalid --to timestamp: {err}");
+                        std::process::exit(2);
+                    }
+                }
+            } else {
+                None
+            };
+            if let (Some(f), Some(t)) = (from_epoch_secs, to_epoch_secs) {
+                if f > t {
+                    eprintln!("invalid time window: --from ({f}) is greater than --to ({t})");
+                    std::process::exit(2);
+                }
+            }
+
+            let mut seq_indices: Vec<u64> = Vec::new();
+            let mut idx = 1usize;
+            while idx < args.len() {
+                if args[idx] == "--seq" {
+                    let Some(seq_arg) = args.get(idx + 1) else {
+                        eprintln!(
+                            "usage: vouch doctor --export-disclosure <disclosure.vdis> --seq <idx>"
+                        );
+                        std::process::exit(2);
+                    };
+                    for part in seq_arg.split(',') {
+                        let trimmed = part.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        match trimmed.parse::<u64>() {
+                            Ok(s) => seq_indices.push(s),
+                            Err(_) => {
+                                eprintln!("invalid --seq index: {trimmed:?}");
+                                std::process::exit(2);
+                            }
+                        }
+                    }
+                    idx += 2;
+                } else {
+                    idx += 1;
+                }
+            }
+            seq_indices.sort_unstable();
+            seq_indices.dedup();
+
+            let filter = vouch::journal_vlog::VlogSliceFilter {
+                session: session_id,
+                from_ts_secs: from_epoch_secs,
+                to_ts_secs: to_epoch_secs,
+            };
+            let dis_path = std::path::Path::new(dis_arg);
+            let dir = journal::state_dir();
+            match vouch::journal_vlog::export_vlog_disclosure(
+                &dir,
+                dis_path,
+                &filter,
+                &seq_indices,
+            ) {
+                Ok(proof) => {
+                    println!(
+                        "exported selective disclosure proof: {} (disclosed records: {}, source records: {}, terminal tag: {:016x})",
+                        vouch::knowledge::display_path(dis_path),
+                        proof.entry_count,
+                        proof.source_record_count,
+                        proof.source_terminal_chain_tag
+                    );
+                    std::process::exit(0);
+                }
+                Err(err) => {
+                    eprintln!("failed to export selective disclosure proof: {err}");
+                    std::process::exit(1);
+                }
+            }
+        }
+
         if args.iter().any(|a| a == "--verify-bundle") {
             let mut bundle_paths = Vec::new();
             let mut idx = 1usize;

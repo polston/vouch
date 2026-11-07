@@ -163,6 +163,14 @@
           "default": null,
           "minimum": 0
         },
+        "io_latency": {
+          "description": "Per-device block I/O latency QoS target rules (`io.latency` lines in cgroups v2, e.g. `\"259:0 target=10000\"`).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
         "io_max": {
           "description": "Block device I/O bandwidth and IOPS limits (`io.max` lines in cgroups v2, e.g. `\"259:0 rbps=104857600 wbps=52428800\"`).",
           "type": "array",
@@ -170,6 +178,16 @@
           "items": {
             "type": "string"
           }
+        },
+        "io_weight": {
+          "description": "Proportional block I/O weight in `[1, 10000]` (`io.weight` in cgroups v2; written as `\"default <weight>\"`, default kernel weight is `100`).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
         },
         "max_memory_mb": {
           "description": "Hard memory limit in megabytes (`memory.max` in cgroups v2).",

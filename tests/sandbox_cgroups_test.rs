@@ -2,15 +2,16 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use vouch::config::{self, SeccompProfile};
 use vouch::runtime::{
-    parse_psi_resource, CgroupCpuStat, CgroupIoMaxRule, CgroupMemoryEvents, CgroupMemoryTelemetry,
-    CgroupPidsEvents, CgroupPsiTelemetry, CgroupSwapEvents, CgroupV2Manager, LandlockRulesetPlan,
-    LandlockVerdict, LoopbackInterfaceSpec, NamespaceSpec, RlimitResource, RlimitRule, RlimitSet,
+    parse_io_stat, parse_psi_resource, CgroupCpuStat, CgroupIoLatencyRule, CgroupIoMaxRule,
+    CgroupIoStatDevice, CgroupMemoryEvents, CgroupMemoryTelemetry, CgroupPidsEvents,
+    CgroupPsiTelemetry, CgroupSwapEvents, CgroupV2Manager, LandlockRulesetPlan, LandlockVerdict,
+    LoopbackInterfaceSpec, NamespaceSpec, RlimitResource, RlimitRule, RlimitSet,
     SandboxExecutionPlan, SeccompFilterProgram, AUDIT_ARCH_AARCH64, AUDIT_ARCH_X86_64,
     CLONE_NEWNET, CLONE_NEWNS, CLONE_NEWPID, CLONE_NEWUSER, DEFAULT_CPU_MAX_PERIOD_US,
-    DEFAULT_CPU_WEIGHT, LANDLOCK_ACCESS_FS_EXECUTE, LANDLOCK_ACCESS_FS_MAKE_REG,
+    DEFAULT_CPU_WEIGHT, DEFAULT_IO_WEIGHT, LANDLOCK_ACCESS_FS_EXECUTE, LANDLOCK_ACCESS_FS_MAKE_REG,
     LANDLOCK_ACCESS_FS_READ_FILE, LANDLOCK_ACCESS_FS_REMOVE_FILE, LANDLOCK_ACCESS_FS_TRUNCATE,
-    LANDLOCK_ACCESS_FS_WRITE_FILE, MAX_CPU_WEIGHT, MIN_CPU_WEIGHT, SECCOMP_RET_ALLOW,
-    SECCOMP_RET_ERRNO_EPERM, SECCOMP_RET_KILL_PROCESS,
+    LANDLOCK_ACCESS_FS_WRITE_FILE, MAX_CPU_WEIGHT, MAX_IO_WEIGHT, MIN_CPU_WEIGHT, MIN_IO_WEIGHT,
+    SECCOMP_RET_ALLOW, SECCOMP_RET_ERRNO_EPERM, SECCOMP_RET_KILL_PROCESS,
 };
 
 fn unique_cgroup_root(tag: &str) -> PathBuf {
@@ -865,6 +866,119 @@ cpu_idle = true
     invalid_cgroups.cpu_weight = Some(0);
     let io_err = manager
         .provision_scope("worker-invalid-weight", &invalid_cgroups)
+        .unwrap_err();
+    assert_eq!(io_err.kind(), std::io::ErrorKind::InvalidInput);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn cgroup_v2_provisions_io_weight_and_io_latency_and_parses_io_stat_telemetry() {
+    let root = unique_cgroup_root("io_weight_latency_stat");
+    std::fs::write(root.join("cgroup.controllers"), "cpu io memory pids\n").unwrap();
+    let manager = CgroupV2Manager::new(&root);
+
+    assert_eq!(MIN_IO_WEIGHT, 1);
+    assert_eq!(MAX_IO_WEIGHT, 10_000);
+    assert_eq!(DEFAULT_IO_WEIGHT, 100);
+
+    // 1. Provision io_weight = 250 and io_latency rules
+    let toml_io = r#"
+[sandbox.cgroups]
+io_weight = 250
+io_latency = [
+    "259:0 target=15000",
+    "8:16 target=50000"
+]
+"#;
+    let cfg = config::load(toml_io).expect("load io_weight and io_latency config");
+    assert_eq!(cfg.sandbox.cgroups.io_weight, Some(250));
+    assert_eq!(cfg.sandbox.cgroups.io_latency.len(), 2);
+
+    let (plan, scope_opt) =
+        SandboxExecutionPlan::prepare(&manager, "worker-io-qos", &cfg.sandbox).expect("prepare");
+    let scope = scope_opt.expect("scope provisioned for io_weight and io_latency");
+    assert_eq!(plan.io_weight, Some(250));
+    assert_eq!(scope.io_weight, Some(250));
+    assert_eq!(
+        plan.io_latency_rules,
+        vec![
+            CgroupIoLatencyRule {
+                major: 259,
+                minor: 0,
+                target_usec: 15_000,
+            },
+            CgroupIoLatencyRule {
+                major: 8,
+                minor: 16,
+                target_usec: 50_000,
+            },
+        ]
+    );
+
+    let io_weight_file = std::fs::read_to_string(scope.dir.join("io.weight")).unwrap();
+    assert_eq!(io_weight_file.trim(), "default 250");
+    assert_eq!(scope.read_io_weight(), Some(250));
+
+    let io_latency_file = std::fs::read_to_string(scope.dir.join("io.latency")).unwrap();
+    assert_eq!(
+        io_latency_file.trim(),
+        "259:0 target=15000\n8:16 target=50000"
+    );
+    assert_eq!(scope.read_io_latency(), plan.io_latency_rules);
+
+    // 2. Simulate kernel reporting multi-device io.stat accounting telemetry
+    let sample_io_stat = "\
+259:0 rbytes=104857600 wbytes=52428800 rios=1600 wios=800 dbytes=4096 dios=1
+8:16 rbytes=20971520 wbytes=10485760 rios=320 wios=160 dbytes=0 dios=0 cost.usage=12500
+";
+    std::fs::write(scope.dir.join("io.stat"), sample_io_stat).unwrap();
+    let io_stats: Vec<CgroupIoStatDevice> = scope.read_io_stat().expect("read io.stat");
+    assert_eq!(
+        io_stats,
+        vec![
+            CgroupIoStatDevice {
+                major: 259,
+                minor: 0,
+                rbytes: 104_857_600,
+                wbytes: 52_428_800,
+                rios: 1600,
+                wios: 800,
+                dbytes: 4096,
+                dios: 1,
+            },
+            CgroupIoStatDevice {
+                major: 8,
+                minor: 16,
+                rbytes: 20_971_520,
+                wbytes: 10_485_760,
+                rios: 320,
+                wios: 160,
+                dbytes: 0,
+                dios: 0,
+            },
+        ]
+    );
+    assert_eq!(parse_io_stat(sample_io_stat).unwrap(), io_stats);
+
+    // Teardown cleans up io.weight, io.latency, io.stat and removes the directory
+    scope
+        .teardown()
+        .expect("teardown scope with io.weight, io.latency, and io.stat");
+    assert!(!scope.dir.exists());
+
+    // 3. Reject out-of-range io_weight (0 or > 10000) and malformed io_latency rules
+    assert!(config::load("[sandbox.cgroups]\nio_weight = 0\n").is_err());
+    assert!(config::load("[sandbox.cgroups]\nio_weight = 10001\n").is_err());
+    assert!(config::load("[sandbox.cgroups]\nio_latency = [\"259:0\"]\n").is_err());
+    assert!(config::load("[sandbox.cgroups]\nio_latency = [\"259:0 target=0\"]\n").is_err());
+    assert!(config::load("[sandbox.cgroups]\nio_latency = [\"259:0 rbps=100\"]\n").is_err());
+    assert!(parse_io_stat("invalid_device rbytes=100\n").is_err());
+
+    let mut invalid_cgroups = vouch::config::CgroupsConfig::default();
+    invalid_cgroups.io_weight = Some(0);
+    let io_err = manager
+        .provision_scope("worker-invalid-io-weight", &invalid_cgroups)
         .unwrap_err();
     assert_eq!(io_err.kind(), std::io::ErrorKind::InvalidInput);
 

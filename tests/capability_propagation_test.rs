@@ -407,3 +407,138 @@ fn python_importlib_and_dunder_import_resolve_static_and_relative_modules() {
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn python_ctypes_and_cffi_native_ffi_capability_propagation() {
+    use vouch::capability::TransitiveImportResolver;
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "vouch_cap_py_ffi_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let pkg_dir = tmp_dir.join("native_pkg");
+    std::fs::create_dir_all(&pkg_dir).unwrap();
+    std::fs::write(pkg_dir.join("__init__.py"), "").unwrap();
+    std::fs::write(
+        pkg_dir.join("bridge.py"),
+        "import ctypes\nlibc = ctypes.CDLL('libc.so.6')\nlibc.getpid()\n",
+    )
+    .unwrap();
+    std::fs::write(
+        pkg_dir.join("cffi_compile.py"),
+        "from cffi import FFI\nffi = FFI()\nffi.cdef('int system(const char *);')\nlib = ffi.verify('#include <stdlib.h>')\n",
+    )
+    .unwrap();
+
+    let resolver = TransitiveImportResolver::new(&tmp_dir);
+
+    // 1. Static ctypes.CDLL('libc.so.6') sets external_paths=true, daemon=true, dynamic_eval=false
+    let r_static_cdll = resolver.resolve_python(
+        "import ctypes\nlibc = ctypes.CDLL('libc.so.6')\nlibc.puts(b'hello')\n",
+        None,
+    );
+    assert!(r_static_cdll.capabilities.external_paths);
+    assert!(r_static_cdll.capabilities.daemon);
+    assert!(
+        !r_static_cdll.capabilities.dynamic_eval,
+        "Static ctypes.CDLL with constant args should not set dynamic_eval: {:?}",
+        r_static_cdll
+    );
+
+    // 2. Transitive import of native_pkg.bridge propagates external_paths=true and daemon=true
+    let r_transitive = resolver.resolve_python("import native_pkg.bridge\n", None);
+    assert!(r_transitive.capabilities.external_paths);
+    assert!(r_transitive.capabilities.daemon);
+    assert!(!r_transitive.capabilities.dynamic_eval);
+
+    // 3. ctypes.cdll.libc.system(...) or dynamic argument to native function sets dynamic_eval=true
+    let r_cdll_system = resolver.resolve_python(
+        "import ctypes\nctypes.cdll.libc.system(b'id')\n",
+        None,
+    );
+    assert!(r_cdll_system.capabilities.external_paths);
+    assert!(r_cdll_system.capabilities.daemon);
+    assert!(
+        r_cdll_system.capabilities.dynamic_eval,
+        "ctypes.cdll.libc.system must set dynamic_eval=true: {:?}",
+        r_cdll_system
+    );
+
+    let r_cdll_dyn_arg = resolver.resolve_python(
+        "import ctypes, sys\nlib = ctypes.WinDLL('kernel32.dll')\nlib.WinExec(sys.argv[1], 1)\n",
+        None,
+    );
+    assert!(r_cdll_dyn_arg.capabilities.external_paths);
+    assert!(r_cdll_dyn_arg.capabilities.daemon);
+    assert!(r_cdll_dyn_arg.capabilities.dynamic_eval);
+
+    // 4. Dynamic library path in ctypes.CDLL(user_so) sets dynamic_eval=true and emits unmodeled_import
+    let dyn_cdll_src = "from ctypes import CDLL\nimport os\nso_path = os.getenv('PLUGIN_SO')\nCDLL(so_path)\n";
+    let r_dyn_cdll = resolver.resolve_python(dyn_cdll_src, None);
+    assert!(r_dyn_cdll.capabilities.external_paths);
+    assert!(r_dyn_cdll.capabilities.daemon);
+    assert!(r_dyn_cdll.capabilities.dynamic_eval);
+    assert!(
+        r_dyn_cdll
+            .unresolved_imports
+            .iter()
+            .any(|u| u == "dynamic_import: ctypes.CDLL"),
+        "Dynamic ctypes.CDLL must record unresolved dynamic_import: {:?}",
+        r_dyn_cdll.unresolved_imports
+    );
+    let scan_dyn_cdll = vouch::python::parse(dyn_cdll_src).expect("parse dyn_cdll_src");
+    assert!(
+        scan_dyn_cdll
+            .constructs
+            .iter()
+            .any(|c| c == "unmodeled_import"),
+        "python::parse must emit unmodeled_import for dynamic ctypes.CDLL: {:?}",
+        scan_dyn_cdll.constructs
+    );
+
+    // 5. cffi.FFI().dlopen static vs dynamic and ffi.verify / ffi.set_source inline C compilation
+    let r_cffi_static = resolver.resolve_python(
+        "import cffi\nffi = cffi.FFI()\nffi.cdef('int getpid(void);')\nC = ffi.dlopen(None)\nC.getpid()\n",
+        None,
+    );
+    assert!(r_cffi_static.capabilities.external_paths);
+    assert!(r_cffi_static.capabilities.daemon);
+    assert!(!r_cffi_static.capabilities.dynamic_eval);
+
+    let r_cffi_dyn_dlopen = resolver.resolve_python(
+        "from cffi import FFI\nimport sys\nffi = FFI()\nlib = ffi.dlopen(sys.argv[1])\n",
+        None,
+    );
+    assert!(r_cffi_dyn_dlopen.capabilities.external_paths);
+    assert!(r_cffi_dyn_dlopen.capabilities.daemon);
+    assert!(r_cffi_dyn_dlopen.capabilities.dynamic_eval);
+    assert!(
+        r_cffi_dyn_dlopen
+            .unresolved_imports
+            .iter()
+            .any(|u| u == "dynamic_import: cffi.FFI.dlopen"),
+        "Dynamic ffi.dlopen must record unresolved dynamic_import: {:?}",
+        r_cffi_dyn_dlopen.unresolved_imports
+    );
+
+    let r_cffi_verify = resolver.resolve_python("import native_pkg.cffi_compile\n", None);
+    assert!(r_cffi_verify.capabilities.external_paths);
+    assert!(r_cffi_verify.capabilities.daemon);
+    assert!(
+        r_cffi_verify.capabilities.dynamic_eval,
+        "Transitive import of module calling ffi.verify must propagate dynamic_eval=true: {:?}",
+        r_cffi_verify
+    );
+
+    // 6. PEP 723 inline script metadata with cffi dependency
+    let pep723_cffi = "# /// script\n# dependencies = [\"cffi>=1.16\"]\n# ///\nprint('ok')\n";
+    let r_pep723 = resolver.resolve_python(pep723_cffi, None);
+    assert!(r_pep723.capabilities.external_paths);
+    assert!(r_pep723.capabilities.daemon);
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}

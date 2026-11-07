@@ -430,6 +430,53 @@ pub enum VariableOrigin {
     TaintedExpression,               // Derived or combined with dynamic untrusted input
 }
 
+/// Script entry staged into a `[powershell]::Create()` runspace pipeline via `.AddScript(...)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PsRunspaceScript {
+    pub text: String,
+    pub is_literal_script: bool,
+    pub is_tainted: bool,
+}
+
+/// Command entry staged into a `[powershell]::Create()` runspace pipeline via `.AddCommand(...)`,
+/// `.AddArgument(...)`, and `.AddParameter(...)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PsRunspaceCommand {
+    pub head: String,
+    pub head_is_tainted: bool,
+    pub args: Vec<String>,
+    pub args_tainted: bool,
+}
+
+/// Builder state accumulated on a `[powershell]::Create()` / `[System.Management.Automation.PowerShell]::Create()`
+/// runspace pipeline instance prior to `.Invoke()` or `.BeginInvoke()`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PsRunspaceBuilderState {
+    pub scripts: Vec<PsRunspaceScript>,
+    pub current_cmd: Option<PsRunspaceCommand>,
+    pub commands: Vec<PsRunspaceCommand>,
+}
+
+impl PsRunspaceBuilderState {
+    pub fn flush_current_cmd(&mut self) {
+        if let Some(cmd) = self.current_cmd.take() {
+            self.commands.push(cmd);
+        }
+    }
+
+    pub fn is_tainted(&self) -> bool {
+        self.scripts.iter().any(|s| s.is_tainted)
+            || self
+                .current_cmd
+                .as_ref()
+                .is_some_and(|c| c.head_is_tainted || c.args_tainted)
+            || self
+                .commands
+                .iter()
+                .any(|c| c.head_is_tainted || c.args_tainted)
+    }
+}
+
 /// Scoped symbol table tracking variable assignments and dataflow taint within a scriptblock.
 #[derive(Debug, Clone)]
 pub struct VariableTaintTable {
@@ -442,6 +489,8 @@ pub struct VariableTaintTable {
     class_instances: std::collections::HashMap<String, String>,
     /// `[ref]` alias bindings (`$r` -> normalized target variable key `$target`).
     ref_targets: std::collections::HashMap<String, String>,
+    /// Staged `[powershell]::Create()` runspace pipeline state keyed by normalized variable name.
+    runspace_builders: std::collections::HashMap<String, PsRunspaceBuilderState>,
 }
 
 impl Default for VariableTaintTable {
@@ -458,6 +507,7 @@ impl VariableTaintTable {
             default_param_values: std::collections::HashMap::new(),
             class_instances: std::collections::HashMap::new(),
             ref_targets: std::collections::HashMap::new(),
+            runspace_builders: std::collections::HashMap::new(),
         };
         table.set("$_", VariableOrigin::PipelineItem);
         table.set("$PSItem", VariableOrigin::PipelineItem);
@@ -660,6 +710,38 @@ impl VariableTaintTable {
         resolved
     }
 
+    pub fn set_runspace_builder(&mut self, var_name: &str, state: PsRunspaceBuilderState) {
+        self.runspace_builders
+            .insert(Self::normalize_key(var_name), state);
+    }
+
+    pub fn get_runspace_builder(&self, var_name: &str) -> Option<&PsRunspaceBuilderState> {
+        let key = Self::normalize_key(var_name);
+        if let Some(st) = self.runspace_builders.get(&key) {
+            return Some(st);
+        }
+        if let Some(bare) = key.strip_prefix("$using:") {
+            if let Some(st) = self.runspace_builders.get(&format!("${bare}")) {
+                return Some(st);
+            }
+            if let Some(st) = self.runspace_builders.get(&format!("$script:{bare}")) {
+                return Some(st);
+            }
+            if let Some(st) = self.runspace_builders.get(&format!("$global:{bare}")) {
+                return Some(st);
+            }
+        } else if !key.contains(':') && key.starts_with('$') {
+            let bare = &key[1..];
+            if let Some(st) = self.runspace_builders.get(&format!("$script:{bare}")) {
+                return Some(st);
+            }
+            if let Some(st) = self.runspace_builders.get(&format!("$global:{bare}")) {
+                return Some(st);
+            }
+        }
+        None
+    }
+
     pub fn clear_variable(&mut self, name: &str) {
         let key = Self::normalize_key(name);
         self.variables
@@ -667,6 +749,7 @@ impl VariableTaintTable {
         self.variables.remove(&format!("{key}.value"));
         self.splat_args.remove(&key);
         self.ref_targets.remove(&key);
+        self.runspace_builders.remove(&key);
     }
 
     pub fn get(&self, name: &str) -> Option<&VariableOrigin> {
@@ -741,6 +824,11 @@ impl VariableTaintTable {
         for (k, v) in &callee.ref_targets {
             if k.starts_with("$script:") || k.starts_with("$global:") {
                 self.ref_targets.insert(k.clone(), v.clone());
+            }
+        }
+        for (k, v) in &callee.runspace_builders {
+            if k.starts_with("$script:") || k.starts_with("$global:") || k.starts_with("$this.") {
+                self.runspace_builders.insert(k.clone(), v.clone());
             }
         }
     }
@@ -2327,6 +2415,9 @@ impl VariableTaintTable {
         for (k, v) in &other.ref_targets {
             self.ref_targets.insert(k.clone(), v.clone());
         }
+        for (k, v) in &other.runspace_builders {
+            self.runspace_builders.insert(k.clone(), v.clone());
+        }
     }
 }
 
@@ -3169,6 +3260,66 @@ fn analyze_statement(stmt: &[PsToken], taint_table: &mut VariableTaintTable, out
             }
         } else if matches!(
             head_lower.as_str(),
+            "register-objectevent"
+                | "register-engineevent"
+                | "register-wmievent"
+                | "register-cimindicationevent"
+        ) {
+            let msg_origin = extract_message_data_origin(&stmt[1..], taint_table);
+            let arg_origins = extract_argument_list_origins(&stmt[1..], taint_table);
+            let mut cursor = 1;
+            let mut walked_scriptblock = false;
+            while cursor < stmt.len() {
+                if matches!(stmt[cursor], PsToken::OpenBrace) {
+                    if let Some((inner, next_c)) = extract_delimited_group(stmt, cursor, false) {
+                        walked_scriptblock = true;
+                        let mut event_taint = taint_table.clone();
+                        bind_argument_list_to_job_scope(&arg_origins, &mut event_taint);
+                        let event_src = VariableOrigin::DynamicInput {
+                            source: head.clone(),
+                        };
+                        event_taint.set("$EventArgs", event_src.clone());
+                        event_taint.set("$Sender", event_src.clone());
+                        event_taint.set("$Event.SourceEventArgs", event_src.clone());
+                        event_taint.set("$Event.SourceArgs", event_src.clone());
+                        if let Some(ref mo) = msg_origin {
+                            event_taint.set("$Event.MessageData", mo.clone());
+                            if matches!(
+                                mo,
+                                VariableOrigin::DynamicInput { .. }
+                                    | VariableOrigin::TaintedExpression
+                                    | VariableOrigin::Environment(_)
+                            ) {
+                                event_taint.set("$Event", mo.clone());
+                            } else {
+                                event_taint
+                                    .set("$Event", VariableOrigin::Literal("event".to_string()));
+                            }
+                        } else {
+                            event_taint.set("$Event", event_src.clone());
+                            event_taint.set("$Event.MessageData", event_src);
+                        }
+                        let body_tokens = strip_and_bind_scriptblock_params(
+                            &inner,
+                            &arg_origins,
+                            &mut event_taint,
+                        );
+                        let mut sub_cfg = PsControlFlowGraph::default();
+                        let entry_id = sub_cfg.new_block("event_action_scriptblock", true);
+                        sub_cfg.walk_tokens(&body_tokens, entry_id, true, &mut event_taint, 0);
+                        taint_table.propagate_cross_scope_from(&event_taint);
+                        out.extend(sub_cfg.synthesized_commands);
+                        cursor = next_c;
+                        continue;
+                    }
+                }
+                cursor += 1;
+            }
+            if walked_scriptblock {
+                return;
+            }
+        } else if matches!(
+            head_lower.as_str(),
             "set-variable"
                 | "sv"
                 | "set"
@@ -3316,6 +3467,11 @@ fn analyze_statement(stmt: &[PsToken], taint_table: &mut VariableTaintTable, out
 
     // 1e. `[Environment]::SetEnvironmentVariable(<name>, <value> [, <target>])` / `[System.Environment]::SetEnvironmentVariable(...)`
     handle_dotnet_set_environment_variable(stmt, taint_table);
+
+    // 1f. `[powershell]::Create()` / `[System.Management.Automation.PowerShell]::Create()` runspace pipeline chains
+    if handle_powershell_sdk_statement(stmt, taint_table, out) {
+        return;
+    }
 
     // 2. Foreach loops: foreach ($var in $collection_or_cmd) { <body> }
     if let Some(PsToken::Identifier(head)) = stmt.first() {
@@ -3790,20 +3946,30 @@ fn analyze_statement(stmt: &[PsToken], taint_table: &mut VariableTaintTable, out
                                     }
                                 }
                             } else if let Some(PsToken::MemberAccess(m)) = stmt.get(idx + 1) {
-                                let prop_expr = format!("{}{}", v, m);
-                                if let Some(VariableOrigin::Literal(lit)) =
-                                    taint_table.get(&prop_expr)
+                                let first_prop = format!("{}{}", v, m);
+                                let mut full_prop = first_prop.clone();
+                                let mut advance = 1usize;
+                                while let Some(PsToken::MemberAccess(next_m)) =
+                                    stmt.get(idx + 1 + advance)
+                                {
+                                    full_prop.push_str(next_m);
+                                    advance += 1;
+                                }
+                                if let Some(VariableOrigin::Literal(lit)) = taint_table
+                                    .get(&full_prop)
+                                    .or_else(|| taint_table.get(&first_prop))
                                 {
                                     args.push(lit.clone());
                                 } else {
-                                    args.push(prop_expr.clone());
-                                    if taint_table.is_tainted_or_dynamic(&prop_expr)
+                                    args.push(full_prop.clone());
+                                    if taint_table.is_tainted_or_dynamic(&full_prop)
+                                        || taint_table.is_tainted_or_dynamic(&first_prop)
                                         || taint_table.is_tainted_or_dynamic(v)
                                     {
                                         has_untrusted_var = true;
                                     }
                                 }
-                                idx += 1;
+                                idx += advance;
                             }
                         }
                         PsToken::SplatVariable(sv) => {
@@ -4595,6 +4761,390 @@ fn is_scriptblock_type_name(type_name: &str) -> bool {
     )
 }
 
+fn is_powershell_sdk_type_name(type_name: &str) -> bool {
+    let lower = type_name.trim().to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "powershell" | "system.management.automation.powershell"
+    )
+}
+
+fn is_powershell_sdk_factory_tokens(rhs: &[PsToken]) -> bool {
+    for i in 0..rhs.len() {
+        if let Some((type_name, method_name, _, _)) = match_dotnet_type_static_call(rhs, i) {
+            if is_powershell_sdk_type_name(&type_name) && method_name.eq_ignore_ascii_case("create")
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn apply_powershell_sdk_method_chain(
+    tokens: &[PsToken],
+    mut cursor: usize,
+    state: &mut PsRunspaceBuilderState,
+    taint_table: &VariableTaintTable,
+) -> (bool, bool) {
+    let mut matched_any = false;
+    let mut invoked = false;
+    while cursor < tokens.len() {
+        while cursor < tokens.len() && matches!(tokens[cursor], PsToken::Newline) {
+            cursor += 1;
+        }
+        let Some(PsToken::MemberAccess(member)) = tokens.get(cursor) else {
+            break;
+        };
+        if tokens.get(cursor + 1) != Some(&PsToken::OpenParen) {
+            break;
+        }
+        let Some((call_args, next_cursor)) = extract_delimited_group(tokens, cursor + 1, true)
+        else {
+            break;
+        };
+        let m_lower = member.trim_start_matches('.').to_ascii_lowercase();
+        let arg_groups = split_comma_separated_tokens(&call_args);
+        match m_lower.as_str() {
+            "addscript" => {
+                matched_any = true;
+                state.flush_current_cmd();
+                if let Some(first_grp) = arg_groups.first() {
+                    let orig = expand_ps_string_tokens_taint(first_grp, taint_table);
+                    let is_tainted = matches!(
+                        orig,
+                        VariableOrigin::DynamicInput { .. }
+                            | VariableOrigin::TaintedExpression
+                            | VariableOrigin::Environment(_)
+                    );
+                    let (raw_script, is_literal_script) = if first_grp.len() == 1 {
+                        if let PsToken::StringLiteral(s) = &first_grp[0] {
+                            (s.clone(), true)
+                        } else if let VariableOrigin::Literal(lit) = &orig {
+                            if !lit.is_empty() && lit != "value" {
+                                (lit.clone(), true)
+                            } else {
+                                (tokens_to_arg_string(first_grp), false)
+                            }
+                        } else {
+                            (tokens_to_arg_string(first_grp), false)
+                        }
+                    } else if let VariableOrigin::Literal(lit) = &orig {
+                        if !lit.is_empty() && lit != "value" {
+                            (lit.clone(), true)
+                        } else {
+                            (tokens_to_arg_string(first_grp), false)
+                        }
+                    } else {
+                        (tokens_to_arg_string(first_grp), false)
+                    };
+                    state.scripts.push(PsRunspaceScript {
+                        text: raw_script,
+                        is_literal_script,
+                        is_tainted,
+                    });
+                }
+            }
+            "addcommand" => {
+                matched_any = true;
+                state.flush_current_cmd();
+                if let Some(first_grp) = arg_groups.first() {
+                    let orig = expand_ps_string_tokens_taint(first_grp, taint_table);
+                    let is_tainted = matches!(
+                        orig,
+                        VariableOrigin::DynamicInput { .. }
+                            | VariableOrigin::TaintedExpression
+                            | VariableOrigin::Environment(_)
+                    );
+                    let cmd_head = match &orig {
+                        VariableOrigin::Literal(lit) if !lit.is_empty() && lit != "value" => {
+                            lit.clone()
+                        }
+                        _ => tokens_to_arg_string(first_grp),
+                    };
+                    state.current_cmd = Some(PsRunspaceCommand {
+                        head: cmd_head,
+                        head_is_tainted: is_tainted,
+                        args: Vec::new(),
+                        args_tainted: is_tainted,
+                    });
+                }
+            }
+            "addargument" => {
+                matched_any = true;
+                if let Some(first_grp) = arg_groups.first() {
+                    let orig = expand_ps_string_tokens_taint(first_grp, taint_table);
+                    let is_tainted = matches!(
+                        orig,
+                        VariableOrigin::DynamicInput { .. }
+                            | VariableOrigin::TaintedExpression
+                            | VariableOrigin::Environment(_)
+                    );
+                    let val_str = match &orig {
+                        VariableOrigin::Literal(lit) if !lit.is_empty() && lit != "value" => {
+                            lit.clone()
+                        }
+                        _ => tokens_to_arg_string(first_grp),
+                    };
+                    if let Some(cmd) = &mut state.current_cmd {
+                        cmd.args.push(val_str);
+                        if is_tainted {
+                            cmd.args_tainted = true;
+                        }
+                    } else if let Some(last_script) = state.scripts.last_mut() {
+                        if is_tainted {
+                            last_script.is_tainted = true;
+                        }
+                    }
+                }
+            }
+            "addparameter" => {
+                matched_any = true;
+                if let Some(first_grp) = arg_groups.first() {
+                    let param_orig = classify_rhs_origin(first_grp, taint_table);
+                    let raw_param = match &param_orig {
+                        VariableOrigin::Literal(lit) if !lit.is_empty() && lit != "value" => {
+                            lit.clone()
+                        }
+                        _ => tokens_to_arg_string(first_grp),
+                    };
+                    let trimmed_param = raw_param.trim().trim_matches(|c| c == '\'' || c == '"');
+                    let flag_name = if trimmed_param.starts_with('-') {
+                        trimmed_param.to_string()
+                    } else {
+                        format!("-{trimmed_param}")
+                    };
+                    if let Some(val_grp) = arg_groups.get(1) {
+                        let val_orig = expand_ps_string_tokens_taint(val_grp, taint_table);
+                        let val_tainted = matches!(
+                            val_orig,
+                            VariableOrigin::DynamicInput { .. }
+                                | VariableOrigin::TaintedExpression
+                                | VariableOrigin::Environment(_)
+                        );
+                        let val_str = match &val_orig {
+                            VariableOrigin::Literal(lit) if !lit.is_empty() && lit != "value" => {
+                                lit.clone()
+                            }
+                            _ => tokens_to_arg_string(val_grp),
+                        };
+                        if let Some(cmd) = &mut state.current_cmd {
+                            cmd.args.push(flag_name);
+                            cmd.args.push(val_str);
+                            if val_tainted {
+                                cmd.args_tainted = true;
+                            }
+                        } else if let Some(last_script) = state.scripts.last_mut() {
+                            if val_tainted {
+                                last_script.is_tainted = true;
+                            }
+                        }
+                    } else if let Some(cmd) = &mut state.current_cmd {
+                        cmd.args.push(flag_name);
+                    }
+                }
+            }
+            "invoke" | "begininvoke" | "invokereturnasis" => {
+                matched_any = true;
+                invoked = true;
+            }
+            "addstatement" => {
+                matched_any = true;
+                state.flush_current_cmd();
+            }
+            _ => {}
+        }
+        cursor = next_cursor;
+    }
+    (matched_any, invoked)
+}
+
+fn emit_runspace_builder_commands(
+    state: &PsRunspaceBuilderState,
+    taint_table: &mut VariableTaintTable,
+    out: &mut Vec<Cmd>,
+) {
+    for script in &state.scripts {
+        if script.is_literal_script {
+            let mut sub_taint = taint_table.clone();
+            let sub_cfg = PsControlFlowGraph::build_with_taint(&script.text, &mut sub_taint);
+            taint_table.propagate_cross_scope_from(&sub_taint);
+            if !sub_cfg.synthesized_commands.is_empty() {
+                for mut c in sub_cfg.synthesized_commands {
+                    if script.is_tainted && !c.args.iter().any(|a| a == "untrusted_input") {
+                        c.args.push("untrusted_input".to_string());
+                    }
+                    out.push(c);
+                }
+            } else if script.is_tainted {
+                out.push(Cmd {
+                    head: "Invoke-Expression".to_string(),
+                    args: vec![
+                        "-Command".to_string(),
+                        script.text.clone(),
+                        "untrusted_input".to_string(),
+                    ],
+                    ..Default::default()
+                });
+            }
+        } else {
+            let mut args = vec!["-Command".to_string(), script.text.clone()];
+            if script.is_tainted {
+                args.push("untrusted_input".to_string());
+            }
+            out.push(Cmd {
+                head: "Invoke-Expression".to_string(),
+                args,
+                ..Default::default()
+            });
+        }
+    }
+
+    let mut all_cmds = state.commands.clone();
+    if let Some(curr) = &state.current_cmd {
+        all_cmds.push(curr.clone());
+    }
+
+    for cmd in all_cmds {
+        if cmd.head_is_tainted {
+            let mut args = vec!["-Command".to_string(), cmd.head.clone()];
+            args.extend(cmd.args.iter().cloned());
+            if !args.iter().any(|a| a == "untrusted_input") {
+                args.push("untrusted_input".to_string());
+            }
+            out.push(Cmd {
+                head: "Invoke-Expression".to_string(),
+                args,
+                ..Default::default()
+            });
+        } else {
+            let name_lower = cmd.head.to_ascii_lowercase();
+            if name_lower.starts_with("remove-")
+                || name_lower.starts_with("stop-")
+                || name_lower.starts_with("set-")
+                || matches!(
+                    name_lower.as_str(),
+                    "rm"
+                        | "del"
+                        | "erase"
+                        | "spps"
+                        | "kill"
+                        | "invoke-expression"
+                        | "iex"
+                        | "invoke-command"
+                        | "icm"
+                        | "invoke-restmethod"
+                        | "irm"
+                        | "invoke-webrequest"
+                        | "iwr"
+                )
+            {
+                let mut args = cmd.args.clone();
+                if cmd.args_tainted {
+                    if (name_lower.starts_with("remove-")
+                        || matches!(name_lower.as_str(), "rm" | "del" | "erase"))
+                        && !args.iter().any(|a| a.eq_ignore_ascii_case("-recurse"))
+                    {
+                        args.push("-Recurse".to_string());
+                    }
+                    if !args.iter().any(|a| a == "untrusted_input") {
+                        args.push("untrusted_input".to_string());
+                    }
+                }
+                out.push(Cmd {
+                    head: cmd.head,
+                    args,
+                    ..Default::default()
+                });
+            }
+        }
+    }
+}
+
+fn handle_powershell_sdk_statement(
+    stmt: &[PsToken],
+    taint_table: &mut VariableTaintTable,
+    out: &mut Vec<Cmd>,
+) -> bool {
+    let assigned_var = stmt
+        .iter()
+        .position(|t| matches!(t, PsToken::Other(op) if op == "="))
+        .and_then(|eq_idx| {
+            if eq_idx > 0 {
+                if let PsToken::Variable(v) = &stmt[eq_idx - 1] {
+                    if !v.eq_ignore_ascii_case("$null") {
+                        return Some(v.clone());
+                    }
+                }
+            }
+            None
+        });
+
+    // 1. Check if statement contains `[powershell]::Create(...)` / `[System.Management.Automation.PowerShell]::Create(...)`
+    for i in 0..stmt.len() {
+        if let Some((type_name, method_name, _, after_create)) =
+            match_dotnet_type_static_call(stmt, i)
+        {
+            if is_powershell_sdk_type_name(&type_name) && method_name.eq_ignore_ascii_case("create")
+            {
+                let mut state = PsRunspaceBuilderState::default();
+                let (_, invoked) = apply_powershell_sdk_method_chain(
+                    stmt,
+                    after_create,
+                    &mut state,
+                    taint_table,
+                );
+                if let Some(ref var) = assigned_var {
+                    taint_table.set_class_instance(var, "powershell");
+                    if state.is_tainted() {
+                        taint_table.set(var, VariableOrigin::TaintedExpression);
+                    }
+                    taint_table.set_runspace_builder(var, state.clone());
+                }
+                if invoked {
+                    emit_runspace_builder_commands(&state, taint_table, out);
+                }
+                return true;
+            }
+        }
+    }
+
+    // 2. Check if statement invokes a method chain on a variable `$ps` bound to a `[powershell]::Create()` instance
+    for i in 0..stmt.len() {
+        if let PsToken::Variable(var) = &stmt[i] {
+            let is_ps_sdk = taint_table
+                .get_class_instance(var)
+                .is_some_and(|cls| is_powershell_sdk_type_name(cls));
+            if is_ps_sdk && matches!(stmt.get(i + 1), Some(PsToken::MemberAccess(_))) {
+                let mut state = taint_table
+                    .get_runspace_builder(var)
+                    .cloned()
+                    .unwrap_or_default();
+                let (matched_any, invoked) =
+                    apply_powershell_sdk_method_chain(stmt, i + 1, &mut state, taint_table);
+                if matched_any {
+                    if state.is_tainted() {
+                        taint_table.set(var, VariableOrigin::TaintedExpression);
+                    }
+                    taint_table.set_runspace_builder(var, state.clone());
+                    if let Some(ref lhs_var) = assigned_var {
+                        if !lhs_var.eq_ignore_ascii_case(var) && !invoked {
+                            taint_table.set_class_instance(lhs_var, "powershell");
+                            taint_table.set_runspace_builder(lhs_var, state.clone());
+                        }
+                    }
+                    if invoked {
+                        emit_runspace_builder_commands(&state, taint_table, out);
+                    }
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
 fn is_scriptblock_factory_tokens(rhs: &[PsToken]) -> bool {
     for i in 0..rhs.len() {
         if let Some((type_name, method_name, _, _)) = match_dotnet_type_static_call(rhs, i) {
@@ -4770,6 +5320,9 @@ fn extract_class_instantiation_name(rhs: &[PsToken]) -> Option<String> {
     // 0. `$ExecutionContext.InvokeCommand.NewScriptBlock(...)` or `[ScriptBlock]::Create(...)`
     if is_scriptblock_factory_tokens(rhs) {
         return Some("scriptblock".to_string());
+    }
+    if is_powershell_sdk_factory_tokens(rhs) {
+        return Some("powershell".to_string());
     }
     // 1. `[ClassName]::new(...)`
     for i in 0..rhs.len() {
@@ -4968,6 +5521,28 @@ pub fn analyze_pipeline_stages(cmds: &[Cmd]) -> Vec<Cmd> {
     }
 
     out
+}
+
+fn extract_message_data_origin(
+    stmt_args: &[PsToken],
+    taint_table: &VariableTaintTable,
+) -> Option<VariableOrigin> {
+    let mut i = 0;
+    while i < stmt_args.len() {
+        let is_msg_data = match &stmt_args[i] {
+            PsToken::Other(f) | PsToken::Identifier(f) => {
+                f.eq_ignore_ascii_case("-messagedata") || f.eq_ignore_ascii_case("-md")
+            }
+            _ => false,
+        };
+        if is_msg_data {
+            if let Some((grp, _)) = extract_single_call_arg(stmt_args, i + 1) {
+                return Some(classify_rhs_origin(&grp, taint_table));
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 fn extract_argument_list_origins(
@@ -5249,7 +5824,10 @@ pub fn is_pure_predicate_block(script: &str) -> bool {
                             | "invokescript"
                             | "newscriptblock"
                             | "invoke"
+                            | "begininvoke"
                             | "invokereturnasis"
+                            | "addscript"
+                            | "addcommand"
                             | "setenvironmentvariable"
                     ) {
                         return false;
@@ -5270,6 +5848,7 @@ pub fn is_pure_predicate_block(script: &str) -> bool {
                 || id_lower.starts_with("clear-")
                 || id_lower.starts_with("restart-")
                 || id_lower.starts_with("kill-")
+                || id_lower.starts_with("register-")
                 || id_lower.contains("setenvironmentvariable")
                 || id_lower.contains("invokescript")
                 || id_lower.contains("scriptblock")

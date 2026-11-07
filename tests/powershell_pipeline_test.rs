@@ -1417,3 +1417,126 @@ fn powershell_dotnet_environment_variable_unification_and_execution_context_refl
         cfg_exec.synthesized_commands[4].args
     );
 }
+
+#[test]
+fn powershell_event_subscriptions_and_sdk_runspace_pipeline_taint_propagation() {
+    use vouch::powershell_pipeline::PsControlFlowGraph;
+
+    // 1. Register-ObjectEvent and Register-EngineEvent with -MessageData and automatic $Event / $EventArgs / $Sender variables
+    let script_events = "{
+        $taintedTarget = Read-Host
+        Register-ObjectEvent -InputObject $timer -EventName Elapsed -MessageData $taintedTarget -Action {
+            Remove-Item $Event.MessageData
+            Remove-Item $EventArgs.FullPath
+        }
+
+        Register-EngineEvent -SourceIdentifier CustomHook -MessageData 'C:/Users/dev/safe_dir' -Action {
+            Remove-Item $Event.MessageData
+            & $Event.SourceEventArgs
+        }
+    }";
+    let cfg_events = PsControlFlowGraph::build(script_events);
+    assert_eq!(
+        cfg_events.synthesized_commands.len(),
+        4,
+        "expected 3 Remove-Item commands and 1 Invoke-Expression from event action scriptblocks: {:?}",
+        cfg_events.synthesized_commands
+    );
+    // [0]: Remove-Item $Event.MessageData (where -MessageData $taintedTarget is tainted)
+    assert_eq!(cfg_events.synthesized_commands[0].head, "Remove-Item");
+    assert!(
+        cfg_events.synthesized_commands[0]
+            .args
+            .contains(&"untrusted_input".to_string()),
+        "tainted -MessageData must taint $Event.MessageData inside Register-ObjectEvent -Action: {:?}",
+        cfg_events.synthesized_commands[0].args
+    );
+    // [1]: Remove-Item $EventArgs.FullPath (automatic $EventArgs is always dynamic event input)
+    assert_eq!(cfg_events.synthesized_commands[1].head, "Remove-Item");
+    assert!(
+        cfg_events.synthesized_commands[1]
+            .args
+            .contains(&"untrusted_input".to_string()),
+        "automatic $EventArgs.FullPath inside -Action must be treated as dynamic event input: {:?}",
+        cfg_events.synthesized_commands[1].args
+    );
+    // [2]: Remove-Item $Event.MessageData (where -MessageData 'C:/Users/dev/safe_dir' is a safe literal)
+    assert_eq!(cfg_events.synthesized_commands[2].head, "Remove-Item");
+    assert!(
+        cfg_events.synthesized_commands[2]
+            .args
+            .contains(&"C:/Users/dev/safe_dir".to_string())
+            && !cfg_events.synthesized_commands[2]
+                .args
+                .contains(&"untrusted_input".to_string()),
+        "literal -MessageData must resolve $Event.MessageData without false-positive taint: {:?}",
+        cfg_events.synthesized_commands[2].args
+    );
+    // [3]: & $Event.SourceEventArgs -> tainted Invoke-Expression
+    assert_eq!(cfg_events.synthesized_commands[3].head, "Invoke-Expression");
+    assert!(
+        cfg_events.synthesized_commands[3]
+            .args
+            .contains(&"untrusted_input".to_string()),
+        "& $Event.SourceEventArgs must synthesize tainted Invoke-Expression: {:?}",
+        cfg_events.synthesized_commands[3].args
+    );
+
+    // 2. [powershell]::Create() and [System.Management.Automation.PowerShell]::Create() runspace pipelines
+    let script_runspace = "{
+        $userCode = Read-Host
+        [powershell]::Create().AddScript($userCode).Invoke()
+
+        $ps = [System.Management.Automation.PowerShell]::Create()
+        [void]$ps.AddCommand('Remove-Item')
+        $null = $ps.AddParameter('Path', $userCode)
+        $ps.AddParameter('Recurse')
+        $ps.BeginInvoke()
+
+        $psLit = [powershell]::Create().AddScript('Remove-Item -Recurse C:/Users/dev/build_cache')
+        $psLit.Invoke()
+    }";
+    let cfg_rs = PsControlFlowGraph::build(script_runspace);
+    assert_eq!(
+        cfg_rs.synthesized_commands.len(),
+        3,
+        "expected 1 Invoke-Expression and 2 Remove-Item commands from [powershell]::Create() pipelines: {:?}",
+        cfg_rs.synthesized_commands
+    );
+    // [0]: [powershell]::Create().AddScript($userCode).Invoke() -> tainted Invoke-Expression
+    assert_eq!(cfg_rs.synthesized_commands[0].head, "Invoke-Expression");
+    assert!(
+        cfg_rs.synthesized_commands[0]
+            .args
+            .contains(&"untrusted_input".to_string()),
+        "[powershell]::Create().AddScript($userCode).Invoke() must propagate untrusted_input: {:?}",
+        cfg_rs.synthesized_commands[0].args
+    );
+    // [1]: $ps.AddCommand('Remove-Item').AddParameter('Path', $userCode).AddParameter('Recurse').BeginInvoke()
+    assert_eq!(cfg_rs.synthesized_commands[1].head, "Remove-Item");
+    assert!(
+        cfg_rs.synthesized_commands[1]
+            .args
+            .contains(&"-Path".to_string())
+            && cfg_rs.synthesized_commands[1]
+                .args
+                .contains(&"-Recurse".to_string())
+            && cfg_rs.synthesized_commands[1]
+                .args
+                .contains(&"untrusted_input".to_string()),
+        "$ps.AddCommand('Remove-Item') with tainted AddParameter('Path', $userCode) must synthesize tainted Remove-Item: {:?}",
+        cfg_rs.synthesized_commands[1].args
+    );
+    // [2]: $psLit.AddScript('Remove-Item -Recurse C:/Users/dev/build_cache').Invoke() -> literal Remove-Item without taint
+    assert_eq!(cfg_rs.synthesized_commands[2].head, "Remove-Item");
+    assert!(
+        cfg_rs.synthesized_commands[2]
+            .args
+            .contains(&"C:/Users/dev/build_cache".to_string())
+            && !cfg_rs.synthesized_commands[2]
+                .args
+                .contains(&"untrusted_input".to_string()),
+        "literal AddScript('Remove-Item -Recurse ...') must parse inner script without false-positive taint: {:?}",
+        cfg_rs.synthesized_commands[2].args
+    );
+}

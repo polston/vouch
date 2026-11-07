@@ -1839,6 +1839,25 @@ impl Walk {
                     self.out.note_with_detail("unmodeled_import", &val.text);
                 }
             }
+            "ctypes.CDLL"
+            | "ctypes.PyDLL"
+            | "ctypes.WinDLL"
+            | "ctypes.OleDLL"
+            | "_ctypes.CDLL"
+            | "_ctypes.PyDLL"
+            | "_ctypes.WinDLL"
+            | "_ctypes.OleDLL"
+            | "ctypes.cdll.LoadLibrary"
+            | "ctypes.pydll.LoadLibrary"
+            | "ctypes.windll.LoadLibrary"
+            | "ctypes.oledll.LoadLibrary"
+            | "ctypes.LibraryLoader.LoadLibrary" => {
+                if let Some(val) = self.extract_call_arg(node, 0, "name") {
+                    if !val.readable || val.text.contains('$') || val.text.is_empty() {
+                        self.out.note_with_detail("unmodeled_import", head);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -2166,6 +2185,10 @@ pub fn extract_capabilities(src: &str) -> crate::capability::CapabilitySet {
             }
             "shutil" | "tempfile" => {
                 caps.external_paths = true;
+            }
+            "ctypes" | "_ctypes" | "cffi" | "_cffi_backend" => {
+                caps.external_paths = true;
+                caps.daemon = true;
             }
             _ => {}
         }

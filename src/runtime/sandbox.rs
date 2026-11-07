@@ -458,6 +458,10 @@ pub const MIN_CPU_WEIGHT: u32 = 1;
 pub const MAX_CPU_WEIGHT: u32 = 10_000;
 pub const DEFAULT_CPU_WEIGHT: u32 = 100;
 
+pub const MIN_IO_WEIGHT: u32 = 1;
+pub const MAX_IO_WEIGHT: u32 = 10_000;
+pub const DEFAULT_IO_WEIGHT: u32 = 100;
+
 /// Parsed statistics from a cgroup v2 `cpu.stat` control file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CgroupCpuStat {
@@ -752,6 +756,143 @@ impl CgroupIoMaxRule {
     }
 }
 
+/// A single Linux cgroups v2 `io.latency` per-device latency QoS target rule
+/// (`"<major>:<minor> target=<usec>"`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CgroupIoLatencyRule {
+    pub major: u32,
+    pub minor: u32,
+    pub target_usec: u64,
+}
+
+impl CgroupIoLatencyRule {
+    /// Parse and validate a cgroup v2 `io.latency` line (`"259:0 target=10000"`).
+    pub fn parse(line: &str) -> Result<Self, String> {
+        let mut tokens = line.split_whitespace();
+        let dev_token = tokens
+            .next()
+            .ok_or_else(|| "io.latency rule is empty".to_string())?;
+        let (maj_str, min_str) = dev_token.split_once(':').ok_or_else(|| {
+            format!("io.latency device '{dev_token}' must be in '<major>:<minor>' format")
+        })?;
+        let major = maj_str
+            .parse::<u32>()
+            .map_err(|_| format!("invalid device major number '{maj_str}'"))?;
+        let minor = min_str
+            .parse::<u32>()
+            .map_err(|_| format!("invalid device minor number '{min_str}'"))?;
+
+        let mut target_usec = None;
+        for tok in tokens {
+            let (key, val_str) = tok.split_once('=').ok_or_else(|| {
+                format!("io.latency token '{tok}' must be in 'target=<usec>' format")
+            })?;
+            match key {
+                "target" => {
+                    let v = val_str.parse::<u64>().map_err(|_| {
+                        format!(
+                            "io.latency target has invalid value '{val_str}' (expected positive integer microseconds)"
+                        )
+                    })?;
+                    if v == 0 {
+                        return Err("io.latency target value must be greater than 0".to_string());
+                    }
+                    target_usec = Some(v);
+                }
+                other => {
+                    return Err(format!(
+                        "unknown io.latency key '{other}' (expected target=<usec>)"
+                    ));
+                }
+            }
+        }
+
+        let target_usec = target_usec
+            .ok_or_else(|| "io.latency rule must specify 'target=<usec>'".to_string())?;
+
+        Ok(Self {
+            major,
+            minor,
+            target_usec,
+        })
+    }
+
+    /// Format this rule as a canonical cgroup v2 `io.latency` line.
+    pub fn format_line(&self) -> String {
+        format!("{}:{} target={}", self.major, self.minor, self.target_usec)
+    }
+}
+
+/// Per-device block I/O accounting statistics parsed from Linux cgroups v2 `io.stat`
+/// (`"<major>:<minor> rbytes=<n> wbytes=<n> rios=<n> wios=<n> dbytes=<n> dios=<n>"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CgroupIoStatDevice {
+    pub major: u32,
+    pub minor: u32,
+    pub rbytes: u64,
+    pub wbytes: u64,
+    pub rios: u64,
+    pub wios: u64,
+    pub dbytes: u64,
+    pub dios: u64,
+}
+
+impl CgroupIoStatDevice {
+    /// Parse a single device line from `io.stat`.
+    pub fn parse_line(line: &str) -> Result<Self, String> {
+        let mut tokens = line.split_whitespace();
+        let dev_token = tokens
+            .next()
+            .ok_or_else(|| "io.stat line is empty".to_string())?;
+        let (maj_str, min_str) = dev_token.split_once(':').ok_or_else(|| {
+            format!("io.stat device '{dev_token}' must be in '<major>:<minor>' format")
+        })?;
+        let major = maj_str
+            .parse::<u32>()
+            .map_err(|_| format!("invalid io.stat device major '{maj_str}'"))?;
+        let minor = min_str
+            .parse::<u32>()
+            .map_err(|_| format!("invalid io.stat device minor '{min_str}'"))?;
+
+        let mut stat = Self {
+            major,
+            minor,
+            ..Self::default()
+        };
+        for tok in tokens {
+            let (key, val_str) = tok.split_once('=').ok_or_else(|| {
+                format!("io.stat token '{tok}' must be in '<key>=<value>' format")
+            })?;
+            let val = val_str.parse::<u64>().map_err(|_| {
+                format!("io.stat key '{key}' has invalid integer value '{val_str}'")
+            })?;
+            match key {
+                "rbytes" => stat.rbytes = val,
+                "wbytes" => stat.wbytes = val,
+                "rios" => stat.rios = val,
+                "wios" => stat.wios = val,
+                "dbytes" => stat.dbytes = val,
+                "dios" => stat.dios = val,
+                _ => {}
+            }
+        }
+        Ok(stat)
+    }
+}
+
+/// Parse a multi-line Linux cgroups v2 `io.stat` file into per-device `CgroupIoStatDevice` entries.
+pub fn parse_io_stat(text: &str) -> Result<Vec<CgroupIoStatDevice>, String> {
+    let mut out = Vec::new();
+    for raw_line in text.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        out.push(CgroupIoStatDevice::parse_line(trimmed)?);
+    }
+    Ok(out)
+}
+
 /// POSIX `setrlimit(2)` resource type enforced for sandboxed worker processes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RlimitResource {
@@ -981,6 +1122,32 @@ impl CgroupV2Manager {
             write_control_file(&dir.join("io.max"), &lines.join("\n"))?;
         }
 
+        if let Some(weight) = cfg.io_weight {
+            if !(MIN_IO_WEIGHT..=MAX_IO_WEIGHT).contains(&weight) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "[sandbox.cgroups] io_weight ({weight}) must be in the range {MIN_IO_WEIGHT}..={MAX_IO_WEIGHT}"
+                    ),
+                ));
+            }
+            write_control_file(&dir.join("io.weight"), &format!("default {weight}"))?;
+        }
+
+        let mut io_latency_rules = Vec::with_capacity(cfg.io_latency.len());
+        for raw_rule in &cfg.io_latency {
+            let rule = CgroupIoLatencyRule::parse(raw_rule)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+            io_latency_rules.push(rule);
+        }
+        if !io_latency_rules.is_empty() {
+            let lines: Vec<String> = io_latency_rules
+                .iter()
+                .map(CgroupIoLatencyRule::format_line)
+                .collect();
+            write_control_file(&dir.join("io.latency"), &lines.join("\n"))?;
+        }
+
         Ok(CgroupScope {
             dir,
             max_memory_bytes: effective_max_bytes,
@@ -993,6 +1160,8 @@ impl CgroupV2Manager {
             cpu_weight: cfg.cpu_weight,
             cpu_idle: cfg.cpu_idle,
             io_max_rules,
+            io_weight: cfg.io_weight,
+            io_latency_rules,
         })
     }
 }
@@ -1022,6 +1191,8 @@ pub struct CgroupScope {
     pub cpu_weight: Option<u32>,
     pub cpu_idle: Option<bool>,
     pub io_max_rules: Vec<CgroupIoMaxRule>,
+    pub io_weight: Option<u32>,
+    pub io_latency_rules: Vec<CgroupIoLatencyRule>,
 }
 
 impl CgroupScope {
@@ -1194,6 +1365,49 @@ impl CgroupScope {
             .collect()
     }
 
+    /// Read the configured proportional block I/O weight from `io.weight` (`1..=10000`, formatted as `"default <weight>"` or `"<weight>"`).
+    pub fn read_io_weight(&self) -> Option<u32> {
+        let text = std::fs::read_to_string(self.dir.join("io.weight")).ok()?;
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Some(rest) = trimmed.strip_prefix("default") {
+                if let Ok(w) = rest.trim().parse::<u32>() {
+                    return Some(w);
+                }
+            }
+            if let Ok(w) = trimmed.parse::<u32>() {
+                return Some(w);
+            }
+        }
+        None
+    }
+
+    /// Read and parse `io.latency` per-device latency QoS rules currently written in this scope.
+    pub fn read_io_latency(&self) -> Vec<CgroupIoLatencyRule> {
+        let Ok(text) = std::fs::read_to_string(self.dir.join("io.latency")) else {
+            return Vec::new();
+        };
+        text.lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .filter_map(|l| CgroupIoLatencyRule::parse(l).ok())
+            .collect()
+    }
+
+    /// Read and parse per-device block I/O accounting statistics from `io.stat` in this scope.
+    /// Returns an empty vector if `io.stat` does not exist yet.
+    pub fn read_io_stat(&self) -> std::io::Result<Vec<CgroupIoStatDevice>> {
+        let p = self.dir.join("io.stat");
+        if !p.exists() {
+            return Ok(Vec::new());
+        }
+        let text = std::fs::read_to_string(&p)?;
+        parse_io_stat(&text).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+
     /// Read and parse Pressure Stall Information (`cpu.pressure`, `memory.pressure`, `io.pressure`)
     /// from this cgroup v2 scope directory. Missing pressure files default to zero stall metrics.
     pub fn read_psi_telemetry(&self) -> std::io::Result<CgroupPsiTelemetry> {
@@ -1238,6 +1452,8 @@ impl CgroupScope {
                 "cpu.stat",
                 "cpu.pressure",
                 "io.max",
+                "io.weight",
+                "io.latency",
                 "io.stat",
                 "io.pressure",
             ] {
@@ -1418,6 +1634,8 @@ pub struct SandboxExecutionPlan {
     pub cpu_weight: Option<u32>,
     pub cpu_idle: Option<bool>,
     pub io_max_rules: Vec<CgroupIoMaxRule>,
+    pub io_weight: Option<u32>,
+    pub io_latency_rules: Vec<CgroupIoLatencyRule>,
     pub psi_stall_warn_pct: Option<f64>,
     pub rlimits: RlimitSet,
     pub namespaces: NamespaceSpec,
@@ -1465,6 +1683,8 @@ impl SandboxExecutionPlan {
             cpu_weight: cfg.cgroups.cpu_weight,
             cpu_idle: cfg.cgroups.cpu_idle,
             io_max: cfg.cgroups.io_max.clone(),
+            io_weight: cfg.cgroups.io_weight,
+            io_latency: cfg.cgroups.io_latency.clone(),
             psi_stall_warn_pct: cfg.cgroups.psi_stall_warn_pct,
         };
         let has_cgroup_limits = effective_cgroups.effective_memory_max_bytes().is_some()
@@ -1477,6 +1697,8 @@ impl SandboxExecutionPlan {
             || effective_cgroups.cpu_weight.is_some()
             || effective_cgroups.cpu_idle.is_some()
             || !effective_cgroups.io_max.is_empty()
+            || effective_cgroups.io_weight.is_some()
+            || !effective_cgroups.io_latency.is_empty()
             || effective_cgroups.psi_stall_warn_pct.is_some();
 
         let scope = if has_cgroup_limits {
@@ -1518,6 +1740,11 @@ impl SandboxExecutionPlan {
             io_max_rules: scope
                 .as_ref()
                 .map(|s| s.io_max_rules.clone())
+                .unwrap_or_default(),
+            io_weight: scope.as_ref().and_then(|s| s.io_weight),
+            io_latency_rules: scope
+                .as_ref()
+                .map(|s| s.io_latency_rules.clone())
                 .unwrap_or_default(),
             psi_stall_warn_pct: effective_cgroups.psi_stall_warn_pct,
             rlimits,

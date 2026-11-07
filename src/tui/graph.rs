@@ -69,6 +69,17 @@ pub enum BuilderPreset {
         guard: String,
         action: String,
     },
+    PlaceScopedProgram {
+        program: String,
+        only_under: Vec<String>,
+    },
+    TrustProgram {
+        under: Vec<String>,
+        name_patterns: Vec<String>,
+    },
+    TrustZone {
+        trust_all_under: Vec<String>,
+    },
     GlobalConstruct {
         section: String,
         key: String,
@@ -131,6 +142,21 @@ impl BuilderPreset {
                 action,
             } => {
                 format!("[[run.guards]] under = {under:?} {guard} = {action:?}")
+            }
+            BuilderPreset::PlaceScopedProgram {
+                program,
+                only_under,
+            } => {
+                format!("[[program]] match = [{program:?}] only_under = {only_under:?}")
+            }
+            BuilderPreset::TrustProgram {
+                under,
+                name_patterns,
+            } => {
+                format!("[[run.trust_program]] under = {under:?} name_patterns = {name_patterns:?}")
+            }
+            BuilderPreset::TrustZone { trust_all_under } => {
+                format!("[run] trust_all_under = {trust_all_under:?}")
             }
             BuilderPreset::GlobalConstruct { section, key } => {
                 format!("[{section}] {key} = \"allow\"")
@@ -289,6 +315,60 @@ impl BuilderPreset {
                 proposed_toml: super::engine::format_place_guard_proposed_toml(
                     under, guard, action,
                 ),
+                approved: 1,
+                denied: 0,
+                unknown: 0,
+                sessions: 1,
+                proposable: true,
+                blocked_reason: None,
+                example_cmd: example_cmd.to_string(),
+            },
+            BuilderPreset::PlaceScopedProgram {
+                program,
+                only_under,
+            } => ReviewCandidate {
+                name: format!("program.only_under: {program} under {}", only_under.join(", ")),
+                section: "program.only_under".to_string(),
+                target_file: TargetFile::MyKnowledge,
+                proposed_toml: super::engine::format_place_scoped_program_proposed_toml(
+                    program, only_under,
+                ),
+                approved: 1,
+                denied: 0,
+                unknown: 0,
+                sessions: 1,
+                proposable: true,
+                blocked_reason: None,
+                example_cmd: example_cmd.to_string(),
+            },
+            BuilderPreset::TrustProgram {
+                under,
+                name_patterns,
+            } => ReviewCandidate {
+                name: format!(
+                    "run.trust_program: {} under {}",
+                    name_patterns.join(", "),
+                    under.join(", ")
+                ),
+                section: "run.trust_program".to_string(),
+                target_file: TargetFile::Config,
+                proposed_toml: super::engine::format_trust_program_proposed_toml(
+                    under,
+                    name_patterns,
+                ),
+                approved: 1,
+                denied: 0,
+                unknown: 0,
+                sessions: 1,
+                proposable: true,
+                blocked_reason: None,
+                example_cmd: example_cmd.to_string(),
+            },
+            BuilderPreset::TrustZone { trust_all_under } => ReviewCandidate {
+                name: format!("run.trust_all_under: {}", trust_all_under.join(", ")),
+                section: "run.trust_all_under".to_string(),
+                target_file: TargetFile::Config,
+                proposed_toml: super::engine::format_trust_zone_proposed_toml(trust_all_under),
                 approved: 1,
                 denied: 0,
                 unknown: 0,
@@ -642,6 +722,11 @@ impl PolicyGraph {
                         args,
                     });
                 }
+                presets.extend(super::engine::extract_unmodeled_place_presets_from_cmd(
+                    &decision.cmd,
+                    &decision.cwd,
+                    &decision.reason,
+                ));
             } else if let Some((lang, construct, path, sha)) =
                 super::engine::extract_script_construct_from_cmd(
                     &decision.cmd,

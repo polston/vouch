@@ -1027,10 +1027,10 @@ fn tui_rule_builder_exact_args_synthesis_simulation_apply_and_undo() {
     // Select [RULE] policy gate: unmodeled_command
     app.handle_event(TerminalEvent::Key(KeyCode::Char('j')));
     let sel = app.policy_graph.selected_node().expect("selected rule node");
-    assert_eq!(sel.builder_presets.len(), 2);
+    assert_eq!(sel.builder_presets.len(), 4);
     assert!(sel.active_preset().unwrap().short_label().contains("exact_args"));
 
-    // Simulate with 'd' (default preset 1/2: exact_args)
+    // Simulate with 'd' (default preset 1/4: exact_args)
     app.handle_event(TerminalEvent::Key(KeyCode::Char('d')));
     let sim = app.policy_graph.simulation.as_ref().expect("simulation present");
     assert_eq!(sim.before_verdict, "ASK");
@@ -1039,14 +1039,16 @@ fn tui_rule_builder_exact_args_synthesis_simulation_apply_and_undo() {
     assert_eq!(sim.session_ask_total, 2);
     assert_eq!(sim.session_flipped_to_allow, 1);
 
-    // Cycle preset with 'b' to GlobalConstruct ([lang.bash.constructs] unmodeled_command = "allow")
+    // Cycle preset with 'b' to PlaceScopedProgram (preset 2/4), TrustZone (preset 3/4), and GlobalConstruct (preset 4/4)
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('b')));
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('b')));
     app.handle_event(TerminalEvent::Key(KeyCode::Char('b')));
     assert!(app.status_message.contains("ASK -> ALLOW"));
     let sim_global = app.policy_graph.simulation.as_ref().expect("global simulation");
     // Under global unmodeled_command = "allow", BOTH session ASK commands flip to ALLOW!
     assert_eq!(sim_global.session_flipped_to_allow, 2);
 
-    // Cycle back with 'b' to exact_args preset [1/2]
+    // Cycle back with 'b' to exact_args preset [1/4]
     app.handle_event(TerminalEvent::Key(KeyCode::Char('b')));
     let sim_narrow = app.policy_graph.simulation.as_ref().expect("narrow simulation");
     assert_eq!(sim_narrow.session_flipped_to_allow, 1);
@@ -1615,6 +1617,229 @@ fn tui_rule_builder_place_scoped_guard_override_simulation_staging_apply_and_und
     vouch::config::load(&updated_cfg_text).expect("config with [[run.guards]] loads cleanly");
 
     // Undo with 'u' and verify exact rollback
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('u')));
+    assert_eq!(std::fs::read_to_string(&config_file).unwrap(), initial_cfg);
+
+    let _ = std::fs::remove_dir_all(&tmp_path);
+}
+
+#[test]
+fn tui_rule_builder_place_scoped_program_trust_program_and_trust_zone_simulation_apply_and_undo() {
+    let tag = format!("tui_test_place_progs_{}_{}", std::process::id(), line!());
+    let tmp_path = std::env::temp_dir().join(tag);
+    let _ = std::fs::remove_dir_all(&tmp_path);
+    std::fs::create_dir_all(&tmp_path).unwrap();
+    let home = tmp_path.to_str().unwrap();
+    let config_dir = tmp_path.join(".config").join("vouch");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let config_file = config_dir.join("config.toml");
+    let my_kb_file = config_dir.join("my-knowledge.toml");
+    let initial_cfg = "version = 1\n";
+    let initial_kb = "# operator knowledge\n";
+    std::fs::write(&config_file, initial_cfg).unwrap();
+    std::fs::write(&my_kb_file, initial_kb).unwrap();
+
+    // Create two workspace directories and a real binary file in project-a/bin/custom-runner
+    let proj_a = tmp_path.join("project-a");
+    let proj_b = tmp_path.join("project-b");
+    let bin_dir = proj_a.join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    std::fs::create_dir_all(&proj_b).unwrap();
+    let runner_path = bin_dir.join("custom-runner");
+    std::fs::write(&runner_path, "#!/bin/sh\necho ok\n").unwrap();
+
+    let proj_a_canon = vouch::paths::normalize(
+        &vouch::paths::resolve_links(&proj_a.to_string_lossy().replace('\\', "/")),
+        "",
+    );
+    let proj_b_canon = vouch::paths::normalize(
+        &vouch::paths::resolve_links(&proj_b.to_string_lossy().replace('\\', "/")),
+        "",
+    );
+    let expected_proj_a_glob = format!("{proj_a_canon}/**");
+    let expected_bin_glob = format!("{proj_a_canon}/bin/**");
+
+    // Three ASK records:
+    // 1. ./bin/custom-runner --verify in project-a (Executed)
+    // 2. ./bin/custom-runner --deploy in project-a (Denied — same program & dir, different args)
+    // 3. other-unmodeled --flag in project-b (Denied — different program & different dir)
+    let records = vec![
+        Record {
+            id: "pp1".into(),
+            ts: "2026-10-30T13:00:00Z".into(),
+            cmd: "./bin/custom-runner --verify".into(),
+            verdict: "ask".into(),
+            reason: "vouch stopped on: unmodeled_command\n  no description of: custom-runner\n  to allow this permanently: [lang.bash.constructs] unmodeled_command = \"allow\"".into(),
+            mode: "live".into(),
+            outcome: Outcome::Executed,
+            session: "sess-pp".into(),
+            lang: "bash".into(),
+            cwd: proj_a_canon.clone(),
+            tool: "bash".into(),
+            permission_mode: "".into(),
+            measurement: false,
+            host: "claude".into(),
+            count: 1,
+        },
+        Record {
+            id: "pp2".into(),
+            ts: "2026-10-30T13:01:00Z".into(),
+            cmd: "./bin/custom-runner --deploy".into(),
+            verdict: "ask".into(),
+            reason: "vouch stopped on: unmodeled_command\n  no description of: custom-runner\n  to allow this permanently: [lang.bash.constructs] unmodeled_command = \"allow\"".into(),
+            mode: "live".into(),
+            outcome: Outcome::Denied,
+            session: "sess-pp".into(),
+            lang: "bash".into(),
+            cwd: proj_a_canon.clone(),
+            tool: "bash".into(),
+            permission_mode: "".into(),
+            measurement: false,
+            host: "claude".into(),
+            count: 1,
+        },
+        Record {
+            id: "pp3".into(),
+            ts: "2026-10-30T13:02:00Z".into(),
+            cmd: "other-unmodeled --flag".into(),
+            verdict: "ask".into(),
+            reason: "vouch stopped on: unmodeled_command\n  no description of: other-unmodeled\n  to allow this permanently: [lang.bash.constructs] unmodeled_command = \"allow\"".into(),
+            mode: "live".into(),
+            outcome: Outcome::Denied,
+            session: "sess-pp".into(),
+            lang: "bash".into(),
+            cwd: proj_b_canon.clone(),
+            tool: "bash".into(),
+            permission_mode: "".into(),
+            measurement: false,
+            host: "claude".into(),
+            count: 1,
+        },
+    ];
+
+    let engine = TuiEngine::from_records(home, &records);
+    assert!(
+        engine
+            .candidates
+            .iter()
+            .any(|c| c.section == "program.only_under" && c.name.contains("custom-runner")),
+        "Expected program.only_under candidate in engine.candidates, got: {:?}",
+        engine.candidates
+    );
+    assert!(
+        engine
+            .candidates
+            .iter()
+            .any(|c| c.section == "run.trust_program" && c.name.contains("custom-runner")),
+        "Expected run.trust_program candidate in engine.candidates, got: {:?}",
+        engine.candidates
+    );
+
+    let mut app = TuiApp::new(engine);
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('v')));
+    // Switch to Decision 2 (pp1: "./bin/custom-runner --verify" in project-a)
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('l')));
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('l')));
+    assert_eq!(app.visualizer_decision_idx, 2);
+
+    // Select [RULE] policy gate: unmodeled_command
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('j')));
+    let sel = app.policy_graph.selected_node().expect("selected rule node");
+    // Path-spelled custom-runner with args in project-a has all 5 presets:
+    // 1. ExactArgs
+    // 2. PlaceScopedProgram ([[program]] only_under)
+    // 3. TrustProgram ([[run.trust_program]])
+    // 4. TrustZone ([run] trust_all_under)
+    // 5. GlobalConstruct ([lang.bash.constructs] unmodeled_command = "allow")
+    assert_eq!(sel.builder_presets.len(), 5);
+
+    // Cycle with 'b' to Preset [2/5]: PlaceScopedProgram ([[program]] match = ["custom-runner"] only_under = ["<proj-a>/**"])
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('b')));
+    let sel_psp = app.policy_graph.selected_node().unwrap();
+    assert!(
+        sel_psp
+            .active_preset()
+            .unwrap()
+            .short_label()
+            .contains("[[program]] match = [\"custom-runner\"] only_under ="),
+        "got label: {}",
+        sel_psp.active_preset().unwrap().short_label()
+    );
+
+    // Simulate with 'd': both custom-runner invocations in project-a flip to ALLOW (2/3), while other-unmodeled in project-b stays ASK!
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('d')));
+    let sim_psp = app.policy_graph.simulation.as_ref().expect("simulation present");
+    assert_eq!(sim_psp.before_verdict, "ASK");
+    assert_eq!(sim_psp.after_verdict, "ALLOW");
+    assert_eq!(sim_psp.session_ask_total, 3);
+    assert_eq!(
+        sim_psp.session_flipped_to_allow, 2,
+        "PlaceScopedProgram must flip both custom-runner calls in project-a to ALLOW while leaving project-b ASK"
+    );
+
+    // Apply Preset [2/5] (PlaceScopedProgram) with 'a', verify my-knowledge.toml validates with validate_place_scopes, then undo ('u')
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('a')));
+    assert!(app.status_message.contains("my-knowledge.toml"));
+    let kb_after_psp = std::fs::read_to_string(&my_kb_file).unwrap();
+    assert!(kb_after_psp.contains("match = [\"custom-runner\"]"));
+    assert!(kb_after_psp.contains(&expected_proj_a_glob));
+    let parsed_kb = vouch::guards::load(&kb_after_psp).expect("my-knowledge loads");
+    vouch::knowledge::validate_place_scopes(vouch::guards::in_effect(), &parsed_kb)
+        .expect("my-knowledge validate_place_scopes succeeds");
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('u')));
+    assert_eq!(std::fs::read_to_string(&my_kb_file).unwrap(), initial_kb);
+
+    // Cycle with 'b' to Preset [3/5]: TrustProgram ([[run.trust_program]] under = ["<proj-a>/bin/**"] name_patterns = ["custom-runner"])
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('b')));
+    let sel_tp = app.policy_graph.selected_node().unwrap();
+    assert!(
+        sel_tp
+            .active_preset()
+            .unwrap()
+            .short_label()
+            .contains("[[run.trust_program]]"),
+        "got label: {}",
+        sel_tp.active_preset().unwrap().short_label()
+    );
+    let sim_tp = app.policy_graph.simulation.as_ref().expect("trust_program simulation");
+    assert_eq!(sim_tp.after_verdict, "ALLOW");
+    assert_eq!(sim_tp.session_flipped_to_allow, 2);
+
+    // Apply Preset [3/5] (TrustProgram) with 'a', verify config.toml validates, then undo ('u')
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('a')));
+    let cfg_after_tp = std::fs::read_to_string(&config_file).unwrap();
+    assert!(cfg_after_tp.contains("[[run.trust_program]]"));
+    assert!(cfg_after_tp.contains(&expected_bin_glob));
+    assert!(cfg_after_tp.contains("name_patterns = [\"custom-runner\"]"));
+    vouch::config::load(&cfg_after_tp).expect("config with [[run.trust_program]] loads");
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('u')));
+    assert_eq!(std::fs::read_to_string(&config_file).unwrap(), initial_cfg);
+
+    // Cycle with 'b' to Preset [4/5]: TrustZone ([run] trust_all_under = ["<proj-a>/**"])
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('b')));
+    let sel_tz = app.policy_graph.selected_node().unwrap();
+    assert!(
+        sel_tz
+            .active_preset()
+            .unwrap()
+            .short_label()
+            .contains("[run] trust_all_under ="),
+        "got label: {}",
+        sel_tz.active_preset().unwrap().short_label()
+    );
+    let sim_tz = app.policy_graph.simulation.as_ref().expect("trust_all_under simulation");
+    assert_eq!(sim_tz.after_verdict, "ALLOW");
+    assert_eq!(
+        sim_tz.session_flipped_to_allow, 2,
+        "TrustZone for project-a must flip only project-a commands to ALLOW"
+    );
+
+    // Apply Preset [4/5] (TrustZone) with 'a', verify config.toml validates, then undo ('u')
+    app.handle_event(TerminalEvent::Key(KeyCode::Char('a')));
+    let cfg_after_tz = std::fs::read_to_string(&config_file).unwrap();
+    assert!(cfg_after_tz.contains("trust_all_under ="));
+    assert!(cfg_after_tz.contains(&expected_proj_a_glob));
+    vouch::config::load(&cfg_after_tz).expect("config with [run] trust_all_under loads");
     app.handle_event(TerminalEvent::Key(KeyCode::Char('u')));
     assert_eq!(std::fs::read_to_string(&config_file).unwrap(), initial_cfg);
 

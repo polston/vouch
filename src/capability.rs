@@ -1706,6 +1706,10 @@ fn check_python_builtin_module_capabilities(
         "shutil" | "tempfile" => {
             caps.external_paths = true;
         }
+        "ctypes" | "_ctypes" | "cffi" | "_cffi_backend" => {
+            caps.external_paths = true;
+            caps.daemon = true;
+        }
         _ => {}
     }
     let norm = WorkspaceManifestIndex::normalize_py_name(top);
@@ -1843,11 +1847,129 @@ fn collect_python_imports(src: &str) -> Result<(Vec<PythonImportSpecifier>, Capa
             .map(|k| &k.value)
     }
 
+    fn is_ctypes_loader_head(head: &str) -> bool {
+        matches!(
+            head,
+            "ctypes.CDLL"
+                | "ctypes.PyDLL"
+                | "ctypes.WinDLL"
+                | "ctypes.OleDLL"
+                | "_ctypes.CDLL"
+                | "_ctypes.PyDLL"
+                | "_ctypes.WinDLL"
+                | "_ctypes.OleDLL"
+                | "ctypes.cdll.LoadLibrary"
+                | "ctypes.pydll.LoadLibrary"
+                | "ctypes.windll.LoadLibrary"
+                | "ctypes.oledll.LoadLibrary"
+                | "ctypes.LibraryLoader.LoadLibrary"
+                | "ctypes.util.find_library"
+        )
+    }
+
+    fn is_ctypes_loader_attr(dotted: &str) -> bool {
+        (dotted.starts_with("ctypes.cdll.")
+            || dotted.starts_with("ctypes.windll.")
+            || dotted.starts_with("ctypes.pydll.")
+            || dotted.starts_with("ctypes.oledll."))
+            && !dotted.ends_with(".LoadLibrary")
+    }
+
+    fn is_cffi_ctor_head(head: &str) -> bool {
+        matches!(head, "cffi.FFI" | "_cffi_backend.FFI")
+    }
+
+    fn is_native_exec_symbol(sym: &str) -> bool {
+        matches!(
+            sym,
+            "system"
+                | "wsystem"
+                | "_wsystem"
+                | "popen"
+                | "_popen"
+                | "execve"
+                | "execv"
+                | "execvp"
+                | "execvpe"
+                | "execl"
+                | "execlp"
+                | "execle"
+                | "posix_spawn"
+                | "posix_spawnp"
+                | "ShellExecuteA"
+                | "ShellExecuteW"
+                | "CreateProcessA"
+                | "CreateProcessW"
+                | "WinExec"
+        )
+    }
+
+    fn is_static_ffi_arg(expr: &ast::Expr, vars: &HashMap<String, Option<String>>) -> bool {
+        match expr {
+            ast::Expr::NumberLiteral(_)
+            | ast::Expr::BooleanLiteral(_)
+            | ast::Expr::NoneLiteral(_)
+            | ast::Expr::BytesLiteral(_)
+            | ast::Expr::EllipsisLiteral(_) => true,
+            ast::Expr::UnaryOp(u) => is_static_ffi_arg(&u.operand, vars),
+            ast::Expr::Tuple(t) => t.elts.iter().all(|e| is_static_ffi_arg(e, vars)),
+            ast::Expr::List(l) => l.elts.iter().all(|e| is_static_ffi_arg(e, vars)),
+            _ => eval_static_str(expr, vars).is_some(),
+        }
+    }
+
     struct ImportVisitor {
         imports: Vec<PythonImportSpecifier>,
         caps: CapabilitySet,
         import_aliases: HashMap<String, String>,
         string_vars: HashMap<String, Option<String>>,
+        ffi_instances: HashSet<String>,
+        ffi_lib_handles: HashSet<String>,
+    }
+
+    impl ImportVisitor {
+        fn expr_is_ffi_instance(&self, expr: &ast::Expr) -> bool {
+            if let ast::Expr::Call(call) = expr {
+                if let Some(head) = resolve_call_head(&call.func, &self.import_aliases) {
+                    return is_cffi_ctor_head(&head);
+                }
+            }
+            false
+        }
+
+        fn expr_is_ffi_lib_handle(&self, expr: &ast::Expr) -> bool {
+            match expr {
+                ast::Expr::Call(call) => {
+                    if let Some(head) = resolve_call_head(&call.func, &self.import_aliases) {
+                        if is_ctypes_loader_head(&head) && head != "ctypes.util.find_library" {
+                            return true;
+                        }
+                        if let Some((recv, method)) = head.rsplit_once('.') {
+                            if self.ffi_instances.contains(recv)
+                                && matches!(method, "dlopen" | "verify")
+                            {
+                                return true;
+                            }
+                        }
+                    }
+                    if let ast::Expr::Attribute(attr) = call.func.as_ref() {
+                        if matches!(attr.attr.as_str(), "dlopen" | "verify")
+                            && self.expr_is_ffi_instance(&attr.value)
+                        {
+                            return true;
+                        }
+                    }
+                    false
+                }
+                ast::Expr::Attribute(_) => {
+                    if let Some(resolved) = resolve_call_head(expr, &self.import_aliases) {
+                        return is_ctypes_loader_attr(&resolved);
+                    }
+                    false
+                }
+                _ => false,
+            }
+        }
     }
 
     impl<'a> PyVisitor<'a> for ImportVisitor {
@@ -1902,9 +2024,17 @@ fn collect_python_imports(src: &str) -> Result<(Vec<PythonImportSpecifier>, Capa
                 ast::Stmt::Assign(assign) => {
                     self.visit_expr(&assign.value);
                     let val = eval_static_str(&assign.value, &self.string_vars);
+                    let is_ffi_inst = self.expr_is_ffi_instance(&assign.value);
+                    let is_ffi_lib = self.expr_is_ffi_lib_handle(&assign.value);
                     for target in &assign.targets {
                         if let ast::Expr::Name(name) = target {
                             self.string_vars.insert(name.id.to_string(), val.clone());
+                            if is_ffi_inst {
+                                self.ffi_instances.insert(name.id.to_string());
+                            }
+                            if is_ffi_lib {
+                                self.ffi_lib_handles.insert(name.id.to_string());
+                            }
                         }
                     }
                     return;
@@ -1913,8 +2043,16 @@ fn collect_python_imports(src: &str) -> Result<(Vec<PythonImportSpecifier>, Capa
                     if let Some(ref value) = assign.value {
                         self.visit_expr(value);
                         let val = eval_static_str(value, &self.string_vars);
+                        let is_ffi_inst = self.expr_is_ffi_instance(value);
+                        let is_ffi_lib = self.expr_is_ffi_lib_handle(value);
                         if let ast::Expr::Name(name) = assign.target.as_ref() {
                             self.string_vars.insert(name.id.to_string(), val);
+                            if is_ffi_inst {
+                                self.ffi_instances.insert(name.id.to_string());
+                            }
+                            if is_ffi_lib {
+                                self.ffi_lib_handles.insert(name.id.to_string());
+                            }
                         }
                     } else if let ast::Expr::Name(name) = assign.target.as_ref() {
                         self.string_vars.insert(name.id.to_string(), None);
@@ -1946,12 +2084,45 @@ fn collect_python_imports(src: &str) -> Result<(Vec<PythonImportSpecifier>, Capa
         }
 
         fn visit_expr(&mut self, expr: &'a ast::Expr) {
+            if let ast::Expr::Attribute(_) = expr {
+                if let Some(resolved) = resolve_call_head(expr, &self.import_aliases) {
+                    if is_ctypes_loader_attr(&resolved) {
+                        self.caps.external_paths = true;
+                        self.caps.daemon = true;
+                    }
+                }
+            }
             if let ast::Expr::Call(call) = expr {
                 if let Some(head) = resolve_call_head(&call.func, &self.import_aliases) {
                     match head.as_str() {
                         "eval" | "exec" | "compile" | "builtins.eval" | "builtins.exec"
                         | "builtins.compile" => {
                             self.caps.dynamic_eval = true;
+                        }
+                        h if is_ctypes_loader_head(h) => {
+                            self.caps.external_paths = true;
+                            self.caps.daemon = true;
+                            if h != "ctypes.util.find_library" {
+                                let name_expr = extract_call_arg(call, 0, "name");
+                                if let Some(e) = name_expr {
+                                    if !matches!(e, ast::Expr::NoneLiteral(_))
+                                        && eval_static_str(e, &self.string_vars).is_none()
+                                    {
+                                        self.caps.dynamic_eval = true;
+                                        self.imports.push(PythonImportSpecifier {
+                                            level: 0,
+                                            module: None,
+                                            imported_names: Vec::new(),
+                                            path_target: None,
+                                            dynamic_source: Some(h.to_string()),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        h if is_cffi_ctor_head(h) => {
+                            self.caps.external_paths = true;
+                            self.caps.daemon = true;
                         }
                         "importlib.import_module" => {
                             let name_expr = extract_call_arg(call, 0, "name");
@@ -2170,6 +2341,74 @@ fn collect_python_imports(src: &str) -> Result<(Vec<PythonImportSpecifier>, Capa
                         _ => {}
                     }
                 }
+                if let ast::Expr::Attribute(attr) = call.func.as_ref() {
+                    let method = attr.attr.as_str();
+                    let is_ffi_recv = match attr.value.as_ref() {
+                        ast::Expr::Name(n) => self.ffi_instances.contains(n.id.as_str()),
+                        other => self.expr_is_ffi_instance(other),
+                    };
+                    if is_ffi_recv {
+                        match method {
+                            "dlopen" => {
+                                self.caps.external_paths = true;
+                                self.caps.daemon = true;
+                                let name_expr = extract_call_arg(call, 0, "name");
+                                if let Some(e) = name_expr {
+                                    if !matches!(e, ast::Expr::NoneLiteral(_))
+                                        && eval_static_str(e, &self.string_vars).is_none()
+                                    {
+                                        self.caps.dynamic_eval = true;
+                                        self.imports.push(PythonImportSpecifier {
+                                            level: 0,
+                                            module: None,
+                                            imported_names: Vec::new(),
+                                            path_target: None,
+                                            dynamic_source: Some("cffi.FFI.dlopen".to_string()),
+                                        });
+                                    }
+                                }
+                            }
+                            "cdef" => {
+                                self.caps.external_paths = true;
+                                self.caps.daemon = true;
+                                let csource_expr = extract_call_arg(call, 0, "csource");
+                                if let Some(e) = csource_expr {
+                                    if eval_static_str(e, &self.string_vars).is_none() {
+                                        self.caps.dynamic_eval = true;
+                                    }
+                                }
+                            }
+                            "verify" | "set_source" | "compile" => {
+                                self.caps.external_paths = true;
+                                self.caps.daemon = true;
+                                self.caps.dynamic_eval = true;
+                            }
+                            _ => {}
+                        }
+                    } else {
+                        let is_lib_recv = match attr.value.as_ref() {
+                            ast::Expr::Name(n) => self.ffi_lib_handles.contains(n.id.as_str()),
+                            other => self.expr_is_ffi_lib_handle(other),
+                        };
+                        if is_lib_recv {
+                            self.caps.external_paths = true;
+                            self.caps.daemon = true;
+                            let has_dynamic_arg = call
+                                .arguments
+                                .args
+                                .iter()
+                                .any(|a| !is_static_ffi_arg(a, &self.string_vars))
+                                || call
+                                    .arguments
+                                    .keywords
+                                    .iter()
+                                    .any(|kw| !is_static_ffi_arg(&kw.value, &self.string_vars));
+                            if is_native_exec_symbol(method) || has_dynamic_arg {
+                                self.caps.dynamic_eval = true;
+                            }
+                        }
+                    }
+                }
             }
             py_visitor::walk_expr(self, expr);
         }
@@ -2180,6 +2419,8 @@ fn collect_python_imports(src: &str) -> Result<(Vec<PythonImportSpecifier>, Capa
         caps: CapabilitySet::EMPTY,
         import_aliases: HashMap::new(),
         string_vars: HashMap::new(),
+        ffi_instances: HashSet::new(),
+        ffi_lib_handles: HashSet::new(),
     };
     for stmt in &parsed.body {
         visitor.visit_stmt(stmt);
@@ -2331,6 +2572,10 @@ fn classify_python_dependency_capabilities(norm_pkg: &str) -> CapabilitySet {
         "psutil" | "pexpect" | "sh" | "plumbum" | "invoke"
     ) {
         caps.external_paths = true;
+    }
+    if matches!(norm_pkg, "cffi" | "ctypes") {
+        caps.external_paths = true;
+        caps.daemon = true;
     }
     caps
 }

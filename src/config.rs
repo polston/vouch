@@ -617,6 +617,12 @@ pub struct CgroupsConfig {
     /// Block device I/O bandwidth and IOPS limits (`io.max` lines in cgroups v2, e.g. `"259:0 rbps=104857600 wbps=52428800"`).
     #[serde(default)]
     pub io_max: Vec<String>,
+    /// Proportional block I/O weight in `[1, 10000]` (`io.weight` in cgroups v2; written as `"default <weight>"`, default kernel weight is `100`).
+    #[serde(default)]
+    pub io_weight: Option<u32>,
+    /// Per-device block I/O latency QoS target rules (`io.latency` lines in cgroups v2, e.g. `"259:0 target=10000"`).
+    #[serde(default)]
+    pub io_latency: Vec<String>,
     /// Optional Pressure Stall Information (`cpu.pressure`, `memory.pressure`, `io.pressure`)
     /// `avg10` stall percentage threshold (`0.0 < pct <= 100.0`) above which worker backpressure
     /// warnings are triggered.
@@ -1192,6 +1198,19 @@ fn validate(cfg: &Config) -> Result<(), String> {
     for rule in &cfg.sandbox.cgroups.io_max {
         crate::runtime::sandbox::CgroupIoMaxRule::parse(rule)
             .map_err(|e| format!("[sandbox.cgroups] invalid io_max rule '{rule}': {e}"))?;
+    }
+    if let Some(w) = cfg.sandbox.cgroups.io_weight {
+        if !(crate::runtime::sandbox::MIN_IO_WEIGHT..=crate::runtime::sandbox::MAX_IO_WEIGHT)
+            .contains(&w)
+        {
+            return Err(format!(
+                "[sandbox.cgroups] io_weight ({w}) must be in the range 1..=10000"
+            ));
+        }
+    }
+    for rule in &cfg.sandbox.cgroups.io_latency {
+        crate::runtime::sandbox::CgroupIoLatencyRule::parse(rule)
+            .map_err(|e| format!("[sandbox.cgroups] invalid io_latency rule '{rule}': {e}"))?;
     }
     if let Some(pct) = cfg.sandbox.cgroups.psi_stall_warn_pct {
         if !pct.is_finite() || pct <= 0.0 || pct > 100.0 {

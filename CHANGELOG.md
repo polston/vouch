@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.67.0 (2026-11-07)
+
+
+### Features
+
+* **Add cryptographic selective disclosure proof export and verification for redacted binary audit bundles**
+  - **Problem & Explanation:** Compliance auditors reviewing a redacted audit bundle previously could not verify a subset of records in plaintext without receiving the entire unredacted binary journal. vouch doctor now supports --export-disclosure and --verify-disclosure (with --session, --from, --to, and --seq filters) to export and cryptographically verify a self-contained VDIS selective disclosure proof whose plaintext records and per-record blake3 digests match the Ed25519-signed hash chain in the redacted bundle.
+  - **Example Scenario:** Verified through automated test suite and regression coverage.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: unmodeled or unhandled. After: evaluated and enforced according to updated specification.
+* **Add interactive TUI rule builder presets for place-scoped programs, executable location trust, and directory trust zones**
+  - **Problem & Explanation:** Operators previously had to hand-author TOML tables for place-scoped program recognition, executable location trust, and directory trust zones in the interactive TUI rule builder. The TUI rule builder now provides PlaceScopedProgram, TrustProgram, and TrustZone presets that pre-populate the resolved binary path and working directory from the selected prompt record, simulate the candidate against the session log, and atomically write either a place-scoped program entry to my-knowledge.toml or a run trust entry to config.toml.
+  - **Example Scenario:** Verified through automated test suite and regression coverage.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: unmodeled or unhandled. After: evaluated and enforced according to updated specification.
+* **Add Linux cgroups v2 block I/O weight, device latency QoS targets, and per-device io.stat telemetry accounting**
+  - **Problem & Explanation:** Linux cgroups v2 sandboxes now provision proportional block I/O weight (io_weight writing io.weight) and device latency QoS targets (io_latency writing io.latency), and parse per-device io.stat accounting telemetry (rbytes, wbytes, rios, wios, dbytes, dios).
+  - **Example Scenario:** Verified through automated test suite and regression coverage.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: unmodeled or unhandled. After: evaluated and enforced according to updated specification.
+* **Propagate native FFI capabilities across Python ctypes and cffi shared library loaders and inline C compilation**
+  - **Problem & Explanation:** The Python transitive import and capability resolver now models ctypes (CDLL, PyDLL, WinDLL, OleDLL, cdll.LoadLibrary) and cffi (FFI.dlopen, FFI.cdef, FFI.verify, FFI.set_source, FFI.compile) native library loading, propagating external_paths and daemon capabilities across module boundaries and flagging dynamic library paths, inline C compilation, and process-spawning symbols with dynamic_eval.
+  - **Example Scenario:** Verified through automated test suite and regression coverage.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: unmodeled or unhandled. After: evaluated and enforced according to updated specification.
+* **Propagate taint and extract nested commands across PowerShell event subscription actions and runspace pipelines**
+  - **Problem & Explanation:** The PowerShell pipeline scanner now descends into Register-ObjectEvent, Register-EngineEvent, Register-WmiEvent, and Register-CimIndicationEvent -Action script blocks (seeding $Event, $EventSubscriber, $Sender, $EventArgs, and $Args from -MessageData or Dynamic) and models [powershell]::Create() runspace method chains (.AddScript, .AddCommand, .AddArgument, .AddParameter, .Invoke, .BeginInvoke) so nested commands and tainted arguments reach guard evaluation.
+  - **Example Scenario:** Verified through automated test suite and regression coverage.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: unmodeled or unhandled. After: evaluated and enforced according to updated specification.
+
 ## 0.66.0 (2026-11-05)
 
 

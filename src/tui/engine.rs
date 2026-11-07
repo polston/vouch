@@ -267,6 +267,14 @@ impl TuiEngine {
                 let (updated, sum) = apply_place_guard_candidate_to_toml(&current_content, cand)?;
                 current_content = updated;
                 summaries.push(sum);
+            } else if cand.section == "run.trust_program" {
+                let (updated, sum) = apply_trust_program_candidate_to_toml(&current_content, cand)?;
+                current_content = updated;
+                summaries.push(sum);
+            } else if cand.section == "run.trust_all_under" {
+                let (updated, sum) = apply_trust_zone_candidate_to_toml(&current_content, cand)?;
+                current_content = updated;
+                summaries.push(sum);
             } else if cand.section.ends_with(".script_constructs") {
                 let (updated, sum) = apply_script_construct_candidate_to_toml(&current_content, cand)?;
                 current_content = updated;
@@ -318,6 +326,8 @@ impl TuiEngine {
             }
             let (updated, sum) = if cand.section == "tool.rule" || cand.section == "tool.action" {
                 apply_tool_candidate_to_my_knowledge_toml(&current_content, cand)?
+            } else if cand.section == "program.only_under" {
+                apply_place_scoped_program_to_my_knowledge_toml(&current_content, cand)?
             } else {
                 apply_exact_args_candidate_to_my_knowledge_toml(&current_content, cand)?
             };
@@ -325,8 +335,10 @@ impl TuiEngine {
             summaries.push(sum);
         }
 
-        // Validate against the knowledge schema before returning
+        // Validate against the knowledge schema and place-scope rules before returning
         crate::knowledge::validate_text(&current_content)?;
+        let mine_kb = crate::guards::load(&current_content)?;
+        crate::knowledge::validate_place_scopes(crate::guards::in_effect(), &mine_kb)?;
 
         Ok((current_content, summaries.join(" + ")))
     }
@@ -492,6 +504,8 @@ impl TuiEngine {
             Ok(format!("Added {:?} to write.allow_paths in config.toml", path_to_add))
         } else if cand.section == "write.scope"
             || cand.section == "run.guards"
+            || cand.section == "run.trust_program"
+            || cand.section == "run.trust_all_under"
             || cand.section.ends_with(".script_constructs")
         {
             Ok(format!("Added {summary} to config.toml"))
@@ -777,6 +791,150 @@ pub(crate) fn extract_unmodeled_exact_args_from_cmd(
         }
     }
     None
+}
+
+pub(crate) fn extract_unmodeled_place_presets_from_cmd(
+    cmd_src: &str,
+    cwd: &str,
+    reason: &str,
+) -> Vec<super::graph::BuilderPreset> {
+    if !reason.contains("unmodeled_command") {
+        return Vec::new();
+    }
+    let Ok(scan) = crate::shell::parse(cmd_src) else {
+        return Vec::new();
+    };
+    let kb = crate::guards::in_effect();
+    let mut fork = crate::guards::ForkCursor::new(&[]);
+    let expanded = crate::guards::expand_wrappers_forking(
+        kb,
+        &scan.commands,
+        &scan.heredocs,
+        &scan.input_source,
+        &scan.args_complete,
+        &[],
+        "bash",
+        &|_| 4,
+        &mut fork,
+    );
+
+    let cwd_clean = cwd.trim().replace('\\', "/");
+    let cwd_stem = cwd_clean.trim_end_matches('/');
+    let cwd_glob = if !cwd_stem.is_empty() {
+        Some(format!("{cwd_stem}/**"))
+    } else {
+        None
+    };
+
+    let mut presets = Vec::new();
+    for occ in &expanded.occurrences {
+        let c = &occ.cmd;
+        if c.head.is_empty() {
+            continue;
+        }
+        let clang = if occ.lang.is_empty() {
+            "bash"
+        } else {
+            occ.lang.as_str()
+        };
+        let eligible = occ.args_complete && !occ.args_from_input;
+        if crate::guards::recognises(kb, c, clang, eligible) {
+            continue;
+        }
+        let prog = crate::guards::base_name(&c.head);
+        if prog.is_empty() || prog.starts_with("python:") {
+            continue;
+        }
+
+        // 1. PlaceScopedProgram (`[[program]] match = [prog] only_under = ["<cwd>/**"]`)
+        // Only offered for operator's own programs (not already described in shipped knowledge.toml).
+        let is_shipped = kb.program.iter().any(|p| {
+            p.match_names
+                .iter()
+                .any(|n| n.eq_ignore_ascii_case(&prog))
+        });
+        if !is_shipped {
+            if let Some(ref glob) = cwd_glob {
+                let candidate_preset = super::graph::BuilderPreset::PlaceScopedProgram {
+                    program: prog.clone(),
+                    only_under: vec![glob.clone()],
+                };
+                if !presets.contains(&candidate_preset) {
+                    presets.push(candidate_preset);
+                }
+            }
+        }
+
+        // 2. TrustProgram (`[[run.trust_program]] under = [...] name_patterns = [...]`)
+        // Offered when the command head is path-spelled (`./bin/tool` or `/abs/path/tool`).
+        if crate::engine::program_head_is_path_spelled(&c.head)
+            && matches!(clang, "bash" | "powershell")
+        {
+            let loc = crate::engine::resolve_program_location(
+                &c.head,
+                if cwd_stem.is_empty() {
+                    None
+                } else {
+                    Some(cwd_stem)
+                },
+                "",
+            );
+            let (under_glob, logical_name) = match loc {
+                crate::engine::ProgramLocation::Proven {
+                    canonical_file,
+                    logical_name,
+                    ..
+                } => (derive_write_scope_glob(&canonical_file), logical_name),
+                _ => {
+                    let head_slash = c.head.replace('\\', "/");
+                    let resolved_file = if head_slash.starts_with('/')
+                        || (head_slash.len() > 2
+                            && head_slash.as_bytes()[0].is_ascii_alphabetic()
+                            && head_slash.as_bytes()[1] == b':')
+                    {
+                        crate::paths::normalize(&head_slash, "")
+                    } else if !cwd_stem.is_empty() {
+                        let rel = head_slash.strip_prefix("./").unwrap_or(&head_slash);
+                        crate::paths::normalize(&format!("{cwd_stem}/{rel}"), "")
+                    } else {
+                        String::new()
+                    };
+                    if resolved_file.is_empty() {
+                        (String::new(), String::new())
+                    } else {
+                        (
+                            derive_write_scope_glob(&resolved_file),
+                            crate::paths::logical_program_name(&resolved_file),
+                        )
+                    }
+                }
+            };
+            let valid_name = !logical_name.is_empty()
+                && !logical_name.contains(['/', '\\', '?', '[', ']', '$', '\'', '"'])
+                && !logical_name.chars().any(char::is_whitespace);
+            if !under_glob.is_empty() && valid_name {
+                let tp_preset = super::graph::BuilderPreset::TrustProgram {
+                    under: vec![under_glob],
+                    name_patterns: vec![logical_name],
+                };
+                if !presets.contains(&tp_preset) {
+                    presets.push(tp_preset);
+                }
+            }
+        }
+    }
+
+    // 3. TrustZone (`[run] trust_all_under = ["<cwd>/**"]`)
+    if let Some(glob) = cwd_glob {
+        let tz_preset = super::graph::BuilderPreset::TrustZone {
+            trust_all_under: vec![glob],
+        };
+        if !presets.contains(&tz_preset) {
+            presets.push(tz_preset);
+        }
+    }
+
+    presets
 }
 
 pub(crate) fn extract_script_construct_from_cmd(
@@ -1069,6 +1227,44 @@ pub(crate) fn format_place_guard_proposed_toml(
     format!("[[run.guards]]\nunder = [{under_fmt}]\n{guard} = {action:?}\n")
 }
 
+pub(crate) fn format_place_scoped_program_proposed_toml(
+    prog: &str,
+    only_under: &[String],
+) -> String {
+    let under_fmt = only_under
+        .iter()
+        .map(|u| format!("{u:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[[program]]\nmatch = [{prog:?}]\nonly_under = [{under_fmt}]\n")
+}
+
+pub(crate) fn format_trust_program_proposed_toml(
+    under: &[String],
+    name_patterns: &[String],
+) -> String {
+    let under_fmt = under
+        .iter()
+        .map(|u| format!("{u:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let names_fmt = name_patterns
+        .iter()
+        .map(|n| format!("{n:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[[run.trust_program]]\nunder = [{under_fmt}]\nname_patterns = [{names_fmt}]\n")
+}
+
+pub(crate) fn format_trust_zone_proposed_toml(trust_all_under: &[String]) -> String {
+    let under_fmt = trust_all_under
+        .iter()
+        .map(|u| format!("{u:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[run]\ntrust_all_under = [{under_fmt}]\n")
+}
+
 pub(crate) fn derive_write_scope_glob(raw_path: &str) -> String {
     let clean = raw_path.trim().replace('\\', "/");
     if clean.ends_with("/**") {
@@ -1258,6 +1454,10 @@ fn synthesize_granular_candidates(records: &[Record]) -> Vec<ReviewCandidate> {
         std::collections::HashMap::new();
     let mut place_guard_counts: std::collections::HashMap<(String, String), SuggestionTally> =
         std::collections::HashMap::new();
+    let mut place_prog_counts: std::collections::HashMap<(String, String), SuggestionTally> =
+        std::collections::HashMap::new();
+    let mut trust_prog_counts: std::collections::HashMap<(String, String), SuggestionTally> =
+        std::collections::HashMap::new();
 
     for r in records {
         if r.verdict != "ask" || r.mode != "live" || r.measurement {
@@ -1339,6 +1539,49 @@ fn synthesize_granular_candidates(records: &[Record]) -> Vec<ReviewCandidate> {
                 _ => entry.2 += 1,
             }
             entry.3.insert(r.session.clone());
+        }
+        for preset in extract_unmodeled_place_presets_from_cmd(&r.cmd, &r.cwd, &r.reason) {
+            match preset {
+                super::graph::BuilderPreset::PlaceScopedProgram {
+                    program,
+                    only_under,
+                } => {
+                    if let Some(under_glob) = only_under.into_iter().next() {
+                        let entry = place_prog_counts
+                            .entry((program, under_glob))
+                            .or_insert_with(|| {
+                                (0, 0, 0, std::collections::HashSet::new(), r.cmd.clone())
+                            });
+                        match r.outcome {
+                            Outcome::Executed => entry.0 += 1,
+                            Outcome::Denied => entry.1 += 1,
+                            _ => entry.2 += 1,
+                        }
+                        entry.3.insert(r.session.clone());
+                    }
+                }
+                super::graph::BuilderPreset::TrustProgram {
+                    under,
+                    name_patterns,
+                } => {
+                    if let (Some(under_glob), Some(name_pat)) =
+                        (under.into_iter().next(), name_patterns.into_iter().next())
+                    {
+                        let entry = trust_prog_counts
+                            .entry((under_glob, name_pat))
+                            .or_insert_with(|| {
+                                (0, 0, 0, std::collections::HashSet::new(), r.cmd.clone())
+                            });
+                        match r.outcome {
+                            Outcome::Executed => entry.0 += 1,
+                            Outcome::Denied => entry.1 += 1,
+                            _ => entry.2 += 1,
+                        }
+                        entry.3.insert(r.session.clone());
+                    }
+                }
+                _ => {}
+            }
         }
         if let Some((lang, construct, path, sha)) =
             extract_script_construct_from_cmd(&r.cmd, &r.cwd, &r.reason)
@@ -1474,6 +1717,45 @@ fn synthesize_granular_candidates(records: &[Record]) -> Vec<ReviewCandidate> {
                 section: "run.guards".to_string(),
                 target_file: TargetFile::Config,
                 proposed_toml: format_place_guard_proposed_toml(&under, &guard_name, "allow"),
+                approved: app,
+                denied: den,
+                unknown: unk,
+                sessions: sess.len().max(1),
+                proposable: true,
+                blocked_reason: None,
+                example_cmd: example,
+            });
+        }
+    }
+
+    for ((prog, under_glob), (app, den, unk, sess, example)) in place_prog_counts {
+        if app > 0 {
+            let only_under = vec![under_glob.clone()];
+            out.push(ReviewCandidate {
+                name: format!("program.only_under: {prog} under {under_glob}"),
+                section: "program.only_under".to_string(),
+                target_file: TargetFile::MyKnowledge,
+                proposed_toml: format_place_scoped_program_proposed_toml(&prog, &only_under),
+                approved: app,
+                denied: den,
+                unknown: unk,
+                sessions: sess.len().max(1),
+                proposable: true,
+                blocked_reason: None,
+                example_cmd: example,
+            });
+        }
+    }
+
+    for ((under_glob, name_pat), (app, den, unk, sess, example)) in trust_prog_counts {
+        if app > 0 {
+            let under = vec![under_glob.clone()];
+            let name_patterns = vec![name_pat.clone()];
+            out.push(ReviewCandidate {
+                name: format!("run.trust_program: {name_pat} under {under_glob}"),
+                section: "run.trust_program".to_string(),
+                target_file: TargetFile::Config,
+                proposed_toml: format_trust_program_proposed_toml(&under, &name_patterns),
                 approved: app,
                 denied: den,
                 unknown: unk,
@@ -1671,6 +1953,153 @@ fn apply_place_guard_candidate_to_toml(
     Ok((doc.to_string(), summary))
 }
 
+fn apply_trust_program_candidate_to_toml(
+    current_content: &str,
+    cand: &ReviewCandidate,
+) -> Result<(String, String), String> {
+    let mut doc: toml_edit::DocumentMut = current_content
+        .parse()
+        .map_err(|e| format!("Invalid TOML: {e}"))?;
+    let prop_doc: toml_edit::DocumentMut = cand
+        .proposed_toml
+        .parse()
+        .map_err(|e| format!("Invalid proposed run.trust_program TOML: {e}"))?;
+
+    let prop_aot = prop_doc
+        .get("run")
+        .and_then(|r| r.get("trust_program"))
+        .and_then(|g| g.as_array_of_tables())
+        .and_then(|aot| aot.iter().next())
+        .ok_or_else(|| "Proposed TOML missing [[run.trust_program]] table".to_string())?;
+
+    let prop_under: Vec<String> = prop_aot
+        .get("under")
+        .and_then(|u| u.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let prop_names: Vec<String> = prop_aot
+        .get("name_patterns")
+        .and_then(|u| u.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if prop_under.is_empty() || prop_names.is_empty() {
+        return Err(
+            "Proposed [[run.trust_program]] requires non-empty under and name_patterns".to_string(),
+        );
+    }
+
+    let run_item = doc
+        .entry("run")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let run_table = run_item
+        .as_table_like_mut()
+        .ok_or_else(|| "run is not a table".to_string())?;
+    let tp_item = run_table
+        .entry("trust_program")
+        .or_insert(toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
+    let aot = tp_item
+        .as_array_of_tables_mut()
+        .ok_or_else(|| "run.trust_program is not an array of tables".to_string())?;
+
+    let mut merged = false;
+    for existing in aot.iter_mut() {
+        let existing_under: Vec<String> = existing
+            .get("under")
+            .and_then(|u| u.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if existing_under == prop_under {
+            let names_item = existing.entry("name_patterns").or_insert(
+                toml_edit::Item::Value(toml_edit::Value::Array(toml_edit::Array::new())),
+            );
+            if let Some(arr) = names_item.as_array_mut() {
+                for n in &prop_names {
+                    let n_fold = crate::paths::fold_case(n);
+                    if !arr
+                        .iter()
+                        .any(|v| v.as_str().map(crate::paths::fold_case).as_deref() == Some(&n_fold))
+                    {
+                        arr.push(n.as_str());
+                    }
+                }
+                merged = true;
+                break;
+            }
+        }
+    }
+    if !merged {
+        aot.push(prop_aot.clone());
+    }
+
+    let summary = format!(
+        "[[run.trust_program]] under = {prop_under:?} name_patterns = {prop_names:?}"
+    );
+    Ok((doc.to_string(), summary))
+}
+
+fn apply_trust_zone_candidate_to_toml(
+    current_content: &str,
+    cand: &ReviewCandidate,
+) -> Result<(String, String), String> {
+    let mut doc: toml_edit::DocumentMut = current_content
+        .parse()
+        .map_err(|e| format!("Invalid TOML: {e}"))?;
+    let prop_doc: toml_edit::DocumentMut = cand
+        .proposed_toml
+        .parse()
+        .map_err(|e| format!("Invalid proposed run.trust_all_under TOML: {e}"))?;
+
+    let prop_under: Vec<String> = prop_doc
+        .get("run")
+        .and_then(|r| r.get("trust_all_under"))
+        .and_then(|u| u.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if prop_under.is_empty() {
+        return Err("Proposed [run] trust_all_under requires at least one path glob".to_string());
+    }
+
+    let run_item = doc
+        .entry("run")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let run_table = run_item
+        .as_table_like_mut()
+        .ok_or_else(|| "run is not a table".to_string())?;
+    let tau_item = run_table
+        .entry("trust_all_under")
+        .or_insert(toml_edit::Item::Value(toml_edit::Value::Array(
+            toml_edit::Array::new(),
+        )));
+    if let Some(arr) = tau_item.as_array_mut() {
+        for u in &prop_under {
+            if !arr.iter().any(|v| v.as_str() == Some(u.as_str())) {
+                arr.push(u.as_str());
+            }
+        }
+    }
+
+    let summary = format!("[run] trust_all_under += {prop_under:?}");
+    Ok((doc.to_string(), summary))
+}
+
 fn apply_script_construct_candidate_to_toml(
     current_content: &str,
     cand: &ReviewCandidate,
@@ -1835,6 +2264,89 @@ fn apply_exact_args_candidate_to_my_knowledge_toml(
     let summary = format!(
         "[[program]] match = [{prog_name:?}] exact_args += [{}]",
         new_vec_val.to_string().trim()
+    );
+    Ok((doc.to_string(), summary))
+}
+
+fn apply_place_scoped_program_to_my_knowledge_toml(
+    current_content: &str,
+    cand: &ReviewCandidate,
+) -> Result<(String, String), String> {
+    let mut doc: toml_edit::DocumentMut = current_content
+        .parse()
+        .map_err(|e| format!("Invalid my-knowledge.toml: {e}"))?;
+    let prop_doc: toml_edit::DocumentMut = cand
+        .proposed_toml
+        .parse()
+        .map_err(|e| format!("Invalid proposed only_under TOML: {e}"))?;
+
+    let prop_table = prop_doc
+        .get("program")
+        .and_then(|p| p.as_array_of_tables())
+        .and_then(|aot| aot.iter().next())
+        .ok_or_else(|| "Proposed TOML missing [[program]] table".to_string())?;
+
+    let prog_name = prop_table
+        .get("match")
+        .and_then(|m| m.as_array())
+        .and_then(|a| a.get(0))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Proposed [[program]] missing match name".to_string())?;
+
+    let prop_under: Vec<String> = prop_table
+        .get("only_under")
+        .and_then(|e| e.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if prop_under.is_empty() {
+        return Err("Proposed [[program]] missing non-empty only_under list".to_string());
+    }
+
+    let prog_item = doc
+        .entry("program")
+        .or_insert(toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
+    let aot = prog_item
+        .as_array_of_tables_mut()
+        .ok_or_else(|| "program in my-knowledge.toml is not an array of tables".to_string())?;
+
+    let mut merged = false;
+    for existing in aot.iter_mut() {
+        let matches_prog = existing
+            .get("match")
+            .and_then(|m| m.as_array())
+            .is_some_and(|a| {
+                a.len() == 1
+                    && a.get(0)
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|s| s.eq_ignore_ascii_case(prog_name))
+            });
+        if matches_prog {
+            let under_item = existing.entry("only_under").or_insert(toml_edit::Item::Value(
+                toml_edit::Value::Array(toml_edit::Array::new()),
+            ));
+            if let Some(arr) = under_item.as_array_mut() {
+                for u in &prop_under {
+                    if !arr.iter().any(|v| v.as_str() == Some(u.as_str())) {
+                        arr.push(u.as_str());
+                    }
+                }
+                merged = true;
+                break;
+            }
+        }
+    }
+
+    if !merged {
+        aot.push(prop_table.clone());
+    }
+
+    let summary = format!(
+        "[[program]] match = [{prog_name:?}] only_under = {prop_under:?}"
     );
     Ok((doc.to_string(), summary))
 }
