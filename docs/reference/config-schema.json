@@ -38,14 +38,6 @@
       "description": "`[run]`: run-place zones, executable-place program trust, and\nplace-scoped guard overrides.",
       "$ref": "#/$defs/RunSection"
     },
-    "runtime": {
-      "description": "`[runtime]`: platform runtime verification configuration (eBPF).",
-      "$ref": "#/$defs/RuntimeConfig"
-    },
-    "sandbox": {
-      "description": "`[sandbox]`: kernel namespace and cgroups v2 memory isolation settings.",
-      "$ref": "#/$defs/SandboxConfig"
-    },
     "shadow": {
       "description": "`[shadow]`: mode-keyed shadow (design 2026-08-16).",
       "anyOf": [
@@ -111,154 +103,6 @@
         }
       ]
     },
-    "CgroupsConfig": {
-      "description": "The `[sandbox.cgroups]` table: Linux cgroups v2 memory, process count, CPU bandwidth, and block I/O limits for worker processes.",
-      "type": "object",
-      "properties": {
-        "cpu_idle": {
-          "description": "Whether the worker cgroup is scheduled with `SCHED_IDLE` semantics (`cpu.idle` in cgroups v2; `true` writes `\"1\"`, `false` writes `\"0\"`).",
-          "type": [
-            "boolean",
-            "null"
-          ],
-          "default": null
-        },
-        "cpu_max_period_us": {
-          "description": "CPU bandwidth period in microseconds (`cpu.max` second token in cgroups v2; defaults to 100000 when `cpu_max_quota_us` is set).",
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint64",
-          "default": null,
-          "minimum": 0
-        },
-        "cpu_max_quota_us": {
-          "description": "CPU bandwidth quota in microseconds per period (`cpu.max` first token in cgroups v2).",
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint64",
-          "default": null,
-          "minimum": 0
-        },
-        "cpu_weight": {
-          "description": "Proportional CPU scheduling weight in `[1, 10000]` (`cpu.weight` in cgroups v2; default kernel weight is `100`).",
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint32",
-          "default": null,
-          "minimum": 0
-        },
-        "high_memory_mb": {
-          "description": "Throttle memory high-water mark in megabytes (`memory.high` in cgroups v2).",
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint64",
-          "default": null,
-          "minimum": 0
-        },
-        "io_latency": {
-          "description": "Per-device block I/O latency QoS target rules (`io.latency` lines in cgroups v2, e.g. `\"259:0 target=10000\"`).",
-          "type": "array",
-          "default": [],
-          "items": {
-            "type": "string"
-          }
-        },
-        "io_max": {
-          "description": "Block device I/O bandwidth and IOPS limits (`io.max` lines in cgroups v2, e.g. `\"259:0 rbps=104857600 wbps=52428800\"`).",
-          "type": "array",
-          "default": [],
-          "items": {
-            "type": "string"
-          }
-        },
-        "io_weight": {
-          "description": "Proportional block I/O weight in `[1, 10000]` (`io.weight` in cgroups v2; written as `\"default <weight>\"`, default kernel weight is `100`).",
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint32",
-          "default": null,
-          "minimum": 0
-        },
-        "max_memory_mb": {
-          "description": "Hard memory limit in megabytes (`memory.max` in cgroups v2).",
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint64",
-          "default": null,
-          "minimum": 0
-        },
-        "memory_high_bytes": {
-          "description": "Throttle memory high-water mark in bytes (`memory.high` in cgroups v2; takes precedence over `high_memory_mb`).",
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint64",
-          "default": null,
-          "minimum": 0
-        },
-        "memory_max_bytes": {
-          "description": "Hard memory limit in bytes (`memory.max` in cgroups v2; takes precedence over `max_memory_mb`).",
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint64",
-          "default": null,
-          "minimum": 0
-        },
-        "memory_oom_group": {
-          "description": "Whether to kill the entire cgroup process tree as a single unit on OOM (`memory.oom.group` in cgroups v2).",
-          "type": [
-            "boolean",
-            "null"
-          ],
-          "default": null
-        },
-        "memory_swap_max_bytes": {
-          "description": "Swap memory ceiling in bytes (`memory.swap.max` in cgroups v2; `0` disables swap entirely for the worker scope).",
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint64",
-          "default": null,
-          "minimum": 0
-        },
-        "pids_max": {
-          "description": "Hard process and thread count limit (`pids.max` in cgroups v2).",
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint64",
-          "default": null,
-          "minimum": 0
-        },
-        "psi_stall_warn_pct": {
-          "description": "Optional Pressure Stall Information (`cpu.pressure`, `memory.pressure`, `io.pressure`)\n`avg10` stall percentage threshold (`0.0 < pct <= 100.0`) above which worker backpressure\nwarnings are triggered.",
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double",
-          "default": null
-        }
-      },
-      "additionalProperties": false
-    },
     "DaemonConfig": {
       "description": "The `[daemon]` table: persistent gating daemon runtime options.",
       "type": "object",
@@ -267,18 +111,6 @@
           "description": "Whether the daemon fails closed on internal errors.",
           "type": "boolean",
           "default": true
-        },
-        "shared_memory": {
-          "description": "Enable shared-memory IPC fallback transport.",
-          "type": "boolean",
-          "default": false
-        },
-        "shm_size_kb": {
-          "description": "Size of the shared memory ring buffer in kilobytes (default 1024).",
-          "type": "integer",
-          "format": "uint32",
-          "default": 1024,
-          "minimum": 0
         },
         "socket_path": {
           "description": "Local socket path (Unix domain socket or Windows named pipe/socket).",
@@ -291,23 +123,6 @@
           "format": "uint64",
           "default": 50,
           "minimum": 0
-        }
-      },
-      "additionalProperties": false
-    },
-    "EbpfRuntimeConfig": {
-      "description": "The `[runtime.ebpf]` table: direct eBPF options.",
-      "type": "object",
-      "properties": {
-        "buffer_page_count": {
-          "type": "integer",
-          "format": "uint32",
-          "default": 64,
-          "minimum": 0
-        },
-        "zero_copy": {
-          "type": "boolean",
-          "default": false
         }
       },
       "additionalProperties": false
@@ -460,31 +275,6 @@
       },
       "additionalProperties": false
     },
-    "LinuxRuntimeConfig": {
-      "description": "The `[runtime.linux]` table: Linux runtime verifications (eBPF).",
-      "type": "object",
-      "properties": {
-        "ebpf_mode": {
-          "type": "string",
-          "default": "audit"
-        },
-        "ebpf_tracing": {
-          "type": "boolean",
-          "default": false
-        },
-        "trace_ring_buffer_pages": {
-          "type": "integer",
-          "format": "uint32",
-          "default": 64,
-          "minimum": 0
-        },
-        "zero_copy": {
-          "type": "boolean",
-          "default": false
-        }
-      },
-      "additionalProperties": false
-    },
     "LoggingConfig": {
       "description": "The `[logging]` table: audit journal storage and indexing options.",
       "type": "object",
@@ -606,86 +396,6 @@
       },
       "additionalProperties": false
     },
-    "RuntimeConfig": {
-      "description": "The `[runtime]` table: platform-specific runtime verification settings.",
-      "type": "object",
-      "properties": {
-        "ebpf": {
-          "$ref": "#/$defs/EbpfRuntimeConfig"
-        },
-        "linux": {
-          "$ref": "#/$defs/LinuxRuntimeConfig"
-        }
-      },
-      "additionalProperties": false
-    },
-    "SandboxConfig": {
-      "description": "The `[sandbox]` table: worker process sandboxing, namespaces, seccomp-BPF, setrlimit, and cgroups v2 limits.",
-      "type": "object",
-      "properties": {
-        "cgroups": {
-          "description": "Linux cgroups v2 memory and PID limits (`[sandbox.cgroups]`).",
-          "$ref": "#/$defs/CgroupsConfig"
-        },
-        "isolate_network": {
-          "description": "Whether to isolate the Linux network namespace (`CLONE_NEWNET`) with loopback-only (`lo`) routing.",
-          "type": "boolean",
-          "default": false
-        },
-        "landlock_enforce": {
-          "description": "Whether to enforce Linux Landlock LSM unprivileged filesystem access rules (`[write].allow_paths`).",
-          "type": "boolean",
-          "default": false
-        },
-        "max_cpu_seconds": {
-          "description": "Maximum CPU time in seconds (`RLIMIT_CPU`).",
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint64",
-          "default": null,
-          "minimum": 0
-        },
-        "max_open_files": {
-          "description": "Maximum open file descriptor count (`RLIMIT_NOFILE`).",
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint64",
-          "default": null,
-          "minimum": 0
-        },
-        "max_pids": {
-          "description": "Maximum process and thread count (`RLIMIT_NPROC` and cgroups v2 `pids.max` fallback).",
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint64",
-          "default": null,
-          "minimum": 0
-        },
-        "seccomp_profile": {
-          "description": "Optional seccomp-BPF syscall filter profile (`\"strict\"`, `\"baseline\"`, or `\"none\"`).",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/SeccompProfile"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "unshare_namespaces": {
-          "description": "Whether to isolate user, PID, and mount namespaces (`CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNS`).",
-          "type": "boolean",
-          "default": false
-        }
-      },
-      "additionalProperties": false
-    },
     "ScriptConstructOverride": {
       "description": "One `[[lang.<name>.script_constructs]]` entry: per-script construct action\noverrides for an inspected script file on disk.",
       "type": "object",
@@ -714,26 +424,6 @@
       },
       "required": [
         "under"
-      ]
-    },
-    "SeccompProfile": {
-      "description": "Seccomp-BPF syscall filter profile under `[sandbox]`.",
-      "oneOf": [
-        {
-          "description": "Blocks kernel module loading, kexec, mount/pivot_root, ptrace, and raw/packet/netlink sockets.",
-          "type": "string",
-          "const": "strict"
-        },
-        {
-          "description": "Blocks kernel module loading, kexec, mount/pivot_root, and ptrace while allowing standard sockets.",
-          "type": "string",
-          "const": "baseline"
-        },
-        {
-          "description": "Disables seccomp-BPF syscall filtering.",
-          "type": "string",
-          "const": "none"
-        }
       ]
     },
     "ShadowSection": {

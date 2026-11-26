@@ -473,12 +473,6 @@ pub struct DaemonConfig {
     /// Whether the daemon fails closed on internal errors.
     #[serde(default = "default_true")]
     pub fail_closed: bool,
-    /// Enable shared-memory IPC fallback transport.
-    #[serde(default)]
-    pub shared_memory: bool,
-    /// Size of the shared memory ring buffer in kilobytes (default 1024).
-    #[serde(default = "default_shm_size_kb")]
-    pub shm_size_kb: u32,
 }
 
 fn default_daemon_socket_path() -> String {
@@ -493,63 +487,14 @@ fn default_true() -> bool {
     true
 }
 
-fn default_shm_size_kb() -> u32 {
-    1024
-}
-
 impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
             socket_path: default_daemon_socket_path(),
             timeout_ms: default_daemon_timeout_ms(),
             fail_closed: true,
-            shared_memory: false,
-            shm_size_kb: 1024,
         }
     }
-}
-
-
-/// The `[runtime.linux]` table: Linux runtime verifications (eBPF).
-#[derive(Debug, Deserialize, Clone, JsonSchema, PartialEq, Eq, Default)]
-#[serde(deny_unknown_fields)]
-pub struct LinuxRuntimeConfig {
-    #[serde(default)]
-    pub ebpf_tracing: bool,
-    #[serde(default = "default_ebpf_mode")]
-    pub ebpf_mode: String,
-    #[serde(default = "default_ring_buffer_pages")]
-    pub trace_ring_buffer_pages: u32,
-    #[serde(default)]
-    pub zero_copy: bool,
-}
-
-fn default_ebpf_mode() -> String {
-    "audit".to_string()
-}
-
-fn default_ring_buffer_pages() -> u32 {
-    64
-}
-
-/// The `[runtime.ebpf]` table: direct eBPF options.
-#[derive(Debug, Deserialize, Clone, JsonSchema, PartialEq, Eq, Default)]
-#[serde(deny_unknown_fields)]
-pub struct EbpfRuntimeConfig {
-    #[serde(default)]
-    pub zero_copy: bool,
-    #[serde(default = "default_ring_buffer_pages")]
-    pub buffer_page_count: u32,
-}
-
-/// The `[runtime]` table: platform-specific runtime verification settings.
-#[derive(Debug, Deserialize, Clone, JsonSchema, PartialEq, Eq, Default)]
-#[serde(deny_unknown_fields)]
-pub struct RuntimeConfig {
-    #[serde(default)]
-    pub linux: LinuxRuntimeConfig,
-    #[serde(default)]
-    pub ebpf: EbpfRuntimeConfig,
 }
 
 /// Journal storage format under `[logging]`.
@@ -575,115 +520,6 @@ pub struct LoggingConfig {
     /// Format used for persisting audit journal events ("jsonl" or "binary").
     #[serde(default)]
     pub journal_format: JournalFormat,
-}
-
-/// The `[sandbox.cgroups]` table: Linux cgroups v2 memory, process count, CPU bandwidth, and block I/O limits for worker processes.
-#[derive(Debug, Deserialize, Clone, JsonSchema, PartialEq, Default)]
-#[serde(deny_unknown_fields)]
-pub struct CgroupsConfig {
-    /// Hard memory limit in megabytes (`memory.max` in cgroups v2).
-    #[serde(default)]
-    pub max_memory_mb: Option<u64>,
-    /// Hard memory limit in bytes (`memory.max` in cgroups v2; takes precedence over `max_memory_mb`).
-    #[serde(default)]
-    pub memory_max_bytes: Option<u64>,
-    /// Throttle memory high-water mark in megabytes (`memory.high` in cgroups v2).
-    #[serde(default)]
-    pub high_memory_mb: Option<u64>,
-    /// Throttle memory high-water mark in bytes (`memory.high` in cgroups v2; takes precedence over `high_memory_mb`).
-    #[serde(default)]
-    pub memory_high_bytes: Option<u64>,
-    /// Swap memory ceiling in bytes (`memory.swap.max` in cgroups v2; `0` disables swap entirely for the worker scope).
-    #[serde(default)]
-    pub memory_swap_max_bytes: Option<u64>,
-    /// Whether to kill the entire cgroup process tree as a single unit on OOM (`memory.oom.group` in cgroups v2).
-    #[serde(default)]
-    pub memory_oom_group: Option<bool>,
-    /// Hard process and thread count limit (`pids.max` in cgroups v2).
-    #[serde(default)]
-    pub pids_max: Option<u64>,
-    /// CPU bandwidth quota in microseconds per period (`cpu.max` first token in cgroups v2).
-    #[serde(default)]
-    pub cpu_max_quota_us: Option<u64>,
-    /// CPU bandwidth period in microseconds (`cpu.max` second token in cgroups v2; defaults to 100000 when `cpu_max_quota_us` is set).
-    #[serde(default)]
-    pub cpu_max_period_us: Option<u64>,
-    /// Proportional CPU scheduling weight in `[1, 10000]` (`cpu.weight` in cgroups v2; default kernel weight is `100`).
-    #[serde(default)]
-    pub cpu_weight: Option<u32>,
-    /// Whether the worker cgroup is scheduled with `SCHED_IDLE` semantics (`cpu.idle` in cgroups v2; `true` writes `"1"`, `false` writes `"0"`).
-    #[serde(default)]
-    pub cpu_idle: Option<bool>,
-    /// Block device I/O bandwidth and IOPS limits (`io.max` lines in cgroups v2, e.g. `"259:0 rbps=104857600 wbps=52428800"`).
-    #[serde(default)]
-    pub io_max: Vec<String>,
-    /// Proportional block I/O weight in `[1, 10000]` (`io.weight` in cgroups v2; written as `"default <weight>"`, default kernel weight is `100`).
-    #[serde(default)]
-    pub io_weight: Option<u32>,
-    /// Per-device block I/O latency QoS target rules (`io.latency` lines in cgroups v2, e.g. `"259:0 target=10000"`).
-    #[serde(default)]
-    pub io_latency: Vec<String>,
-    /// Optional Pressure Stall Information (`cpu.pressure`, `memory.pressure`, `io.pressure`)
-    /// `avg10` stall percentage threshold (`0.0 < pct <= 100.0`) above which worker backpressure
-    /// warnings are triggered.
-    #[serde(default)]
-    pub psi_stall_warn_pct: Option<f64>,
-}
-
-impl CgroupsConfig {
-    /// Effective `memory.max` ceiling in bytes (`memory_max_bytes` takes precedence over `max_memory_mb * 1024 * 1024`).
-    pub fn effective_memory_max_bytes(&self) -> Option<u64> {
-        self.memory_max_bytes
-            .or_else(|| self.max_memory_mb.map(|mb| mb.saturating_mul(1024 * 1024)))
-    }
-
-    /// Effective `memory.high` throttle watermark in bytes (`memory_high_bytes` takes precedence over `high_memory_mb * 1024 * 1024`).
-    pub fn effective_memory_high_bytes(&self) -> Option<u64> {
-        self.memory_high_bytes
-            .or_else(|| self.high_memory_mb.map(|mb| mb.saturating_mul(1024 * 1024)))
-    }
-}
-
-/// Seccomp-BPF syscall filter profile under `[sandbox]`.
-#[derive(Debug, Deserialize, Clone, Copy, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum SeccompProfile {
-    /// Blocks kernel module loading, kexec, mount/pivot_root, ptrace, and raw/packet/netlink sockets.
-    Strict,
-    /// Blocks kernel module loading, kexec, mount/pivot_root, and ptrace while allowing standard sockets.
-    Baseline,
-    /// Disables seccomp-BPF syscall filtering.
-    None,
-}
-
-/// The `[sandbox]` table: worker process sandboxing, namespaces, seccomp-BPF, setrlimit, and cgroups v2 limits.
-#[derive(Debug, Deserialize, Clone, JsonSchema, PartialEq, Default)]
-#[serde(deny_unknown_fields)]
-pub struct SandboxConfig {
-    /// Linux cgroups v2 memory and PID limits (`[sandbox.cgroups]`).
-    #[serde(default)]
-    pub cgroups: CgroupsConfig,
-    /// Whether to isolate user, PID, and mount namespaces (`CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNS`).
-    #[serde(default)]
-    pub unshare_namespaces: bool,
-    /// Whether to isolate the Linux network namespace (`CLONE_NEWNET`) with loopback-only (`lo`) routing.
-    #[serde(default)]
-    pub isolate_network: bool,
-    /// Optional seccomp-BPF syscall filter profile (`"strict"`, `"baseline"`, or `"none"`).
-    #[serde(default)]
-    pub seccomp_profile: Option<SeccompProfile>,
-    /// Whether to enforce Linux Landlock LSM unprivileged filesystem access rules (`[write].allow_paths`).
-    #[serde(default)]
-    pub landlock_enforce: bool,
-    /// Maximum process and thread count (`RLIMIT_NPROC` and cgroups v2 `pids.max` fallback).
-    #[serde(default)]
-    pub max_pids: Option<u64>,
-    /// Maximum open file descriptor count (`RLIMIT_NOFILE`).
-    #[serde(default)]
-    pub max_open_files: Option<u64>,
-    /// Maximum CPU time in seconds (`RLIMIT_CPU`).
-    #[serde(default)]
-    pub max_cpu_seconds: Option<u64>,
 }
 
 
@@ -761,15 +597,9 @@ struct Raw {
     /// `[daemon]`: persistent gating daemon configuration.
     #[serde(default)]
     daemon: DaemonConfig,
-    /// `[runtime]`: platform runtime verification configuration (eBPF).
-    #[serde(default)]
-    runtime: RuntimeConfig,
     /// `[logging]`: audit log storage and binary indexing configuration.
     #[serde(default)]
     logging: LoggingConfig,
-    /// `[sandbox]`: kernel namespace and cgroups v2 memory isolation settings.
-    #[serde(default)]
-    sandbox: SandboxConfig,
 }
 
 #[derive(Debug, Default)]
@@ -784,9 +614,7 @@ pub struct Config {
     pub unparseable_snippet: Option<Action>,
     pub read: ReadConfig,
     pub daemon: DaemonConfig,
-    pub runtime: RuntimeConfig,
     pub logging: LoggingConfig,
-    pub sandbox: SandboxConfig,
     /// True only for `Config::nothing_configured()` — there is no config file
     /// on disk at all. Distinguishes that from a real, loaded config that
     /// simply names no tools yet (`tools` empty either way, so `tools` alone
@@ -981,9 +809,7 @@ pub fn load(text: &str) -> Result<Config, String> {
         unparseable_snippet: raw.unparseable_snippet,
         read: raw.read,
         daemon: raw.daemon,
-        runtime: raw.runtime,
         logging: raw.logging,
-        sandbox: raw.sandbox,
         no_config_file: false,
     };
     validate(&cfg)?;
@@ -1160,66 +986,14 @@ fn validate(cfg: &Config) -> Result<(), String> {
                 .into());
         }
     }
-    if cfg.sandbox.cgroups.effective_memory_max_bytes() == Some(0) {
-        return Err(
-            "[sandbox.cgroups] memory_max_bytes / max_memory_mb must be greater than 0".into(),
-        );
-    }
-    if cfg.sandbox.cgroups.effective_memory_high_bytes() == Some(0) {
-        return Err(
-            "[sandbox.cgroups] memory_high_bytes / high_memory_mb must be greater than 0".into(),
-        );
-    }
-    if let (Some(high), Some(max)) = (
-        cfg.sandbox.cgroups.effective_memory_high_bytes(),
-        cfg.sandbox.cgroups.effective_memory_max_bytes(),
-    ) {
-        if high > max {
-            return Err(format!(
-                "[sandbox.cgroups] memory.high ({high} bytes) cannot exceed memory.max ({max} bytes)"
-            ));
-        }
-    }
-    if cfg.sandbox.cgroups.cpu_max_quota_us == Some(0) {
-        return Err("[sandbox.cgroups] cpu_max_quota_us must be greater than 0".into());
-    }
-    if cfg.sandbox.cgroups.cpu_max_period_us == Some(0) {
-        return Err("[sandbox.cgroups] cpu_max_period_us must be greater than 0".into());
-    }
-    if let Some(w) = cfg.sandbox.cgroups.cpu_weight {
-        if !(crate::runtime::sandbox::MIN_CPU_WEIGHT..=crate::runtime::sandbox::MAX_CPU_WEIGHT)
-            .contains(&w)
-        {
-            return Err(format!(
-                "[sandbox.cgroups] cpu_weight ({w}) must be in the range 1..=10000"
-            ));
-        }
-    }
-    for rule in &cfg.sandbox.cgroups.io_max {
-        crate::runtime::sandbox::CgroupIoMaxRule::parse(rule)
-            .map_err(|e| format!("[sandbox.cgroups] invalid io_max rule '{rule}': {e}"))?;
-    }
-    if let Some(w) = cfg.sandbox.cgroups.io_weight {
-        if !(crate::runtime::sandbox::MIN_IO_WEIGHT..=crate::runtime::sandbox::MAX_IO_WEIGHT)
-            .contains(&w)
-        {
-            return Err(format!(
-                "[sandbox.cgroups] io_weight ({w}) must be in the range 1..=10000"
-            ));
-        }
-    }
-    for rule in &cfg.sandbox.cgroups.io_latency {
-        crate::runtime::sandbox::CgroupIoLatencyRule::parse(rule)
-            .map_err(|e| format!("[sandbox.cgroups] invalid io_latency rule '{rule}': {e}"))?;
-    }
-    if let Some(pct) = cfg.sandbox.cgroups.psi_stall_warn_pct {
-        if !pct.is_finite() || pct <= 0.0 || pct > 100.0 {
-            return Err(format!(
-                "[sandbox.cgroups] psi_stall_warn_pct ({pct}) must be in the range (0.0, 100.0]"
-            ));
-        }
-    }
     for (lang_name, lang_cfg) in &cfg.langs {
+        if let Some(mode) = &lang_cfg.parser_mode {
+            if mode != "scanner" && mode != "reference" {
+                return Err(format!(
+                    "[lang.{lang_name}] `parser_mode` = '{mode}' — expected \"scanner\" or \"reference\""
+                ));
+            }
+        }
         for (i, rule) in lang_cfg.script_constructs.iter().enumerate() {
             let label = format!("[[lang.{lang_name}.script_constructs]] #{}", i + 1);
             if rule.under.is_empty() {

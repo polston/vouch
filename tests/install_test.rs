@@ -553,6 +553,24 @@ fn agy_plan_generation_and_idempotency() {
     let root: serde_json::Value = serde_json::from_str(&p.settings).unwrap();
     assert!(root.get("other_plugin").is_some(), "other_plugin lost");
     let vouch_group = root.get("vouch").expect("vouch group missing");
+    let pre_matcher = vouch_group["PreToolUse"][0]["matcher"].as_str().unwrap();
+    let post_matcher = vouch_group["PostToolUse"][0]["matcher"].as_str().unwrap();
+    for expected_tool in [
+        "run_command",
+        "write_file",
+        "edit_file",
+        "write_to_file",
+        "replace_file_content",
+    ] {
+        assert!(
+            pre_matcher.split('|').any(|t| t == expected_tool),
+            "PreToolUse matcher missing {expected_tool}: {pre_matcher}"
+        );
+        assert!(
+            post_matcher.split('|').any(|t| t == expected_tool),
+            "PostToolUse matcher missing {expected_tool}: {post_matcher}"
+        );
+    }
     let pre_cmd = vouch_group["PreToolUse"][0]["hooks"][0]["command"]
         .as_str()
         .unwrap();

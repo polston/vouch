@@ -109,3 +109,59 @@ fn test_wal_concurrent_appends() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn test_wal_stays_bounded_across_500_sequential_journal_appends() {
+    use vouch::journal::{append, all, Record};
+    use vouch::journal_wal::WAL_CHECKPOINT_THRESHOLD_BYTES;
+    use vouch::outcome::Outcome;
+
+    let dir = temp_dir("wal_bounded_500");
+
+    for i in 0..500u64 {
+        let rec = Record {
+            id: format!("toolu_wal_{i:04}"),
+            ts: format!("{}", 1_760_000_000 + i),
+            session: "sess_bounded_wal".into(),
+            tool: "Bash".into(),
+            cmd: format!("echo bounded_wal_record_{i:04}_padding_text_for_checkpoint_threshold"),
+            verdict: "allow".into(),
+            reason: "allowed by policy".into(),
+            mode: "live".into(),
+            cwd: "/tmp/work".into(),
+            outcome: Outcome::Pending,
+            lang: "bash".into(),
+            permission_mode: String::new(),
+            host: "claude".into(),
+            count: 1,
+            measurement: false,
+        };
+        append(&dir, &rec).expect("append record");
+    }
+
+    let wal_len = std::fs::metadata(dir.join("journal.wal"))
+        .map(|m| m.len())
+        .unwrap_or(0);
+    assert!(
+        wal_len < WAL_CHECKPOINT_THRESHOLD_BYTES * 2,
+        "journal.wal grew unbounded to {wal_len} bytes (threshold {WAL_CHECKPOINT_THRESHOLD_BYTES})"
+    );
+
+    // Confirm no stray checkpoint temp files remain.
+    let ckpt_leftovers: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with("journal.wal.ckpt."))
+        .collect();
+    assert!(
+        ckpt_leftovers.is_empty(),
+        "unexpected leftover checkpoint files: {ckpt_leftovers:?}"
+    );
+
+    let loaded = all(&dir);
+    assert_eq!(loaded.len(), 500);
+    assert_eq!(loaded[0].id, "toolu_wal_0000");
+    assert_eq!(loaded[499].id, "toolu_wal_0499");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

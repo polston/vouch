@@ -247,7 +247,9 @@ pub fn append(dir: &Path, rec: &Record) -> std::io::Result<()> {
     if dir.join("journal.vlog").exists() || std::env::var("VOUCH_JOURNAL_FORMAT").ok().as_deref() == Some("binary") {
         let _ = crate::journal_vlog::append_vlog(dir, rec);
     }
-    append_line(dir, "journal.jsonl", &json)
+    append_line(dir, "journal.jsonl", &json)?;
+    let _ = crate::journal_wal::maybe_checkpoint_wal(dir);
+    Ok(())
 }
 
 pub fn append_with_format(dir: &Path, rec: &Record, format: crate::config::JournalFormat) -> std::io::Result<()> {
@@ -258,7 +260,9 @@ pub fn append_with_format(dir: &Path, rec: &Record, format: crate::config::Journ
             if dir.join("journal.jsonl").exists() {
                 let json = serde_json::to_string(rec).unwrap_or_default();
                 let _ = crate::journal_wal::write_wal_frame(dir, &json);
-                let _ = append_line(dir, "journal.jsonl", &json);
+                if append_line(dir, "journal.jsonl", &json).is_ok() {
+                    let _ = crate::journal_wal::maybe_checkpoint_wal(dir);
+                }
             }
             Ok(())
         }

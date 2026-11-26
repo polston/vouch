@@ -45,9 +45,9 @@
 #                            the shell goes. Silence reads as "no"
 #   dest_dir_flags = [...]   a flag whose value is where the SHELL moves next,
 #                            not where THIS command runs (that's run_dir_flags)
-#   languages      = [...]   which scanner's lines (bash, powershell, python)
-#                            this entry's claims are true for; absent means
-#                            every language
+#   languages      = [...]   which scanner's lines (bash, powershell, python,
+#                            javascript, awk) this entry's claims are true for;
+#                            absent means every language
 #   only_under     = [...]   YOUR file only: trees this entry recognises the
 #                            program in, judged against where the command RUNS.
 #                            Refused on a name this file already describes —
@@ -2936,6 +2936,12 @@ match = ["write_to_file", "replace_file_content"]
 source = "writes the file named by `TargetFile`, relative paths resolved in the calling session's directory"
 cwd_from_call = true
 write_path_field = "TargetFile"
+
+[[tool]]
+match = ["write_file", "edit_file"]
+source = "writes or edits the file named by `Path`, relative paths resolved in the calling session's directory"
+cwd_from_call = true
+write_path_field = "Path"
 
 [[tool]]
 match = ["view_file"]

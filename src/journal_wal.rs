@@ -11,6 +11,8 @@ use std::path::Path;
 
 pub const WAL_MAGIC: [u8; 2] = [0x56, 0x4A]; // 'V', 'J'
 pub const HEADER_LEN: usize = 10; // 2 bytes magic + 4 bytes len + 4 bytes crc32
+/// Byte size threshold at which `maybe_checkpoint_wal` rotates and checkpoints `journal.wal`.
+pub const WAL_CHECKPOINT_THRESHOLD_BYTES: u64 = 64 * 1024;
 
 /// Standard IEEE 802.3 CRC32 algorithm (zero-dependency, bit-exact with zip/png/ethernet).
 pub fn crc32(data: &[u8]) -> u32 {
@@ -200,4 +202,81 @@ pub fn recover_and_checkpoint(dir: &Path) -> std::io::Result<usize> {
     }
 
     Ok(records.len())
+}
+
+/// Read recent lines from the tail of `journal.jsonl` (up to `max_tail_bytes`)
+/// into a deduplication set so periodic WAL checkpoints stay O(WAL) even on
+/// multi-hundred-megabyte journals.
+fn recent_jsonl_lines(jsonl_path: &Path, max_tail_bytes: u64) -> std::io::Result<std::collections::HashSet<String>> {
+    if !jsonl_path.exists() {
+        return Ok(std::collections::HashSet::new());
+    }
+    let mut f = OpenOptions::new().read(true).open(jsonl_path)?;
+    let len = f.metadata()?.len();
+    let start = len.saturating_sub(max_tail_bytes);
+    f.seek(SeekFrom::Start(start))?;
+    let mut raw = Vec::new();
+    f.read_to_end(&mut raw)?;
+    let text = String::from_utf8_lossy(&raw);
+    let mut lines = text.lines();
+    if start > 0 {
+        // Skip the potentially partial first line when seeking mid-file.
+        let _ = lines.next();
+    }
+    Ok(lines
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect())
+}
+
+/// Atomically rotate and checkpoint `journal.wal` once it reaches
+/// `WAL_CHECKPOINT_THRESHOLD_BYTES`, preventing unbounded WAL growth during
+/// write-heavy hook execution while remaining safe under concurrent appenders.
+pub fn maybe_checkpoint_wal(dir: &Path) -> std::io::Result<bool> {
+    let wal_path = dir.join("journal.wal");
+    let wal_len = match std::fs::metadata(&wal_path) {
+        Ok(m) => m.len(),
+        Err(_) => return Ok(false),
+    };
+    if wal_len < WAL_CHECKPOINT_THRESHOLD_BYTES {
+        return Ok(false);
+    }
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let ckpt_path = dir.join(format!("journal.wal.ckpt.{}.{nanos}", std::process::id()));
+    if let Err(err) = std::fs::rename(&wal_path, &ckpt_path) {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            // Another concurrent hook process already rotated the WAL.
+            return Ok(false);
+        }
+        return Err(err);
+    }
+
+    let data = std::fs::read(&ckpt_path)?;
+    let (records, _torn) = decode_frames(&data);
+    if !records.is_empty() {
+        let jsonl_path = dir.join("journal.jsonl");
+        let tail_window = wal_len.saturating_mul(4).max(256 * 1024);
+        let existing = recent_jsonl_lines(&jsonl_path, tail_window)?;
+        let uncommitted: Vec<&String> = records
+            .iter()
+            .filter(|r| !existing.contains(r.trim()))
+            .collect();
+        if !uncommitted.is_empty() {
+            let mut jsonl_file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&jsonl_path)?;
+            for r in &uncommitted {
+                writeln!(jsonl_file, "{r}")?;
+            }
+            jsonl_file.flush()?;
+        }
+    }
+
+    let _ = std::fs::remove_file(&ckpt_path);
+    Ok(true)
 }

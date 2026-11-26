@@ -289,7 +289,7 @@ fn agy_command(exe: &str, shadow: bool, state_dir: Option<&str>) -> String {
 
 fn agy_hook_entry(exe: &str, shadow: bool, state_dir: Option<&str>) -> Value {
     json!({
-        "matcher": "run_command|write_to_file|replace_file_content",
+        "matcher": "run_command|write_file|edit_file|write_to_file|replace_file_content",
         "hooks": [{
             "type": "command",
             "command": agy_command(exe, shadow, state_dir)
@@ -332,7 +332,7 @@ pub fn plan_agy(
         if shadow {
             "SHADOW: vouch records what it would decide and emits no decision; Antigravity remains in charge."
         } else {
-            "LIVE: vouch gates Antigravity tool calls (run_command, write_to_file, replace_file_content)."
+            "LIVE: vouch gates Antigravity tool calls (run_command, write_file, edit_file, write_to_file, replace_file_content)."
         }
         .into(),
         "Antigravity PreToolUse evaluates tool calls; PostToolUse records outcomes.".into(),

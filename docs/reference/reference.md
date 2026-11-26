@@ -21,8 +21,6 @@ setting must never become permission.
 | `protected` | ProtectedSection | (none) | `[protected]`: paths no `allow_paths` entry can ever open. |
 | `read` | ReadConfig | (none) | `[read]`: what vouch does about reading files, and which confidential paths are protected from silent exposure into transcripts. |
 | `run` | RunSection | (none) | `[run]`: run-place zones, executable-place program trust, and place-scoped guard overrides. |
-| `runtime` | RuntimeConfig | (none) | `[runtime]`: platform runtime verification configuration (eBPF). |
-| `sandbox` | SandboxConfig | (none) | `[sandbox]`: kernel namespace and cgroups v2 memory isolation settings. |
 | `shadow` | ShadowSection (optional) | (none) | `[shadow]`: mode-keyed shadow (design 2026-08-16). |
 | `tools` | map of string to Action | (none) | Per-tool actions, written as `[tools]`. vouch used to say NOTHING about any tool it had no scanner for — 46.5% of recorded tool calls — which is the same "unknown means allowed" inversion as unmodelled programs, one level up. Naming a FIRST tool here makes this section govern every tool, not only the one named; see `Config::tool_decision`. |
 | `unparseable_snippet` | Action (optional) | (none) | Decision when hook input from an agent harness or tool snippet cannot be parsed into structured payload. Allowed: "ask" (default) or "deny". "allow" is refused. |
@@ -38,28 +36,6 @@ through, stop and ask the operator, or refuse it outright.
 - `ask` — Stop and show the operator what was recognised, before it runs.
 - `deny` — Refuse it outright, with no prompt.
 
-### `CgroupsConfig`
-
-The `[sandbox.cgroups]` table: Linux cgroups v2 memory, process count, CPU bandwidth, and block I/O limits for worker processes.
-
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `cpu_idle` | boolean (optional) | (unset) | Whether the worker cgroup is scheduled with `SCHED_IDLE` semantics (`cpu.idle` in cgroups v2; `true` writes `"1"`, `false` writes `"0"`). |
-| `cpu_max_period_us` | integer (optional) | (unset) | CPU bandwidth period in microseconds (`cpu.max` second token in cgroups v2; defaults to 100000 when `cpu_max_quota_us` is set). |
-| `cpu_max_quota_us` | integer (optional) | (unset) | CPU bandwidth quota in microseconds per period (`cpu.max` first token in cgroups v2). |
-| `cpu_weight` | integer (optional) | (unset) | Proportional CPU scheduling weight in `[1, 10000]` (`cpu.weight` in cgroups v2; default kernel weight is `100`). |
-| `high_memory_mb` | integer (optional) | (unset) | Throttle memory high-water mark in megabytes (`memory.high` in cgroups v2). |
-| `io_latency` | array of string | [] | Per-device block I/O latency QoS target rules (`io.latency` lines in cgroups v2, e.g. `"259:0 target=10000"`). |
-| `io_max` | array of string | [] | Block device I/O bandwidth and IOPS limits (`io.max` lines in cgroups v2, e.g. `"259:0 rbps=104857600 wbps=52428800"`). |
-| `io_weight` | integer (optional) | (unset) | Proportional block I/O weight in `[1, 10000]` (`io.weight` in cgroups v2; written as `"default <weight>"`, default kernel weight is `100`). |
-| `max_memory_mb` | integer (optional) | (unset) | Hard memory limit in megabytes (`memory.max` in cgroups v2). |
-| `memory_high_bytes` | integer (optional) | (unset) | Throttle memory high-water mark in bytes (`memory.high` in cgroups v2; takes precedence over `high_memory_mb`). |
-| `memory_max_bytes` | integer (optional) | (unset) | Hard memory limit in bytes (`memory.max` in cgroups v2; takes precedence over `max_memory_mb`). |
-| `memory_oom_group` | boolean (optional) | (unset) | Whether to kill the entire cgroup process tree as a single unit on OOM (`memory.oom.group` in cgroups v2). |
-| `memory_swap_max_bytes` | integer (optional) | (unset) | Swap memory ceiling in bytes (`memory.swap.max` in cgroups v2; `0` disables swap entirely for the worker scope). |
-| `pids_max` | integer (optional) | (unset) | Hard process and thread count limit (`pids.max` in cgroups v2). |
-| `psi_stall_warn_pct` | number (optional) | (unset) | Optional Pressure Stall Information (`cpu.pressure`, `memory.pressure`, `io.pressure`) `avg10` stall percentage threshold (`0.0 < pct <= 100.0`) above which worker backpressure warnings are triggered. |
-
 ### `DaemonConfig`
 
 The `[daemon]` table: persistent gating daemon runtime options.
@@ -67,19 +43,8 @@ The `[daemon]` table: persistent gating daemon runtime options.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `fail_closed` | boolean | true | Whether the daemon fails closed on internal errors. |
-| `shared_memory` | boolean | false | Enable shared-memory IPC fallback transport. |
-| `shm_size_kb` | integer | 1024 | Size of the shared memory ring buffer in kilobytes (default 1024). |
 | `socket_path` | string | "~/.config/vouch/vouch.sock" | Local socket path (Unix domain socket or Windows named pipe/socket). |
 | `timeout_ms` | integer | 50 | Client connect and read timeout in milliseconds before local fallback. |
-
-### `EbpfRuntimeConfig`
-
-The `[runtime.ebpf]` table: direct eBPF options.
-
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `buffer_page_count` | integer | 64 |  |
-| `zero_copy` | boolean | false |  |
 
 ### `FileConfig`
 
@@ -130,17 +95,6 @@ Settings for one language: `[lang.bash]`, `[lang.powershell]`,
 | `worker_binary` | string (optional) | (unset) | Worker binary name (e.g. "pwsh" or "dotnet"). |
 | `worker_timeout_ms` | integer (optional) | (unset) | Timeout in milliseconds for reference worker calls before falling back. |
 | `wrap_depth` | integer (optional) | (unset) | How many layers of wrapper nesting are scanned before a deeper nest trips `wrap_depth_exceeded` and asks. `None` means the operator has not set it, so the built-in cap (4) applies. Read by the engine's wrapper walk, not by this file. |
-
-### `LinuxRuntimeConfig`
-
-The `[runtime.linux]` table: Linux runtime verifications (eBPF).
-
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `ebpf_mode` | string | "audit" |  |
-| `ebpf_tracing` | boolean | false |  |
-| `trace_ring_buffer_pages` | integer | 64 |  |
-| `zero_copy` | boolean | false |  |
 
 ### `LoggingConfig`
 
@@ -196,30 +150,6 @@ program trust, and place-scoped guard overrides.
 | `trust_nothing_under` | array of string (optional) | (unset) | Distrust zone: no command run from under one of these trees is recognised, whatever it is — even a program a knowledge entry describes. Refused when written empty, same as the grants above: a written empty list can only be a mistake. It restricts, so it applies wherever any directory the command could be running in is under it, and wherever vouch cannot place the command at all; it stands down only when every possible directory is known and none is under it. |
 | `trust_program` | array of ProgramLocationTrust | (none) | Program-location trust rules, written as `[[run.trust_program]]`. Both an existing canonical executable location and a logical filename convention must match; bare names and uncertainty grant nothing. |
 
-### `RuntimeConfig`
-
-The `[runtime]` table: platform-specific runtime verification settings.
-
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `ebpf` | EbpfRuntimeConfig | (none) |  |
-| `linux` | LinuxRuntimeConfig | (none) |  |
-
-### `SandboxConfig`
-
-The `[sandbox]` table: worker process sandboxing, namespaces, seccomp-BPF, setrlimit, and cgroups v2 limits.
-
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `cgroups` | CgroupsConfig | (none) | Linux cgroups v2 memory and PID limits (`[sandbox.cgroups]`). |
-| `isolate_network` | boolean | false | Whether to isolate the Linux network namespace (`CLONE_NEWNET`) with loopback-only (`lo`) routing. |
-| `landlock_enforce` | boolean | false | Whether to enforce Linux Landlock LSM unprivileged filesystem access rules (`[write].allow_paths`). |
-| `max_cpu_seconds` | integer (optional) | (unset) | Maximum CPU time in seconds (`RLIMIT_CPU`). |
-| `max_open_files` | integer (optional) | (unset) | Maximum open file descriptor count (`RLIMIT_NOFILE`). |
-| `max_pids` | integer (optional) | (unset) | Maximum process and thread count (`RLIMIT_NPROC` and cgroups v2 `pids.max` fallback). |
-| `seccomp_profile` | SeccompProfile (optional) | (none) | Optional seccomp-BPF syscall filter profile (`"strict"`, `"baseline"`, or `"none"`). |
-| `unshare_namespaces` | boolean | false | Whether to isolate user, PID, and mount namespaces (`CLONE_NEWUSER \| CLONE_NEWPID \| CLONE_NEWNS`). |
-
 ### `ScriptConstructOverride`
 
 One `[[lang.<name>.script_constructs]]` entry: per-script construct action
@@ -229,14 +159,6 @@ overrides for an inspected script file on disk.
 |---|---|---|---|
 | `sha256` | array of string (optional) | (unset) | Optional lowercase 64-character hex SHA-256 content digests. When present, the inspected script's SHA-256 digest must match one of the listed digests. |
 | `under` | array of string | (required) | Allowed script file paths or trees (`path` or `path/**`, supporting `~`, `$PROJECT_ROOT`, and `$WORKSPACE_ROOT`). Evaluated against the symlink-resolved canonical path of the inspected script file. |
-
-### `SeccompProfile`
-
-Seccomp-BPF syscall filter profile under `[sandbox]`.
-
-- `strict` — Blocks kernel module loading, kexec, mount/pivot_root, ptrace, and raw/packet/netlink sockets.
-- `baseline` — Blocks kernel module loading, kexec, mount/pivot_root, and ptrace while allowing standard sockets.
-- `none` — Disables seccomp-BPF syscall filtering.
 
 ### `ShadowSection`
 

@@ -223,6 +223,55 @@ journal_format = "binary"
 }
 
 #[test]
+fn hook_cli_honors_config_logging_journal_format_binary_without_env_override() {
+    let dir = unique_test_dir("hook_cli_binary_journal");
+    let cfg_path = dir.join("config.toml");
+    std::fs::write(
+        &cfg_path,
+        "[lang.bash]\ndefault = \"allow\"\n[logging]\njournal_format = \"binary\"\n",
+    )
+    .expect("write temp config");
+
+    let payload = r#"{"hook_event_name":"PreToolUse","session_id":"sess_bin_cfg","tool_use_id":"toolu_bin_1","tool_name":"Bash","cwd":"/tmp","tool_input":{"command":"ls -la"}}"#;
+
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_vouch"))
+        .arg("--hook")
+        .env("VOUCH_CONFIG", &cfg_path)
+        .env("VOUCH_STATE_DIR", &dir)
+        .env_remove("VOUCH_JOURNAL_FORMAT")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn vouch --hook");
+
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().expect("child stdin");
+        stdin.write_all(payload.as_bytes()).expect("write payload");
+    }
+    let output = child.wait_with_output().expect("wait vouch --hook");
+    assert!(
+        output.status.success(),
+        "vouch --hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        dir.join("journal.vlog").exists(),
+        "expected journal.vlog when [logging].journal_format = \"binary\" without VOUCH_JOURNAL_FORMAT"
+    );
+    assert!(
+        !dir.join("journal.jsonl").exists(),
+        "binary-only config should not create journal.jsonl from scratch"
+    );
+    let loaded = journal::all(&dir);
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].cmd, "ls -la");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn vlog_10k_records_indexed_seek_completes_under_submillisecond_budget() {
     let dir = unique_test_dir("bench_10k");
     let mut records = Vec::with_capacity(10_000);

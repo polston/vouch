@@ -26,14 +26,14 @@ nothing; it needs no broker and leaves `approvals_reviewer = "auto_review"` (or
 whatever reviewer is configured) and the native policy unchanged. Codex Allow
 also emits nothing, so its native sandbox and approval policy remain
 authoritative in either route. Google Antigravity exposes `PreToolUse` hooks
-configured in `~/.gemini/antigravity-cli/hooks.json`, answering with native
+configured in `~/.gemini/config/hooks.json`, answering with native
 `decision: "allow" | "ask" | "deny"` without altering sandbox elevation.
 
 Codex tool hooks cover shell commands, `apply_patch`, MCP tools, and most local
 function tools. Hosted tools and some specialized paths are outside that hook
 boundary. Report that boundary plainly: vouch is a guardrail over observed
 calls, not a replacement for Codex's sandbox. Antigravity tool hooks cover
-`run_command`, `write_to_file`, `replace_file_content`, and custom tool calls.
+`run_command`, `write_file`, `edit_file`, `write_to_file`, `replace_file_content`, and custom tool calls.
 
 **The judgment rules are `vouch-trust`'s hard rules, and that skill is the
 authority for them** — narrowest entry that covers the command, destructive
@@ -239,7 +239,7 @@ guard refuses to let an agent change which program gates its tool calls).
    backup, then hand the operator the one command that saves the Claude scratch
    file over `~/.claude/settings.json`, the Codex scratch file over
    `~/.codex/hooks.json`, or the Antigravity scratch file over
-   `~/.gemini/antigravity-cli/hooks.json` (or pass `--write` if the operator explicitly
+   `~/.gemini/config/hooks.json` (or pass `--write` if the operator explicitly
    authorizes updating in place). Restoration returns that backup,
    or removes only the newly created file when no file existed before.
 4. For a **live Codex gate only**, register the sibling release binary once

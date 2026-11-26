@@ -47,7 +47,7 @@ fn run_hook_call(
                 _ => Decision::Ask(reason),
             };
             let rec = journal::record_unparseable(host, raw, &decision);
-            let _ = journal::append(state_dir, &rec);
+            let _ = journal::append_with_format(state_dir, &rec, cfg.logging.journal_format);
             if shadow {
                 return HookCall::Processed(None);
             }
@@ -148,7 +148,7 @@ fn run_hook_call(
     // record fallback. Snippet-bearing calls retain one record per snippet.
     if outcome.snippets.is_empty() {
         let rec = journal::record_from_host(host, &input, &decision, mode);
-        let _ = journal::append(state_dir, &rec);
+        let _ = journal::append_with_format(state_dir, &rec, cfg.logging.journal_format);
     } else {
         for rec in vouch::journal::records_from_snippets_host(
             host,
@@ -157,7 +157,7 @@ fn run_hook_call(
             mode,
             &outcome.snippets,
         ) {
-            let _ = journal::append(state_dir, &rec);
+            let _ = journal::append_with_format(state_dir, &rec, cfg.logging.journal_format);
         }
     }
     let journal_us = t_journal_start.elapsed().as_micros() as u64;

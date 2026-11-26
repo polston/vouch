@@ -76,3 +76,18 @@ worker_timeout_ms = 1
 
     assert!(matches!(dec, vouch::protocol::Decision::Allow(_)));
 }
+
+#[test]
+fn parser_mode_accepts_scanner_and_reference_and_rejects_unknown_values() {
+    assert!(load("[lang.powershell]\nparser_mode = \"scanner\"\n").is_ok());
+    assert!(load("[lang.powershell]\nparser_mode = \"reference\"\n").is_ok());
+
+    for invalid in ["reference_worker", "in_process", "hybrid", "bogus"] {
+        let err = load(&format!("[lang.powershell]\nparser_mode = \"{invalid}\"\n"))
+            .expect_err(&format!("expected parser_mode = {invalid} to be rejected"));
+        assert!(
+            err.contains("parser_mode") && err.contains("scanner") && err.contains("reference"),
+            "unexpected error for {invalid}: {err}"
+        );
+    }
+}

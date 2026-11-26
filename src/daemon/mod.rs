@@ -13,7 +13,6 @@
 pub mod lifecycle;
 pub mod protocol;
 pub mod session;
-pub mod shm;
 pub mod transport;
 
 use std::io::{BufRead, BufReader, Write};
@@ -29,7 +28,6 @@ use crate::protocol::{render_for, Decision, Host};
 pub use lifecycle::{daemonize_process, generate_session_token, install_signal_handlers, is_pid_alive, PidLockGuard};
 pub use protocol::{ClientFrame, DaemonFrame, DecisionOutput, EvaluateRequest};
 pub use session::{DaemonSessionHandler, SessionContext};
-pub use shm::{run_shm_worker, ShmError, ShmHeader, ShmRequest, ShmResponse, ShmRingBuffer, ShmTransport};
 pub use transport::StreamingClient;
 
 
@@ -127,7 +125,11 @@ impl DaemonState {
                     _ => Decision::Ask(reason),
                 };
                 let rec = crate::journal::record_unparseable(host, &req.raw, &decision);
-                let _ = crate::journal::append(Path::new(&req.state_dir), &rec);
+                let _ = crate::journal::append_with_format(
+                    Path::new(&req.state_dir),
+                    &rec,
+                    self.cfg.logging.journal_format,
+                );
                 if shadow {
                     return DaemonResponse { output: None, from_daemon: true };
                 }
@@ -211,7 +213,11 @@ impl DaemonState {
         // Journaling
         if outcome.snippets.is_empty() {
             let rec = crate::journal::record_from_host(host, &input, &decision, mode);
-            let _ = crate::journal::append(Path::new(&req.state_dir), &rec);
+            let _ = crate::journal::append_with_format(
+                Path::new(&req.state_dir),
+                &rec,
+                self.cfg.logging.journal_format,
+            );
         } else {
             for rec in crate::journal::records_from_snippets_host(
                 host,
@@ -220,7 +226,11 @@ impl DaemonState {
                 mode,
                 &outcome.snippets,
             ) {
-                let _ = crate::journal::append(Path::new(&req.state_dir), &rec);
+                let _ = crate::journal::append_with_format(
+                    Path::new(&req.state_dir),
+                    &rec,
+                    self.cfg.logging.journal_format,
+                );
             }
         }
 

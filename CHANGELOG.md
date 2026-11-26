@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.67.1 (2026-11-26)
+
+
+### Bug Fixes
+
+* **Automatically rotate and checkpoint journal.wal at 64 KiB during appends**
+  - **Problem & Explanation:** Normal hook appends wrote every decision frame to journal.wal and journal.jsonl without ever truncating or checkpointing journal.wal until a read path ran, allowing journal.wal to grow past 100 MiB in active environments. Journal appends now atomically rotate and checkpoint journal.wal once it reaches 64 KiB using a tail-bounded deduplication window, keeping steady-state WAL size bounded while remaining safe under concurrent hook processes.
+  - **Example Scenario:** Verified through automated test suite and regression coverage.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: unmodeled or unhandled. After: evaluated and enforced according to updated specification.
+* **Cover write_file and edit_file in Antigravity hook installation and knowledge**
+  - **Problem & Explanation:** Cover write_file and edit_file in Antigravity hook installation and knowledge.
+  - **Example Scenario:** Verified through automated test suite and regression coverage.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: unmodeled or unhandled. After: evaluated and enforced according to updated specification.
+* **Honor [logging] journal_format = "binary" in hook and daemon execution**
+  - **Problem & Explanation:** Honor [logging] journal_format = "binary" in hook and daemon execution.
+  - **Example Scenario:** Verified through automated test suite and regression coverage.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: unmodeled or unhandled. After: evaluated and enforced according to updated specification.
+* **Reject invalid [lang.&lt;L&gt;] parser_mode values at config load and align docs**
+  - **Problem & Explanation:** Reject invalid [lang.&lt;L&gt;] parser_mode values at config load and align docs.
+  - **Example Scenario:** Verified through automated test suite and regression coverage.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: unmodeled or unhandled. After: evaluated and enforced according to updated specification.
+* **Remove unwired sandbox, runtime, shared-memory, container-socket, and transitive-resolver subsystems and enforce live config wiring**
+  - **Problem & Explanation:** Five subsystems totaling over 10,000 lines of source,
+tests, and configuration schema were deserialized or compiled without any live
+runtime caller in the decision, daemon, or hook pipeline: the sandbox and
+cgroups configuration tables, the runtime and eBPF tracing tables, the daemon
+shared-memory transport ring, the container runtime socket detector, and the
+workspace manifest and transitive import resolver in capability analysis.
+Keeping unwired config keys created a silent false sense of enforcement where
+an operator could set sandbox or runtime options that had zero effect at run
+time.
+  - **Example Scenario:** An operator configures sandbox cgroup memory limits or eBPF
+tracing in config.toml expecting kernel isolation; previously the keys parsed
+silently with no runtime enforcement, whereas now unknown inert keys fail fast
+at load time and the schema reference documents only live settings.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Removes the unwired sandbox, runtime, daemon shared-memory, container
+runtime socket, and transitive lockfile resolver subsystems, regenerates the
+JSON schemas and reference documentation, updates the glossary and example
+configuration, and adds a regression test verifying every top-level Config
+field has a live runtime consumer outside config loading.
+
 ## 0.67.0 (2026-11-07)
 
 
