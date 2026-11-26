@@ -47,6 +47,32 @@ class TestCodexParsing(unittest.TestCase):
         self.assertIsNone(cmd)
         self.assertIsNone(cwd)
 
+    def test_codex_wire_tool_name_edge_cases(self):
+        cases = [
+            ("send_message", "collaboration", "collaborationsend_message"),
+            ("sleep", "clock", "clocksleep"),
+            ("curr_time", "clock", "clockcurr_time"),
+            ("run", "web", "webrun"),
+            ("tool_search_tool", "tool_search", "tool_searchtool_search_tool"),
+            ("get_goal", None, "get_goal"),
+            ("wait", "", "wait"),
+            ("wait", "   ", "wait"),
+            ("wait", 123, "wait"),
+            ("wait", {"ns": "clock"}, "wait"),
+            ("send_message", "collaboration:", "collaboration:send_message"),
+            ("apply_patch", None, "apply_patch"),
+            ("apply_patch", "custom", "customapply_patch"),
+            (None, "collaboration", ""),
+            ("", "clock", ""),
+            (42, "web", ""),
+        ]
+        for name, namespace, want in cases:
+            self.assertEqual(
+                wwf.codex_wire_tool_name(name, namespace),
+                want,
+                "mismatch for name=%r namespace=%r" % (name, namespace),
+            )
+
 
 class TestHostDetection(unittest.TestCase):
     def test_detect_by_path(self):
@@ -200,6 +226,101 @@ class TestMultiHostHarvest(unittest.TestCase):
         r_agy_subagent = [r for r in rows if r.tool_use_id == "call-agy-2"][0]
         self.assertEqual(r_agy_subagent.tool, "write_to_file")
         self.assertTrue(r_agy_subagent.sidechain)
+
+    def test_harvest_codex_namespaced_function_calls(self):
+        codex_file = os.path.join(self.codex_dir, "rollout-namespaced.jsonl")
+        codex_records = [
+            {
+                "payload": {
+                    "type": "function_call",
+                    "namespace": "collaboration",
+                    "name": "send_message",
+                    "call_id": "codex-ns-1",
+                    "arguments": json.dumps({"target": "worker", "message": "ping"}),
+                }
+            },
+            {
+                "payload": {
+                    "type": "function_call",
+                    "namespace": "clock",
+                    "name": "curr_time",
+                    "call_id": "codex-ns-2",
+                    "arguments": "{}",
+                }
+            },
+            {
+                "payload": {
+                    "type": "function_call",
+                    "namespace": "web",
+                    "name": "run",
+                    "call_id": "codex-ns-3",
+                    "arguments": json.dumps({"response_length": "short", "search_query": [{"q": "rust"}]}),
+                }
+            },
+            {
+                "payload": {
+                    "type": "function_call",
+                    "namespace": "tool_search",
+                    "name": "tool_search_tool",
+                    "call_id": "codex-ns-4",
+                    "arguments": json.dumps({"query": "agents"}),
+                }
+            },
+            {
+                "payload": {
+                    "type": "function_call",
+                    "name": "get_goal",
+                    "call_id": "codex-ns-5",
+                    "arguments": "{}",
+                }
+            },
+            {
+                "payload": {
+                    "type": "function_call",
+                    "name": "apply_patch",
+                    "call_id": "codex-ns-6",
+                    "arguments": "*** Begin Patch\n*** End Patch",
+                }
+            },
+            {
+                "payload": {
+                    "type": "function_call",
+                    "namespace": "custom",
+                    "name": "apply_patch",
+                    "call_id": "codex-ns-7",
+                    "arguments": json.dumps({"target": "sample"}),
+                }
+            },
+            # Duplicate call_id must be deduped
+            {
+                "payload": {
+                    "type": "function_call",
+                    "namespace": "collaboration",
+                    "name": "send_message",
+                    "call_id": "codex-ns-1",
+                    "arguments": json.dumps({"target": "worker", "message": "dup"}),
+                }
+            },
+        ]
+        with open(codex_file, "w", encoding="utf-8") as f:
+            for r in codex_records:
+                f.write(json.dumps(r) + "\n")
+
+        rows, counters = wwf.harvest([self.codex_dir])
+        self.assertEqual(counters["rows_codex"], 7)
+        self.assertEqual(counters["duplicates"], 1)
+
+        by_id = {r.tool_use_id: r for r in rows}
+        self.assertEqual(by_id["codex-ns-1"].tool, "collaborationsend_message")
+        self.assertEqual(by_id["codex-ns-1"].input.get("target"), "worker")
+        self.assertEqual(by_id["codex-ns-2"].tool, "clockcurr_time")
+        self.assertEqual(by_id["codex-ns-3"].tool, "webrun")
+        self.assertEqual(by_id["codex-ns-4"].tool, "tool_searchtool_search_tool")
+        self.assertEqual(by_id["codex-ns-5"].tool, "get_goal")
+        self.assertEqual(by_id["codex-ns-6"].tool, "apply_patch")
+        self.assertEqual(by_id["codex-ns-6"].input, {"command": "*** Begin Patch\n*** End Patch"})
+        self.assertEqual(by_id["codex-ns-7"].tool, "customapply_patch")
+        self.assertEqual(by_id["codex-ns-7"].input, {"target": "sample"})
 
 
 class TestSynthesisAndVerification(unittest.TestCase):

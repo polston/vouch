@@ -141,6 +141,23 @@ def parse_codex_exec(s):
     return cmd, cwd
 
 
+def codex_wire_tool_name(name, namespace):
+    """Combine Codex function_call namespace and name into the PreToolUse wire tool_name.
+
+    Codex's PreToolUse hook concatenates `namespace + name` verbatim without adding a
+    separator (e.g. collaboration + send_message -> collaborationsend_message,
+    tool_search + tool_search_tool -> tool_searchtool_search_tool). Do not skip
+    concatenation when `name` already starts with `namespace`.
+    """
+    if not isinstance(name, str) or not name:
+        return ""
+    if isinstance(namespace, str):
+        ns = namespace.strip()
+        if ns:
+            return f"{ns}{name}"
+    return name
+
+
 def detect_file_host_from_path(path):
     """Determine host purely from path conventions without reading disk."""
     norm = path.replace("\\", "/").lower()
@@ -308,6 +325,7 @@ def harvest(roots):
                             order.append(tid)
                             rows_by_host["codex"] += 1
                     elif ptype == "function_call":
+                        wire_name = codex_wire_tool_name(name, payload.get("namespace"))
                         args_raw = payload.get("arguments", "{}")
                         if isinstance(args_raw, str):
                             try:
@@ -322,11 +340,11 @@ def harvest(roots):
                         if tid in by_id:
                             duplicates += 1
                             continue
-                        if name == "apply_patch":
+                        if wire_name == "apply_patch":
                             patch_cmd = args_raw if isinstance(args_raw, str) else args_dict.get("patch", "")
                             by_id[tid] = Row(tid, "apply_patch", {"command": patch_cmd}, None, False, False)
                         else:
-                            by_id[tid] = Row(tid, name, args_dict, None, False, False)
+                            by_id[tid] = Row(tid, wire_name, args_dict, None, False, False)
                         order.append(tid)
                         rows_by_host["codex"] += 1
 

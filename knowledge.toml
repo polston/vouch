@@ -2836,7 +2836,10 @@ cwd_from_call = true
 read_path_field = "path"
 
 [[tool]]
-match = ["ListMcpResourcesTool", "ReadMcpResourceTool", "ReadMcpResourceDirTool", "ToolSearch"]
+match = [
+  "ListMcpResourcesTool", "ReadMcpResourceTool", "ReadMcpResourceDirTool",
+  "ToolSearch", "tool_searchtool_search_tool",
+]
 source = "reads catalogues and schemas, writes nothing"
 
 [[tool]]
@@ -2844,7 +2847,11 @@ match = ["WebFetch", "WebSearch"]
 source = "declared: deliberately out of scope, not gated"
 
 [[tool]]
-match = ["Task", "Agent", "Skill", "Workflow", "SendMessage", "send_message", "followup_task"]
+match = [
+  "Task", "Agent", "Skill", "Workflow", "SendMessage",
+  "send_message", "followup_task",
+  "collaborationsend_message", "collaborationfollowup_task",
+]
 source = "starts work whose own tool calls are gated, so this does not allow its effects"
 
 [[tool]]
@@ -2984,12 +2991,24 @@ match = ["invoke_subagent", "define_subagent", "manage_subagents"]
 source = "starts work whose own tool calls are gated, so this does not allow its effects"
 
 [[tool]]
-match = ["wait", "wait_agent", "list_agents", "ListAgents", "interrupt_agent", "sleep"]
-source = "Codex/Claude agent coordination and status inspection; touches no files"
+match = [
+  "wait", "wait_agent", "list_agents", "ListAgents", "interrupt_agent", "sleep",
+  "collaborationwait_agent", "collaborationlist_agents", "collaborationinterrupt_agent",
+  "clockcurr_time", "clocksleep",
+]
+source = "Codex/Claude agent coordination, status inspection, and clock; touches no files"
 
 [[tool]]
-match = ["spawn_agent"]
+match = ["spawn_agent", "collaborationspawn_agent"]
 source = "starts work whose own tool calls are gated, so this does not allow its effects"
+
+[[tool]]
+match = ["get_goal"]
+source = "reads the active Codex session goal; touches no project file"
+
+[[tool]]
+match = ["webrun"]
+source = "declared: deliberately out of scope, not gated"
 
 [[tool]]
 match = ["generate_image"]

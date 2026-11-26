@@ -165,3 +165,138 @@ fn codex_auto_review_shadow_records_without_steering_and_correlates_outcome() {
     assert_eq!(records[0].permission_mode, "default");
     assert_eq!(records[0].outcome, vouch::outcome::Outcome::Executed);
 }
+
+fn manifest_dir() -> std::path::PathBuf {
+    std::env::var_os("CARGO_MANIFEST_DIR")
+        .map(std::path::PathBuf::from)
+        .expect("CARGO_MANIFEST_DIR is unset: run this test through cargo")
+}
+
+fn run_codex_bash_tool(
+    dir: &std::path::Path,
+    config_path: &std::path::Path,
+    knowledge_path: &std::path::Path,
+    id: &str,
+    tool_name: &str,
+) -> String {
+    let input = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "session_id": "test-session",
+        "turn_id": "test-turn",
+        "tool_use_id": id,
+        "cwd": "C:/Users/dev",
+        "tool_name": tool_name,
+        "tool_input": {}
+    });
+    let mut child = Command::new(env!("CARGO_BIN_EXE_vouch"));
+    let mut child = child
+        .args(["--hook", "--host", "codex", "--shell", "bash"])
+        .env("VOUCH_CONFIG", config_path)
+        .env("VOUCH_KNOWLEDGE", knowledge_path)
+        .env("VOUCH_MY_KNOWLEDGE", dir.join("my-knowledge.toml"))
+        .env("VOUCH_STATE_DIR", dir.join("state"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(input.to_string().as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "hook exited {:?}", out.status.code());
+    String::from_utf8(out.stdout).unwrap()
+}
+
+#[test]
+fn codex_namespaced_builtin_tools_allow_and_unknown_prefix_lookalikes_block() {
+    let root = manifest_dir();
+    let knowledge_path = root.join("knowledge.toml");
+    let example_config_path = root.join("vouch.example.toml");
+    let dir = scratch("namespaced_builtins");
+    std::fs::write(dir.join("my-knowledge.toml"), "").unwrap();
+
+    let recognized = [
+        "collaborationsend_message",
+        "collaborationfollowup_task",
+        "collaborationwait_agent",
+        "collaborationspawn_agent",
+        "collaborationlist_agents",
+        "collaborationinterrupt_agent",
+        "clockcurr_time",
+        "clocksleep",
+        "webrun",
+        "get_goal",
+        "tool_searchtool_search_tool",
+    ];
+    for (i, tool) in recognized.iter().enumerate() {
+        let id = format!("allow-{i}");
+        let stdout = run_codex_bash_tool(&dir, &example_config_path, &knowledge_path, &id, tool);
+        assert_eq!(
+            stdout, "",
+            "recognized Codex tool {tool} must emit empty stdout on Allow, got: {stdout:?}"
+        );
+    }
+
+    let lookalikes = ["collaborationdelete_all", "clockset_time", "webpost"];
+    for (i, tool) in lookalikes.iter().enumerate() {
+        let id = format!("ask-{i}");
+        let stdout = run_codex_bash_tool(&dir, &example_config_path, &knowledge_path, &id, tool);
+        let response: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+        assert_eq!(response["hookSpecificOutput"]["permissionDecision"], "deny");
+        let reason = response["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap();
+        assert!(
+            reason.contains("unmodeled_tool"),
+            "lookalike {tool} must stop on unmodeled_tool, got: {reason}"
+        );
+        assert!(
+            reason.contains("vouch-"),
+            "lookalike {tool} must include a one-time approval request id, got: {reason}"
+        );
+    }
+
+    // Explicit config deny for a recognized wire name must hard-deny with no approval request.
+    let deny_cfg = dir.join("deny-webrun.toml");
+    std::fs::write(&deny_cfg, "version = 1\n[tools]\nwebrun = \"deny\"\n").unwrap();
+    let deny_stdout = run_codex_bash_tool(&dir, &deny_cfg, &knowledge_path, "deny-web", "webrun");
+    let deny_resp: serde_json::Value = serde_json::from_str(deny_stdout.trim()).unwrap();
+    assert_eq!(deny_resp["hookSpecificOutput"]["permissionDecision"], "deny");
+    let deny_reason = deny_resp["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .unwrap();
+    assert!(
+        deny_reason.contains("tools.webrun"),
+        "deny reason should name tools.webrun, got: {deny_reason}"
+    );
+    assert!(
+        !deny_reason.contains("approval request:"),
+        "explicit deny must not mint an approval request, got: {deny_reason}"
+    );
+
+    let records = vouch::journal::all(&dir.join("state"));
+    for (i, tool) in recognized.iter().enumerate() {
+        let id = format!("allow-{i}");
+        assert!(
+            records
+                .iter()
+                .any(|r| r.id == id && r.host == "codex" && r.tool == *tool && r.verdict == "allow"),
+            "missing allow journal row for {tool}"
+        );
+    }
+    for (i, tool) in lookalikes.iter().enumerate() {
+        let id = format!("ask-{i}");
+        assert!(
+            records
+                .iter()
+                .any(|r| r.id == id && r.host == "codex" && r.tool == *tool && r.verdict == "ask"),
+            "missing ask journal row for {tool}"
+        );
+    }
+    assert!(records.iter().any(|r| {
+        r.id == "deny-web" && r.host == "codex" && r.tool == "webrun" && r.verdict == "deny"
+    }));
+}

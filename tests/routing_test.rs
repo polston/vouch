@@ -1304,3 +1304,86 @@ fn shipped_knowledge_routes_antigravity_tools() {
     }
 }
 
+#[test]
+fn shipped_knowledge_routes_codex_namespaced_builtin_tools() {
+    let kb = shipped_kb();
+    let cfg = common::realistic_config();
+
+    for tool in [
+        "collaborationsend_message",
+        "collaborationfollowup_task",
+        "collaborationwait_agent",
+        "collaborationspawn_agent",
+        "collaborationlist_agents",
+        "collaborationinterrupt_agent",
+        "clockcurr_time",
+        "clocksleep",
+        "webrun",
+        "get_goal",
+        "tool_searchtool_search_tool",
+    ] {
+        let raw = format!(
+            r#"{{"session_id":"s","cwd":"C:/Users/dev","tool_name":"{tool}","tool_input":{{}}}}"#
+        );
+        let input = hook(&raw);
+        let outcome = decide(&cfg, &kb, HOME, &input);
+        assert!(
+            matches!(outcome.decision, Decision::Allow(_)),
+            "recognized Codex tool {tool} should allow, got: {:?}",
+            outcome.decision
+        );
+    }
+
+    // Fail-closed negative controls sharing the exact same prefixes: recognition
+    // is by exact wire name, never prefix stripping.
+    for unknown in [
+        "collaborationdelete_all",
+        "clockset_time",
+        "webpost",
+        "tool_searchrun_code",
+        "zz_unmodeled_codex_tool",
+    ] {
+        let raw = format!(
+            r#"{{"session_id":"s","cwd":"C:/Users/dev","tool_name":"{unknown}","tool_input":{{}}}}"#
+        );
+        let input = hook(&raw);
+        let outcome = decide(&cfg, &kb, HOME, &input);
+        let reason = ask_reason(&outcome.decision);
+        assert!(
+            reason.contains("unmodeled_tool"),
+            "unknown prefix-lookalike {unknown} must stop on unmodeled_tool, got: {reason}"
+        );
+    }
+
+    // Explicit operator [tools] overrides must govern exact wire names.
+    let override_cfg = vouch::config::load(
+        r#"
+version = 1
+[tools]
+collaborationsend_message = "deny"
+webrun = "ask"
+"#,
+    )
+    .expect("override config parses");
+
+    let send_in = hook(
+        r#"{"session_id":"s","cwd":"C:/Users/dev","tool_name":"collaborationsend_message","tool_input":{}}"#,
+    );
+    match decide(&override_cfg, &kb, HOME, &send_in).decision {
+        Decision::Deny(reason) => {
+            assert!(reason.contains("tools.collaborationsend_message"), "got: {reason}");
+        }
+        other => panic!("expected Deny for overridden collaborationsend_message, got: {other:?}"),
+    }
+
+    let web_in = hook(
+        r#"{"session_id":"s","cwd":"C:/Users/dev","tool_name":"webrun","tool_input":{}}"#,
+    );
+    match decide(&override_cfg, &kb, HOME, &web_in).decision {
+        Decision::Ask(reason) => {
+            assert!(reason.contains("tools.webrun"), "got: {reason}");
+        }
+        other => panic!("expected Ask for overridden webrun, got: {other:?}"),
+    }
+}
+

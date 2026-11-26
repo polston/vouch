@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.69.0 (2026-11-26)
+
+
+### Features
+
+* **Recognize Codex namespaced built-in tools in shipped knowledge**
+  - **Problem & Explanation:** Codex PreToolUse hooks concatenate a built-in tool's namespace and name without a separator, sending wire tool names such as collaborationsend_message, collaborationfollowup_task, collaborationwait_agent, collaborationspawn_agent, collaborationlist_agents, collaborationinterrupt_agent, clockcurr_time, clocksleep, webrun, and tool_searchtool_search_tool alongside unnamespaced get_goal. Because shipped knowledge only listed the unprefixed tool names and the setup replay harvester dropped the Codex namespace field, live multi-agent Codex sessions stopped repeatedly on unmodeled_tool asks while pre-live replays missed the gap.
+  - **Example Scenario:** Verified through automated test suite and regression coverage.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: unmodeled or unhandled. After: evaluated and enforced according to updated specification.
+
+
+### Bug Fixes
+
+* **Preserve Codex function-call namespaces when harvesting transcripts for setup replay**
+  - **Problem & Explanation:** Codex PreToolUse hooks concatenate a built-in tool's namespace and name without a separator, sending wire tool names such as collaborationsend_message, collaborationfollowup_task, collaborationwait_agent, collaborationspawn_agent, collaborationlist_agents, collaborationinterrupt_agent, clockcurr_time, clocksleep, webrun, and tool_searchtool_search_tool alongside unnamespaced get_goal. Because shipped knowledge only listed the unprefixed tool names and the setup replay harvester dropped the Codex namespace field, live multi-agent Codex sessions stopped repeatedly on unmodeled_tool asks while pre-live replays missed the gap.
+  - **Example Scenario:** Verified through automated test suite and regression coverage.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: unmodeled or unhandled. After: evaluated and enforced according to updated specification.
+
 ## 0.68.0 (2026-11-26)
 
 
