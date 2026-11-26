@@ -21,13 +21,7 @@ use vouch::outcome::Outcome;
 use vouch::tui::engine::JournalTailReader;
 
 fn vouch_exe() -> PathBuf {
-    let mut path = std::env::current_exe().expect("current_exe");
-    path.pop();
-    if path.ends_with("deps") {
-        path.pop();
-    }
-    let bin = if cfg!(windows) { "vouch.exe" } else { "vouch" };
-    path.join(bin)
+    PathBuf::from(env!("CARGO_BIN_EXE_vouch"))
 }
 
 fn unique_test_dir(tag: &str) -> PathBuf {
