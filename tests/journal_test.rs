@@ -467,3 +467,106 @@ fn compact_records_isolates_measurement_from_production() {
     let meas = compacted.iter().find(|r| r.measurement).expect("measurement record");
     assert_eq!(meas.count, 2);
 }
+
+#[test]
+fn state_dir_from_env_resolves_persistent_defaults_and_overrides() {
+    use std::path::{Path, PathBuf};
+    use vouch::journal::state_dir_from_env;
+
+    let tmp = Path::new("/tmp/fallback");
+
+    // 1. Explicit VOUCH_STATE_DIR always wins on both platforms.
+    assert_eq!(
+        state_dir_from_env(
+            Some("/custom/vouch-state"),
+            Some("/xdg/state"),
+            Some("/home/dev"),
+            Some("C:/Users/dev/AppData/Local"),
+            Some("C:/Users/dev"),
+            false,
+            tmp,
+        ),
+        PathBuf::from("/custom/vouch-state")
+    );
+    assert_eq!(
+        state_dir_from_env(
+            Some("D:/custom-vouch"),
+            None,
+            None,
+            Some("C:/Users/dev/AppData/Local"),
+            Some("C:/Users/dev"),
+            true,
+            tmp,
+        ),
+        PathBuf::from("D:/custom-vouch")
+    );
+
+    // 2. Unix: absolute XDG_STATE_HOME takes precedence over HOME.
+    assert_eq!(
+        state_dir_from_env(
+            None,
+            Some("/home/dev/.state"),
+            Some("/home/dev"),
+            None,
+            None,
+            false,
+            tmp,
+        ),
+        PathBuf::from("/home/dev/.state/vouch")
+    );
+
+    // 3. Unix: relative XDG_STATE_HOME is ignored per XDG spec; falls back to $HOME/.local/state/vouch.
+    assert_eq!(
+        state_dir_from_env(
+            Some("   "),
+            Some("relative/state"),
+            Some("/home/dev"),
+            None,
+            None,
+            false,
+            tmp,
+        ),
+        PathBuf::from("/home/dev/.local/state/vouch")
+    );
+
+    // 4. Unix: default $HOME/.local/state/vouch when XDG_STATE_HOME is unset.
+    assert_eq!(
+        state_dir_from_env(None, None, Some("/home/dev"), None, None, false, tmp),
+        PathBuf::from("/home/dev/.local/state/vouch")
+    );
+
+    // 5. Windows: %LOCALAPPDATA%/vouch/state takes precedence over USERPROFILE.
+    assert_eq!(
+        state_dir_from_env(
+            None,
+            None,
+            None,
+            Some("C:/Users/dev/AppData/Local"),
+            Some("C:/Users/dev"),
+            true,
+            tmp,
+        ),
+        PathBuf::from("C:/Users/dev/AppData/Local")
+            .join("vouch")
+            .join("state")
+    );
+
+    // 6. Windows: falls back to %USERPROFILE%/.local/state/vouch if LOCALAPPDATA is unset.
+    assert_eq!(
+        state_dir_from_env(None, None, None, None, Some("C:/Users/dev"), true, tmp),
+        PathBuf::from("C:/Users/dev")
+            .join(".local")
+            .join("state")
+            .join("vouch")
+    );
+
+    // 7. Last-resort fallback when all environment variables are unset or empty.
+    assert_eq!(
+        state_dir_from_env(None, None, None, None, None, false, tmp),
+        PathBuf::from("/tmp/fallback/vouch")
+    );
+    assert_eq!(
+        state_dir_from_env(None, None, None, None, None, true, tmp),
+        PathBuf::from("/tmp/fallback/vouch")
+    );
+}

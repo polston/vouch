@@ -302,7 +302,7 @@ pub struct HookOptions {
 }
 
 /// A hook command runs from the session cwd, so a relative state directory
-/// would split one logical journal across whatever repositories Codex visits.
+/// would split one logical journal across whatever repositories the host visits.
 /// Accept both native absolute spellings independent of the platform running
 /// the test suite; generated Windows registrations are tested on Unix too.
 pub fn validate_state_dir(value: &str) -> Result<(), String> {
@@ -361,15 +361,12 @@ pub fn parse_hook_options(args: &[String]) -> Result<HookOptions, String> {
     if hook == batch {
         return Err("vouch: choose exactly one of --hook or --hook-batch".into());
     }
-    match (host, shell, state_dir.is_some()) {
-        (InstallHost::Codex, None, _) => {
+    match (host, shell) {
+        (InstallHost::Codex, None) => {
             Err("vouch: Codex hook needs --shell bash or --shell powershell".into())
         }
-        (InstallHost::Claude, Some(_), _) | (InstallHost::Agy, Some(_), _) => {
+        (InstallHost::Claude, Some(_)) | (InstallHost::Agy, Some(_)) => {
             Err("vouch: --shell is only meaningful with --host codex".into())
-        }
-        (InstallHost::Claude, None, true) => {
-            Err("vouch: --state-dir is only meaningful with --host codex".into())
         }
         _ => Ok(HookOptions {
             host,
@@ -438,15 +435,12 @@ pub fn parse_install_options(args: &[String]) -> Result<InstallOptions, String> 
             "vouch: --print and --write cannot be used together.\n{USAGE}"
         ));
     }
-    match (host, shell, state_dir.is_some()) {
-        (InstallHost::Codex, None, _) => Err(format!(
+    match (host, shell) {
+        (InstallHost::Codex, None) => Err(format!(
             "vouch: Codex installation needs --shell bash or --shell powershell.\n{USAGE}"
         )),
-        (InstallHost::Claude, Some(_), _) | (InstallHost::Agy, Some(_), _) => Err(format!(
+        (InstallHost::Claude, Some(_)) | (InstallHost::Agy, Some(_)) => Err(format!(
             "vouch: --shell is only meaningful with --host codex.\n{USAGE}"
-        )),
-        (InstallHost::Claude, None, true) => Err(format!(
-            "vouch: --state-dir is only meaningful with --host codex.\n{USAGE}"
         )),
         _ => Ok(InstallOptions { host, shell, shadow, hooks_only, state_dir, write }),
     }

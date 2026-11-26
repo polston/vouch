@@ -5,8 +5,8 @@ use vouch::cli::{
     InstallHost, InstallShell,
 };
 use vouch::install::{
-    plan, plan_agy, plan_codex, plan_codex_with_state, unplan, unplan_agy, unplan_codex,
-    write_file_atomically,
+    plan, plan_agy, plan_codex, plan_codex_with_state, plan_with_state, unplan, unplan_agy,
+    unplan_codex, write_file_atomically,
 };
 
 const EXISTING: &str = r#"{
@@ -26,19 +26,25 @@ fn shadow_leaves_the_existing_gate_in_charge() {
         "existing gate removed: {}",
         p.settings
     );
-    assert!(p.settings.contains("vouch.exe --hook --shadow"));
+    assert!(p.settings.contains("'C:/workspace/vouch-dev/vouch.exe' --hook --shadow"));
 }
 
 #[test]
 fn live_replaces_the_existing_gate() {
     let p = plan(EXISTING, "C:/workspace/vouch-dev/vouch.exe", false).unwrap();
-    let pre = p.settings.split("\"PreToolUse\"").nth(1).unwrap_or("");
-    let pre = pre.split(']').next().unwrap_or("");
+    let root: serde_json::Value = serde_json::from_str(&p.settings).unwrap();
+    let pre = root["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
     assert!(
         !pre.contains("cc-allow"),
         "cc-allow still in PreToolUse: {pre}"
     );
-    assert!(pre.contains("vouch.exe --hook"));
+    assert!(pre.contains("'C:/workspace/vouch-dev/vouch.exe' --hook"));
+    assert!(
+        pre.contains("permissionDecision") && pre.contains("deny"),
+        "live PreToolUse must fail closed when binary is missing: {pre}"
+    );
     assert!(!pre.contains("--shadow"), "live mode must not be shadow");
 }
 
@@ -229,25 +235,27 @@ const MOVED_CLAUDE_HOOKS: &str = r#"{
 fn claude_repoints_a_moved_binary_on_every_event() {
     let p = plan(MOVED_CLAUDE_HOOKS, "C:/new/vouch.exe", false).unwrap();
     assert!(!p.settings.contains("C:/old/vouch.exe"));
-    assert_eq!(p.settings.matches("C:/new/vouch.exe --hook").count(), 4);
+    assert_eq!(p.settings.matches("'C:/new/vouch.exe' --hook").count(), 4);
     assert!(p.settings.contains("C:/other/tool.exe observe"));
-    assert!(p.notes.join(" ").contains("repointed"));
+    assert!(p.notes.join(" ").contains("4 existing vouch hook(s)"));
 }
 
 #[test]
 fn claude_shadow_stands_a_repointed_live_gate_down() {
     let p = plan(MOVED_CLAUDE_HOOKS, "C:/new/vouch.exe", true).unwrap();
-    let pre = p.settings.split("\"PreToolUse\"").nth(1).unwrap_or("");
-    let pre = pre.split(']').next().unwrap_or("");
-    assert!(pre.contains("C:/new/vouch.exe --hook --shadow"));
-    assert!(!pre.contains("C:/new/vouch.exe --hook\""));
+    let root: serde_json::Value = serde_json::from_str(&p.settings).unwrap();
+    let pre = root["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(pre.contains("'C:/new/vouch.exe' --hook --shadow"));
+    assert!(!pre.contains("permissionDecision"), "shadow PreToolUse must stay non-disruptive: {pre}");
     assert!(p.notes.join(" ").contains("stood down"));
 }
 
 #[test]
 fn claude_quotes_an_executable_path_with_spaces() {
     let p = plan("{}", "C:/Program Files/vouch/bin/vouch.exe", false).unwrap();
-    assert!(p.settings.contains("\\\"C:/Program Files/vouch/bin/vouch.exe\\\" --hook"));
+    assert!(p.settings.contains("'C:/Program Files/vouch/bin/vouch.exe' --hook"));
 }
 
 #[test]
@@ -261,9 +269,13 @@ fn claude_recognises_a_quoted_registration_without_duplication() {
     }"#;
     let p = plan(existing, "C:/new/vouch.exe", false).unwrap();
     assert!(!p.settings.contains("My Tools"));
-    let post = p.settings.split("\"PostToolUse\"").nth(1).unwrap_or("");
-    let post = post.split(']').next().unwrap_or("");
-    assert_eq!(post.matches("--hook").count(), 1);
+    let root: serde_json::Value = serde_json::from_str(&p.settings).unwrap();
+    let post = root["hooks"]["PostToolUse"].as_array().unwrap();
+    assert_eq!(post.len(), 1);
+    assert!(post[0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap()
+        .contains("'C:/new/vouch.exe' --hook"));
 }
 
 #[test]
@@ -277,7 +289,7 @@ fn claude_does_not_claim_a_lookalike_hook() {
     }"#;
     let p = plan(existing, "C:/new/vouch.exe", false).unwrap();
     assert!(p.settings.contains("C:/bin/notvouch.exe --hook"));
-    assert!(p.settings.contains("C:/new/vouch.exe --hook"));
+    assert!(p.settings.contains("'C:/new/vouch.exe' --hook"));
 }
 
 #[test]
@@ -366,7 +378,14 @@ fn codex_state_dir_is_absolute_and_reaches_both_parsers() {
         ];
         assert!(parse_install_options(&args).is_err(), "accepted {bad:?}");
     }
-    assert!(parse_install_options(&["--state-dir".into(), "/tmp/vouch".into()]).is_err());
+    // Claude now also accepts an explicit absolute --state-dir symmetrically with Codex and Agy.
+    let claude_state = parse_install_options(&["--state-dir".into(), "/tmp/vouch".into()]).unwrap();
+    assert_eq!(claude_state.host, InstallHost::Claude);
+    assert_eq!(claude_state.state_dir.as_deref(), Some("/tmp/vouch"));
+    let claude_hook_state =
+        parse_hook_options(&["--hook".into(), "--state-dir".into(), "/tmp/vouch".into()]).unwrap();
+    assert_eq!(claude_hook_state.host, InstallHost::Claude);
+    assert_eq!(claude_hook_state.state_dir.as_deref(), Some("/tmp/vouch"));
 }
 
 #[test]
@@ -578,12 +597,19 @@ fn agy_plan_generation_and_idempotency() {
         .as_str()
         .unwrap();
 
-    assert!(pre_cmd.starts_with(
-        "\"/opt/Vouch Bin/vouch\" --hook --host agy --shadow --state-dir \"/tmp/vouch agy state\""
-    ));
-    assert!(post_cmd.starts_with(
-        "\"/opt/Vouch Bin/vouch\" --hook --host agy --state-dir \"/tmp/vouch agy state\""
-    ));
+    assert!(
+        pre_cmd.contains("'/opt/Vouch Bin/vouch' --hook --host agy --shadow --state-dir '/tmp/vouch agy state'"),
+        "unexpected shadow pre_cmd: {pre_cmd}"
+    );
+    assert!(
+        !pre_cmd.contains("\"decision\":\"deny\""),
+        "shadow PreToolUse must stay non-disruptive: {pre_cmd}"
+    );
+    assert!(
+        post_cmd.contains("'/opt/Vouch Bin/vouch' --hook --host agy --state-dir '/tmp/vouch agy state'")
+            && post_cmd.contains("printf '%s\\n' '{}'"),
+        "unexpected post_cmd: {post_cmd}"
+    );
     assert!(!post_cmd.contains("--shadow"));
 
     // Idempotent: running again produces identical vouch config
@@ -591,17 +617,25 @@ fn agy_plan_generation_and_idempotency() {
     let root2: serde_json::Value = serde_json::from_str(&p2.settings).unwrap();
     assert_eq!(root, root2);
 
-    // Live mode (shadow = false, state_dir = None)
-    let p_live = plan_agy("", "vouch", false, None).unwrap();
+    // Live mode with an explicit Unix path (deterministic across Unix and Windows CI)
+    let p_live = plan_agy("", "/usr/local/bin/vouch", false, None).unwrap();
     let root_live: serde_json::Value = serde_json::from_str(&p_live.settings).unwrap();
     let live_pre = root_live["vouch"]["PreToolUse"][0]["hooks"][0]["command"]
         .as_str()
         .unwrap();
-    assert_eq!(live_pre, "vouch --hook --host agy");
+    assert!(
+        live_pre.contains("'/usr/local/bin/vouch' --hook --host agy")
+            && live_pre.contains("\"decision\":\"deny\""),
+        "live Agy PreToolUse must fail closed: {live_pre}"
+    );
     let live_post = root_live["vouch"]["PostToolUse"][0]["hooks"][0]["command"]
         .as_str()
         .unwrap();
-    assert_eq!(live_post, "vouch --hook --host agy");
+    assert!(
+        live_post.contains("'/usr/local/bin/vouch' --hook --host agy")
+            && live_post.contains("printf '%s\\n' '{}'"),
+        "live Agy PostToolUse must stay non-disruptive: {live_post}"
+    );
 }
 
 #[test]
@@ -646,7 +680,7 @@ fn uninstall_options_parsing() {
 #[test]
 fn claude_unplan_removes_vouch_and_preserves_others() {
     let planned = plan(EXISTING_WITH_SERVER, "C:/workspace/vouch.exe", false).unwrap();
-    assert!(planned.settings.contains("vouch.exe --hook"));
+    assert!(planned.settings.contains("'C:/workspace/vouch.exe' --hook"));
     assert!(planned.settings.contains("mcpServers"));
 
     let unp = unplan(&planned.settings).unwrap();
@@ -781,6 +815,412 @@ fn reconciles_agy_permissions_cleanly() {
     // Idempotent: running again produces identical output
     let reconciled2 = reconcile_agy_permissions(&reconciled, DEFAULT_AGY_UNSANDBOXED_TOOLS).unwrap();
     assert_eq!(reconciled, reconciled2);
+}
+
+#[test]
+fn claude_live_preserves_unrelated_pre_hooks_repoints_wrapped_and_supports_state_dir() {
+    let existing = r#"{
+      "hooks": {
+        "PreToolUse": [
+          { "hooks": [ { "type": "command", "command": "C:/workspace/cc-allow/cc-allow.exe --hook" } ] },
+          { "hooks": [ { "type": "command", "command": "/usr/local/bin/other-guard check" } ] }
+        ]
+      }
+    }"#;
+    let first = plan_with_state(existing, "/opt/old/vouch", false, Some("/tmp/vouch state")).unwrap();
+    let root1: serde_json::Value = serde_json::from_str(&first.settings).unwrap();
+    let pre1 = root1["hooks"]["PreToolUse"].as_array().unwrap();
+    assert_eq!(pre1.len(), 2, "must retain unrelated guard and add vouch: {pre1:?}");
+    assert!(first.settings.contains("/usr/local/bin/other-guard check"));
+    assert!(!first.settings.contains("cc-allow"));
+    assert!(first.settings.contains("--state-dir '/tmp/vouch state'"));
+    assert!(first.notes.join(" ").contains("cc-allow was REMOVED"));
+
+    // Repoint wrapped hooks to a new path containing spaces and single quotes
+    let moved = plan_with_state(
+        &first.settings,
+        "/opt/it's my/vouch",
+        false,
+        Some("/tmp/vouch state"),
+    )
+    .unwrap();
+    assert!(!moved.settings.contains("/opt/old/vouch"));
+    assert!(moved.settings.contains("/usr/local/bin/other-guard check"));
+    assert!(moved.notes.join(" ").contains("4 existing vouch hook(s)"));
+
+    // Idempotent second run produces zero repoint notes and identical hooks
+    let again = plan_with_state(
+        &moved.settings,
+        "/opt/it's my/vouch",
+        false,
+        Some("/tmp/vouch state"),
+    )
+    .unwrap();
+    assert_eq!(moved.settings, again.settings);
+    assert!(!again.notes.join(" ").contains("repointed"));
+
+    // Standing down wrapped live PreToolUse to shadow
+    let stood_down = plan_with_state(
+        &moved.settings,
+        "/opt/it's my/vouch",
+        true,
+        Some("/tmp/vouch state"),
+    )
+    .unwrap();
+    assert!(stood_down.notes.join(" ").contains("stood down"));
+    let root_sd: serde_json::Value = serde_json::from_str(&stood_down.settings).unwrap();
+    let pre_sd = root_sd["hooks"]["PreToolUse"][1]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(pre_sd.contains("--shadow") && !pre_sd.contains("permissionDecision"));
+
+    // Unplan cleanly strips all 4 wrapped hooks while keeping the unrelated PreToolUse guard
+    let removed = unplan(&moved.settings).unwrap();
+    assert!(!removed.settings.contains("vouch"));
+    assert!(removed.settings.contains("/usr/local/bin/other-guard check"));
+    assert!(removed.notes.join(" ").contains("4 vouch hook(s) removed"));
+}
+
+#[test]
+fn install_notes_name_persistent_default_state_dir_across_all_hosts() {
+    let claude = plan("", "/opt/vouch", false).unwrap();
+    let codex = plan_codex("", "/opt/vouch", InstallShell::Bash, false).unwrap();
+    let agy = plan_agy("", "/opt/vouch", false, None).unwrap();
+
+    for (host, notes) in [
+        ("claude", claude.notes.join("\n")),
+        ("codex", codex.notes.join("\n")),
+        ("agy", agy.notes.join("\n")),
+    ] {
+        assert!(
+            notes.contains("~/.local/state/vouch") && notes.contains("%LOCALAPPDATA%/vouch/state"),
+            "{host} notes missing persistent state dir default: {notes}"
+        );
+        assert!(
+            !notes.contains("OS temp fallback"),
+            "{host} notes still mention OS temp fallback: {notes}"
+        );
+        assert!(
+            notes.contains("fails closed"),
+            "{host} live notes must state fail-closed behavior: {notes}"
+        );
+    }
+}
+
+#[test]
+fn codex_powershell_and_agy_windows_cmd_wrappers_are_well_formed() {
+    let codex_ps = plan_codex(
+        "",
+        "C:/Program Files/O'Brien/vouch.exe",
+        InstallShell::PowerShell,
+        false,
+    )
+    .unwrap();
+    let root_ps: serde_json::Value = serde_json::from_str(&codex_ps.settings).unwrap();
+    let ps_pre = root_ps["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    let ps_post = root_ps["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(ps_pre.contains("Get-Command 'C:/Program Files/O''Brien/vouch.exe'"));
+    assert!(ps_pre.contains("try {") && ps_pre.contains("catch {}"));
+    assert!(ps_pre.contains("$? -and $LASTEXITCODE -eq 0"));
+    assert!(ps_pre.contains("Write-Output"));
+    assert!(ps_pre.contains("permissionDecision"));
+    assert!(ps_post.contains("Get-Command 'C:/Program Files/O''Brien/vouch.exe'"));
+    assert!(ps_post.contains("try {") && ps_post.contains("catch {}"));
+    assert!(!ps_post.contains("Write-Output"));
+
+    // PowerShell also doubles Unicode single-quote delimiters
+    let codex_ps_unicode = plan_codex(
+        "",
+        "C:/Program Files/O\u{2019}Brien/vouch.exe",
+        InstallShell::PowerShell,
+        false,
+    )
+    .unwrap();
+    assert!(codex_ps_unicode.settings.contains("O\u{2019}\u{2019}Brien"));
+
+    // Windows Antigravity path-bearing cmd wrapper uses `if exist ... (...) else (...)`
+    // and normalizes trailing backslashes in --state-dir so Win32 quoting cannot break.
+    let agy_win = plan_agy(
+        "",
+        "C:/Program Files (x86)/vouch/vouch.exe",
+        false,
+        Some(r"C:\Users\dev\AppData\Local\vouch\state\"),
+    )
+    .unwrap();
+    let root_win: serde_json::Value = serde_json::from_str(&agy_win.settings).unwrap();
+    let win_pre = root_win["vouch"]["PreToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    let win_post = root_win["vouch"]["PostToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(win_pre.starts_with(r#"if exist "C:/Program Files (x86)/vouch/vouch.exe" ("#));
+    assert!(win_pre.contains(r#") else (echo {"decision":"deny""#));
+    assert!(win_pre.contains(r#"--state-dir "C:/Users/dev/AppData/Local/vouch/state/""#));
+    assert!(win_post.contains("|| echo {}) else (echo {})"));
+
+    // Windows Antigravity bare .exe wrapper quotes the executable and exits 0 in shadow mode
+    let agy_bare_live = plan_agy("", "vouch.exe", false, None).unwrap();
+    let bare_live_root: serde_json::Value = serde_json::from_str(&agy_bare_live.settings).unwrap();
+    let bare_live_pre = bare_live_root["vouch"]["PreToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    let bare_live_post = bare_live_root["vouch"]["PostToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(bare_live_pre.starts_with(r#"where /q "vouch.exe" && ("vouch.exe" --hook --host agy || echo "#));
+    assert!(bare_live_post.starts_with(r#"where /q "vouch.exe" && ("vouch.exe" --hook --host agy || echo {}) || echo {}"#));
+
+    let agy_bare_shadow = plan_agy("", "vouch.exe", true, None).unwrap();
+    let bare_shadow_root: serde_json::Value =
+        serde_json::from_str(&agy_bare_shadow.settings).unwrap();
+    let bare_shadow_pre = bare_shadow_root["vouch"]["PreToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(bare_shadow_pre.ends_with("|| exit /b 0"));
+}
+
+#[test]
+fn claude_parser_handles_same_exe_upgrade_tricky_state_dir_and_rejects_lookalikes() {
+    // 1. Legacy bare hook with the SAME executable upgrades to fail-closed wrapper with 0 repointed
+    let legacy = r#"{
+      "hooks": {
+        "PreToolUse": [ { "hooks": [ { "type": "command", "command": "/opt/vouch --hook" } ] } ],
+        "PostToolUse": [ { "hooks": [ { "type": "command", "command": "/opt/vouch --hook" } ] } ],
+        "PostToolUseFailure": [ { "hooks": [ { "type": "command", "command": "/opt/vouch --hook" } ] } ],
+        "PermissionDenied": [ { "hooks": [ { "type": "command", "command": "/opt/vouch --hook" } ] } ]
+      }
+    }"#;
+    let upgraded = plan(legacy, "/opt/vouch", false).unwrap();
+    assert!(!upgraded.notes.join(" ").contains("repointed"));
+    let root: serde_json::Value = serde_json::from_str(&upgraded.settings).unwrap();
+    let pre = root["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(pre.contains("permissionDecision") && pre.contains("deny"));
+
+    // 2. State-dir paths containing `--shadow` or `--host codex` must not confuse flag/host parsing
+    let tricky_state = "/tmp/my --shadow --host codex dir";
+    let once = plan_with_state("", "/opt/vouch", false, Some(tricky_state)).unwrap();
+    let twice = plan_with_state(&once.settings, "/opt/vouch", false, Some(tricky_state)).unwrap();
+    assert_eq!(once.settings, twice.settings, "idempotency broke on tricky --state-dir");
+    let root2: serde_json::Value = serde_json::from_str(&twice.settings).unwrap();
+    let post = root2["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(
+        post.contains("--hook --state-dir '/tmp/my --shadow --host codex dir'"),
+        "PostToolUse must not gain spurious --shadow: {post}"
+    );
+    let cleaned = unplan(&twice.settings).unwrap();
+    assert!(!cleaned.settings.contains("vouch"));
+
+    // 3. Lookalike wrapped hooks and multi-word unrelated commands ending in `.../vouch --hook` are preserved
+    let lookalikes = r#"{
+      "hooks": {
+        "PostToolUse": [
+          { "hooks": [ { "type": "command", "command": "if command -v '/opt/notvouch' >/dev/null 2>&1; then '/opt/notvouch' --hook || true; fi" } ] },
+          { "hooks": [ { "type": "command", "command": "python3 /usr/local/bin/tool.py /path/to/vouch --hook" } ] }
+        ]
+      }
+    }"#;
+    let p = plan(lookalikes, "/opt/vouch", false).unwrap();
+    assert!(p.settings.contains("/opt/notvouch"));
+    assert!(p.settings.contains("python3 /usr/local/bin/tool.py /path/to/vouch --hook"));
+    let unp = unplan(&p.settings).unwrap();
+    assert!(unp.settings.contains("/opt/notvouch"));
+    assert!(unp.settings.contains("python3 /usr/local/bin/tool.py /path/to/vouch --hook"));
+}
+
+#[test]
+fn codex_unplan_removes_wrapped_bash_and_powershell_hooks_including_shared_groups() {
+    for shell in [InstallShell::Bash, InstallShell::PowerShell] {
+        let planned = plan_codex("", "/opt/vouch", shell, false).unwrap();
+        let unp = unplan_codex(&planned.settings).unwrap();
+        assert!(!unp.settings.contains("vouch"));
+        assert!(unp.notes.join(" ").contains("vouch hooks removed"));
+    }
+
+    // Shared matcher group containing both an unrelated hook and a vouch hook
+    let shared = r#"{
+      "hooks": {
+        "PreToolUse": [{
+          "matcher": ".*",
+          "hooks": [
+            {"type": "command", "command": "other-gate"},
+            {"type": "command", "command": "if command -v '/opt/vouch' >/dev/null 2>&1; then '/opt/vouch' --hook --host codex --shell bash; fi", "statusMessage": "vouch is checking this tool call"}
+          ]
+        }]
+      }
+    }"#;
+    let unp = unplan_codex(shared).unwrap();
+    assert!(unp.settings.contains("other-gate"));
+    assert!(!unp.settings.contains("/opt/vouch"));
+    assert!(unp.notes.join(" ").contains("vouch hooks removed"));
+}
+
+#[cfg(unix)]
+#[test]
+fn unix_sh_wrappers_fail_closed_on_missing_nonexec_and_crash_and_stay_silent_on_outcomes() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::{Command, Stdio};
+
+    let tmp = std::env::temp_dir().join(format!("vouch_install_sh_probe_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let tricky = tmp.join("dir with 'quote' and space");
+    std::fs::create_dir_all(&tricky).unwrap();
+
+    let ok_allow = tricky.join("vouch");
+    std::fs::write(
+        &ok_allow,
+        "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"decision\":\"allow\",\"reason\":\"ok\"}'\nexit 0\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&ok_allow, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let ok_empty = tricky.join("vouch_empty");
+    std::fs::write(&ok_empty, "#!/bin/sh\ncat >/dev/null\nexit 0\n").unwrap();
+    std::fs::set_permissions(&ok_empty, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let crash_partial = tricky.join("vouch_crash");
+    std::fs::write(
+        &crash_partial,
+        "#!/bin/sh\nprintf '{\"partial\": '\nexit 134\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&crash_partial, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let nonexec = tricky.join("vouch_nonexec");
+    std::fs::write(&nonexec, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&nonexec, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    let missing = tricky.join("vouch_missing");
+
+    let run_sh = |cmd: &str| -> (i32, String, String) {
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(cmd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn /bin/sh");
+        {
+            use std::io::Write;
+            let mut stdin = child.stdin.take().unwrap();
+            let _ = stdin.write_all(b"{\"hook_event_name\":\"PreToolUse\"}");
+        }
+        let out = child.wait_with_output().unwrap();
+        (
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        )
+    };
+
+    // 1. Claude, Codex (bash), and Antigravity live PreToolUse on missing, nonexec, and crash-with-partial-stdout
+    for exe in [&missing, &nonexec, &crash_partial] {
+        let exe_str = exe.to_string_lossy();
+
+        // Claude
+        let claude_plan = plan("", &exe_str, false).unwrap();
+        let claude_root: serde_json::Value = serde_json::from_str(&claude_plan.settings).unwrap();
+        let claude_pre = claude_root["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        let (rc, stdout, _) = run_sh(claude_pre);
+        assert_eq!(rc, 0, "Claude PreToolUse must emit structured deny JSON with exit 0");
+        let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+            .unwrap_or_else(|e| panic!("Claude output must be valid JSON ({e}): {stdout:?}"));
+        assert_eq!(parsed["hookSpecificOutput"]["permissionDecision"], "deny");
+
+        // Codex (bash)
+        let codex_plan = plan_codex("", &exe_str, InstallShell::Bash, false).unwrap();
+        let codex_root: serde_json::Value = serde_json::from_str(&codex_plan.settings).unwrap();
+        let codex_pre = codex_root["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        let (rc, stdout, _) = run_sh(codex_pre);
+        assert_eq!(rc, 0);
+        let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+            .unwrap_or_else(|e| panic!("Codex output must be valid JSON ({e}): {stdout:?}"));
+        assert_eq!(parsed["hookSpecificOutput"]["permissionDecision"], "deny");
+
+        // Antigravity
+        let agy_plan = plan_agy("", &exe_str, false, None).unwrap();
+        let agy_root: serde_json::Value = serde_json::from_str(&agy_plan.settings).unwrap();
+        let agy_pre = agy_root["vouch"]["PreToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        let (rc, stdout, _) = run_sh(agy_pre);
+        assert_eq!(rc, 0);
+        let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+            .unwrap_or_else(|e| panic!("Agy output must be valid JSON ({e}): {stdout:?}"));
+        assert_eq!(parsed["decision"], "deny");
+    }
+
+    // 2. Working binary passes stdout through verbatim; empty stdout (Codex Allow / Abstain) stays empty
+    let ok_plan = plan_agy("", &ok_allow.to_string_lossy(), false, None).unwrap();
+    let ok_root: serde_json::Value = serde_json::from_str(&ok_plan.settings).unwrap();
+    let ok_pre = ok_root["vouch"]["PreToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    let (rc, stdout, _) = run_sh(ok_pre);
+    assert_eq!(rc, 0);
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(parsed["decision"], "allow");
+
+    let empty_plan =
+        plan_codex("", &ok_empty.to_string_lossy(), InstallShell::Bash, false).unwrap();
+    let empty_root: serde_json::Value = serde_json::from_str(&empty_plan.settings).unwrap();
+    let empty_pre = empty_root["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    let (rc, stdout, _) = run_sh(empty_pre);
+    assert_eq!(rc, 0);
+    assert_eq!(stdout, "", "empty stdout on Allow/Abstain must remain 0 bytes");
+
+    // 3. Outcome hooks & shadow PreToolUse stay silently non-disruptive when binary is missing
+    let miss_str = missing.to_string_lossy();
+    let claude_shadow = plan("", &miss_str, true).unwrap();
+    let cs_root: serde_json::Value = serde_json::from_str(&claude_shadow.settings).unwrap();
+    for ev in ["PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionDenied"] {
+        let cmd = cs_root["hooks"][ev][0]["hooks"][0]["command"].as_str().unwrap();
+        let (rc, stdout, stderr) = run_sh(cmd);
+        assert_eq!(rc, 0, "Claude {ev} shadow/outcome must exit 0 when missing");
+        assert_eq!(stdout, "", "Claude {ev} must stay silent");
+        assert_eq!(stderr, "", "Claude {ev} must emit no stderr");
+    }
+
+    let codex_shadow = plan_codex("", &miss_str, InstallShell::Bash, true).unwrap();
+    let cx_root: serde_json::Value = serde_json::from_str(&codex_shadow.settings).unwrap();
+    for ev in ["PreToolUse", "PostToolUse"] {
+        let cmd = cx_root["hooks"][ev][0]["hooks"][0]["command"].as_str().unwrap();
+        let (rc, stdout, stderr) = run_sh(cmd);
+        assert_eq!(rc, 0, "Codex {ev} shadow/outcome must exit 0 when missing");
+        assert_eq!(stdout, "");
+        assert_eq!(stderr, "");
+    }
+
+    let agy_shadow = plan_agy("", &miss_str, true, None).unwrap();
+    let ag_root: serde_json::Value = serde_json::from_str(&agy_shadow.settings).unwrap();
+    let ag_pre = ag_root["vouch"]["PreToolUse"][0]["hooks"][0]["command"].as_str().unwrap();
+    let (rc, stdout, stderr) = run_sh(ag_pre);
+    assert_eq!(rc, 0);
+    assert_eq!(stdout, "");
+    assert_eq!(stderr, "");
+
+    let ag_post = ag_root["vouch"]["PostToolUse"][0]["hooks"][0]["command"].as_str().unwrap();
+    let (rc, stdout, stderr) = run_sh(ag_post);
+    assert_eq!(rc, 0);
+    assert_eq!(stdout.trim(), "{}");
+    assert_eq!(stderr, "");
+
+    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 

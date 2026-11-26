@@ -2139,7 +2139,9 @@ fn main() {
             .map(|p| p.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"))
             .unwrap_or_else(|_| "vouch".into());
         let planned = match options.host {
-            Host::Claude => vouch::install::plan(&existing, &exe, options.shadow),
+            Host::Claude => {
+                vouch::install::plan_with_state(&existing, &exe, options.shadow, options.state_dir.as_deref())
+            }
             Host::Codex => match options.state_dir.as_deref() {
                 Some(state_dir) => vouch::install::plan_codex_with_state(
                     &existing,

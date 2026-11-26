@@ -294,9 +294,10 @@ native policy in charge, use passive shadow instead:
 
 This route needs no vouch approval broker. `PreToolUse` evaluates and appends a
 `host = "codex"`, `mode = "shadow"` row while emitting nothing; `PostToolUse`
-appends the matching host-attributed outcome. The explicit absolute state
-directory keeps both rows in one durable journal even when Codex starts in a
-different repository. New outcomes correlate by host plus tool-use id, so a
+appends the matching host-attributed outcome. By default all hosts and CLI
+commands share `~/.local/state/vouch` on Unix (`%LOCALAPPDATA%/vouch/state` on
+Windows); passing `--state-dir` pins a custom absolute directory across
+repositories. New outcomes correlate by host plus tool-use id, so a
 Codex id cannot attach to a Claude row.
 
 Codex hooks cover shell commands, `apply_patch`, MCP tools, and most local
@@ -367,7 +368,7 @@ Everything else is for you:
 | `vouch doctor` | What vouch could not read or describe: place rules that can never fire, `my-knowledge.toml` lines the merge discarded, commands it could not parse, programs it has no description of, and undeclared options on directory-changing programs, by count and by spelling |
 | `vouch review [--accept <name>]` | Rule candidates drawn from recorded outcomes, each with the counts behind it, including the ones it will not propose and why. Prints only; `--accept` is the one thing that writes, and it never proposes a guard |
 | `vouch import [file]` | Translates a cc-allow config to standard output and lists on standard error what did not translate. Writes nothing |
-| `vouch install [--host claude\|codex\|agy] [--shell bash\|powershell] [--state-dir <absolute>] [--shadow] [--print] [--write]` | Prints the selected host's merged hook document for redirecting and saving, or updates the configuration file in place with `--write`. Codex requires an explicit shell; `--state-dir` pins an absolute state directory for Codex and Antigravity hooks so decision/outcome journaling stays durable. Live Codex notes include the broker route; passive `--shadow` notes leave the native reviewer unchanged and require no broker. `--print` narrows output to the hooks-only view |
+| `vouch install [--host claude\|codex\|agy] [--shell bash\|powershell] [--state-dir <absolute>] [--shadow] [--print] [--write]` | Prints the selected host's merged hook document for redirecting and saving, or updates the configuration file in place with `--write`. Live `PreToolUse` hooks wrap the binary fail-closed so a missing or non-zero-exiting gate executable blocks execution instead of failing open, while outcome events (`PostToolUse`, `PostToolUseFailure`, `PermissionDenied`) and `--shadow` `PreToolUse` stay non-disruptive. Codex requires an explicit shell; `--state-dir` pins a custom absolute state directory for any host (otherwise CLI commands and hooks share `~/.local/state/vouch` on Unix or `%LOCALAPPDATA%/vouch/state` on Windows). Live Codex notes include the broker route; passive `--shadow` notes leave the native reviewer unchanged and require no broker. `--print` narrows output to the hooks-only view |
 | `vouch uninstall [--host claude\|codex\|agy] [--write]` | Removes vouch hook registrations from the host's configuration file, printing the cleaned document to standard output or updating in place with `--write`. Preserves unrelated hooks and MCP servers |
 | `vouch schema <config\|knowledge> [--write]` | Prints the JSON Schema generated from the structs the loaders actually read; `--write` regenerates the committed schemas and the reference page |
 

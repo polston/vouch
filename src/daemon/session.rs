@@ -30,7 +30,7 @@ impl SessionContext {
         Self {
             agent_id: "default".into(),
             session_token: "anonymous".into(),
-            state_dir: std::env::temp_dir().join("vouch-default-state"),
+            state_dir: crate::journal::state_dir(),
             cwd,
         }
     }

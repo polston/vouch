@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.68.0 (2026-11-26)
+
+
+### Features
+
+* **Unify default state directory onto persistent user storage (~/.local/state/vouch on Unix and %LOCALAPPDATA%/vouch/state on Windows) across CLI commands, host hooks, daemon sessions, and vouch-codex-broker, and accept --state-dir on Claude Code**
+  - **Problem & Explanation:** journal::state_dir now defaults to $XDG_STATE_HOME/vouch or ~/.local/state/vouch on Unix and %LOCALAPPDATA%/vouch/state or %USERPROFILE%/.local/state/vouch on Windows when VOUCH_STATE_DIR is unset, unifying vouch doctor, vouch why, vouch review, vouch tui, host hooks, daemon sessions, vouch-codex-broker, and verification helpers onto one durable journal. For example, running vouch doctor in a fresh terminal now reads live decisions from ~/.local/state/vouch instead of reporting zero decisions from an empty temp directory, and deleting the installed binary blocks shell tool execution fail-closed across hosts instead of silently failing open.
+  - **Example Scenario:** Verified through automated test suite and regression coverage.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: unmodeled or unhandled. After: evaluated and enforced according to updated specification.
+* **Wrap live PreToolUse hook registrations fail-closed across Claude Code, Codex, and Antigravity so a missing or failed gate binary blocks execution instead of failing open while keeping outcome and shadow hooks non-disruptive**
+  - **Problem & Explanation:** vouch install now wraps live PreToolUse registrations across Claude Code, Codex (Bash and PowerShell), and Google Antigravity (Unix sh and Windows cmd) so a missing, non-executable, or non-zero-exiting gate executable discards partial stdout and emits the host's structured deny JSON fail-closed, while PostToolUse, PostToolUseFailure, PermissionDenied, and shadow PreToolUse hooks stay non-disruptive. Ownership parsing, moved-binary repointing, live-to-shadow stand-down, and vouch uninstall handle both legacy bare commands and wrapped commands while preserving unrelated and lookalike hooks, and Claude Code now accepts explicit --state-dir symmetrically with Codex and Antigravity.
+  - **Example Scenario:** Verified through automated test suite and regression coverage.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: unmodeled or unhandled. After: evaluated and enforced according to updated specification.
+
+
+### Bug Fixes
+
+* **Update Antigravity hooks path references in vouch-update and vouch-status skills to ~/.gemini/config/hooks.json**
+  - **Problem & Explanation:** When a registered vouch binary was removed, made non-executable, or exited non-zero after hook wiring, Claude Code and Codex treated the failed spawn as a non-blocking hook error and allowed tool calls to execute ungated. Separate default state directory fallbacks also split bare CLI commands, Claude Code hooks, and vouch-codex-broker into an ephemeral OS temp directory while Codex and Antigravity wrote live journals into persistent user storage.
+  - **Example Scenario:** Verified through automated test suite and regression coverage.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: unmodeled or unhandled. After: evaluated and enforced according to updated specification.
+
 ## 0.67.2 (2026-11-26)
 
 

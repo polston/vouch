@@ -371,7 +371,7 @@ undescribed names by frequency, and the journal itself groups them:
 ```
 python - <<'PY'
 import json, collections, re
-p = r"<state dir>/journal.jsonl"   # journal::state_dir(), the temp vouch dir by default
+p = r"<state dir>/journal.jsonl"   # journal::state_dir(), ~/.local/state/vouch on Unix / %LOCALAPPDATA%/vouch/state on Windows by default
 names = collections.Counter()
 for line in open(p, encoding="utf-8", errors="replace"):
     line = line.strip()

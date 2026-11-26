@@ -46,7 +46,7 @@ impl StreamingClient {
                 agent_id.to_string(),
                 session_token.to_string(),
                 cwd.clone(),
-                state_dir.unwrap_or_else(|| std::env::temp_dir().join("vouch-session")),
+                state_dir.unwrap_or_else(crate::journal::state_dir),
             );
 
             let handshake = ClientFrame::Handshake {
@@ -175,7 +175,7 @@ pub fn handle_client_connection(
                     agent_id,
                     session_token,
                     cwd,
-                    state_dir.unwrap_or_else(|| std::env::temp_dir().join("vouch-session")),
+                    state_dir.unwrap_or_else(crate::journal::state_dir),
                 );
                 let ack = DaemonFrame::HandshakeAck {
                     version: env!("CARGO_PKG_VERSION").to_string(),

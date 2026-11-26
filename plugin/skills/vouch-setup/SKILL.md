@@ -222,10 +222,14 @@ guard refuses to let an agent change which program gates its tool calls).
 1. For Claude Code, run `vouch install`. For Codex, run
    `vouch install --host codex --shell <bash|powershell>`; the shell must name
    how Codex executes `Bash` calls on this machine. For Antigravity, run
-   `vouch install --host agy`. For passive observation on Codex,
-   add `--shadow --state-dir <absolute durable directory>`; the same explicit
-   directory reaches both decision and outcome commands, so host-attributed
-   rows do not split by session cwd. **Redirect every form to a scratch file**.
+   `vouch install --host agy`. Live `PreToolUse` registrations wrap the binary
+   fail-closed so a missing or crashed gate executable blocks execution instead
+   of failing open, while outcome events (`PostToolUse`, `PostToolUseFailure`,
+   `PermissionDenied`) and `--shadow` `PreToolUse` stay non-disruptive. By
+   default, all hosts and CLI tools share the persistent user state directory
+   (`~/.local/state/vouch` on Unix, `%LOCALAPPDATA%/vouch/state` on Windows);
+   pass `--state-dir <absolute>` on any host to pin a custom durable journal
+   directory. **Redirect every form to a scratch file**.
    Do not capture its stdout: that stdout is the entire merged settings
    document. This holds for every form of the command, `--print` included: an
    unparsed flag is swallowed silently, so a form expected to print only the

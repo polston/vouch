@@ -278,10 +278,70 @@ pub fn append_outcome(dir: &Path, rec: &OutcomeRecord) -> std::io::Result<()> {
     )
 }
 
+/// Resolve vouch's default state directory from explicit environment inputs.
+///
+/// Precedence:
+/// 1. `VOUCH_STATE_DIR` (when non-empty)
+/// 2. Unix (`!is_windows`): `$XDG_STATE_HOME/vouch` (when absolute and non-empty),
+///    else `$HOME/.local/state/vouch` (when non-empty)
+/// 3. Windows (`is_windows`): `%LOCALAPPDATA%/vouch/state` (when non-empty),
+///    else `%USERPROFILE%/.local/state/vouch` (when non-empty)
+/// 4. Last-resort fallback: `<temp_dir>/vouch`
+pub fn state_dir_from_env(
+    vouch_state_dir: Option<&str>,
+    xdg_state_home: Option<&str>,
+    home: Option<&str>,
+    local_app_data: Option<&str>,
+    user_profile: Option<&str>,
+    is_windows: bool,
+    temp_dir: &Path,
+) -> std::path::PathBuf {
+    if let Some(dir) = vouch_state_dir.map(str::trim).filter(|s| !s.is_empty()) {
+        return std::path::PathBuf::from(dir);
+    }
+    if is_windows {
+        if let Some(local) = local_app_data.map(str::trim).filter(|s| !s.is_empty()) {
+            return std::path::PathBuf::from(local).join("vouch").join("state");
+        }
+        if let Some(profile) = user_profile.map(str::trim).filter(|s| !s.is_empty()) {
+            return std::path::PathBuf::from(profile)
+                .join(".local")
+                .join("state")
+                .join("vouch");
+        }
+    } else {
+        if let Some(xdg) = xdg_state_home
+            .map(str::trim)
+            .filter(|s| s.starts_with('/'))
+        {
+            return std::path::PathBuf::from(xdg).join("vouch");
+        }
+        if let Some(h) = home.map(str::trim).filter(|s| !s.is_empty()) {
+            return std::path::PathBuf::from(h)
+                .join(".local")
+                .join("state")
+                .join("vouch");
+        }
+    }
+    temp_dir.join("vouch")
+}
+
 pub fn state_dir() -> std::path::PathBuf {
-    std::env::var("VOUCH_STATE_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir().join("vouch"))
+    let vouch_state_dir = std::env::var("VOUCH_STATE_DIR").ok();
+    let xdg_state_home = std::env::var("XDG_STATE_HOME").ok();
+    let home = std::env::var("HOME").ok();
+    let local_app_data = std::env::var("LOCALAPPDATA").ok();
+    let user_profile = std::env::var("USERPROFILE").ok();
+    let temp = std::env::temp_dir();
+    state_dir_from_env(
+        vouch_state_dir.as_deref(),
+        xdg_state_home.as_deref(),
+        home.as_deref(),
+        local_app_data.as_deref(),
+        user_profile.as_deref(),
+        cfg!(windows),
+        &temp,
+    )
 }
 
 fn read_lines<T: for<'de> Deserialize<'de>>(dir: &Path, file: &str) -> Vec<T> {
