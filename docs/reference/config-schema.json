@@ -107,11 +107,6 @@
       "description": "The `[daemon]` table: persistent gating daemon runtime options.",
       "type": "object",
       "properties": {
-        "fail_closed": {
-          "description": "Whether the daemon fails closed on internal errors.",
-          "type": "boolean",
-          "default": true
-        },
         "socket_path": {
           "description": "Local socket path (Unix domain socket or Windows named pipe/socket).",
           "type": "string",

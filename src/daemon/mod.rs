@@ -294,6 +294,31 @@ pub fn default_socket_path(home: &str) -> PathBuf {
     crate::knowledge::config_dir(home).join("vouch.sock")
 }
 
+/// Resolve the daemon socket path from environment override (`VOUCH_DAEMON_SOCKET`),
+/// configured `[daemon].socket_path` (expanding a leading `~` against `home`),
+/// or the default `<home>/.config/vouch/vouch.sock`.
+pub fn resolve_socket_path(configured: &str, home: &str) -> PathBuf {
+    if let Ok(sock) = std::env::var("VOUCH_DAEMON_SOCKET") {
+        if !sock.trim().is_empty() {
+            return PathBuf::from(sock);
+        }
+    }
+    let trimmed = configured.trim();
+    if trimmed.is_empty() {
+        return crate::knowledge::config_dir(home).join("vouch.sock");
+    }
+    if trimmed == "~" {
+        return PathBuf::from(home);
+    }
+    if let Some(rest) = trimmed
+        .strip_prefix("~/")
+        .or_else(|| trimmed.strip_prefix("~\\"))
+    {
+        return PathBuf::from(home).join(rest);
+    }
+    PathBuf::from(trimmed)
+}
+
 /// Resolve the default PID lock file path for the daemon on this machine.
 pub fn default_pid_path(home: &str) -> PathBuf {
     if let Ok(p) = std::env::var("VOUCH_DAEMON_PID") {

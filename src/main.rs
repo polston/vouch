@@ -937,8 +937,11 @@ fn main() {
             std::process::exit(0);
         }
 
-        let mut socket_path = vouch::daemon::default_socket_path(&home());
-        let mut pid_path = vouch::daemon::default_pid_path(&home());
+        let (daemon_cfg, _) = load_config();
+        let home_dir = home();
+        let mut socket_path =
+            vouch::daemon::resolve_socket_path(&daemon_cfg.daemon.socket_path, &home_dir);
+        let mut pid_path = vouch::daemon::default_pid_path(&home_dir);
         let mut token_path = None;
         let mut daemonize = false;
 
@@ -2427,11 +2430,7 @@ fn main() {
     }
 
     // Try query daemon if socket is available, with non-blocking fail-closed fallback
-    let default_sock = vouch::daemon::default_socket_path(&home_dir);
-    let daemon_sock = std::env::var("VOUCH_DAEMON_SOCKET")
-        .ok()
-        .map(std::path::PathBuf::from)
-        .unwrap_or(default_sock);
+    let daemon_sock = vouch::daemon::resolve_socket_path(&cfg.daemon.socket_path, &home_dir);
 
     if daemon_sock.exists() {
         let req = vouch::daemon::DaemonRequest {

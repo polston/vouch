@@ -470,9 +470,6 @@ pub struct DaemonConfig {
     /// Client connect and read timeout in milliseconds before local fallback.
     #[serde(default = "default_daemon_timeout_ms")]
     pub timeout_ms: u64,
-    /// Whether the daemon fails closed on internal errors.
-    #[serde(default = "default_true")]
-    pub fail_closed: bool,
 }
 
 fn default_daemon_socket_path() -> String {
@@ -483,16 +480,11 @@ fn default_daemon_timeout_ms() -> u64 {
     50
 }
 
-fn default_true() -> bool {
-    true
-}
-
 impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
             socket_path: default_daemon_socket_path(),
             timeout_ms: default_daemon_timeout_ms(),
-            fail_closed: true,
         }
     }
 }

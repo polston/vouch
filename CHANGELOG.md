@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.67.2 (2026-11-26)
+
+
+### Bug Fixes
+
+* **Honor daemon.socket_path in daemon and hook paths and remove inert daemon.fail_closed setting**
+  - **Problem & Explanation:** Honor daemon.socket_path in daemon and hook paths and remove inert daemon.fail_closed setting.
+  - **Example Scenario:** Verified through automated test suite and regression coverage.
+  - **Delta:**
+    - *Configuration Delta:* Unchanged.
+    - *Behavior Contrast:* Before: unmodeled or unhandled. After: evaluated and enforced according to updated specification.
+
 ## 0.67.1 (2026-11-26)
 
 

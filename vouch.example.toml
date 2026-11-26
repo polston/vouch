@@ -529,7 +529,6 @@ paths = [
 # [daemon]
 # socket_path = "~/.config/vouch/vouch.sock"
 # timeout_ms = 50
-# fail_closed = true
 
 # ---------------------------------------------------------------------------
 # Audit Log Persistence & Binary Indexing: optional memory-mapped binary

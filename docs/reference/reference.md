@@ -42,7 +42,6 @@ The `[daemon]` table: persistent gating daemon runtime options.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `fail_closed` | boolean | true | Whether the daemon fails closed on internal errors. |
 | `socket_path` | string | "~/.config/vouch/vouch.sock" | Local socket path (Unix domain socket or Windows named pipe/socket). |
 | `timeout_ms` | integer | 50 | Client connect and read timeout in milliseconds before local fallback. |
 
